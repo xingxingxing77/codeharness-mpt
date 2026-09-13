@@ -42,6 +42,8 @@ class Agent:
         prefix = f"You are a {p.get('profile', 'helper')}, named {p['name']}, your goal is {p.get('goal', '')}."
         if p.get("constraints"):
             prefix += f" The constraint is {p['constraints']}."
+        if p.get("desc"):                                  # 源 Role.desc：对话型角色的人设原则全文
+            prefix += f" {p['desc']}"
         if self.env_desc:
             prefix += f" You are in {self.env_desc}."
         return prefix
