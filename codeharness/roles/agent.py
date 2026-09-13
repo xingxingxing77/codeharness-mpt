@@ -111,7 +111,8 @@ class Agent:
             msg = result
         else:
             msg = Message(content=str(result), role="assistant")
-        msg.cause_by = action.name                       # 对齐 :388 cause_by=todo
+        if not msg.cause_by or msg.cause_by == trigger_cause:
+            msg.cause_by = action.name                   # 对齐 :388 cause_by=todo（Action 未显式设 tag 时）
         msg.sent_from = self.profile["name"]             # 对齐 :389 sent_from=self
         return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],
                 "inbox": [], "action_cursor": s["action_cursor"]}   # BY_ORDER 的进位已在 think 完成
