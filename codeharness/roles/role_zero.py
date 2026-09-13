@@ -9,7 +9,7 @@ from typing import TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, END
-from langgraph.types import interrupt
+from langgraph.types import interrupt, GraphInterrupt
 from pydantic import BaseModel, Field
 from codeharness.const import RequirementTag
 from codeharness.schema import Message, Command
@@ -121,6 +121,8 @@ class RoleZero:
                     results.append({"name": name, "result": str(out)[:4000]})
                 else:
                     results.append({"name": name, "result": f"未知命令 {name}，可用: {list(self.tools)}"})
+            except GraphInterrupt:
+                raise                                         # interrupt 靠抛异常暂停图——绝不能被 self-heal 吞掉
             except asyncio.TimeoutError:
                 results.append({"name": name, "result": f"[超时] {name}"})
             except Exception as e:                            # self-heal：错误回喂下一轮（源 :289 error_msg 同语义）
