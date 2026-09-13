@@ -1,17 +1,16 @@
 [project]
 name = "codeharness"
 version = "0.1.0"
-description = "MetaGPT replication with Python/FastAPI/LangChain/LangGraph/Vue3/Qdrant"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.6", "pydantic-settings>=2.2",
     "langchain>=0.2", "langchain-openai>=0.1", "langchain-community>=0.2",
     "langchain-qdrant>=0.1", "langgraph>=0.1",
-    "qdrant-client>=1.7", "loguru>=0.7", "shortuuid>=1.0",
+    "qdrant-client>=1.7", "loguru>=0.7", "shortuuid>=1.0", "tiktoken",
 ]
 
 [project.optional-dependencies]
-server = ["fastapi>=0.110", "uvicorn[standard]", "websockets"]
+server = ["fastapi>=0.110", "uvicorn[standard]", "sse-starlette"]
 dev = ["pytest", "pytest-asyncio", "ruff"]
 
 [build-system]
