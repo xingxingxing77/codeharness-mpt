@@ -63,15 +63,20 @@ class Agent:
                 if (m.cause_by in self.watch or s["name"] in m.send_to) and m not in s["memory"]]
         return {"inbox": news, "memory": s["memory"] + news}
 
-    # ---- 源 _think(:340-379) 两模式 ----
+    # ---- 源 _think(:340-379) 两模式（全部包 thought_block，前端每个思考步都有 Thought 块） ----
     async def _think(self, s: AgentState):
+        from codeharness.report import thought_block
         names = list(self.actions)
         if len(names) == 1:                              # 对齐 :342 单动作直选
+            async with thought_block(role=self.profile["name"]) as rep:
+                await rep.content(f"[单动作] 直接执行 {names[0]}")
             return {"chosen": names[0], "loops": s["loops"] + 1}
         if self.react_mode == "BY_ORDER":                # 对齐 :353-357（源 state 从 -1 起步，think 先进位）
             cursor = s["action_cursor"] + 1
             if cursor >= len(names):
                 return {"chosen": "END", "action_cursor": cursor, "loops": s["loops"] + 1}
+            async with thought_block(role=self.profile["name"]) as rep:
+                await rep.content(f"[计划] 执行 {names[cursor]}")
             return {"chosen": names[cursor], "action_cursor": cursor, "loops": s["loops"] + 1}
         from codeharness.report import thought_block
         async with thought_block(role=self.profile["name"]) as rep:
