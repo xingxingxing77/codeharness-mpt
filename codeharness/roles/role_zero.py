@@ -101,35 +101,41 @@ class RoleZero:
         return {"history": s["history"] + [{"thought": thought.thought, "commands": commands}]}
 
     # ---- 源 _act(:280-301)/_run_commands(:385)/_run_special_command(:420) ----
-    async def _act(self, s: RoleZeroState):
-        last = s["history"][-1]
-        results, finished = [], False
-        for cmd in last["commands"]:
-            name, args = cmd["command_name"], cmd.get("args", {})
-            try:
-                if name in ("end", "End"):                    # 源 _end(:474)
-                    finished = True
-                    results.append({"name": name, "result": "[结束]"})
-                elif name == "RoleZero.ask_human":            # 源 ask_human(:456) → interrupt
-                    answer = interrupt({"question": args.get("question", "")})
-                    results.append({"name": name, "result": answer})
-                elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
-                    results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
-                elif name == "Plan.finish_current_task":
-                    results.append({"name": name, "result": "[任务完成]"})
-                elif name in self.tools:
-                    out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
-                    results.append({"name": name, "result": str(out)[:4000]})
-                else:
-                    results.append({"name": name, "result": f"未知命令 {name}，可用: {list(self.tools)}"})
-            except GraphInterrupt:
-                raise                                         # interrupt 靠抛异常暂停图——绝不能被 self-heal 吞掉
-            except asyncio.TimeoutError:
-                results.append({"name": name, "result": f"[超时] {name}"})
-            except Exception as e:                            # self-heal：错误回喂下一轮（源 :289 error_msg 同语义）
-                results.append({"name": name, "result": f"[错误] {type(e).__name__}: {e}"})
-        history = s["history"][:-1] + [{**last, "results": results}]
-        return {"history": history, "finished": finished}
+    # config 参数由 LangGraph 注入；interrupt() 的 get_config 依赖它（langgraph 1.x 节点执行路径不自带）
+    async def _act(self, s: RoleZeroState, config: dict | None = None):
+        from langchain_core.runnables.config import var_child_runnable_config
+        tok = var_child_runnable_config.set(config)
+        try:
+            last = s["history"][-1]
+            results, finished = [], False
+            for cmd in last["commands"]:
+                name, args = cmd["command_name"], cmd.get("args", {})
+                try:
+                    if name in ("end", "End"):                    # 源 _end(:474)
+                        finished = True
+                        results.append({"name": name, "result": "[结束]"})
+                    elif name == "RoleZero.ask_human":            # 源 ask_human(:456) → interrupt
+                        answer = interrupt({"question": args.get("question", "")})
+                        results.append({"name": name, "result": answer})
+                    elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
+                        results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
+                    elif name == "Plan.finish_current_task":
+                        results.append({"name": name, "result": "[任务完成]"})
+                    elif name in self.tools:
+                        out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
+                        results.append({"name": name, "result": str(out)[:4000]})
+                    else:
+                        results.append({"name": name, "result": f"未知命令 {name}，可用: {list(self.tools)}"})
+                except GraphInterrupt:
+                    raise                                         # interrupt 靠抛异常暂停图——绝不能被 self-heal 吞掉
+                except asyncio.TimeoutError:
+                    results.append({"name": name, "result": f"[超时] {name}"})
+                except Exception as e:                            # self-heal：错误回喂下一轮（源 :289 error_msg 同语义）
+                    results.append({"name": name, "result": f"[错误] {type(e).__name__}: {e}"})
+            history = s["history"][:-1] + [{**last, "results": results}]
+            return {"history": history, "finished": finished}
+        finally:
+            var_child_runnable_config.reset(tok)
 
     # ---- 嵌入团队图（接口与 Agent.as_node 完全一致） ----
     def as_node(self, name: str):
