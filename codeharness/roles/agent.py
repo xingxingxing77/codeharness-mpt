@@ -84,8 +84,10 @@ class Agent:
         return {"chosen": choice.action, "loops": s["loops"] + 1}
 
     def _route(self, s: AgentState):
-        if s["loops"] >= self.max_loops or not s["inbox"]:
-            return END                                   # 对齐 is_idle(:561) + max_react_loop
+        # 对齐源 _react(:458) 循环条件：只有 max_react_loop 与"无 todo"两个停止条件
+        # （inbox 为空不能停——BY_ORDER 的第二个动作仍要跑；散会语义在团队层 route）
+        if s["loops"] >= self.max_loops:
+            return END
         if s["chosen"] == "END" or s["chosen"] not in self.actions:
             return END
         return "act"
