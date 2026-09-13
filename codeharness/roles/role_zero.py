@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 from typing import TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, END
 from langgraph.errors import GraphInterrupt
@@ -102,7 +103,7 @@ class RoleZero:
 
     # ---- 源 _act(:280-301)/_run_commands(:385)/_run_special_command(:420) ----
     # config 参数由 LangGraph 注入；interrupt() 的 get_config 依赖它（langgraph 1.x 节点执行路径不自带）
-    async def _act(self, s: RoleZeroState, config: dict | None = None):
+    async def _act(self, s: RoleZeroState, config: RunnableConfig | None = None):
         from langchain_core.runnables.config import var_child_runnable_config
         tok = var_child_runnable_config.set(config)
         try:
