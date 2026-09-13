@@ -67,8 +67,8 @@ class Agent:
     async def _think(self, s: AgentState):
         from codeharness.report import thought_block
         names = list(self.actions)
-        if len(names) == 1:                              # 对齐 :342 单动作直选
-            async with thought_block(role=self.profile["name"]) as rep:
+        if len(names) == 1 and self.react_mode == "REACT":   # 对齐 :342 单动作直选（仅 REACT；
+            async with thought_block(role=self.profile["name"]) as rep:   #  BY_ORDER 必须走 cursor 才能止于 len）
                 await rep.content(f"[单动作] 直接执行 {names[0]}")
             return {"chosen": names[0], "loops": s["loops"] + 1}
         if self.react_mode == "BY_ORDER":                # 对齐 :353-357（源 state 从 -1 起步，think 先进位）
