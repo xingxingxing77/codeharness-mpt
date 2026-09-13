@@ -95,8 +95,13 @@ class Agent:
     # ---- 源 _act(:381-397) 逐行翻译 ----
     async def _act(self, s: AgentState):
         action = self.actions[s["chosen"]]
-        prompt = self._format_inbox(s["inbox"])
-        result = await action.run(Message(content=prompt, role="user", cause_by=s["inbox"][-1].cause_by))
+        if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
+            prompt = self._format_inbox(s["inbox"])
+            trigger_cause = s["inbox"][-1].cause_by
+        else:                                                # BY_ORDER 第 2+ 动作：收件箱已清，退化为最近记忆
+            last = s["memory"][-1] if s["memory"] else Message(content="")
+            prompt, trigger_cause = last.content, last.cause_by
+        result = await action.run(Message(content=prompt, role="user", cause_by=trigger_cause))
         if isinstance(result, Message):
             msg = result
         else:
