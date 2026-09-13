@@ -9,7 +9,8 @@ from typing import TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, END
-from langgraph.types import interrupt, GraphInterrupt
+from langgraph.errors import GraphInterrupt
+from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 from codeharness.const import RequirementTag
 from codeharness.schema import Message, Command
