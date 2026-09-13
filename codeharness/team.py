@@ -58,3 +58,26 @@ def _make_llm(cost_manager=None):
     from codeharness.configs.settings import settings
     from codeharness.provider.cost import CostManager
     return LLMGateway(cost_manager=cost_manager or CostManager(max_budget=settings.max_budget))
+
+
+def classic_team(llm):
+    """经典 Role 线五角色（参考速查全图）。每个 Agent 的 actions 即第 9 步的实现类。"""
+    from codeharness.roles.agent import Agent
+    from codeharness.actions.write_prd import WritePRD
+    from codeharness.actions.project_management import WriteTasks
+    from codeharness.actions.write_code import WriteCode
+    from codeharness.actions.write_test import WriteTest
+    from codeharness.actions.run_code import RunCode
+    from codeharness.actions.debug_error import DebugError
+    from codeharness.actions.summarize_code import SummarizeCode
+    return {
+        "PM":        Agent({"name": "PM", "profile": "Product Manager",
+                            "goal": "write a PRD"}, [WritePRD(llm=llm)], llm, max_loops=2),
+        "PMManager": Agent({"name": "PMManager", "profile": "Project Manager",
+                            "goal": "break down tasks"}, [WriteTasks(llm=llm)], llm, max_loops=2),
+        "Engineer":  Agent({"name": "Engineer", "profile": "Engineer", "goal": "write code"},
+                           [WriteCode(llm=llm), SummarizeCode(llm=llm)], llm, max_loops=4),
+        "QA":        Agent({"name": "QA", "profile": "QA Engineer", "goal": "test the code"},
+                           [WriteTest(llm=llm), RunCode(llm=llm), DebugError(llm=llm)], llm,
+                           react_mode="REACT", max_loops=5),
+    }
