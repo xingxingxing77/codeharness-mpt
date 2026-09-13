@@ -1,7 +1,7 @@
 """动作基类。改造自源 actions/action.py:29-119：
 剥 SerializationMixin/ContextMixin/ActionNode/私有 LLM；保留 name/prefix/_aask/_format_history/run 约定；
 新增 output_schema（with_structured_output 替代 ActionNode）。"""
-from typing import Optional, Type
+from typing import ClassVar, Optional, Type
 from pydantic import BaseModel, Field
 
 
@@ -9,7 +9,7 @@ class BaseAction(BaseModel):
     name: str = ""
     desc: str = ""
     prefix: str = ""                                   # system prompt（Agent.build_prefix 灌入）
-    output_schema: Optional[Type[BaseModel]] = None    # 有则走结构化输出
+    output_schema: ClassVar[Optional[Type[BaseModel]]] = None   # 类级常量（子类覆盖无需注解）
     llm: Optional[object] = None                       # LLMGateway / FakeLLM，组队时注入
 
     def model_post_init(self, __ctx):
