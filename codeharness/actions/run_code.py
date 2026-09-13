@@ -23,5 +23,7 @@ class RunCode(BaseAction):
         return Message(content=("测试通过" if ok else f"测试失败:\n{combined.stderr[:3000]}"),
                        role="assistant", cause_by=self.name, sent_from="QA",
                        send_to={"<self>"} if ok else set(),
-                       instruct_content={"output_filename": out_name, "ok": ok},
+                       instruct_content={"output_filename": out_name, "ok": ok,
+                                         "code_filename": ctx.code_filename,     # DebugError 修复回路透传
+                                         "test_filename": ctx.test_filename},
                        instruct_schema="RunCodeOutput")

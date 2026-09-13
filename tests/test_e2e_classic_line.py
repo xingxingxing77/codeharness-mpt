@@ -12,6 +12,8 @@ from codeharness.actions.summarize_code import SummarizeCode
 from codeharness.actions.write_test import WriteTest
 from codeharness.actions.run_code import RunCode
 from codeharness.actions.prepare_documents import PrepareDocuments
+from codeharness.actions.design_api import WriteDesign
+from codeharness.actions.write_code_review import WriteCodeReview
 from pathlib import Path
 
 PRD = {"language": "en_us", "programming_language": "python", "original_requirements": "2048",
@@ -25,35 +27,32 @@ async def main():
     pm = Agent({"name": "PM", "profile": "Product Manager", "goal": "PRD"},
                [PrepareDocuments(llm=FakeLLM([])), WritePRD(llm=FakeLLM([json.dumps(PRD)]))],
                FakeLLM([]), react_mode="BY_ORDER", max_loops=3, watch={"UserRequirement"})
+    design_script = json.dumps({
+        "implementation_approach": "用 pygame", "project_name": "game_2048",
+        "file_list": ["main.py"],
+        "data_structures_and_interfaces": "classDiagram\nclass Game",
+        "program_call_flow": "sequenceDiagram\nGame->>UI: render()"})
+    architect = Agent({"name": "Bob", "profile": "Architect", "goal": "design"},
+                       [WriteDesign(llm=FakeLLM([design_script]))], FakeLLM([]),
+                       max_loops=2, watch={"WritePRD"})
     tasks_script = json.dumps({"task_list": [
         {"filename": "main.py", "task_id": "1", "dependent_task_ids": [],
          "instruction": "实现 add"}]})
     pmm = Agent({"name": "PMManager", "profile": "Project Manager", "goal": "tasks"},
                 [WriteTasks(llm=FakeLLM([tasks_script]))], FakeLLM([]), max_loops=2,
-                watch={"WritePRD"})
+                watch={"WriteDesign"})
     eng_llm = FakeLLM(["```python\ndef add(a, b):\n    return a + b\n```",
+                       "## Code Review Result\nLGTM",
                        "变更摘要：新增 main.py 实现 add"])
     eng = Agent({"name": "Engineer", "profile": "Engineer", "goal": "code"},
-                [WriteCode(llm=eng_llm), SummarizeCode(llm=eng_llm)], eng_llm,
-                react_mode="BY_ORDER", max_loops=4, watch={"WriteTasks"})
-    orig = eng.as_node
-    def eng_as_node(name):        # 黑板→上下文注入：WriteCode 按 task 拿单个 filename（tasks.json 是 task_doc）
-        node_name, fn = orig(name)
-        async def wrapped(state):
-            print("[wrapper] Engineer 收件:", [(m.cause_by, m.instruct_content) for m in state.get("_inbox", [])])
-            state["_inbox"] = [Message(content=m.content, role=m.role, cause_by=m.cause_by,
-                                       sent_from=m.sent_from,
-                                       instruct_content={"filename": "main.py"},
-                                       instruct_schema="TaskList")
-                               for m in state.get("_inbox", [])]
-            return await fn(state)
-        return node_name, wrapped
-    eng.as_node = eng_as_node
+                [WriteCode(llm=eng_llm), WriteCodeReview(llm=eng_llm), SummarizeCode(llm=eng_llm)], eng_llm,
+                react_mode="BY_ORDER", max_loops=5, watch={"WriteTasks"})
 
     sop = {RequirementTag.USER_REQUIREMENT: ["PM"],
-           RequirementTag.WRITE_PRD: ["PMManager"],
+           RequirementTag.WRITE_PRD: ["Architect"],
+           RequirementTag.WRITE_DESIGN: ["PMManager"],
            RequirementTag.WRITE_TASKS: ["Engineer"]}
-    g = build_team({"PM": pm, "PMManager": pmm, "Engineer": eng}, sop=sop)
+    g = build_team({"PM": pm, "Architect": architect, "PMManager": pmm, "Engineer": eng}, sop=sop)
     init = {"messages": [Message(content="做个2048游戏", cause_by=RequirementTag.USER_REQUIREMENT)],
             "memories": {}, "docs": {}, "round": 0, "budget_used": 0.0, "debug_rounds": 0, "finished": False}
     async for _ in g.astream(init, {"configurable": {"thread_id": "e2e"}}):

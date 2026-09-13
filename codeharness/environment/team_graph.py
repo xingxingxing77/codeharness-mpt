@@ -39,8 +39,46 @@ SOP = {
 }
 
 
-def make_route(sop: dict, agents: dict):
-    """= 源 base_env.publish_message(:176) 的路由语义，做成工厂便于测试替换 SOP 表"""
+# ---- 黑板→上下文自动装配（源项目 i_context 的等价机制） ----
+# key = cause_by tag；value = assembler(msg, state) -> list[Message]（一条消息 = 一个 Send 载荷）。
+# 这是 e2e 里手写 wrapper 的产品化：WriteTasks 拆任务多 Send、QA 拿到 TestingContext。
+def _wire_write_tasks(msg: Message, state: dict) -> list[Message]:
+    """WriteTasks 的任务清单 → 每个文件一条 Engineer 载荷（源 i_context=CodingContext 语义）"""
+    tasks = (msg.instruct_content or {}).get("task_list", [])
+    out = []
+    for t in tasks:
+        out.append(Message(content=msg.content, role="user", cause_by=msg.cause_by,
+                           sent_from=msg.sent_from,
+                           instruct_content={"filename": t.get("filename", ""),
+                                             "instruction": t.get("instruction", "")},
+                           instruct_schema="TaskItem"))
+    return out
+
+
+def _wire_summarize_code(msg: Message, state: dict) -> list[Message]:
+    """SummarizeCode → QA：从产物仓取最新 src 文件装配 TestingContext（源 qa_engineer.py:92 语义）"""
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.const import RepoName
+    store = ArtifactStore.active()
+    files = store.all_files(RepoName.SRC)
+    if not files:
+        return [msg]
+    latest = max(files, key=lambda f: (store.root / RepoName.SRC / f).stat().st_mtime)
+    code_doc = {"filename": latest, "root_path": RepoName.SRC,
+                "content": (store.root / RepoName.SRC / latest).read_text(encoding="utf-8",
+                                                                          errors="replace")}
+    return [Message(content=msg.content, role="user", cause_by=msg.cause_by, sent_from=msg.sent_from,
+                    instruct_content={"code_doc": code_doc}, instruct_schema="TestingContext")]
+
+
+CONTEXT_WIRING = {
+    RequirementTag.WRITE_TASKS: _wire_write_tasks,
+    RequirementTag.SUMMARIZE_CODE: _wire_summarize_code,
+}
+
+
+def make_route(sop: dict, agents: dict, wiring: dict | None = None):
+    """= 源 base_env.publish_message(:176) 的路由语义 + i_context 装配，工厂化便于测试"""
 
     def route(state: TeamState):
         if state.get("finished"):
@@ -56,7 +94,11 @@ def make_route(sop: dict, agents: dict):
         targets = sop.get(last.cause_by, [])
         # ---- 运行中插话（= 源 runner.send_chat:46 + MGXEnv 直聊分支；前端 InputCard "追问"） ----
         from codeharness.runtime import CHAT_SINK
-        sends = [Send(t, {"_inbox": [last]}) for t in targets]
+        w = wiring or CONTEXT_WIRING                    # 别名：route 内赋值会遮蔽闭包变量
+        sends = []
+        for t in targets:
+            payload_msgs = w.get(last.cause_by, lambda m, s: [m])(last, state)  # 上下文装配
+            sends.extend(Send(t, {"_inbox": [m]}) for m in payload_msgs)
         chat = CHAT_SINK.get()
         if chat:
             for content, send_to in chat.drain():
