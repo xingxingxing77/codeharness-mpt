@@ -13,12 +13,8 @@ from typing import List, Optional, Union
 import tiktoken
 from pydantic import BaseModel, ConfigDict
 
-from metagpt.const import DEFAULT_MIN_TOKEN_COUNT, DEFAULT_WORKSPACE_ROOT
-from metagpt.tools.libs.linter import Linter
-from metagpt.tools.tool_registry import register_tool
-from metagpt.utils.common import awrite
-from metagpt.utils.file import File
-from metagpt.utils.report import EditorReporter
+from codeharness.tools.libs._shims import (DEFAULT_MIN_TOKEN_COUNT, DEFAULT_WORKSPACE_ROOT,
+                                           Linter, register_tool, awrite, File, EditorReporter)
 
 # This is also used in unit tests!
 LINTER_ERROR_MSG = "[Your proposed edit has introduced new syntax error(s). Please understand the errors and retry your edit command.]\n"
