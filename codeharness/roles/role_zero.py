@@ -92,9 +92,22 @@ class RoleZero:
                                    respond_language=s.get("respond_language", "中文"))
         # Thought 块（第 10 步 §1.2）：前端"思考中"卡片；structured 无 token 流，整段上屏（打字机见文末备注）
         from codeharness.report import thought_block
+        from codeharness.reflection import detect_repeated_error, reflect
+        err = detect_repeated_error(s["history"])
+        if err:                                               # 源 utils/reflection.py：重复失败 → 自反思
+            experience = (experience + "\n" +
+                          await reflect(self.llm, s["task"], s["history"], err)).strip()
         async with thought_block(role=self.profile["name"]) as rep:
-            thought: ZeroThought = await self.llm.structured(ZeroThought).ainvoke(
-                [SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
+            try:
+                thought: ZeroThought = await self.llm.structured(ZeroThought).ainvoke(
+                    [SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
+            except Exception:
+                # structured 失败 → 纯文本重问 + repair 管线 + LLM 自修（源 parse_commands + JSON_REPAIR 链）
+                from codeharness.provider.repair import llm_repair_json
+                raw = await self.llm.aask(system_prompt + "\n\n" + prompt, tag="rz_fallback")
+                thought = llm_repair_json(raw, ZeroThought, self.llm) or ZeroThought(
+                    thought=f"[解析失败，已按 end 处理] {raw[:200]}",
+                    commands=[{"command_name": "end", "args": {}}])
             await rep.content(thought.thought)
         commands = [c.model_dump() for c in thought.commands]
         if not commands:                                      # 契约：至少一条命令，否则视作结束

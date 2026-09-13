@@ -39,3 +39,10 @@ def repair_llm_raw_output(raw: str, schema: Type[BaseModel]) -> Optional[BaseMod
         except Exception:
             continue
     return None
+
+async def llm_repair_json(raw: str, schema: Type[BaseModel], llm) -> Optional[BaseModel]:
+    """最后一档：静态修复全部失败时让 LLM 自修（源 RoleZero JSON_REPAIR 重试路径）"""
+    from codeharness.prompts.role_zero import JSON_REPAIR_PROMPT
+    fixed = await llm.aask(JSON_REPAIR_PROMPT.format(
+        json_data=raw[:4000], json_decode_error="invalid json"), tag="json_repair")
+    return repair_llm_raw_output(fixed, schema)

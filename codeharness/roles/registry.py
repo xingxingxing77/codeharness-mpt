@@ -188,12 +188,12 @@ def DataAnalyst(llm, **kw):
 
 
 def DataInterpreter(llm, **kw):
-    """源 roles/di/data_interpreter.py（David / DataInterpreter）：PLAN_AND_ACT 功能等价物——
-    计划 → 分析代码 → 沙箱执行 的固定三段（完整 plan-and-act 引擎为 strategy/ 扩展位）"""
-    return _classic("David", "DataInterpreter",
-                    "integrate all information to generate a detailed and complete data analysis report",
-                    [WriteCodePlanAndChange(llm=llm), WriteAnalysisCode(llm=llm), RunPythonCode(llm=llm)],
-                    llm, react_mode="BY_ORDER", max_loops=4, **kw)
+    """源 roles/di/data_interpreter.py（David / DataInterpreter）：完整 plan-and-act 引擎
+    （strategy/plan_and_act.py——Planner 计划 → 逐任务写分析代码+沙箱执行 → 汇总）"""
+    from codeharness.strategy.plan_and_act import PlanAndActAgent
+    return PlanAndActAgent({"name": "David", "profile": "DataInterpreter",
+                            "goal": "integrate all information to generate a detailed and complete "
+                                    "data analysis report"}, llm, **kw)
 
 
 # ============ 注册表 ============

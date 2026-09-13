@@ -117,3 +117,20 @@ Your reply must be concise.
 You must respond in {respond_language}
 Directly output your reply content. Do not add any output format.
 """
+
+JSON_REPAIR_PROMPT = """
+## json data
+{json_data}
+
+## json decode error
+{json_decode_error}
+
+## Output Format
+```json
+
+```
+Do not use escape characters in json data, particularly within file paths.
+Help check if there are any formatting issues with the JSON data? If so, please help format it.
+If no issues are detected, the original json data should be returned unchanged. Do not omit any information.
+Output the JSON data in a format that can be loaded by the json.loads() function.
+"""
