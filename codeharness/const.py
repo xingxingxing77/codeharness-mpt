@@ -63,3 +63,6 @@ class DocName:
     TASKS = "tasks.json"
     CODE_SUMMARY = "code_summary.md"
     BUGFIX = "bugfix.md"
+
+# ---- utils/common 复制件依赖（源 const.py 逐字） ----
+MARKDOWN_TITLE_PREFIX = "## "   # common.py:48 的 Markdown 标题前缀
