@@ -68,10 +68,11 @@ class Agent:
         names = list(self.actions)
         if len(names) == 1:                              # 对齐 :342 单动作直选
             return {"chosen": names[0], "loops": s["loops"] + 1}
-        if self.react_mode == "BY_ORDER":                # 对齐 :353-357
+        if self.react_mode == "BY_ORDER":                # 对齐 :353-357（源 state 从 -1 起步，think 先进位）
             cursor = s["action_cursor"] + 1
-            chosen = names[cursor] if cursor < len(names) else "END"
-            return {"chosen": chosen, "action_cursor": cursor, "loops": s["loops"] + 1}
+            if cursor >= len(names):
+                return {"chosen": "END", "action_cursor": cursor, "loops": s["loops"] + 1}
+            return {"chosen": names[cursor], "action_cursor": cursor, "loops": s["loops"] + 1}
         from codeharness.report import thought_block
         async with thought_block(role=self.profile["name"]) as rep:
             choice: ActionChoice = await self.llm.structured(ActionChoice).ainvoke(
@@ -100,9 +101,8 @@ class Agent:
             msg = Message(content=str(result), role="assistant")
         msg.cause_by = action.name                       # 对齐 :388 cause_by=todo
         msg.sent_from = self.profile["name"]             # 对齐 :389 sent_from=self
-        cursor = s["action_cursor"] + 1 if self.react_mode == "BY_ORDER" else s["action_cursor"]
         return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],
-                "inbox": [], "action_cursor": cursor}
+                "inbox": [], "action_cursor": s["action_cursor"]}   # BY_ORDER 的进位已在 think 完成
 
     def _format_inbox(self, inbox) -> str:
         return "\n\n".join(m.content for m in inbox)
@@ -117,7 +117,7 @@ class Agent:
             inbox = state.get("_inbox") or []
             mem = list(state.get("memories", {}).get(name, []))
             result = await graph.ainvoke({"name": name, "inbox": inbox, "memory": mem,
-                                          "action_cursor": 0, "chosen": "", "loops": 0, "output": []})
+                                          "action_cursor": -1, "chosen": "", "loops": 0, "output": []})
             return {"messages": result["output"], "memories": {name: result["memory"]}}
 
         return name, _run
