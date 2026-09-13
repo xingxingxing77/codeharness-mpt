@@ -47,7 +47,8 @@ class ArtifactStore:
         path = self._path(subdir, filename)
         if not path.exists():
             return None
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        content = await asyncio.to_thread(
+            path.read_text, encoding="utf-8", errors="replace")   # 容忍历史遗留的非 utf-8 文件
         return Document(root_path=subdir, filename=filename, content=content)
 
     def all_files(self, subdir: str) -> list[str]:

@@ -102,16 +102,19 @@ class Agent:
         action = self.actions[s["chosen"]]
         if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
             prompt = self._format_inbox(s["inbox"])
-            trigger_cause = s["inbox"][-1].cause_by
+            trig = s["inbox"][-1]
         else:                                                # BY_ORDER 第 2+ 动作：收件箱已清，退化为最近记忆
-            last = s["memory"][-1] if s["memory"] else Message(content="")
-            prompt, trigger_cause = last.content, last.cause_by
-        result = await action.run(Message(content=prompt, role="user", cause_by=trigger_cause))
+            trig = s["memory"][-1] if s["memory"] else Message(content="")
+            prompt = trig.content
+        result = await action.run(Message(
+            content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,
+            instruct_content=trig.instruct_content,          # 上下文模型透传（CodingContext/TestingContext 的接缝）
+            instruct_schema=trig.instruct_schema))
         if isinstance(result, Message):
             msg = result
         else:
             msg = Message(content=str(result), role="assistant")
-        if not msg.cause_by or msg.cause_by == trigger_cause:
+        if not msg.cause_by or msg.cause_by == trig.cause_by:
             msg.cause_by = action.name                   # 对齐 :388 cause_by=todo（Action 未显式设 tag 时）
         msg.sent_from = self.profile["name"]             # 对齐 :389 sent_from=self
         return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],

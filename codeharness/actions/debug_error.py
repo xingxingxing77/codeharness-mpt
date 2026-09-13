@@ -44,10 +44,11 @@ class DebugError(BaseAction):
             return Message(content="缺少修复上下文", role="assistant", cause_by=self.name)
         from codeharness.schema import RunCodeResult
         detail = RunCodeResult.model_validate_json(output.content)
-        if re.search(r"Ran (\d+) tests in ([\d.]+)s\n\nOK", detail.stderr):
+        if detail.return_code == 0 or re.search(r"Ran (\d+) tests in ([\d.]+)s\n\nOK", detail.stderr):
             return Message(content="已通过，无需修复", role="assistant", cause_by=self.name)
         rsp = await self._aask(PROMPT_TEMPLATE.format(code=code_doc.content,
-                                                      test_code=test_doc.content, logs=detail.stderr))
+                                                      test_code=test_doc.content,
+                                                      logs=(detail.stderr + "\n" + detail.stdout)[:4000]))
         from codeharness.actions.write_code import _parse_code
         fixed = _parse_code(rsp)
         await store.save(RepoName.SRC, Document(filename=ctx.code_filename, content=fixed))

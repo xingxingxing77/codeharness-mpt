@@ -62,8 +62,14 @@ class WriteCode(BaseAction):
         design = (await store.get(RepoName.DOCS, DocName.DESIGN)) or Document(content="")
         tasks = (await store.get(RepoName.DOCS, DocName.TASKS)) or Document(content="")
         # 源 get_codes(:168)：同项目其他文件的代码作为上下文，排除当前文件
-        others = "\n".join(f"### File Name: `{f}`\n```\n{(await store.get(RepoName.SRC, f)).content}\n```\n"
-                           for f in store.all_files(RepoName.SRC) if f != ctx.filename)
+        parts = []
+        for f in store.all_files(RepoName.SRC):
+            if f == ctx.filename:
+                continue
+            d = await store.get(RepoName.SRC, f)
+            if d:
+                parts.append(f"### File Name: `{f}`\n```\n{d.content}\n```\n")
+        others = "\n".join(parts)
         prompt = PROMPT_TEMPLATE.format(design=design.content, task=tasks.content, code=others,
                                         logs="", summary_log="", feedback="",
                                         filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
