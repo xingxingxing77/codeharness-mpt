@@ -23,4 +23,4 @@ class WriteTasks(BaseAction):
         files = [t["filename"] for t in tasks.task_list]
         return Message(content="任务拆解完成: " + ", ".join(files), role="assistant",
                        cause_by=self.name, sent_from="PMManager",
-                       instruct_content=content, instruct_schema="TaskList")
+                       instruct_content=tasks.model_dump(), instruct_schema="TaskList")
