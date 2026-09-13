@@ -1,0 +1,148 @@
+"""RoleZero：动态范式（源 roles/di/role_zero.py:55-475 的语义 → 图）。
+_think(:198) 八步组装 → think 节点；_act(:280) 命令执行 → act 节点；
+ask_human(:456)/reply_to_human(:465)/_end(:474) → interrupt/记录/END。
+经验检索(_retrieve_experience:449) 接 第 8 步 exp_pool；此版留空串占位。"""
+import asyncio
+import json
+from datetime import datetime
+from typing import TypedDict
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, END
+from langgraph.types import interrupt
+from pydantic import BaseModel, Field
+from codeharness.const import RequirementTag
+from codeharness.schema import Message, Command
+from codeharness.prompts.role_zero import (SYSTEM_PROMPT, CMD_PROMPT, ROLE_INSTRUCTION,
+                                           TASK_TYPE_DESC)
+
+
+class ZeroThought(BaseModel):
+    """输出契约：structured 强约束（替代源 parse_commands + JSON_REPAIR 重试）"""
+    thought: str
+    commands: list[Command] = Field(default_factory=list)
+
+
+class RoleZeroState(TypedDict):
+    task: str
+    history: list          # [{thought, commands:[{command_name,args}], results:[{name,result}]}]
+    experience: str
+    respond_language: str
+    finished: bool
+
+
+class RoleZero:
+    SPECIAL = {"end", "End", "RoleZero.ask_human", "RoleZero.reply_to_human"}
+
+    def __init__(self, profile: dict, tools: list, llm, system_prompt: str = SYSTEM_PROMPT,
+                 instruction: str = ROLE_INSTRUCTION, max_loops: int = 15, env_desc: str = "",
+                 longterm_memory=None):
+        self.profile = profile
+        self.tools = {t.name: t for t in tools}
+        self.llm = llm
+        self.system_prompt = system_prompt
+        self.instruction = instruction
+        self.max_loops = max_loops
+        self.env_desc = env_desc
+        self.ltm = longterm_memory          # 第 4 步 LongTermMemory，可空
+
+    # ---- 源 _get_prefix(:276)：人设 + 当前时间 ----
+    def _prefix(self) -> str:
+        p = self.profile
+        s = (f"You are a {p.get('profile', 'helper')}, named {p['name']}, "
+             f"your goal is {p.get('goal', '')}.")
+        if self.env_desc:
+            s += f" You are in {self.env_desc}."
+        s += f" The current time is {datetime.now():%Y-%m-%d %H:%M:%S}."
+        return s
+
+    def _plan_status(self, s: RoleZeroState):
+        """源 :216 get_plan_status 的极简版：Task 数据结构在 prompt 里，计划即 history 里的 Plan 命令记录"""
+        lines = [f"- [{i+1}] {h['thought'][:80]}" for i, h in enumerate(s["history"][-5:])]
+        return "\n".join(lines) or "(no plan yet)", f"step {len(s['history'])+1}/{self.max_loops}"
+
+    def build(self, checkpointer=None):
+        g = StateGraph(RoleZeroState)
+        g.add_node("think", self._think)
+        g.add_node("act", self._act)
+        g.set_entry_point("think")
+        g.add_conditional_edges("think", lambda s: END if s["finished"] else "act")
+        g.add_edge("act", "think")
+        return g.compile(checkpointer=checkpointer or InMemorySaver())
+
+    # ---- 源 _think(:198-265) 的组装顺序（2 检测语言并入首轮、5 工具清单、8 查重由 structured 取代） ----
+    async def _think(self, s: RoleZeroState):
+        if len(s["history"]) >= self.max_loops:
+            return {"finished": True}
+        experience = s.get("experience", "")
+        if self.ltm and not experience:                       # 源 :213 _retrieve_experience + 第 4 步 recall
+            memories = await self.ltm.recall(s["task"], k=3)
+            experience = "\n".join(m.content for m in memories)
+
+        tool_info = json.dumps({n: {"description": t.description} for n, t in self.tools.items()},
+                               ensure_ascii=False)
+        plan_status, current_task = self._plan_status(s)
+        system_prompt = self.system_prompt.format(
+            role_info=self._prefix(), task_type_desc=TASK_TYPE_DESC,
+            available_commands=tool_info, example=experience, instruction=self.instruction)
+        prompt = CMD_PROMPT.format(experience=experience, current_state="ready",
+                                   plan_status=plan_status, current_task=current_task,
+                                   respond_language=s.get("respond_language", "中文"))
+        # Thought 块（第 10 步 §1.2）：前端"思考中"卡片；structured 无 token 流，整段上屏（打字机见文末备注）
+        from codeharness.report import thought_block
+        async with thought_block(role=self.profile["name"]) as rep:
+            thought: ZeroThought = await self.llm.structured(ZeroThought).ainvoke(
+                [SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
+            await rep.content(thought.thought)
+        commands = [c.model_dump() for c in thought.commands]
+        if not commands:                                      # 契约：至少一条命令，否则视作结束
+            commands = [{"command_name": "end", "args": {}}]
+        return {"history": s["history"] + [{"thought": thought.thought, "commands": commands}]}
+
+    # ---- 源 _act(:280-301)/_run_commands(:385)/_run_special_command(:420) ----
+    async def _act(self, s: RoleZeroState):
+        last = s["history"][-1]
+        results, finished = [], False
+        for cmd in last["commands"]:
+            name, args = cmd["command_name"], cmd.get("args", {})
+            try:
+                if name in ("end", "End"):                    # 源 _end(:474)
+                    finished = True
+                    results.append({"name": name, "result": "[结束]"})
+                elif name == "RoleZero.ask_human":            # 源 ask_human(:456) → interrupt
+                    answer = interrupt({"question": args.get("question", "")})
+                    results.append({"name": name, "result": answer})
+                elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
+                    results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
+                elif name == "Plan.finish_current_task":
+                    results.append({"name": name, "result": "[任务完成]"})
+                elif name in self.tools:
+                    out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
+                    results.append({"name": name, "result": str(out)[:4000]})
+                else:
+                    results.append({"name": name, "result": f"未知命令 {name}，可用: {list(self.tools)}"})
+            except asyncio.TimeoutError:
+                results.append({"name": name, "result": f"[超时] {name}"})
+            except Exception as e:                            # self-heal：错误回喂下一轮（源 :289 error_msg 同语义）
+                results.append({"name": name, "result": f"[错误] {type(e).__name__}: {e}"})
+        history = s["history"][:-1] + [{**last, "results": results}]
+        return {"history": history, "finished": finished}
+
+    # ---- 嵌入团队图（接口与 Agent.as_node 完全一致） ----
+    def as_node(self, name: str):
+        graph = self.build()
+
+        async def _run(state: dict):
+            from codeharness.report import set_role
+            set_role(name)                      # 报道事件的 role 字段
+            inbox = state.get("_inbox") or []
+            task = inbox[-1].content if inbox else "continue"
+            sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
+                                       "respond_language": "中文", "finished": False})
+            results = sub["history"][-1]["results"] if sub["history"] else []
+            reply = next((r["result"] for r in results if r["name"] == "RoleZero.reply_to_human"), None)
+            content = reply or (sub["history"][-1]["thought"] if sub["history"] else "done")
+            return {"messages": [Message(content=content, role="assistant",
+                                         cause_by=RequirementTag.RUN_COMMAND, sent_from=name)]}
+
+        return name, _run
