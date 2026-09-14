@@ -7,6 +7,11 @@ dependencies = [
     "langchain>=0.2", "langchain-openai>=0.1", "langchain-community>=0.2",
     "langchain-qdrant>=0.1", "langgraph>=0.1",
     "qdrant-client>=1.7", "loguru>=0.7", "shortuuid>=1.0", "tiktoken",
+    # 复制件带出的依赖：utils/common.py（源逐字复制件）import 了前 6 个，
+    # 不声明则新环境 pip install -e . 后 import codeharness.utils.common 直接 ModuleNotFoundError
+    "aiofiles>=23.0", "aiohttp>=3.9", "chardet>=5.0", "requests>=2.31", "pillow>=10.0", "tenacity>=8.2",
+    "pandas>=2.0",    # document.py 的 IndexableDocument / read_data
+    "redis>=5.0",     # utils/redis.py（源语义客户端）+ S7 平台层
 ]
 
 [project.optional-dependencies]

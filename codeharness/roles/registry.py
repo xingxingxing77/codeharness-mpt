@@ -7,7 +7,7 @@ profile 字典 + 动作/工具集 + watch 订阅。源同名不同角色（David
     from codeharness.roles.registry import build_role, ALL_ROLES
     researcher = build_role("Researcher", llm)
 """
-from codeharness.const import RequirementTag
+from codeharness.const import RequirementTag, TEAMLEADER_NAME
 from codeharness.roles.agent import Agent
 from codeharness.roles.role_zero import RoleZero
 from codeharness.tools import REGISTRY
@@ -33,7 +33,7 @@ from codeharness.actions.data_analysis import WriteAnalysisCode, RunPythonCode
 
 def TeamLeader(llm, **kw):
     """源 roles/di/team_leader.py：调度中枢"""
-    return RoleZero({"name": "Mike", "profile": "Team Leader",
+    return RoleZero({"name": TEAMLEADER_NAME, "profile": "Team Leader",
                      "goal": "lead a team to fulfill requirements efficiently"},
                     REGISTRY, llm, **kw)
 

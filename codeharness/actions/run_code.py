@@ -2,7 +2,7 @@
 import sys
 from codeharness.base.action import BaseAction
 from codeharness.schema import Message, Document, RunCodeContext
-from codeharness.const import RepoName
+from codeharness.const import MESSAGE_ROUTE_TO_SELF, RepoName
 from codeharness.document_store.artifact_store import ArtifactStore
 from codeharness.tools.sandbox import run_context
 
@@ -10,7 +10,7 @@ from codeharness.tools.sandbox import run_context
 class RunCode(BaseAction):
     async def run(self, msg: Message) -> Message:
         ctx = RunCodeContext(**(msg.instruct_content or {}))
-        ctx.working_dir = ctx.working_dir or str(ArtifactStore.active().root)
+        ctx.working_directory = ctx.working_directory or str(ArtifactStore.active().root)
         # sys.executable：保证用当前解释器（PATH 上的 python 可能没装 pytest）
         ctx.command = ctx.command or [sys.executable, "-m", "pytest", "tests", "-x", "--tb=short"]
         result = await run_context(ctx)
@@ -22,7 +22,7 @@ class RunCode(BaseAction):
         ok = result.return_code == 0
         return Message(content=("测试通过" if ok else f"测试失败:\n{combined.stderr[:3000]}"),
                        role="assistant", cause_by=self.name, sent_from="QA",
-                       send_to={"<self>"} if ok else set(),
+                       send_to={MESSAGE_ROUTE_TO_SELF} if ok else set(),
                        instruct_content={"output_filename": out_name, "ok": ok,
                                          "code_filename": ctx.code_filename,     # DebugError 修复回路透传
                                          "test_filename": ctx.test_filename},

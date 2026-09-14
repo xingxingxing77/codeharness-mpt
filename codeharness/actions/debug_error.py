@@ -1,7 +1,8 @@
 """DebugError：修复回路核心。prompt 逐字搬运源 :22-47；通过判定 = 源 :60 的 "Ran N tests ... OK" 正则。"""
 import re
+
 from codeharness.base.action import BaseAction
-from codeharness.schema import Message, RunCodeContext
+from codeharness.schema import Document, Message, RunCodeContext
 from codeharness.const import RepoName
 from codeharness.document_store.artifact_store import ArtifactStore
 

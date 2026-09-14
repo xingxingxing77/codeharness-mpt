@@ -1,7 +1,7 @@
 """项目入口：源 team.py 的 run_project(:102) + run(:123) 合体。
 run_project = 脚本场景的 async generator；prepare_project = runner 专用的三件套。"""
 from codeharness.schema import Message
-from codeharness.const import RequirementTag
+from codeharness.const import RequirementTag, TEAMLEADER_NAME
 
 
 def default_team(llm, cost_manager=None, env_desc: str = "a software company"):
@@ -10,7 +10,7 @@ def default_team(llm, cost_manager=None, env_desc: str = "a software company"):
     from codeharness.prompts.role_zero import SYSTEM_PROMPT
     from codeharness.tools import REGISTRY
     profiles = {                                    # 字段逐字抄自 roles/ 对应文件（参考速查 §4）
-        "Mike":  ("Team Leader", "lead a team to fulfill requirements efficiently"),
+        TEAMLEADER_NAME: ("Team Leader", "lead a team to fulfill requirements efficiently"),
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
         "Bob":   ("Architect", "design a concise, usable, complete software system"),
     }

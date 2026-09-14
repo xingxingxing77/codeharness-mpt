@@ -28,7 +28,7 @@ async def run_python_code(code: str, timeout: int = 60) -> RunCodeResult:
 async def run_context(ctx: RunCodeContext, timeout: int = 120) -> RunCodeResult:
     """RunCodeContext.command 形如 ["python", "-m", "pytest", "tests/"]"""
     proc = await asyncio.create_subprocess_exec(
-        *ctx.command, cwd=str(Path(ctx.working_dir or settings.workspace_root).resolve()),
+        *ctx.command, cwd=str(Path(ctx.working_directory or settings.workspace_root).resolve()),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)

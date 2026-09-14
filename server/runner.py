@@ -85,7 +85,7 @@ class SessionRunner:
         from codeharness.provider.cost import CostManager
         from codeharness.configs.settings import settings
 
-        chat = self.chats[sid] = ChatQueue(default_target="Mike")
+        chat = self.chats[sid] = ChatQueue()
         cost_manager = CostManager(max_budget=session.investment or settings.max_budget)
         try:
             from codeharness.team import prepare_project

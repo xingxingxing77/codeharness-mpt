@@ -43,15 +43,18 @@ SOP = {
 # key = cause_by tag；value = assembler(msg, state) -> list[Message]（一条消息 = 一个 Send 载荷）。
 # 这是 e2e 里手写 wrapper 的产品化：WriteTasks 拆任务多 Send、QA 拿到 TestingContext。
 def _wire_write_tasks(msg: Message, state: dict) -> list[Message]:
-    """WriteTasks 的任务清单 → 每个文件一条 Engineer 载荷（源 i_context=CodingContext 语义）"""
+    """WriteTasks 的任务清单 → 每个文件一条 Engineer 载荷（源 i_context=CodingContext 语义）
+
+    分工照源：`content` = 给 agent 看的自然语言指令，`instruct_content` = 结构化上下文。
+    任务指令不要塞进 instruct_content——CodingContext 没这个字段（源也没有），
+    BaseSerialization 的 extra="forbid" 会拒绝它。"""
     tasks = (msg.instruct_content or {}).get("task_list", [])
     out = []
     for t in tasks:
-        out.append(Message(content=msg.content, role="user", cause_by=msg.cause_by,
+        out.append(Message(content=t.get("instruction", "") or msg.content, role="user", cause_by=msg.cause_by,
                            sent_from=msg.sent_from,
-                           instruct_content={"filename": t.get("filename", ""),
-                                             "instruction": t.get("instruction", "")},
-                           instruct_schema="TaskItem"))
+                           instruct_content={"filename": t.get("filename", "")},
+                           instruct_schema="CodingContext"))
     return out
 
 

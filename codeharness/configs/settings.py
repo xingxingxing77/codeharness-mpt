@@ -1,32 +1,66 @@
-"""全局配置。替代源项目 config2.py + configs/（约 300 行 yaml 体系）。"""
+"""全局配置。判定 `改`（R7）：替代源 `config2.py`(182) + `utils/yaml_model.py`(48) 那套 yaml 体系。
+
+机制换成 pydantic-settings：`.env` 里用双下划线表达嵌套，例如
+`LLM__API_KEY` / `LLM__MAX_TOKEN` / `EMBEDDING__BASE_URL` / `REDIS__HOST`。
+字段名一律照源（含源的 `max_token` 单数），以免 S6 逐字复制的源代码取不到属性。
+"""
+from typing import Optional
+
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-class LLMConfig(BaseModel):
-    model: str = "gpt-4o"
-    api_key: str = ""
-    base_url: str = "https://api.openai.com/v1"
-    temperature: float = 0.0
-    max_tokens: int = 4096
+from codeharness.configs.llm_config import LLMConfig
 
 
 class EmbeddingConfig(BaseModel):
-    """2026-09-13 选型：bge-m3（1024 维），OpenAI 兼容端点"""
-    model: str = "bge-m3"
+    """2026-09-13 选型定稿：bge-m3（1024 维），OpenAI 兼容端点。字段名照源 embedding_config.py。"""
+
     api_key: str = ""
     base_url: str = "http://localhost:9998/v1"
+    model: str = "bge-m3"
     dim: int = 1024
 
 
 class RerankerConfig(BaseModel):
     model: str = "bge-reranker-v2-m3"
-    base_url: str = "http://localhost:9998/v1"   # /v1/rerank
+    api_key: str = ""
+    base_url: str = "http://localhost:9998/v1"      # /v1/rerank
     top_n: int = 5
+    recall_k: int = 10                                # 粗排取 10 → 精排 top_n=5；服务离线自动降级为仅粗排
 
 
 class QdrantConfig(BaseModel):
+    """源 qdrant_config.py + document_store/qdrant_store.py:11 的 QdrantConnection 字段合并。"""
+
+    host: Optional[str] = None
+    port: Optional[int] = None
     url: str = "http://localhost:6333"
+    api_key: str = ""
+    collection_name: str = "m3"
+
+
+class RedisConfig(BaseModel):
+    """来源：metagpt/configs/redis_config.py（26 行）。`to_url()` 语义照源，供 utils/redis.py 用。"""
+
+    host: str = "localhost"
+    port: int = 6379
+    username: Optional[str] = None
+    password: Optional[str] = None
+    db: int = 0
+    ssl: bool = False
+
+    def to_url(self) -> str:
+        scheme = "rediss" if self.ssl else "redis"
+        return f"{scheme}://{self.host}:{self.port}/{self.db}"
+
+
+class SearchConfig(BaseModel):
+    """源 search_config.py：只保留新栈实际接的两个引擎（ddg + serper）。"""
+
+    tbs: Optional[str] = None
+    domaits: bool = True
+    serper_api_key: str = ""
+    bing_api_key: str = ""
 
 
 class Settings(BaseSettings):
@@ -36,9 +70,17 @@ class Settings(BaseSettings):
     embedding: EmbeddingConfig = EmbeddingConfig()
     reranker: RerankerConfig = RerankerConfig()
     qdrant: QdrantConfig = QdrantConfig()
+    redis: RedisConfig = RedisConfig()
+    search: SearchConfig = SearchConfig()
+
     workspace_root: str = "./workspace"
     memory_overflow_size: int = 200
     max_budget: float = 10.0
+    enable_rag: bool = True
+
+    # 源 config2.py 的 Config 级开关（repair.py 与 gateway 的重试层读它）
+    repair_llm_output: bool = True
+    multimodal_llm: Optional[LLMConfig] = None
 
 
 settings = Settings()

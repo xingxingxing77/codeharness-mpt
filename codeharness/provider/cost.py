@@ -7,10 +7,16 @@ from codeharness.logs import logger
 
 
 class NoMoneyException(Exception):
-    """预算耗尽（源 utils/exceptions.py 定义、team.py:98 抛出；新栈抛出点在 team_graph.budget_guard）"""
+    """预算耗尽。
+
+    源定义在 `utils/common.py:323`（⚠ 不是 utils/exceptions.py），抛出点是 `team.py:99-100`
+    的 `Team._check_balance`，源用两个位置参数抛：`NoMoneyException(total_cost, "Insufficient funds: ...")`。
+    新栈的抛出点在 `team_graph.budget_guard`。"""
 
 
 class Costs(NamedTuple):
+    """源 cost_manager.py:18 逐字。"""
+
     total_prompt_tokens: int
     total_completion_tokens: int
     total_cost: float
@@ -51,9 +57,42 @@ class CostManager(BaseModel):
         self.records.append({"tag": tag, "model": model, "pt": pt, "ct": ct})
 
     def check_budget(self):
-        """预算把守（对齐 team._check_balance 语义），budget_guard 调用"""
-        if self.total_cost >= self.max_budget > 0:
-            raise NoMoneyException(f"Insufficient funds: ${self.max_budget}, used ${self.total_cost:.3f}")
+        """源 `Team._check_balance`（team.py:99-100）逐字对齐：`>=` 即抛，两参形式。"""
+        if self.total_cost >= self.max_budget:
+            raise NoMoneyException(self.total_cost, f"Insufficient funds: {self.max_budget}")
+
+    # ---- 新栈自有（源 CostManager 只有 update_cost/get_costs，**没有这两个方法**） ----
+    # 为 N5「每用户每会话配额」服务：源是"事后抛"，平台需要"发问前判断值不值得发"。
+    def is_within_budget(self, msgs: list = None, **kwargs) -> bool:
+        """预测式判断：这一问发出去还会不会在预算内。`estimated_cost`（美元）优先。"""
+        if self.max_budget <= 0:                       # 未设预算 = 不限
+            return True
+        estimated = kwargs.get("estimated_cost")
+        if estimated is None:
+            tokens = kwargs.get("new_messages_added")
+            if not tokens and msgs:
+                from codeharness.utils.token_counter import count_message_tokens
+                try:
+                    tokens = count_message_tokens(
+                        messages=[{"role": getattr(m, "role", "user"), "content": getattr(m, "content", str(m))}
+                                  for m in msgs],
+                        model=self._last_model or "gpt-4o")
+                except Exception:                     # 价目表缺项不该中断预算判断，退回字符粗估
+                    tokens = sum(len(getattr(m, "content", str(m))) for m in msgs) // 4
+            if not tokens:
+                return True
+            rate = (self.token_costs.get(self._last_model or "gpt-4o", {}) or {}).get("completion", 0)
+            estimated = tokens * rate / 1000
+        # 已超支则一律不再发（哪怕预估 0）——与 check_budget 的 `>=` 语义保持一致
+        return self.total_cost < self.max_budget and self.total_cost + float(estimated) < self.max_budget
+
+    def update_budget(self, budget_used: float):
+        """累计已授权的花费（源无此方法；新栈用它跟踪 budget 上限内的预扣额）。"""
+        self.total_budget += budget_used
+
+    @property
+    def _last_model(self) -> str:
+        return self.records[-1]["model"] if self.records else ""
 
 
 class TokenCostManager(CostManager):

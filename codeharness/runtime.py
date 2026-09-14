@@ -2,6 +2,7 @@
 内核只读它们；server 在会话任务入口 set——包内保持零 fastapi 依赖。"""
 from contextvars import ContextVar
 from collections import deque, defaultdict
+from codeharness.const import TEAMLEADER_NAME
 
 CURRENT_PROJECT: ContextVar[str] = ContextVar("current_project", default="project")
 """当前会话的项目目录名——ArtifactStore.active() 用它，保证产物落进 session.workspace 同名目录"""
@@ -16,7 +17,7 @@ CHAT_SINK: ContextVar[object] = ContextVar("chat_sink", default=None)
 class ChatQueue:
     """每会话一个。runner 持有并暴露 enqueue；route 每轮 drain。"""
 
-    def __init__(self, default_target: str = "Mike"):
+    def __init__(self, default_target: str = TEAMLEADER_NAME):
         self.default_target = default_target
         self._q: dict[str, deque] = defaultdict(deque)
 
