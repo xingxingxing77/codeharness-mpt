@@ -5,17 +5,22 @@ from codeharness.const import RequirementTag, TEAMLEADER_NAME
 
 
 def default_team(llm, env_desc: str = "a software company"):
-    """= 源 software_company.py 组队（RoleZero 系，参考速查 §4）；经典线组队见 第 9 步 §4"""
+    """= 源 software_company.py 组队（RoleZero 系，参考速查 §4）；经典线组队见 第 9 步 §4。
+    ⚠ 这套角色名不在 `team_graph.SOP` 里，动态范式要靠它自己的路由表（S6 接），
+    所以现在**不参与默认兜底**——默认见 `_default_agents`。"""
     from codeharness.roles.role_zero import RoleZero
     from codeharness.prompts.role_zero import SYSTEM_PROMPT
+    from codeharness.memory.brain_memory import BrainMemory
     from codeharness.tools import REGISTRY
     profiles = {                                    # 字段逐字抄自 roles/ 对应文件（参考速查 §4）
         TEAMLEADER_NAME: ("Team Leader", "lead a team to fulfill requirements efficiently"),
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
         "Bob":   ("Architect", "design a concise, usable, complete software system"),
     }
+    # 每角色一个 brain：key 按角色名分（RoleZero._brain_key），Redis 挂了也只是不摘要，不影响跑
     return {name: RoleZero({"name": name, "profile": prof, "goal": goal},
-                           REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc)
+                           REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
+                           brain=BrainMemory())
             for name, (prof, goal) in profiles.items()}
 
 
@@ -23,7 +28,7 @@ async def run_project(idea: str, project_id: str, agents: dict | None = None,
                       checkpointer=None, cost_manager=None):
     """async generator：产出 astream_events 事件（脚本场景）。runner 用 prepare_project。"""
     if agents is None:
-        agents = default_team(_make_llm(cost_manager))
+        agents = _default_agents(cost_manager)
     from codeharness.environment.team_graph import build_team
     team = build_team(agents, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
@@ -42,7 +47,7 @@ def prepare_project(idea: str, project_id: str, agents: dict | None = None,
     调用方手上的另一个实例只会记到 0（这个断链曾让前端用量恒为 0）。"""
     from codeharness.environment.team_graph import build_team
     if agents is None:
-        agents = default_team(_make_llm(cost_manager))
+        agents = _default_agents(cost_manager)
     team = build_team(agents, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
@@ -56,10 +61,18 @@ def _make_llm(cost_manager=None):
     return LLMGateway(cost_manager=cost_manager or CostManager())
 
 
+def _default_agents(cost_manager=None):
+    """不传 agents 时的兜底组队。必须是经典线：`build_team` 默认用的就是 `team_graph.SOP`，
+    角色名对不上时 LangGraph 只会打一行 "Ignoring unknown node name PM"，
+    整场会话零次 LLM 调用（实测，runner 走的就是这条兜底）。"""
+    return classic_team(_make_llm(cost_manager))
+
+
 def classic_team(llm):
     """经典 Role 线五角色（参考速查全图）。每个 Agent 的 actions 即第 9 步的实现类。"""
     from codeharness.roles.agent import Agent
     from codeharness.actions.write_prd import WritePRD
+    from codeharness.actions.design_api import WriteDesign
     from codeharness.actions.project_management import WriteTasks
     from codeharness.actions.write_code import WriteCode
     from codeharness.actions.write_test import WriteTest
@@ -69,6 +82,9 @@ def classic_team(llm):
     return {
         "PM":        Agent({"name": "PM", "profile": "Product Manager",
                             "goal": "write a PRD"}, [WritePRD(llm=llm)], llm, max_loops=2),
+        "Architect": Agent({"name": "Architect", "profile": "Architect",
+                            "goal": "design a concise, usable, complete software system"},
+                           [WriteDesign(llm=llm)], llm, max_loops=2),
         "PMManager": Agent({"name": "PMManager", "profile": "Project Manager",
                             "goal": "break down tasks"}, [WriteTasks(llm=llm)], llm, max_loops=2),
         "Engineer":  Agent({"name": "Engineer", "profile": "Engineer", "goal": "write code"},

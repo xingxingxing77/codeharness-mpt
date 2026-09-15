@@ -107,6 +107,16 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - 仓库级陷阱 #1 已清：`docs/` 从 `.gitignore` 移除并入库（`33244d8`）；P2 的 0 字节 `actions/action.py` 已 `git rm`（`a30b91c`）。
 - **仍未闭合的真实缺口**：S5 整层偏薄且**无门禁**（`memory` 185 行 / `document_store` 84 / `rag` 60 / `exp_pool` 29 / `strategy` 111，`tests/s5_memory_rag.py` 不存在，R9 hybrid 检索要求的 Qdrant named vectors 无处落）；`repo_parser.py` 63 vs 源 1,023；S4 侧剩 `Editor` 命令面接线（S6）+ per-session 强制边界与浏览器类（同批等 S7）；server/S8 层零门禁。供体 `E:\MetaGPT` **2026-09-15 已授权读取**。
 
+### 2026-09-15 晚 · S5.1（记忆层第一条闭环）
+
+- **`utils/redis.py` 落地**（`复`，63 行语义照抄）：惰性连接 + 连不上只 warning、读写静默返回 `None`/`False`。t2 把 `settings.redis.port` 指向死端口 6399 实测：`ConnectionError` 被吞，不抛。这是「没起容器也能跑自测」的前提。
+- **`memory/brain_memory.py` 落地**（`复改` 345 → 168 行）：`history`/`knowledge`/`historical_summary` + 整体 JSON 存**单个** redis key + dirty 才写 + `DEFAULT_MAX_TOKENS=1500` 分窗滚动摘要 + 滑动窗口重叠。四条零调用者分支判 `弃`（三个 `MetaGPTLLM` 兜底、`get_title`、`is_related`/`rewrite`），`memory/summarizing.py`(17 行，与 BrainMemory 正重复) **`git rm`**。
+- **RoleZero 工作记忆接线**（本步的真实缺口，不是行数缺口）：实测 `_think` 此前每轮只发 `[System, Human]` **两条**消息，`_act` 拿到的工具结果**从不回喂**，而 `CMD_PROMPT` 反复要求 "review the conversation history" → 跨轮失忆。现在 `Memory` 做窗口（`memory_k` 默认取 `settings.memory_overflow_size`，**该字段第一次有读者**），溢出交 `BrainMemory` 摘要落 Redis，key = `BRAIN_MEMORY:default:{会话目录}/{角色名}`（复用 `CURRENT_PROJECT`，与 `session_root` 同一接缝）。t7 断言打在 FakeLLM 收到的 messages 上：`已写入 prd.md` 确实出现在下一轮 payload。
+- **P0（实测，非推测）**：runner 不传 `agents` 时兜底走 `default_team`（TeamLeader/Alice/Bob），**三个名字无一在 `team_graph.SOP` 目标里** → LangGraph 只打一行 `Ignoring unknown node name PM`，**整场会话零次 LLM 调用**就算跑完（`prepare_project` + `ainvoke` 实测 `fake.calls == 0`）。这就是「八个自测全绿而 Web 会话其实什么都没干」的又一个真实路径洞。修法：兜底改 `_default_agents()` → `classic_team`，并补 `classic_team` 缺的第 5 个角色 `Architect`（docstring 自称五角色、`WriteDesign` 的 `sent_from` 也写着 `"Architect"`，实际只建了四个）。修后同一冒烟 `LLM_CALLS=3`。**S3(b) 新增 t10** 双向钉住「兜底角色名覆盖 SOP 目标」+「default_team 与经典线名字互斥」，`default_team` 降为 S6 动态范式的备选组队（已写明不参与默认路由）。
+- 顺带修一处一调即炸的接缝：`BrainMemory._get_summary` 原本照源传 `stream=False`，而 `provider/fake.FakeLLM.aask` 签名不收 `stream` → 自测路径必 `TypeError`。本仓 `LLMGateway.aask` 默认即 `stream=False`，去掉该关键字两边都通。
+- 门禁基线：**九个自测脚本全 exit 0** —— s1(12) / s2(12) / s3a(12) / **s3b(10)** / s4(35) / **s5_memory_rag(11)** + test_p1 / test_roles_registry / test_e2e_classic_line。仍**全部 FakeLLM 驱动，真实模型至今没端到端跑过一次**。
+- **S5 剩余**：S5.2 R9（Qdrant named vectors + 单 collection payload 多租户 + hit-rate@5 单向量 vs hybrid 对比表，`longterm`/`exp_store`/`knowledge` 三件都还是「单 dense 向量 + 每租户一 collection」的老形态且零调用者）；S5.3 `exp_pool` 闭环。`brain` 的 Redis 恢复只接了 `RoleZero._think` 首轮 loads，runner 侧的会话级 resume 仍等 S7。
+
 ### 本次审查缺陷清单（标「实测」的都已当场复现，非推测）
 
 | 级 | 位置 | 现象 | 根因 |
@@ -129,14 +139,14 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
 1. **`.gitignore` 最后一行 `docs/` 仍未删**（2026-09-14 复测：`git ls-files docs` 为空）。全套文档至今**零版本控制**——本轮全部改判只存在于工作区，一次误 `clean` 就蒸发。**开工第一件事仍是删这行并提交 docs/。**
-2. **只在真实路径上才炸的洞，FakeLLM 主线路径照不出来**。这已经是第二次：先是 `debug_error.py` 用了未 import 的 `Document`；这次是 `stream_usage`——五条自测全绿，而真模型流式一秒账都记不上。**立规矩：每条 FakeLLM 门禁都要写明"断言打在回放上，还是打在 `_build()` 的构造参数上"；凡是"真模型才会有的字段"，必须有一条打在构造参数上的断言。**
+2. **只在真实路径上才炸的洞，FakeLLM 主线路径照不出来**。这已经是第三次：先是 `debug_error.py` 用了未 import 的 `Document`；第二次是 `stream_usage`——五条自测全绿，而真模型流式一秒账都记不上；第三次是 runner 兜底组队的角色名与 `SOP` 目标名对不上，九个自测全绿而真实会话一次 LLM 都没调（2026-09-15 晚实测并已修，S3b t10 钉住）。**立规矩：每条 FakeLLM 门禁都要写明"断言打在回放上，还是打在 `_build()` 的构造参数上"；凡是"真模型才会有的字段"，必须有一条打在构造参数上的断言。** 结构性的同理：凡是「两套表必须互相自洽」的地方（角色名 ↔ SOP 目标名、工具名 ↔ profile 选择名），要有一条双向断言。
 3. **本仓库存在并发写入者**。2026-09-14 20:12:57 出现提交 `9a765ba`（23 文件 / 2,632 行，含那个 0 字节 `actions/action.py`），当时有审查会话正在读同一工作区，根目录的一次性脚本 `_neutralize_batch1.py`、`_revert.py` 同时消失。多个会话同仓工作时，"改前 `git status`、改后立刻小口分批提交"不是仪式，是防丢工。
 
 ## 还债清单（按真实缺口排，不按行数）
 
 1. **计量与上报这条链是断的**（`stream_usage` + runner 双账本 + 前端 `max_budget` 取错字段）—— 先修，否则 S9 的度量拿不到可信数字。
 2. **`repo_parser.py` 63 行** vs 源 1,023：类图/序列图是前端与 RAG 的共同数据源，全项目最大的真实缺口。
-3. **S5 两条闭环零接线**：经验池 `@exp_cache`、`LongTermMemory` 无人构造。行数看着够，能力其实不存在。
+3. **记忆三条闭环，已闭一条**（2026-09-15 晚 S5.1）：RoleZero 工作记忆 + BrainMemory 摘要落 Redis 已接线并有门禁（s5 11 组）。仍零接线的两件：经验池 `@exp_cache`（S5.3）、`LongTermMemory` 无人构造而 `role_zero.py:49 self.ltm` 已在等它（S5.2，与 R9 同批）。行数看着够，能力可以其实不存在——照旧按接线计，不按行数计。
 4. **`gitignore_parser` 依赖未声明**：S1 交付的 `tree.py` 目前 import 不动。
 5. ~~`cost.py` 62 vs 源 149~~ —— **划掉**：预算强制作废后，这个"行数差"不再是债（见判定表 §零）。
 

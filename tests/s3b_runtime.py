@@ -244,11 +244,31 @@ def t9_kernel_tests_leave_no_disk():
         _fail("9. build_team 没返回可执行图")
 
 
+def t10_default_agents_cover_sop_targets():
+    """兜底组队的角色名必须与 SOP 目标名一一对上。
+    实测缺陷：runner 不传 agents 时走 default_team（TeamLeader/Alice/Bob），三个名字无一在 SOP 表内，
+    LangGraph 只打一行 "Ignoring unknown node name PM"，整场会话零次 LLM 调用就算跑完。"""
+    import codeharness.team as T
+    from codeharness.provider.fake import FakeLLM
+    keep, T._make_llm = T._make_llm, lambda cost_manager=None: FakeLLM(["{}"])
+    try:
+        agents = T._default_agents()
+    finally:
+        T._make_llm = keep
+    targets = {n for names in SOP.values() for n in names}
+    missing = targets - set(agents)
+    if missing:
+        _fail(f"10. 兜底组队缺 SOP 目标节点: {sorted(missing)}，图会静默丢 Send")
+    overlap = targets & set(T.default_team(FakeLLM(["{}"])))
+    if overlap:
+        _fail(f"10. default_team 与经典线同名({sorted(overlap)})，换错兜底就测不出来了")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
-              t9_kernel_tests_leave_no_disk]
+              t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -257,7 +277,7 @@ def main():
     asyncio.run(close_all())
     print(f"\nS3(b) 门禁通过：{len(checks)} 组 —— R3 路由 5 组（BY_ORDER 全跑完/精准激活/显式指名/"
           f"<self> 目标校验/订阅可证伪）+ R4a 持久化 1 组 + R5 interrupt-resume 跨实例 1 组 + "
-          f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组")
+          f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组")
 
 
 if __name__ == "__main__":

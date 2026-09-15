@@ -1,19 +1,24 @@
 """RoleZero：动态范式（源 roles/di/role_zero.py:55-475 的语义 → 图）。
 _think(:198) 八步组装 → think 节点；_act(:280) 命令执行 → act 节点；
 ask_human(:456)/reply_to_human(:465)/_end(:474) → interrupt/记录/END。
-经验检索(_retrieve_experience:449) 接 第 8 步 exp_pool；此版留空串占位。"""
+工作记忆照源 :241 `memory.get(memory_k)` 窗口回喂，溢出交 BrainMemory 摘要（S5.1）；
+经验检索(_retrieve_experience:449) 接第 8 步 exp_pool，此版留空串占位。"""
 import asyncio
 import json
 from datetime import datetime
 from typing import TypedDict
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, END
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
+from codeharness.configs.settings import settings
 from codeharness.const import RequirementTag
+from codeharness.logs import logger
+from codeharness.memory.brain_memory import BrainMemory
+from codeharness.memory.memory import Memory
 from codeharness.schema import Message, Command
 from codeharness.prompts.role_zero import (SYSTEM_PROMPT, CMD_PROMPT, ROLE_INSTRUCTION,
                                            TASK_TYPE_DESC)
@@ -38,7 +43,8 @@ class RoleZero:
 
     def __init__(self, profile: dict, tools: list, llm, system_prompt: str = SYSTEM_PROMPT,
                  instruction: str = ROLE_INSTRUCTION, max_loops: int = 15, env_desc: str = "",
-                 longterm_memory=None):
+                 longterm_memory=None, memory: Memory | None = None,
+                 brain: BrainMemory | None = None, redis_key: str = "", memory_k: int = 0):
         self.profile = profile
         self.tools = {t.name: t for t in tools}
         self.llm = llm
@@ -47,6 +53,54 @@ class RoleZero:
         self.max_loops = max_loops
         self.env_desc = env_desc
         self.ltm = longterm_memory          # 第 4 步 LongTermMemory，可空
+        self.memory = memory if memory is not None else Memory()
+        self.brain = brain                  # None → 超窗直接丢，语义同源的 memory_k 截断
+        self.redis_key = redis_key
+        self.memory_k = memory_k or settings.memory_overflow_size
+        self._brain_loaded = False
+
+    def _brain_key(self) -> str:
+        """一个角色一个 key：目录名走 CURRENT_PROJECT（与 session_root 同一接缝），不另起一套会话对象。"""
+        if self.redis_key:
+            return self.redis_key
+        from codeharness.runtime import CURRENT_PROJECT
+        from codeharness.const import BRAIN_MEMORY
+        return BrainMemory.to_redis_key(BRAIN_MEMORY, "default", f"{CURRENT_PROJECT.get()}/{self.profile['name']}")
+
+    # ---- 工作记忆（源 roles/di/role_zero.py:241 memory.get(memory_k) + :287-295 回喂） ----
+    def _observe(self, s: RoleZeroState):
+        """把上一轮 _act 的结果收进记忆。多命令轮里 results 会短于 commands，按内容去重防重复入库。"""
+        if not s["history"]:
+            return
+        last = s["history"][-1]
+        for r in last.get("results") or []:
+            text = f"{r['name']}: {r['result']}"
+            if not self.memory.try_remember(text):
+                self.memory.add(Message(content=text, role="user",
+                                        cause_by=RequirementTag.RUN_COMMAND,
+                                        sent_from=self.profile["name"]))
+
+    async def _compress(self):
+        """超窗：窗口外那截交给 BrainMemory 滚动摘要并落 Redis，进程内只留窗口。"""
+        if self.brain is None or len(self.memory.storage) <= self.memory_k:
+            return
+        evicted = self.memory.storage[:-self.memory_k]
+        self.memory.storage = self.memory.storage[-self.memory_k:]
+        for m in evicted:
+            self.brain.add_history(m)
+        try:
+            await self.brain.summarize(self.llm, redis_key=self._brain_key())
+        except ValueError as e:                     # 摘要没产出不能把记忆丢了——退回原样，下轮再试
+            logger.warning(f"{self.profile['name']} 记忆压缩失败，保留窗口外 {len(evicted)} 条不裁剪: {e}")
+            self.memory.storage = evicted + self.memory.storage
+
+    def _context_messages(self) -> list:
+        out = []
+        if self.brain is not None and self.brain.historical_summary:
+            out.append(SystemMessage(content=f"[历史摘要] {self.brain.historical_summary}"))
+        for m in self.memory.get(self.memory_k):
+            out.append(AIMessage(content=m.content) if m.role == "assistant" else HumanMessage(content=m.content))
+        return out
 
     # ---- 源 _get_prefix(:276)：人设 + 当前时间 ----
     def _prefix(self) -> str:
@@ -76,6 +130,11 @@ class RoleZero:
     async def _think(self, s: RoleZeroState):
         if len(s["history"]) >= self.max_loops:
             return {"finished": True}
+        if self.brain is not None and not self._brain_loaded:
+            self._brain_loaded = True               # 只恢复一次：每轮都读 Redis 会把摘要盖回旧值
+            self.brain = await self.brain.loads(self._brain_key())
+        self._observe(s)                              # 源 :295：上一轮命令结果进记忆，否则下一轮看不见
+        await self._compress()
         experience = s.get("experience", "")
         if self.ltm and not experience:                       # 源 :213 _retrieve_experience + 第 4 步 recall
             memories = await self.ltm.recall(s["task"], k=3)
@@ -98,13 +157,14 @@ class RoleZero:
             experience = (experience + "\n" +
                           await reflect(self.llm, s["task"], s["history"], err)).strip()
         async with thought_block(role=self.profile["name"]) as rep:
+            context = [SystemMessage(content=system_prompt), *self._context_messages()]
             try:
                 thought: ZeroThought = await self.llm.structured(ZeroThought).ainvoke(
-                    [SystemMessage(content=system_prompt), HumanMessage(content=prompt)])
+                    context + [HumanMessage(content=prompt)])
             except Exception:
                 # structured 失败 → 纯文本重问 + repair 管线 + LLM 自修（源 parse_commands + JSON_REPAIR 链）
                 from codeharness.provider.repair import llm_repair_json
-                raw = await self.llm.aask(system_prompt + "\n\n" + prompt, tag="rz_fallback")
+                raw = await self.llm.aask([*context, HumanMessage(content=prompt)], tag="rz_fallback")
                 thought = llm_repair_json(raw, ZeroThought, self.llm) or ZeroThought(
                     thought=f"[解析失败，已按 end 处理] {raw[:200]}",
                     commands=[{"command_name": "end", "args": {}}])
@@ -112,6 +172,8 @@ class RoleZero:
         commands = [c.model_dump() for c in thought.commands]
         if not commands:                                      # 契约：至少一条命令，否则视作结束
             commands = [{"command_name": "end", "args": {}}]
+        self.memory.add(Message(content=thought.thought, role="assistant",
+                                cause_by=RequirementTag.RUN_COMMAND, sent_from=self.profile["name"]))
         return {"history": s["history"] + [{"thought": thought.thought, "commands": commands}]}
 
     # ---- 源 _act(:280-301)/_run_commands(:385)/_run_special_command(:420) ----
