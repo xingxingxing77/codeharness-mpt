@@ -1,4 +1,5 @@
-"""工作区文件树/读取。路径基准 = session.workspace（与 ArtifactStore.active() 同目录）。"""
+"""工作区文件树/读取。路径基准 = session.workspace = runtime.session_root()——
+工具层（write_file / 终端 cwd / 沙箱 scratch）与产物仓都落这里，agent 写的文件树里才看得见。"""
 import mimetypes
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
@@ -32,7 +33,7 @@ def files(sid: str, request: Request):
 def file(sid: str, path: str, request: Request):
     root = _ws(request, sid).resolve()
     target = Path(path).resolve()
-    if not str(target).startswith(str(root)):               # 路径越界防护
+    if not target.is_relative_to(root):        # startswith 会放行兄弟目录（"ws" 是 "ws_probe" 的前缀）
         raise HTTPException(400, "path out of workspace")
     if not target.exists() or not target.is_file():
         raise HTTPException(404, "file not found")

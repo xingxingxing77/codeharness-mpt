@@ -1,8 +1,9 @@
 """Session REST + SSE（端点集=client.ts 全集）。"""
 import asyncio
+from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from server.sessions import SessionStatus
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -13,6 +14,14 @@ class CreateSessionReq(BaseModel):
     project_name: str = ""
     n_round: int = 5
     llm: dict = Field(default_factory=dict)
+
+    @field_validator("project_name")
+    @classmethod
+    def _single_dir_name(cls, v: str) -> str:
+        # 名字直接拼成 workspace/{name}：会话目录、产物仓与前端文件树的根都是它，带分隔就能越界
+        if v and Path(v).name != v:
+            raise ValueError("project_name 不能包含路径分隔")
+        return v
 
 
 class ChatReq(BaseModel):

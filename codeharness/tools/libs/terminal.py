@@ -3,11 +3,12 @@
 与 `tools/__init__.py` 的 `execute_shell_async` 分工不同：那条一次一壳，`cd` 之后下一条命令就忘；
 本件保态，SweAgent / DataInterpreter 这类"先定位再改再重跑"的循环要的是它。
 
-四处适配（其余函数体照抄源）：
-- `Config.default().workspace.path` / `DEFAULT_WORKSPACE_ROOT` → `settings.workspace_root`
+五处适配（其余函数体照抄源）：
+- `Config.default().workspace.path` / `DEFAULT_WORKSPACE_ROOT` → `runtime.session_root()`（按会话分配）
 - `TerminalReporter()` → `report.terminal_block()`（同为 TERMINAL 块，前端 Terminal 面板不变）
 - `@register_tool()` → 本仓注册表，tags=["terminal"]
 - 新增 `timeout`：源是单人 CLI，这里跑在 FastAPI worker 里，一条挂死的命令会永久占住一个任务
+- 源 `TERMINAL = Terminal()` 全进程一个壳 → 本仓按会话登记（`current_terminal()`），共用会把 B 会话带进 A 会话的 cwd
 
 **不搬源 `Bash`(:185)**：它 `start()` 里 source 的 `SWE_SETUP_PATH` 脚本属于 `swe_agent_commands/`，
 判定表 §四 已判 `弃`（SWE-bench 评测专用）。
@@ -17,15 +18,15 @@ import os
 import re
 import sys
 from asyncio import Queue
-from pathlib import Path
 from asyncio.subprocess import PIPE, STDOUT
 from typing import Optional
 
-from codeharness.configs.settings import settings
 from codeharness.logs import logger
 from langchain_core.tools import tool
 
 from codeharness.report import END_MARKER_VALUE, terminal_block
+from codeharness.runtime import CURRENT_PROJECT, session_root
+from codeharness.tools.sandbox import kill_tree
 from codeharness.tools.tool_registry import register_tool
 
 
@@ -64,13 +65,9 @@ class Terminal:
             stdin=PIPE, stdout=PIPE, stderr=STDOUT,
             executable=self.executable,
             env=os.environ.copy(),
-            cwd=str(self._root()),
+            cwd=str(session_root()),
         )
         await self._check_state()
-
-    @staticmethod
-    def _root() -> Path:
-        return Path(settings.workspace_root).resolve()
 
     async def _check_state(self):
         """打印当前目录，确认 shell 活着（源语义）。"""
@@ -116,17 +113,7 @@ class Terminal:
         proc, self.process = self.process, None
         if not proc or proc.returncode is not None:
             return
-        if sys.platform.startswith("win"):
-            # 只 kill cmd.exe 会把它派生的子进程变成孤儿（还占着工作目录），Windows 上必须按树杀。
-            # ⚠ taskkill 的 pid 必须带 /PID 前缀，裸 pid 会报"无效语法"而什么都没杀。
-            tk = await asyncio.create_subprocess_exec(
-                "taskkill", "/F", "/T", "/PID", str(proc.pid),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-            await tk.wait()
-        else:
-            # ponytail: POSIX 未做 setpgid/killpg，挂死命令自建的子进程会留下。
-            # 升级路径：起 shell 时 start_new_session=True，再 os.killpg。Windows 侧已按树杀。
-            proc.kill()
+        await kill_tree(proc)
         try:
             # 限时：超时路径上刚被取消的 read(1) 会让管道回收拖很久，进程树已死，不能阻塞调用方
             await asyncio.wait_for(proc.wait(), 5)
@@ -183,13 +170,29 @@ class Terminal:
             await self._kill("close")
 
 
-TERMINAL = Terminal()
+_TERMINALS: dict[str, Terminal] = {}
+
+
+def current_terminal() -> Terminal:
+    """每会话一个常驻 shell。共用单个 shell 会让 B 会话在 A 的 cwd 里执行、并读到 A 的输出队列。"""
+    key = CURRENT_PROJECT.get()
+    if key not in _TERMINALS:
+        _TERMINALS[key] = Terminal()
+    return _TERMINALS[key]
+
+
+async def close_terminal(project: str | None = None) -> None:
+    """散会收壳——按会话登记的 shell 不主动关就是每会话漏一个常驻进程。默认关当前会话的。"""
+    t = _TERMINALS.pop(project or CURRENT_PROJECT.get(), None)
+    if t:
+        await t.close()
 
 
 @register_tool(tags=["terminal"])
 @tool
 async def terminal_command(command: str, conda_env: str = "") -> str:
     """在保态终端会话里执行命令（cd 与环境变量跨调用保留）。conda_env 非空则在该 conda 环境内执行"""
+    t = current_terminal()
     if conda_env:
-        return await TERMINAL.execute_in_conda_env(command, conda_env)
-    return await TERMINAL.run_command(command)
+        return await t.execute_in_conda_env(command, conda_env)
+    return await t.run_command(command)

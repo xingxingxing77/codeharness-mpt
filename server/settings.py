@@ -6,6 +6,7 @@ from codeharness.configs.settings import settings as core_settings
 SERVER_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = SERVER_ROOT.parent
 WORKSPACE_ROOT = REPO_ROOT / "workspace"          # 与 codeharness workspace_root 统一为同一目录
+core_settings.workspace_root = str(WORKSPACE_ROOT)   # core 的默认值是 CWD 相对的 "./workspace"：不对齐，服务换个目录启动就各写各的
 DATA_DIR = SERVER_ROOT / "data"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 

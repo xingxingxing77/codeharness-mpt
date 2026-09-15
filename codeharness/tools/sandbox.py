@@ -1,42 +1,91 @@
-"""Python 代码沙箱：RunCode Action 的执行后端（源 actions/run_code.py → subprocess）。"""
+"""Python 代码沙箱：RunCode Action 的执行后端（源 actions/run_code.py → subprocess）。
+共享件 `run_proc` / `kill_tree`：工具层与 Terminal 都用它们，别再各写一份超时收尸。"""
 import asyncio
+import os
 import sys
 import uuid
 from pathlib import Path
-from codeharness.configs.settings import settings
+from codeharness.runtime import session_root
 from codeharness.schema import RunCodeContext, RunCodeResult
+
+DEVNULL = asyncio.subprocess.DEVNULL
+
+
+async def kill_tree(proc) -> None:
+    """杀掉整个进程树。
+
+    Windows 上 `proc.kill()` 只杀 cmd.exe 父进程，孙进程活着且攥住继承的管道 →
+    随后 `communicate()` 永久不返回（实测：shell 里起的 python 卡死图节点）。
+    ⚠ taskkill 的 pid 必须带 /PID 前缀，裸 pid 报「无效语法」而什么都没杀。
+    """
+    if proc.returncode is not None:
+        return
+    if sys.platform.startswith("win"):
+        tk = await asyncio.create_subprocess_exec(
+            "taskkill", "/F", "/T", "/PID", str(proc.pid), stdout=DEVNULL, stderr=DEVNULL)
+        await tk.wait()
+    else:
+        # ponytail: POSIX 未做 setpgid/killpg，孙进程会漏杀。升级路径：起进程时 start_new_session=True + os.killpg
+        proc.kill()
+
+
+async def run_proc(argv, cwd: Path | None = None, timeout: int = 60, shell: bool = False,
+                   env: dict | None = None) -> RunCodeResult:
+    """跑子进程到结束或超时。超时杀进程树并留下超时前已产出的输出，return_code=-1。
+
+    不用 `wait_for(proc.communicate())`：被取消的 communicate() 会把管道里已读到的数据丢掉
+    （实测超时后 stdout 变空串），而超时输出恰恰是调用方最需要的信息。
+    """
+    kwargs = dict(cwd=str(cwd or session_root()),
+                  # 子进程 python 对管道是块缓冲：不强制无缓冲，超时前 print 的东西全留在它自己的缓冲区里
+                  env={**(env or os.environ), "PYTHONUNBUFFERED": "1"},
+                  stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    # create_subprocess_exec 是 *args 签名：Windows 上传单个 list 不会被摊平，得自己摊
+    proc = await (asyncio.create_subprocess_shell(argv, **kwargs) if shell
+                  else asyncio.create_subprocess_exec(*argv, **kwargs))
+    out, err = bytearray(), bytearray()
+
+    async def pump(stream, sink):
+        while chunk := await stream.read(4096):
+            sink.extend(chunk)
+
+    pumps = [asyncio.create_task(pump(proc.stdout, out)), asyncio.create_task(pump(proc.stderr, err))]
+    timed_out = False
+    try:
+        await asyncio.wait_for(proc.wait(), timeout)
+    except asyncio.TimeoutError:
+        timed_out = True
+        await kill_tree(proc)
+        await proc.wait()
+        err.extend(f"[timeout after {timeout}s]".encode())
+    try:
+        await asyncio.wait_for(asyncio.gather(*pumps), 5)
+    except asyncio.TimeoutError:
+        for t in pumps:
+            t.cancel()                       # ponytail: 孙进程攥住管道时到此为止，输出已尽力收全
+    return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
+                         stderr=err.decode(errors="replace")[:20000],
+                         return_code=-1 if timed_out else (proc.returncode or 0))
 
 
 async def run_python_code(code: str, timeout: int = 60) -> RunCodeResult:
-    workdir = (Path(settings.workspace_root) / "scratch").resolve()   # resolve：cwd+相对路径会双重拼接
+    workdir = session_root() / "scratch"        # per-session：脚本与产物不跨会话互看
     workdir.mkdir(parents=True, exist_ok=True)
     script = workdir / f"run_{uuid.uuid4().hex}.py"
     script.write_text(code, encoding="utf-8")
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, str(script), cwd=workdir,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        rc = proc.returncode or 0
-    except asyncio.TimeoutError:
-        proc.kill()
-        out, _ = await proc.communicate()          # 收尸：不 drain 会留 unclosed transport，且丢掉已产出的 stdout
-        err, rc = f"[timeout after {timeout}s]".encode(), -1
-    return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
-                         stderr=err.decode(errors="replace")[:20000], return_code=rc)
+    return await run_proc([sys.executable, str(script)], cwd=workdir, timeout=timeout)
+
+
+def _env_with_paths(ctx: RunCodeContext) -> dict | None:
+    """源 run_code.py 语义：additional_python_paths 进 PYTHONPATH；没配则继承环境。"""
+    if not ctx.additional_python_paths:
+        return None
+    paths = [str(Path(p).resolve()) for p in ctx.additional_python_paths]
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(paths + [os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep)}
 
 
 async def run_context(ctx: RunCodeContext, timeout: int = 120) -> RunCodeResult:
     """RunCodeContext.command 形如 ["python", "-m", "pytest", "tests/"]"""
-    proc = await asyncio.create_subprocess_exec(
-        *ctx.command, cwd=str(Path(ctx.working_directory or settings.workspace_root).resolve()),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout)
-        rc = proc.returncode or 0
-    except asyncio.TimeoutError:
-        proc.kill()
-        out, _ = await proc.communicate()          # 收尸：不 drain 会留 unclosed transport，且丢掉已产出的 stdout
-        err, rc = f"[timeout after {timeout}s]".encode(), -1
-    return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
-                         stderr=err.decode(errors="replace")[:20000], return_code=rc)
+    workdir = Path(ctx.working_directory).resolve() if ctx.working_directory else session_root()
+    workdir.mkdir(parents=True, exist_ok=True)
+    return await run_proc(ctx.command, cwd=workdir, timeout=timeout, env=_env_with_paths(ctx))

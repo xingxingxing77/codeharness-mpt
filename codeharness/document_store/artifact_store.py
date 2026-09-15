@@ -1,8 +1,8 @@
 """产物仓：workspace/{project}/docs|src|tests 目录约定 + Document 存取（源 utils/file_repository.py 语义）。"""
 from pathlib import Path
 import asyncio
-from codeharness.configs.settings import settings
 from codeharness.const import RepoName
+from codeharness.runtime import session_root
 from codeharness.schema import Document
 
 
@@ -10,8 +10,8 @@ class ArtifactStore:
     SUBDIRS = (RepoName.DOCS, RepoName.PRD, RepoName.SRC, RepoName.TESTS, RepoName.TEST_OUTPUTS, RepoName.RESOURCES)
 
     def __init__(self, project_id: str | None = None):
-        from codeharness.runtime import CURRENT_PROJECT
-        self.root = Path(settings.workspace_root) / (project_id or CURRENT_PROJECT.get())
+        # session_root 是唯一的目录出口：顺带拿到越界目录名防护与 mkdir
+        self.root = session_root(project_id)
         for d in self.SUBDIRS:
             (self.root / d).mkdir(parents=True, exist_ok=True)
 

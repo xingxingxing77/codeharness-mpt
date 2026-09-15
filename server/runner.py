@@ -25,6 +25,7 @@ class SessionRunner:
         self.chats: dict[str, object] = {}        # sid -> ChatQueue
         self.costs: dict[str, object] = {}        # sid -> CostManager（图内共用的那一个账本）
         self.projects: dict[str, str] = {}        # sid -> 产物目录名
+        self._closers: set = set()                # 散会收壳的后台任务，握住引用防被 GC 半路回收
         self._ck = None                            # 进程级 checkpointer（懒建）
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
@@ -168,7 +169,13 @@ class SessionRunner:
         self.costs.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
-            self.projects.pop(sid, None)
+            project = self.projects.pop(sid, None)
+            if project:
+                # 常驻 shell 按会话登记，散会不收就是每会话漏一个 cmd.exe
+                from codeharness.tools.libs.terminal import close_terminal
+                task = asyncio.create_task(close_terminal(project))
+                self._closers.add(task)
+                task.add_done_callback(self._closers.discard)
 
     def _fail(self, sid: str, exc: Exception):
         message = f"{type(exc).__name__}: {exc}"
