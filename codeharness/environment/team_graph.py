@@ -1,6 +1,6 @@
 """团队编排：源 base_env.py + team.py 的 LangGraph 化。
 publish_message(:176) → route()；run(:198) → 图执行；is_idle(:230) → route 无目标即 END；
-hire(:83) → 组图；invest/_check_balance(:92/:98) → budget_guard；run(n_round)(:123) → recursion_limit；
+hire(:83) → 组图；run(n_round)(:123) → recursion_limit；
 serialize/deserialize(:59/:67) → checkpointer（一行不写）。"""
 import operator
 from typing import Annotated, TypedDict
@@ -21,7 +21,6 @@ class TeamState(TypedDict):
     memories: Annotated[dict, merge_dicts]         # 每角色私有记忆（checkpointer 持久化）
     docs: dict                                     # filename -> Document（产物仓）
     round: int
-    budget_used: float
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）
     finished: bool
 
@@ -80,8 +79,11 @@ CONTEXT_WIRING = {
 }
 
 
-def make_route(sop: dict, agents: dict, wiring: dict | None = None):
-    """= 源 base_env.publish_message(:176) 的路由语义 + i_context 装配，工厂化便于测试"""
+def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list | None = None):
+    """= 源 base_env.publish_message(:176) 的路由语义 + i_context 装配，工厂化便于测试
+
+    `stats`：每传一条消息记一条 {"cause_by", "activated", "roles"}，用于验证
+    **精准激活**（订阅式路由的本意就是每轮只唤醒相关角色，而不是全员轮询）。"""
 
     def route(state: TeamState):
         if state.get("finished"):
@@ -90,49 +92,58 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None):
             return END
         last = state["messages"][-1]
 
-        # <self> 自投递（源 role.publish_message:437-443 + const.py:83）
+        # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播）
         if MESSAGE_ROUTE_TO_SELF in last.send_to:
-            return [Send(last.sent_from, {"_inbox": [last]})]
+            if last.sent_from in agents:
+                return [Send(last.sent_from, {"_inbox": [last]})]
+            # 目标节点不存在时绝不能发 Send——LangGraph 会直接抛 Unknown node
 
-        targets = sop.get(last.cause_by, [])
-        # ---- 运行中插话（= 源 runner.send_chat:46 + MGXEnv 直聊分支；前端 InputCard "追问"） ----
-        from codeharness.runtime import CHAT_SINK
+        # 目标 = 订阅表命中的角色 ∪ 消息里显式指名的角色
+        # ⚠ send_to 的默认值是 <all>，这里**刻意不做广播**：多数 Action 不显式设 send_to，
+        # 一旦把 <all> 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活。
+        # 要广播请显式列出收件人，或走插话通道。
+        targets = list(sop.get(last.cause_by, []))
+        for name in sorted(last.send_to):
+            if name in agents and name != last.sent_from and name not in targets:
+                targets.append(name)
+
         w = wiring or CONTEXT_WIRING                    # 别名：route 内赋值会遮蔽闭包变量
-        sends = []
-        for t in targets:
-            payload_msgs = w.get(last.cause_by, lambda m, s: [m])(last, state)  # 上下文装配
-            sends.extend(Send(t, {"_inbox": [m]}) for m in payload_msgs)
+        # 上下文装配按 cause_by 只做一次，多目标共用（装配要读产物仓，别按目标重复读盘）
+        payload_msgs = w.get(last.cause_by, lambda m, s: [m])(last, state) if targets else []
+        sends = [Send(t, {"_inbox": [m]}) for t in targets for m in payload_msgs]
+
+        # ---- 运行中插话（前端 InputCard "追问"；空目标 = TeamLeader） ----
+        from codeharness.runtime import CHAT_SINK
         chat = CHAT_SINK.get()
         if chat:
             for content, send_to in chat.drain():
-                recv = send_to or chat.default_target      # 空 = TeamLeader（源 :59 语义）
+                recv = send_to or chat.default_target
                 if recv in agents:
                     sends.append(Send(recv, {"_inbox": [Message(
                         content=content, cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")]}))
+
+        if stats is not None:
+            stats.append({"cause_by": last.cause_by, "activated": len({s.node for s in sends}),
+                          "roles": len(agents)})
         if not sends:
-            return END                                     # 无订阅者且无插话 = is_idle 散会
+            return END                                 # 无订阅者且无插话 = 散会
         if last.cause_by == RequirementTag.DEBUG_ERROR:
             state["debug_rounds"] = state.get("debug_rounds", 0) + 1
-            if state["debug_rounds"] >= 3:                 # 源 qa_engineer 隐式 3 轮上限
+            if state["debug_rounds"] >= 3:             # 修复回路上限，防 QA↔Engineer 死循环
                 return END
         return sends
 
     return route
 
 
-async def budget_guard(state: TeamState):
-    """= 源 team._check_balance(:98)。挂在 START 后、router 前"""
-    from codeharness.configs.settings import settings
-    if state.get("budget_used", 0.0) >= settings.max_budget:
-        return {"finished": True}
-    return {}
+def build_team(agents: dict, checkpointer=None, sop: dict | None = None, stats: list | None = None):
+    """= 源 team.hire(:83)。agents: {name: Agent|RoleZero}，均提供 as_node(name) 接口
 
-
-def build_team(agents: dict, checkpointer=None, sop: dict | None = None, cost_manager=None):
-    """= 源 team.hire(:83)。agents: {name: Agent|RoleZero}，均提供 as_node(name) 接口"""
-    route = make_route(sop or SOP, agents)
+    ⚠ 默认 checkpointer 是内存型：内核自测不落盘。持久化断点由调用方（server runner）
+    经 `environment/checkpoint.py::make_checkpointer` 显式注入。
+    `stats` 传一个列表即可拿到每轮实际激活的节点数（见 make_route）。"""
+    route = make_route(sop or SOP, agents, stats=stats)
     g = StateGraph(TeamState)
-    g.add_node("budget_guard", budget_guard)
 
     async def router(state: TeamState):
         return {}                                     # 汇聚虚节点：所有产出流回这里再路由
@@ -143,7 +154,6 @@ def build_team(agents: dict, checkpointer=None, sop: dict | None = None, cost_ma
         g.add_node(node_name, node_fn)
         g.add_edge(node_name, "router")
 
-    g.add_edge(START, "budget_guard")
-    g.add_edge("budget_guard", "router")
+    g.add_edge(START, "router")
     g.add_conditional_edges("router", route)
     return g.compile(checkpointer=checkpointer or InMemorySaver())
