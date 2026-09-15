@@ -99,10 +99,11 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 - **第 0 步已落地**（并发会话提交 `07e6db1` + `3a75989`）：源码树里 `max_budget`/`budget_guard`/`budget_used`/`check_budget`/`is_within_budget`/三处 `NoMoneyException` **grep 已为空**（只剩陈旧 `.pyc` 与 `sessions.json` 里的历史数据字段）；`runner` 建单一 `CostManager` 并 `cost_manager=` 传进 `prepare_project`，双账本消失。
 - `gateway._build()` 已补 `stream_usage`（`gateway.py:70`）；`gitignore-parser` 已进 `pyproject.toml:15`，`utils/{tree,repo_to_markdown}.py` import 实测通过。
-- **八个自测脚本全 exit 0**：`s1_schema`(12) / `s2_gateway`(12) / `s3_report_action`(12) / `s3b_runtime`(9) / **`s4_tools`(14，新增)** / `test_p1` / `test_roles_registry` / `test_e2e_classic_line`。仍**全部 FakeLLM 驱动，真实模型至今没端到端跑过一次**。
+- **八个自测脚本全 exit 0**：`s1_schema`(12) / `s2_gateway`(12) / `s3_report_action`(12) / `s3b_runtime`(9) / **`s4_tools`(24，本日新增)** / `test_p1` / `test_roles_registry` / `test_e2e_classic_line`。仍**全部 FakeLLM 驱动，真实模型至今没端到端跑过一次**。
+- **S4 推进两件**：① R8 按第一条纪律拆开判——注册表数据结构与「按名字/tag 选工具」自写 60 行（`fc705ef`），反射 YAML schema 那半件判 `重` 不搬，连带 `tool_data_type.py` 改判 `弃`；② `Terminal` 保态终端移植（`15c0970`），修掉源三处会卡死 web worker 的点。**S4 仍缺**：`libs/{linter,browser,env}` ~602 行、`search_engine` 基类+serper、`web_browser_engine`、per-session 沙箱隔离（`新`）。
 - 本轮新修两处（提交 `8db857d`）：① `tools/_safe` 用 `str.startswith` 判越界，`workspace_root=ws` 时 `../ws_probe/x` 因前缀命中被判区内，`write_file` 可写到沙箱外——改 `Path.is_relative_to`，门禁 t2 锁死；② 三处超时分支 `kill()` 后不 `drain`，Windows 退出时抛 `unclosed transport` 噪声，`sandbox` 两处还丢超时前已产出的 stdout。
 - 仓库级陷阱 #1 已清：`docs/` 从 `.gitignore` 移除并入库（`33244d8`）；P2 的 0 字节 `actions/action.py` 已 `git rm`（`a30b91c`）。
-- **仍未闭合的真实缺口**：S5 整层偏薄且**无门禁**（`memory` 185 行 / `document_store` 84 / `rag` 60 / `exp_pool` 29 / `strategy` 111，`tests/s5_memory_rag.py` 不存在，R9 hybrid 检索要求的 Qdrant named vectors 无处落）；`repo_parser.py` 63 vs 源 1,023；`tools/` 的 `libs/{terminal,linter,browser,env}` 与 per-session 沙箱隔离仍缺，这些复制件要读供体 `E:\MetaGPT`。
+- **仍未闭合的真实缺口**：S5 整层偏薄且**无门禁**（`memory` 185 行 / `document_store` 84 / `rag` 60 / `exp_pool` 29 / `strategy` 111，`tests/s5_memory_rag.py` 不存在，R9 hybrid 检索要求的 Qdrant named vectors 无处落）；`repo_parser.py` 63 vs 源 1,023；S4 剩 `libs/{linter,browser,env}` ~602 行、`search_engine` 基类+serper、`web_browser_engine`+playwright、per-session 沙箱隔离（`新`）。供体 `E:\MetaGPT` **2026-09-15 已授权读取**。
 
 ### 本次审查缺陷清单（标「实测」的都已当场复现，非推测）
 
