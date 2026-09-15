@@ -253,17 +253,65 @@ def t12_plain_text_path_untouched():
         _fail("12. _aask 坏了")
 
 
+def t13_artifact_filename_gate():
+    """真模型实测的两条崩法：任务条目缺 filename（装配处 KeyError）、filename 空串（写目录本身）。"""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from pydantic import ValidationError
+    from codeharness.actions.project_management import TaskItem
+    from codeharness.configs.settings import settings
+    from codeharness.const import RepoName
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document
+
+    base = Path(tempfile.mkdtemp(prefix="s3a_gate_"))
+    keep_ws, keep_proj = settings.workspace_root, CURRENT_PROJECT.get()
+    settings.workspace_root = str(base)
+    CURRENT_PROJECT.set("gate_proj")
+    try:
+        store = ArtifactStore.active()
+        # 边界是会话根：跳出到根内（src/../x.py）不算越界，跳出根与绝对路径才拒
+        for bad in ("", "   ", "/etc/passwd", "C:\\Windows\\x.py", "../../outside.py", "..\\..\\outside2.py"):
+            try:
+                asyncio.run(store.save(RepoName.SRC, Document(filename=bad, content="x")))
+                _fail(f"13. 非法产物文件名被放过了: {bad!r}")
+            except ValueError as e:
+                if "非法产物文件名" not in str(e):
+                    _fail(f"13. 拒绝理由没说清，将来没人看得懂: {e}")
+            except PermissionError:
+                _fail(f"13. 又走成写目录本身了（空串的真实崩法）: {bad!r}")
+        outside = [p for p in base.parent.glob("outside*.py") if not p.resolve().is_relative_to(base.resolve())]
+        if outside or list(base.rglob("escape.py")):
+            _fail(f"13. 越界文件名虽然报错但还是落了盘: {outside}")
+        asyncio.run(store.save(RepoName.SRC, Document(filename="main.py", content="print(1)")))
+        asyncio.run(store.save(RepoName.SRC, Document(filename="pkg/util.py", content="A = 1")))
+        if not (store.root / "src" / "main.py").exists() or not (store.root / "src" / "pkg" / "util.py").exists():
+            _fail("13. 合法名（含嵌套 pkg/util.py）写不下去，闸口管太宽")
+        try:
+            TaskItem(filename="")
+            _fail("13. TaskItem 允许空 filename，问题会一路跑到写盘")
+        except ValidationError:
+            pass
+    finally:
+        settings.workspace_root = keep_ws
+        CURRENT_PROJECT.set(keep_proj)
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def main():
     checks = [t1_class_surface, t2_blocktype_vocabulary, t3_payload_shape, t4_path_absolute,
               t5_context_manager_and_hooks, t6_llm_stream_bridge,
               t7_retry_targets_only_missing, t8_no_retry_when_complete, t9_empty_semantics,
-              t10_merge_never_clobbers, t11_partial_schema_keys, t12_plain_text_path_untouched]
+              t10_merge_never_clobbers, t11_partial_schema_keys, t12_plain_text_path_untouched,
+              t13_artifact_filename_gate]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS3(a) 门禁通过：{len(checks)} 组 —— R6 Reporter 类族 6 组（类名/词汇表/载荷/绝对路径/"
           f"上下文管理器与钩子/LLM 流桥接）+ R2 字段级定向重试 6 组（只补缺口/齐全不重发/空值语义/"
-          f"合并不覆盖/部分模型键/纯文本退化）")
+          f"合并不覆盖/部分模型键/纯文本退化）+ 产物仓文件名闸口与任务契约 1 组")
     print("注意：S3 的 R3/R4a/R5（编排、checkpointer、interrupt）尚未做，勿据此认为 S3 已完成。")
 
 

@@ -10,7 +10,7 @@ class TaskItem(BaseModel):
     """一条文件级任务。定成具名模型而不是 dict：`list[dict]` 等于没契约，
     structured 不会要求模型填 filename（真模型实测就是缺这个键，装配处 KeyError 崩掉整场会话）。"""
 
-    filename: str
+    filename: str = Field(min_length=1)     # 空串会一路传到 WriteCode，往 src 目录本身写
     task_id: str = ""
     dependent_task_ids: list[str] = Field(default_factory=list)
     instruction: str = ""

@@ -22,7 +22,15 @@ class ArtifactStore:
         return cls()
 
     def _path(self, subdir: str, filename: str) -> Path:
-        p = self.root / subdir / filename
+        """filename 来自模型产出，这里是不二闸口。空串会让路径塌成目录本身
+        （`root/src/"" == root/src`），`write_text` 直接抛 `PermissionError [Errno 13]`，
+        整场会话只剩一句看不懂的错误码（2026-09-15 真模型实测）。
+        允许合法嵌套名（pkg/util.py），但绝对路径与越出会话根的 `..` 一律拒。"""
+        fn = (filename or "").strip()
+        p = self.root / subdir / fn
+        if not fn or Path(fn).is_absolute() or not p.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError(f"非法产物文件名 {filename!r}（子目录 {subdir}）："
+                             f"空串会写到目录本身，绝对路径或越出会话根的直接拒")
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
