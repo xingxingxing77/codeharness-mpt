@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "C:/Users/LUBIYUE/AppData/Roaming/npm/node_modules/@colbymchenry/codegraph/npm-shim.js",
+        "serve",
+        "--mcp",
+        "--path",
+        "E:/Codeharness"
+      ]
+    }
+  }
+}

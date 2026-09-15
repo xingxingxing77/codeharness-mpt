@@ -15,6 +15,9 @@ dist/
 workspace/
 storage/
 
+# 代码图索引（CodeGraph 本地产物，随机器重建）
+.codegraph/
+
 # 前端
 node_modules/
 frontend/dist/
