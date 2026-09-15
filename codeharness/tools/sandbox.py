@@ -20,7 +20,8 @@ async def run_python_code(code: str, timeout: int = 60) -> RunCodeResult:
         rc = proc.returncode or 0
     except asyncio.TimeoutError:
         proc.kill()
-        out, err, rc = b"", f"[timeout after {timeout}s]".encode(), -1
+        out, _ = await proc.communicate()          # 收尸：不 drain 会留 unclosed transport，且丢掉已产出的 stdout
+        err, rc = f"[timeout after {timeout}s]".encode(), -1
     return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
                          stderr=err.decode(errors="replace")[:20000], return_code=rc)
 
@@ -35,6 +36,7 @@ async def run_context(ctx: RunCodeContext, timeout: int = 120) -> RunCodeResult:
         rc = proc.returncode or 0
     except asyncio.TimeoutError:
         proc.kill()
-        out, err, rc = b"", f"[timeout after {timeout}s]".encode(), -1
+        out, _ = await proc.communicate()          # 收尸：不 drain 会留 unclosed transport，且丢掉已产出的 stdout
+        err, rc = f"[timeout after {timeout}s]".encode(), -1
     return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
                          stderr=err.decode(errors="replace")[:20000], return_code=rc)

@@ -12,8 +12,10 @@ def _root() -> Path:
 
 
 def _safe(path: str) -> Path | None:
-    target = (_root() / path).resolve()
-    return target if str(target).startswith(str(_root())) else None
+    root = _root()
+    target = (root / path).resolve()
+    # 必须用 is_relative_to：str.startswith 会把兄弟目录 ws_probe 当成 ws 之内（前缀命中）而放行
+    return target if target.is_relative_to(root) else None
 
 
 @tool
@@ -52,6 +54,7 @@ async def execute_shell_async(command: str, timeout: int = 60) -> str:
             out, err = await asyncio.wait_for(p.communicate(), timeout)
         except asyncio.TimeoutError:
             p.kill()
+            await p.communicate()                 # 收尸：不 drain 会在 Windows 上留 unclosed transport
             await rep.output(f"[超时 {timeout}s] {command}")
             return f"[超时 {timeout}s] {command}"
         text = ((out.decode(errors="replace") + err.decode(errors="replace")).strip() or "(无输出)")[:10000]
