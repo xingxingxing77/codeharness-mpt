@@ -134,12 +134,19 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 | 会话 `finished` 却零代码 | 真模型回了 `task_list=[]` → 零条 Send → 路由不报错地跑到收场 | `WriteTasks` 空清单就地抛并带上设计文档片段；S3(a) t13 |
 
 **仍未闭合（都有实测证据，按优先级）**：
-1. **runner 的用量快照不合流**：跑动中 `GET /sessions/{sid}` 的 `cost` 恒 0，只在 `_publish_status` 时刷一次；且各场冒烟的最终 pt 数（490 / 3116 / 4424）与真实调用量不成比例——账本合流这条要专门查（还债清单 #1 的残尾）。
+1. ~~**runner 的用量快照不合流**~~ —— **当晚闭合**（提交 `ed8e6e8` + `242d6a8`）：`on_chat_model_end` 每笔合流 store/落盘/SSE 三头；重启 resume 从落盘快照**续算**不覆盖；零用量漏账从"静默记 0"变成 `add_usage` warning（有 warning 才有可 grep 的账差）。新门禁 `tests/s8_runner_meter.py`（4 组）把"传给图的账本必须就是 runner 手上那个实例"钉成双向断言。冒烟复跑实证：跑动中 sessions.json 里的 cost 已在落且非零。那复跑当场又炸出**第十处**：`APIError: Model output became abnormal while generating a JSON response for response_format`——qwen MaaS **服务端**abort 掉 JSON 模式生成（这段错误文本不在任何本地包里），同一请求重发即成；`_acall` 原本只重 Timeout/ConnectionError/OSError，瞬态错直接吹掉整场会话。修法有个继承链坑：openai 的 `APIStatusError`（4xx/5xx，重了烧钱）是 **`APIError` 的子类**，判据必须 `isinstance(APIError) and not isinstance(APIStatusError)`（s2 t14 用真 SDK 异常类族两头钉）。
 2. **embedding 端点没配**：`.env` 无 `EMBEDDING__*`，默认指向离线 `localhost:9998`，所以 `LongTermMemory`/`KnowledgeBase`/`ExpStore` 的**真语义向量路径至今没跑过一次**（S5 门禁用的是 hash-fake），hit-rate 表的真值要等它上线重测。
 3. **`qwen3.8-flash` 不在 `TOKEN_COSTS`** → token 记账正常、`total_cost` 恒 0（要价目表补一行才会出钱数）。
 4. **LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"——checkpointer 的 msgpack 白名单要显式配（S7）。
 5. `structured` 的 `include_raw` 路径每次调用会打一条 pydantic 序列化 `UserWarning`（噪声，未影响结果）。
 
+
+### 2026-09-15 深夜二段 · 计量合流闭合 + S5.3 经验池闭环（提交 `ed8e6e8` + `242d6a8`）
+
+- **计量链残尾收掉**（上面「仍未闭合 #1」的详情）。附带修掉一处同族坑：`utils/redis.py` 的 async client 绑死在建它的 event loop 上，换 loop 后读写静默变 None（降级语义吞掉 `Event loop is closed`）——`_connect` 现在认 `get_running_loop()` 变化重建。
+- **S5 三片就此全闭**：`exp_pool/` schema/serializers/manager/decorator 四件落地 + `@exp_cache` 真接线 `RoleZero.llm_cached_think`（命中=零模型调用，池默认关，`EXP_POOL__*` 开）。源 990 行的 chroma/bm25 与 LLM judge/ranker 按判定不复制，排序换成 Redis 命中计数（键=点 id=uuid5(tag,req)，三处同一派生式）。详见 `施工2` 的 S5.3 落地状态。
+- 门禁基线更新：**十个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / s3b(10) / s4(35) / **s5_memory_rag(24)** / **s8_runner_meter(4)** + test_p1 / test_roles_registry / test_e2e_classic_line。
+- hit-rate 表复测会漂（HNSW 近似检索 + IDF 实时统计，4/4→3/4）：方向性结论仍成立，但 S9 要可复现数字得钉 ef/exact——口径记在 `施工2` S5.2 末。
 
 ### 本次审查缺陷清单（标「实测」的都已当场复现，非推测）
 
@@ -170,7 +177,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 1. **计量与上报这条链是断的**（`stream_usage` + runner 双账本 + 前端 `max_budget` 取错字段）—— 先修，否则 S9 的度量拿不到可信数字。
 2. **`repo_parser.py` 63 行** vs 源 1,023：类图/序列图是前端与 RAG 的共同数据源，全项目最大的真实缺口。
-3. **记忆三条闭环，已闭一条**（2026-09-15 晚 S5.1）：RoleZero 工作记忆 + BrainMemory 摘要落 Redis 已接线并有门禁（s5 11 组）。仍零接线的两件：经验池 `@exp_cache`（S5.3）、`LongTermMemory` 无人构造而 `role_zero.py:49 self.ltm` 已在等它（S5.2，与 R9 同批）。行数看着够，能力可以其实不存在——照旧按接线计，不按行数计。
+3. ~~**记忆三条闭环，已闭一条**~~ —— **三条全闭**（S5.1 工作记忆 2026-09-15 晚 / S5.2 ltm 构造点+召回进 prompt 当晚 / S5.3 经验池 `@exp_cache` 真接线 `RoleZero.llm_cached_think` + Redis 命中计数排序，s5 门禁累计 24 组，2026-09-15 深夜）。开关默认关（照源），t24 钉"命中零模型调用/关池透传"。行数看着够，能力可以其实不存在——照旧按接线计，不按行数计。
 4. **`gitignore_parser` 依赖未声明**：S1 交付的 `tree.py` 目前 import 不动。
 5. ~~`cost.py` 62 vs 源 149~~ —— **划掉**：预算强制作废后，这个"行数差"不再是债（见判定表 §零）。
 
