@@ -6,9 +6,19 @@ from codeharness.const import RepoName, DocName
 from codeharness.document_store.artifact_store import ArtifactStore
 
 
+class TaskItem(BaseModel):
+    """一条文件级任务。定成具名模型而不是 dict：`list[dict]` 等于没契约，
+    structured 不会要求模型填 filename（真模型实测就是缺这个键，装配处 KeyError 崩掉整场会话）。"""
+
+    filename: str
+    task_id: str = ""
+    dependent_task_ids: list[str] = Field(default_factory=list)
+    instruction: str = ""
+
+
 class TaskList(BaseModel):
     """= project_management_an.py TASK_LIST"""
-    task_list: list[dict] = Field(default_factory=list)   # [{filename, task_id, dependent_task_ids, instruction}]
+    task_list: list[TaskItem] = Field(default_factory=list)
 
 
 class WriteTasks(BaseAction):
@@ -20,7 +30,7 @@ class WriteTasks(BaseAction):
             f"{self.prefix}\n按设计文档拆分文件级任务（每文件一条，标注依赖）：\n{design.content if design else msg.content}")
         content = tasks.model_dump_json()
         await ArtifactStore.active().save(RepoName.DOCS, Document(filename=DocName.TASKS, content=content))
-        files = [t["filename"] for t in tasks.task_list]
+        files = [t.filename for t in tasks.task_list]
         return Message(content="任务拆解完成: " + ", ".join(files), role="assistant",
                        cause_by=self.name, sent_from="PMManager",
                        instruct_content=tasks.model_dump(), instruct_schema="TaskList")

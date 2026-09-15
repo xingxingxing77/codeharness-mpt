@@ -45,12 +45,20 @@ class CostManager(BaseModel):
         return Costs(self.total_prompt_tokens, self.total_completion_tokens, self.total_cost)
 
     def add_usage(self, resp, model: str = "", tag: str = ""):
-        """从响应的 response_metadata.token_usage 取用量。
+        """取一次响应的用量，两个来源按新栈口径排优先级：
 
-        ⚠ 流式调用必须让底层 ChatOpenAI 带 `stream_usage=True`，否则末块不回 usage，
-        这里拿到 (0, 0) 后在 `update_cost` 首行 early return——整条线跑完账上是 0。"""
-        usage = (getattr(resp, "response_metadata", None) or {}).get("token_usage") or {}
-        pt, ct = usage.get("prompt_tokens", 0) or 0, usage.get("completion_tokens", 0) or 0
+        1. `usage_metadata` —— LangChain 1.x 标准字段。`streaming=True` 建出来的 ChatOpenAI
+           （本仓 `cfg.stream` 默认即 True）只往这里写，`token_usage` 是 None；
+        2. `response_metadata.token_usage` —— OpenAI 原始口径，非流式构造时才有。
+
+        只读第 2 条会让整条线跑完账上是 0（2026-09-15 真模型实测）。
+        流式还须给底层带 `stream_usage=True`，否则末块连 usage 都不回。"""
+        um = getattr(resp, "usage_metadata", None) or {}
+        if um:
+            pt, ct = um.get("input_tokens", 0) or 0, um.get("output_tokens", 0) or 0
+        else:
+            usage = (getattr(resp, "response_metadata", None) or {}).get("token_usage") or {}
+            pt, ct = usage.get("prompt_tokens", 0) or 0, usage.get("completion_tokens", 0) or 0
         self.update_cost(pt, ct, model)
         self.records.append({"tag": tag, "model": model, "pt": pt, "ct": ct})
 

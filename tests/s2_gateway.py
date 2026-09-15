@@ -337,6 +337,106 @@ def t11_usage():
         _fail("11. stream=False 却建成了流式模型")
 
 
+# ---------- 13. 真模型的用量字段形状（2026-09-15 真端点实测，FakeLLM 照不出来） ----------
+def t13_usage_field_shapes():
+    class Out(BaseModel):
+        answer: str = ""
+
+    # 1) cfg.stream 默认 True → ChatOpenAI(streaming=True) → 用量只在 usage_metadata，token_usage 是 None
+    cm = CostManager()
+    msg = AIMessage(content="x")
+    msg.usage_metadata = {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+    cm.add_usage(msg, model="gpt-4o", tag="um")
+    if (cm.total_prompt_tokens, cm.total_completion_tokens) != (11, 7):
+        _fail(f"13. usage_metadata 口径没读到（真模型流式必恒 0）: {cm.get_costs()}")
+    # 2) 非流式构造的 legacy 形态仍要兜住
+    cm2 = CostManager()
+    cm2.add_usage(AIMessage(content="x", response_metadata={
+        "token_usage": {"prompt_tokens": 3, "completion_tokens": 4}}), model="gpt-4o", tag="tu")
+    if (cm2.total_prompt_tokens, cm2.total_completion_tokens) != (3, 4):
+        _fail(f"13. legacy token_usage 兜底断了: {cm2.get_costs()}")
+
+    # 3) structured() 不经 ainvoke 出口，必须自己记账（RoleZero 每轮思考都走它）
+    class _StubStructured:
+        async def ainvoke(self, prompt, **kw):
+            raw = AIMessage(content='{"answer":"hi"}')
+            raw.usage_metadata = {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}
+            return {"raw": raw, "parsed": Out(answer="hi"), "parsing_error": None}
+
+    class _StubModel:
+        def bind(self, **kw):
+            return self
+
+        def with_structured_output(self, schema, include_raw=False):
+            if include_raw is not True:
+                _fail("13. structured 没用 include_raw=True —— 拿不到原始响应就记不了账")
+            return _StubStructured()
+
+    gw = LLMGateway(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", stream=False), cost_manager=CostManager())
+    gw._model = _StubModel()
+    out = asyncio.run(gw.structured(Out).ainvoke("问点什么", tag="st"))
+    if not isinstance(out, Out) or out.answer != "hi" or (
+            gw.cost_manager.total_prompt_tokens, gw.cost_manager.total_completion_tokens) != (5, 2):
+        _fail(f"13. structured 记账或返回契约不对: {out} {gw.cost_manager.get_costs()}")
+
+    # 4) 流式：usage 常在中间块，末块反而是 None —— 聚合后必须还挂着用量
+    class _StubStream:
+        def bind(self, **kw):
+            return self
+
+        async def astream(self, msgs, **kw):
+            for txt, usage in (("ab", None), ("cd", {"input_tokens": 6, "output_tokens": 2, "total_tokens": 8}),
+                               ("", None)):
+                ch = AIMessage(content=txt)
+                if usage:
+                    ch.usage_metadata = usage
+                yield ch
+
+    gw2 = LLMGateway(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", stream=True), cost_manager=CostManager())
+    gw2._model = _StubStream()
+    resp = asyncio.run(gw2.ainvoke("流式问一句", tag="stream", stream=True))
+    if resp.content != "abcd" or not getattr(resp, "usage_metadata", None):
+        _fail(f"13. 流式聚合丢了 content 或 usage: {resp.content!r} {getattr(resp, 'usage_metadata', None)}")
+    if (gw2.cost_manager.total_prompt_tokens, gw2.cost_manager.total_completion_tokens) != (6, 2):
+        _fail(f"13. 流式记账不对: {gw2.cost_manager.get_costs()}")
+
+    # 5) thinking 模型烧光 max_token → LengthFinishReasonError：半截正文在 .completion 上
+    class _Trunc(Exception):
+        def __init__(self, text):
+            super().__init__("length")
+            self.completion = type("C", (), {"choices": [type("Ch", (), {
+                "message": type("M", (), {"content": text})()})()]})()
+
+    class _StubTrunc:
+        async def ainvoke(self, prompt, **kw):
+            raise _Trunc('{"answer": "被截断的回答", "steps": ["第一步"]')     # 缺尾花括号，正是要修的形状
+
+    class _StubModel2:
+        def bind(self, **kw):
+            return self
+
+        def with_structured_output(self, schema, include_raw=False):
+            return _StubTrunc()
+
+    gw3 = LLMGateway(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", stream=False), cost_manager=CostManager())
+    gw3._model = _StubModel2()
+    try:
+        got = asyncio.run(gw3.structured(Out).ainvoke("会被截断的问法"))
+    except Exception as e:
+        _fail(f"13. 截断形态没走修复档，库异常直接抛到会话外: {type(e).__name__}: {e}")
+    if not isinstance(got, Out) or "被截断" not in got.answer:
+        _fail(f"13. 截断修复结果不对: {got}")
+
+    # 6) 这一档旧实现只补 `]`，"缺 }"和"断在字符串里"两种最常见截断等于白放
+    from codeharness.provider.repair import _fix_unclosed
+    if _fix_unclosed('{"a": 1') != '{"a": 1}':
+        _fail(f"13. 缺 }} 没补上: {_fix_unclosed('{\"a\": 1')!r}")
+    if _fix_unclosed('{"a": "截到一') != '{"a": "截到一"}':
+        _fail(f"13. 断在字符串里没收尾: {_fix_unclosed('{\"a\": \"截到一')!r}")
+    if _fix_unclosed('["a", "b') != '["a", "b"]':
+        _fail(f"13. 缺 ] 的旧形态被改坏了: {_fix_unclosed('[\"a\", \"b')!r}")
+
+
 # ---------- 12. structured 回落修复档 + aask_code ----------
 def t12_structured_and_code():
     class S(BaseModel):
@@ -364,13 +464,15 @@ def t12_structured_and_code():
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
-              t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code]
+              t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
+              t13_usage_field_shapes]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS2 门禁全部通过：{len(checks)} 组（cfg→客户端快照 / 未支持厂商显式失败 / format_msg / "
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
-          f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code）")
+          f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
+          f"真模型 usage 字段形状与 structured+流式记账）")
 
 
 if __name__ == "__main__":

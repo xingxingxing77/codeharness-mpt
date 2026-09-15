@@ -348,7 +348,29 @@ def _extract_json_block(text: str) -> str:
 
 
 def _fix_unclosed(text: str) -> str:
-    return text + "]" if text.strip().startswith("[") and not text.strip().endswith("]") else text
+    """补齐被截断的收尾。真模型实测最多的两种形态：整棵对象少一个 `}`、断在字符串字面量中间。"""
+    t = text.strip()
+    if not t:
+        return text
+    stack, in_str, esc = [], False, False
+    for ch in t:
+        if esc:
+            esc = False
+        elif in_str:
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            stack.append(ch)
+        elif ch in "]}":
+            if stack:
+                stack.pop()
+    if in_str:
+        t += '"'                                   # 断在字符串里：先收掉引号再补括号
+    return t + "".join("]" if o == "[" else "}" for o in reversed(stack))
 
 
 def repair_to_model(raw: str, schema: Type[BaseModel]) -> Optional[BaseModel]:

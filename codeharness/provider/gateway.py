@@ -128,16 +128,17 @@ class LLMGateway:
         deadline = timeout or self.cfg.timeout
 
         if stream:
-            pieces, last_chunk = [], None
-            agen = model.astream(msgs)
-            last_chunk = None
-            async for chunk in agen:
-                last_chunk = chunk
+            pieces, usage, meta = [], None, {}
+            async for chunk in model.astream(msgs):
+                if getattr(chunk, "usage_metadata", None):
+                    usage = chunk.usage_metadata        # usage 常在中间块，末块反而是 None
+                meta = getattr(chunk, "response_metadata", None) or meta
                 if chunk.content:
                     pieces.append(chunk.content)
                     log_llm_stream(chunk.content)
-            resp = AIMessage(content="".join(pieces),
-                             response_metadata=getattr(last_chunk, "response_metadata", {}) or {})
+            resp = AIMessage(content="".join(pieces), response_metadata=meta)
+            if usage is not None:
+                resp.usage_metadata = usage
         else:
             resp = await _acall(model.ainvoke, msgs, timeout=deadline)
 
@@ -187,8 +188,11 @@ class LLMGateway:
 
     def structured(self, schema: Type[BaseModel], include_raw: bool = False):
         """替代源 `action_node.py` 的 876 行结构化引擎。
-        解析失败时回落 `provider.repair` 的升级式修复档（S3 的 R2 会在此加**字段级**定向重试）。"""
-        runnable = self._model.with_structured_output(schema, include_raw=include_raw)
+        解析失败时回落 `provider.repair` 的升级式修复档（S3 的 R2 会在此加**字段级**定向重试）。
+
+        ⚠ 内部恒用 `include_raw=True`：这条路不经过 `ainvoke`，不在这里记账就整条动态范式
+        零账（RoleZero 每轮思考都走它）。对外契约不变——默认仍返回 schema 实例。"""
+        runnable = self._model.with_structured_output(schema, include_raw=True)
 
         class _Wrapped:
             """保持与 FakeLLM.structured() 同构：await .ainvoke(prompt) -> schema 实例。"""
@@ -196,18 +200,65 @@ class LLMGateway:
             def __init__(self, outer: "LLMGateway"):
                 self.outer, self.schema = outer, schema
 
-            async def ainvoke(self, prompt, **kw):
+            def _account(self, raw, tag: str):
+                """raw 有两种形态：langchain 消息，或 LengthFinishReasonError 挂的 openai ChatCompletion。
+                被截断的那次调用照样花了钱，不记就是漏账。"""
+                if not self.outer.cfg.calc_usage or raw is None:
+                    return
+                if getattr(raw, "usage_metadata", None) or getattr(raw, "response_metadata", None):
+                    self.outer.cost_manager.add_usage(raw, model=self.outer.cfg.model, tag=tag)
+                    return
+                usage = getattr(raw, "usage", None)          # ChatCompletion.usage
+                if usage is not None:
+                    self.outer.cost_manager.update_cost(getattr(usage, "prompt_tokens", 0) or 0,
+                                                        getattr(usage, "completion_tokens", 0) or 0,
+                                                        self.outer.cfg.model)
+
+            def _repair(self, text: str):
+                from codeharness.provider.repair import repair_to_model
+                fixed = repair_to_model(text, self.schema) if text else None
+                if fixed is not None:
+                    logger.warning(f"structured 解析失败，已走 repair_to_model 修复档：{self.schema.__name__}")
+                return fixed
+
+            @staticmethod
+            def _partial_text(exc) -> str:
+                """解析失败时模型到底回了什么：两种挂法都要覆盖到。
+                `exc.output` 是 langchain 解析器失败的常规形态；`exc.completion` 是
+                `LengthFinishReasonError`（thinking 模型把 max_token 烧光）的形态。"""
+                raw = getattr(exc, "output", None)
+                text = getattr(raw, "content", None) or (raw if isinstance(raw, str) else "")
+                if text:
+                    return text
                 try:
-                    return await runnable.ainvoke(prompt, **kw)
+                    return (exc.completion.choices[0].message.content or "")
+                except Exception:
+                    return ""
+
+            async def ainvoke(self, prompt, tag: str = "", timeout: int = USE_CONFIG_TIMEOUT, **kw):
+                deadline = timeout or self.outer.cfg.timeout
+                try:
+                    out = await _acall(runnable.ainvoke, prompt, timeout=deadline, **kw)
                 except Exception as exc:
-                    from codeharness.provider.repair import repair_to_model
-                    raw = getattr(exc, "output", None)
-                    text = getattr(raw, "content", None) or (raw if isinstance(raw, str) else "")
-                    fixed = repair_to_model(text, self.schema) if text else None
+                    self._account(getattr(exc, "output", None) or getattr(exc, "completion", None), tag)
+                    fixed = self._repair(self._partial_text(exc))
                     if fixed is None:
+                        if type(exc).__name__ == "LengthFinishReasonError":
+                            raise ValueError(
+                                f"模型输出被 max_token={self.outer.cfg.max_token} 截断，结构化解析无果："
+                                f"提高 LLM__MAX_TOKEN 或缩短单次产出（thinking 模型的 reasoning 也计在这里）"
+                            ) from exc
                         raise
-                    logger.warning(f"structured 解析失败，已走 repair_to_model 修复档：{type(exc).__name__}")
-                    return fixed
+                    return {"raw": getattr(exc, "output", None), "parsed": fixed} if include_raw else fixed
+                raw = (out or {}).get("raw")
+                self._account(raw, tag)
+                parsed = (out or {}).get("parsed")
+                if parsed is None:                              # include_raw 形态下解析失败不抛，只带 error
+                    fixed = self._repair(getattr(raw, "content", "") or "")
+                    if fixed is None:
+                        raise ValueError(f"structured 解析失败且修复无果: {str(getattr(raw, 'content', ''))[:200]}")
+                    parsed = fixed
+                return out if include_raw else parsed
 
         return _Wrapped(self)
 
