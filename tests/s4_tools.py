@@ -12,6 +12,7 @@ import importlib
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from codeharness.configs.settings import settings
@@ -22,6 +23,7 @@ from codeharness.schema import RunCodeContext
 from codeharness.tools import (REGISTRY, _root, _safe, execute_shell_async, read_file,
                                search_internet, tool_registry, write_file)
 from codeharness.tools.tool_registry import TOOL_REGISTRY, register_tool
+from codeharness.tools.libs.terminal import Terminal
 from codeharness.tools.sandbox import run_context, run_python_code
 
 BASE = Path(tempfile.mkdtemp(prefix="s4gate_"))
@@ -33,7 +35,7 @@ PY = f'"{sys.executable}"'
 
 def t1_registry_items_are_langchain_tools():
     names = [t.name for t in REGISTRY]
-    assert len(names) == len(set(names)) == 4, names
+    assert len(names) == len(set(names)) == 5, names
     for t in REGISTRY:
         assert t.description and t.args, t.name
         assert t.func or t.coroutine, f"{t.name} 解析不到 callable"
@@ -172,7 +174,7 @@ def _capture_warnings():
 
 def t15_registry_and_tools_share_one_source():
     assert {t.name for t in REGISTRY} == set(TOOL_REGISTRY.tools) == {
-        "write_file", "read_file", "execute_shell_async", "search_internet"}
+        "write_file", "read_file", "execute_shell_async", "search_internet", "terminal_command"}
     assert sorted(TOOL_REGISTRY.tags()) == ["file", "terminal", "web"]
 
 
@@ -187,7 +189,7 @@ def t17_unknown_key_warns_and_is_skipped():
         got = [t.name for t in TOOL_REGISTRY.select("no_such_tool", "terminal")]
     finally:
         tool_registry._warn = orig
-    assert got == ["execute_shell_async"], got
+    assert got == ["execute_shell_async", "terminal_command"], got
     assert len(seen) == 1 and "no_such_tool" in seen[0], seen
 
 
@@ -206,7 +208,72 @@ def t18_register_tool_requires_langchain_tool():
 def t19_swe_agent_tool_set_comes_from_tags():
     # roles/registry.py 的 SweAgent 取法：终端 + 文件，不许静默漂成全量工具
     assert {t.name for t in TOOL_REGISTRY.select("terminal", "file")} == {
-        "execute_shell_async", "write_file", "read_file"}
+        "execute_shell_async", "terminal_command", "write_file", "read_file"}
+
+
+async def _in_shell(coro):
+    """每个用例独立起壳、跑完必关：常驻 shell 漏关就是孤儿进程，门禁不许留。"""
+    term = Terminal()
+    try:
+        return await coro(term)
+    finally:
+        await term.close()
+
+
+def t20_terminal_keeps_state_across_commands():
+    async def go(term):
+        await term.run_command("mkdir state_probe")
+        await term.run_command("cd state_probe")
+        return await term.run_command(term.pwd_command)
+
+    assert "state_probe" in asyncio.run(_in_shell(go))
+
+
+def t21_hung_command_times_out_and_shell_self_heals():
+    hang = "ping -n 30 127.0.0.1 >nul" if sys.platform.startswith("win") else "sleep 30"
+
+    async def go(term):
+        out = await term.run_command(hang, timeout=2)
+        assert "[timeout after 2s]" in out, out
+        assert term.process is None, "超时后必须丢掉这条 shell，否则下一条命令骑在挂死进程上"
+        return await term.run_command(term.pwd_command)
+
+    assert "timeout" not in asyncio.run(_in_shell(go))
+
+
+def t22_shell_exit_reports_instead_of_spinning():
+    # 源 :158 `if not output: continue` 在进程退出后变成空转死循环，web 进程里就是永久卡住
+    async def go(term):
+        out = await term.run_command("exit")
+        assert "shell 已退出" in out, out
+        assert term.process is None
+        return await term.run_command(term.pwd_command)
+
+    assert asyncio.run(_in_shell(go))  # 能自重建并拿到输出即通过
+
+
+def t23_forbidden_command_is_skipped_not_run():
+    async def go(term):
+        return await term.run_command("echo before_out && npm run dev")
+
+    out = asyncio.run(_in_shell(go))
+    assert "Failed to execute npm run dev" in out and "Deployer" in out, out
+    assert "before_out" in out, out
+
+
+def t24_daemon_output_reaches_queue():
+    async def go(term):
+        assert await term.run_command("echo bg_marker_42", daemon=True) == ""
+        got = ""
+        for _ in range(20):
+            await asyncio.sleep(0.25)
+            got += await term.get_stdout_output()
+            if "bg_marker_42" in got:
+                break
+        return got
+
+    # 源 :103 起 daemon 任务时漏传 daemon，queue 恒空 → get_stdout_output 恒 ""
+    assert "bg_marker_42" in asyncio.run(_in_shell(go))
 
 
 def main():
@@ -222,16 +289,28 @@ def main():
               t16_select_unions_names_and_tags_without_duplicates,
               t17_unknown_key_warns_and_is_skipped,
               t18_register_tool_requires_langchain_tool,
-              t19_swe_agent_tool_set_comes_from_tags]
+              t19_swe_agent_tool_set_comes_from_tags,
+              t20_terminal_keeps_state_across_commands,
+              t21_hung_command_times_out_and_shell_self_heals,
+              t22_shell_exit_reports_instead_of_spinning,
+              t23_forbidden_command_is_skipped_not_run,
+              t24_daemon_output_reaches_queue]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
-    shutil.rmtree(BASE, ignore_errors=True)
-    assert not BASE.exists()
-    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（四项工具登记/名字与 tag 并集去重/"
+    for _ in range(20):
+        shutil.rmtree(BASE, ignore_errors=True)   # Windows：刚被 taskkill 的句柄要几百毫秒才释放
+        if not BASE.exists():
+            break
+        time.sleep(0.25)
+    leftovers = [str(p.relative_to(BASE)) for p in BASE.rglob("*")] if BASE.exists() else []
+    assert not BASE.exists(), f"自测留下了句柄或文件: {leftovers[:8]}"
+    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（五项工具登记/名字与 tag 并集去重/"
           f"未知 key 告警跳过/漏 @tool 不登记/SweAgent 取法）+ 越界防护 3 组（兄弟目录前缀回归/"
           f"父目录与绝对路径/scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）"
-          f"+ shell 2 组 + 搜索 2 组（零外网 stub 与降级）+ 沙箱 3 组（退出码/超时/工作目录）")
+          f"+ shell 2 组 + 搜索 2 组（零外网 stub 与降级）+ 沙箱 3 组（退出码/超时/工作目录）"
+          f"+ Terminal 5 组（跨命令保态/挂死超时后 shell 自愈/死壳报错不空转/禁行命令替换跳过/"
+          f"daemon 输出进队列）")
 
 
 if __name__ == "__main__":

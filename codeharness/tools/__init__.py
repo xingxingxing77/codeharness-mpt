@@ -77,5 +77,8 @@ def search_internet(query: str) -> str:
         return f"[搜索暂不可用: {e}]"
 
 
+from codeharness.tools.libs import terminal as _terminal  # noqa: F401  副作用：terminal_command 登记进 TOOL_REGISTRY
+
 REGISTRY = TOOL_REGISTRY.all()      # 全量视图；按 profile 选子集用 TOOL_REGISTRY.select(name|tag)
-# git_run / scrape_web：tools/libs/git.py、web_scraping.py 复制后按 write_file 同样方式包 @tool（各 ~10 行）
+# 待接：git_run / scrape_web 按同样方式包 `@register_tool(tags=[...]) + @tool`（各 ~10 行）。
+# 只 import 真已移植的 libs——源项目 libs/__init__.py 全量 eager import，会把 editor.py(1,135) 拖进导入路径。
