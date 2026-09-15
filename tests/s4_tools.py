@@ -9,6 +9,7 @@
 """
 import asyncio
 import importlib
+import os
 import shutil
 import sys
 import tempfile
@@ -23,8 +24,11 @@ from codeharness.schema import RunCodeContext
 from codeharness.tools import (REGISTRY, _root, _safe, execute_shell_async, read_file,
                                search_internet, tool_registry, write_file)
 from codeharness.tools.tool_registry import TOOL_REGISTRY, register_tool
+from codeharness.tools.libs.editor import Editor
+from codeharness.tools.libs.linter import Linter
 from codeharness.tools.libs.terminal import Terminal
 from codeharness.tools.sandbox import run_context, run_python_code
+from codeharness.utils._config_compat import get_env_default
 
 BASE = Path(tempfile.mkdtemp(prefix="s4gate_"))
 WS = BASE / "ws"
@@ -276,6 +280,54 @@ def t24_daemon_output_reaches_queue():
     assert "bg_marker_42" in asyncio.run(_in_shell(go))
 
 
+def t25_linter_reports_python_syntax_error_with_line():
+    p = WS / "broken.py"
+    p.write_text("def f(:\n    return 1\n", encoding="utf-8")
+    r = Linter(root=WS).lint(str(p))
+    assert r and "SyntaxError" in r.text, r
+    assert r.lines[0] == 1, r.lines
+
+
+def t26_linter_passes_clean_python():
+    p = WS / "clean.py"
+    p.write_text("def f(x):\n    return x + 1\n", encoding="utf-8")
+    assert Linter(root=WS).lint(str(p)) is None
+
+
+def t27_linter_skips_non_python_like_source():
+    # 源 languages 表把 js/css/sql 全指到 fake_lint（不校验），本处照抄该语义
+    p = WS / "note.md"
+    p.write_text("这不是代码 ((( 未闭合", encoding="utf-8")
+    assert Linter(root=WS).lint(str(p)) is None
+
+
+def t28_editor_lint_hook_works():
+    """真消费者：editor.py:198 `_lint_file`。旧假垫片把 lint 声明成 async 而调用点不 await，
+    返回的协程对象恒真 → 下一步取 .text 必 AttributeError。这条断言让它无处可藏。"""
+    p = WS / "edit_target.py"
+    p.write_text("import os\n\nif True:\nprint(1)\n", encoding="utf-8")
+    err, line = Editor(working_dir=WS)._lint_file(p)
+    assert err and err.startswith("ERRORS:\n"), err
+    # 精确锁 4：真实错误行。Windows 盘符冒号曾让它退化成 1；flake8 在/不在两条分支都给 4
+    assert line == 4, (line, err)
+    p.write_text("import os\n\nprint(os.name)\n", encoding="utf-8")
+    assert Editor(working_dir=WS)._lint_file(p) == (None, None)
+
+
+def t29_env_reader_matches_its_only_call_site():
+    """utils/file.py:154 写死了 await + key/app_name/default_value 三个关键字，签名一漂就是 TypeError。"""
+    async def go():
+        os.environ["OMNIPARSE__BASE_URL"] = "http://127.0.0.1:9331"
+        try:
+            hit = await get_env_default(key="base_url", app_name="OmniParse", default_value="")
+            miss = await get_env_default(key="timeout", app_name="OmniParse", default_value="60")
+        finally:
+            del os.environ["OMNIPARSE__BASE_URL"]
+        return hit, miss
+
+    assert asyncio.run(go()) == ("http://127.0.0.1:9331", "60")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -294,7 +346,12 @@ def main():
               t21_hung_command_times_out_and_shell_self_heals,
               t22_shell_exit_reports_instead_of_spinning,
               t23_forbidden_command_is_skipped_not_run,
-              t24_daemon_output_reaches_queue]
+              t24_daemon_output_reaches_queue,
+              t25_linter_reports_python_syntax_error_with_line,
+              t26_linter_passes_clean_python,
+              t27_linter_skips_non_python_like_source,
+              t28_editor_lint_hook_works,
+              t29_env_reader_matches_its_only_call_site]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -310,7 +367,8 @@ def main():
           f"父目录与绝对路径/scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）"
           f"+ shell 2 组 + 搜索 2 组（零外网 stub 与降级）+ 沙箱 3 组（退出码/超时/工作目录）"
           f"+ Terminal 5 组（跨命令保态/挂死超时后 shell 自愈/死壳报错不空转/禁行命令替换跳过/"
-          f"daemon 输出进队列）")
+          f"daemon 输出进队列）+ linter 3 组（Python 报错带行号/干净文件放行/非 Python 照源不校验）"
+          f"+ Editor._lint_file 真消费者 1 组（钉死旧假垫片的 async/sync 漂移）+ env 读口签名 1 组")
 
 
 if __name__ == "__main__":

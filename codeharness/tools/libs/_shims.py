@@ -1,7 +1,10 @@
 """libs 移植垫片：源 metagpt 依赖的最小等价实现（editor/git 复制件用）。
-MVP 中 editor 命令未接入 REGISTRY（write_file 覆盖），垫片只为 import 不炸、语义不歪。"""
+`Linter` 已换成 `libs/linter.py` 的真实现（原来的假 `Linter` 让 editor 的"改完自动 lint"变成空话）；
+`register_tool` 仍是 no-op——editor 系命令尚未接入 REGISTRY（write_file 覆盖），接的时候换真件。"""
 import asyncio
 from pathlib import Path
+
+from codeharness.tools.libs.linter import Linter  # editor.py:206 的真消费者
 
 
 def register_tool(**kw):
@@ -32,15 +35,6 @@ class File:
         p.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(p.write_text, content, encoding="utf-8")
         return True
-
-
-class Linter:
-    def __init__(self, root=None):
-        self.root = root
-
-    async def lint(self, filename=None, return_dict=False):
-        """返回空 = 无 lint 错误（源语义：错误列表/字典）；接 ruff 属后续增强"""
-        return {} if return_dict else []
 
 
 class EditorReporter:
