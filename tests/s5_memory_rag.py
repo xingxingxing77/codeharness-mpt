@@ -500,6 +500,223 @@ def t18_hitrate_single_vs_hybrid_table():
           f"mean rank {d['mean_rank']}→{h['mean_rank']}；表已存 storage/benchmark/s5_hitrate.json")
 
 
+# ---------------- S5.3 · 经验池闭环（schema 往返 / 命中计数排序 / @exp_cache 真接线） ----------------
+
+
+def t19_exp_schema_roundtrip():
+    """判定表 S5.3 门禁第一条：序列化 roundtrip 逐字段相等（格式照源，S9 双跑要吃这份 JSON）。"""
+    from codeharness.exp_pool.schema import (EntryType, Experience, ExperienceType, Metric,
+                                             Score, Trajectory)
+    e = Experience(req="做个2048", resp='{"thought":"先建文件","commands":[]}',
+                   metric=Metric(time_cost=1.5, money_cost=0.0, score=Score(val=7, reason="好")),
+                   exp_type=ExperienceType.INSIGHT, entry_type=EntryType.MANUAL,
+                   tag="RoleZero.llm_cached_think",
+                   traj=Trajectory(plan="p", action="a", observation="o", reward=1))
+    back = Experience.model_validate_json(e.model_dump_json())
+    assert back == e and back.model_dump() == e.model_dump(), "roundtrip 不等，格式漂移了"
+    assert set(e.model_dump()) == {"req", "resp", "metric", "exp_type", "entry_type",
+                                   "tag", "traj", "timestamp", "uuid"}, e.model_dump().keys()
+    assert back.rag_key() == "做个2048"
+    print("  t19 Experience JSON roundtrip 逐字段相等，9 个字段名与源一致")
+
+
+def t20_serializer_think_roundtrip():
+    """被缓存的载荷（ZeroThought JSON）无损往返；键=最后一条 human（CMD_PROMPT），system 不进键。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from codeharness.exp_pool.serializers import RoleZeroSerializer
+    from codeharness.roles.role_zero import ZeroThought
+    ser = RoleZeroSerializer()
+    req = [SystemMessage(content="很大一段人设，不该进键"),
+           HumanMessage(content="step 3/15 当前任务：main.py")]
+    key = ser.serialize_req(req=req)
+    assert key == "step 3/15 当前任务：main.py", key
+    t = ZeroThought(thought="先写 main.py", commands=[{"command_name": "end", "args": {}}])
+    dumped = ser.serialize_resp(t.model_dump_json())
+    back = ZeroThought.model_validate_json(ser.deserialize_resp(dumped))
+    assert back.model_dump() == t.model_dump(), "ZeroThought 过经验池不无损"
+    print("  t20 裁剪键正确，ZeroThought 序列化往返逐字段相等")
+
+
+class StubStore:
+    """manager 的替身存储：给定 (tag, req)→resp，search 按预设相似度出候选。"""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows          # [{"id","action_tag","input","output","score"}]
+
+    async def search(self, action_tag, query, k=2):
+        return [r for r in self.rows if r["action_tag"] == action_tag][:k]
+
+
+class StubCounter:
+    def __init__(self, counts: dict):
+        self.counts = counts
+
+    async def get(self, exp_id):
+        return self.counts.get(exp_id, 0)
+
+    async def bump(self, exp_id):
+        self.counts[exp_id] = self.counts.get(exp_id, 0) + 1
+
+
+def t21_hit_count_reorders():
+    """判定表 S5.3 门禁第二条：命中计数改变排序——计数高的排前面，计数打平才轮到相似度。
+    点 id 用真实的派生式（record_hit 按 (tag,req) 反推同一个 id，这里必须一致）。"""
+    from codeharness.document_store.exp_store import exp_point_id
+    from codeharness.exp_pool.manager import ExperienceManager
+    hi, lo = exp_point_id("T", "近问题"), exp_point_id("T", "远问题")
+    rows = [{"id": hi, "action_tag": "T", "input": "近问题", "output": "A", "score": 0.99},
+            {"id": lo, "action_tag": "T", "input": "远问题", "output": "B", "score": 0.85}]
+    counts = {lo: 3}                                     # 低相似但被复用 3 次的那条
+    mgr = ExperienceManager(store=StubStore(rows), counter=StubCounter(counts))
+    got = asyncio.run(mgr.query_exps("q", tag="T"))
+    assert [e.resp for e, _ in got] == ["B", "A"], "命中计数没有改变排序"
+    counts[hi] = 3                                       # 追平 → 相似度做 tie-break
+    got = asyncio.run(mgr.query_exps("q", tag="T"))
+    assert [x.resp for x, _ in got] == ["A", "B"], "计数打平时相似度必须做第二键"
+    from codeharness.exp_pool.schema import Experience
+    asyncio.run(mgr.record_hit(Experience(req="近问题", resp="A", tag="T")))
+    assert counts[hi] == 4, "record_hit 没走 bump"
+    print("  t21 命中计数改变排序（计数>相似度 两级键），record_hit 只对复用的那条计数")
+
+
+def t22_exp_cache_semantics():
+    """@exp_cache 的开关矩阵：disabled 透传；read 命中跳过函数并计数；低于阈值照常执行；
+    write 才入库；read 抛异常只 warning 不断主流程；缺 req 报 ValueError（源契约）。"""
+    from codeharness.configs.settings import settings
+    from codeharness.exp_pool.decorator import exp_cache
+    from codeharness.exp_pool.schema import Experience, QueryType
+
+    calls = {"n": 0}
+
+    class FakeMgr:
+        def __init__(self):
+            self.saved, self.hits = [], []
+            self.next_score = 0.99
+
+        async def query_exps(self, req, tag="", query_type=QueryType.SEMANTIC, k=2):
+            if tag not in [x.tag for x in self.saved]:
+                return []
+            return [(self.saved[0], self.next_score)]
+
+        async def create_exp(self, exp):
+            self.saved.append(exp)
+
+        async def record_hit(self, exp):
+            self.hits.append(exp)
+
+    @exp_cache(manager=None, serializer=None)
+    async def ask(*, req):
+        calls["n"] += 1
+        return f"answer::{req}"
+
+    saved, settings.exp_pool = settings.exp_pool, settings.exp_pool.model_copy()
+    try:
+        settings.exp_pool.enabled = False
+        assert asyncio.run(ask(req="q1")) == "answer::q1" and calls["n"] == 1
+        assert asyncio.run(ask(req="q1")) == "answer::q1" and calls["n"] == 2   # 关着：透传，不查池
+        mgr = FakeMgr()
+        import codeharness.exp_pool.manager as mg
+        mg._manager = mgr
+        settings.exp_pool.enabled = True
+        settings.exp_pool.enable_read = settings.exp_pool.enable_write = True
+        assert asyncio.run(ask(req="q2")) == "answer::q2"          # miss：执行并入库
+        assert len(mgr.saved) == 1 and mgr.saved[0].tag == "ask"   # 裸函数 tag=函数名（源 _generate_tag）
+        assert asyncio.run(ask(req="q2")) == "answer::q2" and calls["n"] == 3
+        assert mgr.hits and mgr.hits[0] is mgr.saved[0]            # 命中：函数没再执行，计数记了
+        mgr.next_score = 0.5                                       # 低于 0.9 阈值 → 不复用
+        assert asyncio.run(ask(req="q2")) == "answer::q2" and calls["n"] == 4
+
+        class BoomMgr(FakeMgr):
+            async def query_exps(self, *a, **kw):
+                raise ConnectionError("qdrant down")
+
+        mgr2 = BoomMgr()
+        mgr2.saved = [Experience(req="q3", resp="answer::q3", tag="ask")]
+        mg._manager = mgr2
+        assert asyncio.run(ask(req="q3")) == "answer::q3" and calls["n"] == 5   # 读挂：照常执行
+        try:
+            asyncio.run(ask("positional"))
+            raise AssertionError("缺 req 必须 ValueError")
+        except ValueError:
+            pass
+    finally:
+        settings.exp_pool, mg._manager = saved, None
+    print("  t22 @exp_cache：透传/命中跳LLM/阈值把关/计数/读挂降级/req 契约 六条全过")
+
+
+def t23_exp_store_replay_on_qdrant():
+    """真 Qdrant（gate 集合）+ hash-fake embedding 的存取回放：同 tag 命中、跨 tag 不漏。"""
+    if not live_qdrant():
+        print("  t23 跳过（无 Qdrant）")
+        return
+    from codeharness.document_store.exp_store import ExpStore, exp_point_id
+    from codeharness.exp_pool.manager import ExperienceManager, HitCounter
+    from codeharness.exp_pool.schema import Experience
+
+    user = f"u_exp_{uuid.uuid4().hex[:6]}"
+    store = ExpStore(embeddings=HashEmbeddings(), user_id=user, store=gate_store())
+    counter = HitCounter(user_id=user)
+    KEYS.append(f"exp_hits:{user}:{exp_point_id('RoleZero.llm_cached_think', '做个2048')}")
+    mgr = ExperienceManager(store=store, counter=counter)
+    exp = Experience(req="做个2048", resp='{"thought":"先建文件","commands":[]}',
+                     tag="RoleZero.llm_cached_think")
+    asyncio.run(mgr.create_exp(exp))
+    got = asyncio.run(mgr.query_exps("做个2048", tag=exp.tag))
+    assert got and got[0][0].resp == exp.resp and got[0][1] >= 0.99, got
+    assert asyncio.run(mgr.query_exps("做个2048", tag="Other.action")) == []      # 跨 tag 不漏
+    from codeharness.exp_pool.schema import QueryType
+    exact_miss = asyncio.run(mgr.query_exps("写一个五子棋", tag=exp.tag, query_type=QueryType.EXACT))
+    assert exact_miss == [] or all(e.req == "写一个五子棋" for e, _ in exact_miss)
+    asyncio.run(mgr.record_hit(exp))
+    assert asyncio.run(counter.get(exp_point_id(exp.tag, exp.req))) == 1, "真 Redis 计数没落"
+    asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=user))
+    print("  t23 真 Qdrant+真 Redis：入库→召回→计数落盘→作用域清理")
+
+
+def t24_rolezero_think_wired():
+    """真接线的证据：池子开着且命中时，RoleZero 的 structured **零次进模型**；关着时一切照旧。"""
+    from codeharness.configs.settings import settings
+    from codeharness.exp_pool.schema import Experience, QueryType
+    from codeharness.roles.role_zero import RoleZero, ZeroThought
+    import codeharness.exp_pool.manager as mg
+
+    class FakeMgr:
+        def __init__(self):
+            self.saved, self.hits = [], []
+
+        async def query_exps(self, req, tag="", query_type=QueryType.SEMANTIC, k=2):
+            return [(self.saved[0], 0.99)] if self.saved and tag == self.saved[0].tag else []
+
+        async def create_exp(self, exp):
+            self.saved.append(exp)
+
+        async def record_hit(self, exp):
+            self.hits.append(exp)
+
+    fake = FakeMgr()
+    saved, settings.exp_pool = settings.exp_pool, settings.exp_pool.model_copy()
+    mg._manager = fake
+    try:
+        settings.exp_pool.enabled = settings.exp_pool.enable_read = settings.exp_pool.enable_write = True
+        from langchain_core.messages import HumanMessage
+        llm = FakeLLM()
+        role = RoleZero({"name": "RZ", "profile": "p", "goal": "g"}, [], llm)
+        req = [HumanMessage(content="CMD")]
+        first = asyncio.run(role.llm_cached_think(req=req))
+        assert ZeroThought.model_validate_json(first).thought == "先写文件"
+        assert len(llm.payloads) == 1 and len(fake.saved) == 1 and fake.saved[0].tag == "RoleZero.llm_cached_think"
+        n0 = len(llm.payloads)
+        again = asyncio.run(role.llm_cached_think(req=req))
+        assert again == first and len(llm.payloads) == n0, "命中后仍进模型 = 没接线"
+        assert fake.hits, "复用没计数"
+        settings.exp_pool.enabled = False
+        asyncio.run(role.llm_cached_think(req=req))
+        assert len(llm.payloads) == n0 + 1, "关掉后必须完全透传"
+    finally:
+        settings.exp_pool, mg._manager = saved, None
+    print("  t24 RoleZero.llm_cached_think 接线：命中零模型调用，关池透传，tag=类名.方法名")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -512,11 +729,14 @@ def main():
               t12_collection_shape, t13_tenant_and_doctype_isolation,
               t14_sparse_indices_are_process_stable, t15_longterm_overflow_recall_roundtrip,
               t16_rolezero_uses_longterm_recall, t17_embedding_outage_degrades_not_crashes,
-              t18_hitrate_single_vs_hybrid_table]
+              t18_hitrate_single_vs_hybrid_table,
+              t19_exp_schema_roundtrip, t20_serializer_think_roundtrip,
+              t21_hit_count_reorders, t22_exp_cache_semantics,
+              t23_exp_store_replay_on_qdrant, t24_rolezero_think_wired]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
-        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18 跳过。"
+        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23 跳过。"
               f"R9 这层的门禁必须起容器跑一次才算数。")
     for fn in checks:
         fn()
@@ -529,7 +749,10 @@ def main():
             asyncio.run(gate_store().drop())        # 自测集合不留残余
         except Exception as e:
             print(f"  （清理 {GATE_COLL} 集合失败：{type(e).__name__}）")
-    print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.1 记忆 11 组（Redis 真往返与死端口降级/"
+    print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.3 经验池 6 组（Experience 逐字段 roundtrip/"
+          f"think 载荷无损往返与裁剪键/命中计数改变排序/@exp_cache 开关矩阵/"
+          f"真 Qdrant+Redis 存取回放/RoleZero 接线命中零模型调用）"
+          f"+ S5.1 记忆 11 组（Redis 真往返与死端口降级/"
           f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/RoleZero 结果回喂、"
           f"截窗、摘要可恢复、key 按会话+角色隔离、去重容错）"
           f"+ S5.2 R9 检索 7 组（集合形态 named+sparse+INT8+租户索引/单集合双向隔离/"

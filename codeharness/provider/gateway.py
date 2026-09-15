@@ -282,17 +282,29 @@ class LLMGateway:
         return False
 
 
+def _retryable(exc: BaseException) -> bool:
+    """只重试**超时与连接类**异常；HTTP 状态错（鉴权/参数错，openai 的 APIStatusError）立刻抛出。
+
+    ⚠ 继承链坑：openai 的 APIStatusError 是 APIError 的子类——按类型族重试会把 401/400 也重了，
+    重试只是烧钱。要重的是「非 status 的 APIError」基形态：流被掐断 / 服务端 abort 掉
+    response_format 的 JSON 生成（qwen MaaS 实测：`APIError: Model output became abnormal
+    while generating a JSON response for response_format`——同一请求重发即成，典型瞬态）。"""
+    from openai import APIError, APIStatusError
+    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+        return True
+    return isinstance(exc, APIError) and not isinstance(exc, APIStatusError)
+
+
 async def _acall(fn, *args, timeout: int = 0, **kwargs):
     """指数退避重试（源在 `general_api_base` 里手写的 tenacity 语义，这里统一收口）。
 
-    只对**超时与连接类**异常重试；HTTP 4xx（鉴权/参数错）立刻抛出，重试只是烧钱。
-    流式路径不走这里——半截断流重放会让前端重复上屏，交由上层重新发起整轮。"""
-    from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
+    重试判据见 `_retryable`。流式路径不走这里——半截断流重放会让前端重复上屏，交由上层重新发起整轮。"""
+    from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
     result = {}
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((asyncio.TimeoutError, ConnectionError, OSError)),
+        retry=retry_if_exception(_retryable),
         reraise=True,
     ):
         with attempt:

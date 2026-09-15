@@ -2,7 +2,8 @@
 _think(:198) 八步组装 → think 节点；_act(:280) 命令执行 → act 节点；
 ask_human(:456)/reply_to_human(:465)/_end(:474) → interrupt/记录/END。
 工作记忆照源 :241 `memory.get(memory_k)` 窗口回喂，溢出交 BrainMemory 摘要（S5.1）；
-经验检索(_retrieve_experience:449) 接第 8 步 exp_pool，此版留空串占位。"""
+经验池 `@exp_cache` 接在 `llm_cached_think`（S5.3，对应源 :267 `llm_cached_aask`——包的是
+纯问函数，命中=跳过模型；默认全关，`EXP_POOL__ENABLED/ENABLE_READ/ENABLE_WRITE` 开）。"""
 import asyncio
 import json
 from datetime import datetime
@@ -16,6 +17,8 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 from codeharness.configs.settings import settings
 from codeharness.const import RequirementTag
+from codeharness.exp_pool import exp_cache
+from codeharness.exp_pool.serializers import RoleZeroSerializer
 from codeharness.logs import logger
 from codeharness.memory.brain_memory import BrainMemory
 from codeharness.memory.memory import Memory
@@ -143,6 +146,14 @@ class RoleZero:
         g.add_edge("act", "think")
         return g.compile(checkpointer=checkpointer or InMemorySaver())
 
+    # ---- 源 llm_cached_aask(:267) 的对应件：带经验池缓存的单次 think ----
+    @exp_cache(serializer=RoleZeroSerializer())
+    async def llm_cached_think(self, *, req: list, **kw) -> str:
+        """返回 ZeroThought 的 JSON 字符串：字符串过经验池无损 roundtrip（源的 cached_aask 同形），
+        schema 校验留在调用侧。命中即整次 structured 不进模型——落账口径里这次调用 token 为零。"""
+        thought: ZeroThought = await self.llm.structured(ZeroThought).ainvoke(req)
+        return thought.model_dump_json()
+
     # ---- 源 _think(:198-265) 的组装顺序（2 检测语言并入首轮、5 工具清单、8 查重由 structured 取代） ----
     async def _think(self, s: RoleZeroState):
         if len(s["history"]) >= self.max_loops:
@@ -175,8 +186,8 @@ class RoleZero:
         async with thought_block(role=self.profile["name"]) as rep:
             context = [SystemMessage(content=system_prompt), *self._context_messages()]
             try:
-                thought: ZeroThought = await self.llm.structured(ZeroThought).ainvoke(
-                    context + [HumanMessage(content=prompt)])
+                thought = ZeroThought.model_validate_json(
+                    await self.llm_cached_think(req=context + [HumanMessage(content=prompt)]))
             except Exception:
                 # structured 失败 → 纯文本重问 + repair 管线 + LLM 自修（源 parse_commands + JSON_REPAIR 链）
                 from codeharness.provider.repair import llm_repair_json

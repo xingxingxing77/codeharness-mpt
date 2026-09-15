@@ -461,18 +461,48 @@ def t12_structured_and_code():
         _fail(f"12. aask_code 没取出代码块: {code!r}")
 
 
+def t14_retry_predicate():
+    """_acall 的重试判据（真模型第十处实测：qwen MaaS 服务端 abort 掉 response_format 的
+    JSON 生成，抛 openai.APIError——这是瞬态，重发即成；而 4xx/5xx 是 APIStatusError——
+    它的**父类才是 APIError**，判据写成 isinstance(APIError) 会把鉴权/参数错也重了，烧钱）。"""
+    import httpx
+    from openai import APIError, AuthenticationError, APITimeoutError
+    from codeharness.provider.gateway import _acall, _retryable
+
+    req = httpx.Request("POST", "http://x")
+    if not _retryable(APIError("Model output became abnormal ...", request=req, body=None)):
+        _fail("服务端 abort JSON 生成（非状态类 APIError）必须重试")
+    if not _retryable(APITimeoutError(request=req)):
+        _fail("连接族（APIError 子类）照旧要可重")
+    auth = AuthenticationError("invalid api key", response=httpx.Response(401, request=req), body=None)
+    if _retryable(auth):
+        _fail("APIStatusError 是 APIError 的子类——判据不扣掉它，鉴权错会被重试三次")
+    if _retryable(ValueError("契约错是自己的代码错")):
+        _fail("自己的代码错不许重")
+
+    calls = {"n": 0}
+
+    async def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise APIError("became abnormal", request=req, body=None)
+        return "ok"
+
+    assert asyncio.run(_acall(flaky)) == "ok" and calls["n"] == 2   # 真走通一次重试环
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
               t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
-              t13_usage_field_shapes]
+              t13_usage_field_shapes, t14_retry_predicate]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS2 门禁全部通过：{len(checks)} 组（cfg→客户端快照 / 未支持厂商显式失败 / format_msg / "
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
-          f"真模型 usage 字段形状与 structured+流式记账）")
+          f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑）")
 
 
 if __name__ == "__main__":

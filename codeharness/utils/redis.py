@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Optional
 
@@ -18,10 +19,15 @@ class Redis:
     def __init__(self, config: Optional[RedisConfig] = None):
         self.config = config or settings.redis
         self._client = None
+        self._loop = None        # client 属于创建它的那个事件循环，见 _connect 的重建条件
 
     async def _connect(self, force: bool = False) -> bool:
-        if self._client and not force:
+        loop = asyncio.get_running_loop()
+        if self._client and not force and self._loop is loop:
             return True
+        # 换 loop 就重建：async client 绑死在创建时的 loop 上，那个 loop 关掉后复用必
+        # `Event loop is closed`（被 except 吞掉后表现为读写**静默返回 None**，S5.3 命中计数
+        # 实测踩过）。生产单 loop 撞不到，多次 asyncio.run 的自测与进程内重启 loop 必撞。
         try:
             # from_url 是惰性的：真正的连接失败发生在下面 get/set 里，被那里的 except 吞掉
             self._client = await aioredis.from_url(
@@ -30,6 +36,7 @@ class Redis:
                 password=self.config.password,
                 db=self.config.db,
             )
+            self._loop = loop
             return True
         except Exception as e:
             logger.warning(f"Redis initialization has failed: {e}")

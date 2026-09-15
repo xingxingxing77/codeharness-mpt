@@ -54,6 +54,16 @@ class RedisConfig(BaseModel):
         return f"{scheme}://{self.host}:{self.port}/{self.db}"
 
 
+class ExpPoolConfig(BaseModel):
+    """字段名与默认值照源 configs/exp_pool_config.py（默认全关，显式开了接线才生效）。
+    源的 retrieval_type/persist_path/collection_name/use_llm_ranker 随「存储换 Qdrant +
+    Redis 命中计数」的判定失去意义（chroma/bm25 双存储与 LLM ranker 都不搬），不带过来。"""
+
+    enabled: bool = False
+    enable_read: bool = False
+    enable_write: bool = False
+
+
 class SearchConfig(BaseModel):
     """源 search_config.py：只保留新栈实际接的两个引擎（ddg + serper）。"""
 
@@ -72,6 +82,7 @@ class Settings(BaseSettings):
     qdrant: QdrantConfig = QdrantConfig()
     redis: RedisConfig = RedisConfig()
     search: SearchConfig = SearchConfig()
+    exp_pool: ExpPoolConfig = ExpPoolConfig()
 
     workspace_root: str = "./workspace"
     memory_overflow_size: int = 200
