@@ -26,7 +26,7 @@ with TestClient(app) as c:
     print("health:", {k: h[k] for k in ("ok", "llm_configured", "model")})
     sid = c.post("/api/sessions", json={
         "idea": "做一个命令行 tinycli：只有一个 main.py，提供 --version 打印 0.1.0。要求极简，不要测试文件。",
-        "project_name": "real_e2e_d", "n_round": 2}).json()["id"]
+        "project_name": "real_e2e_e", "n_round": 2}).json()["id"]
     print("session:", sid, "start:", c.post(f"/api/sessions/{sid}/start").status_code)
     s = {}
     for i in range(150):

@@ -145,8 +145,21 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 - **计量链残尾收掉**（上面「仍未闭合 #1」的详情）。附带修掉一处同族坑：`utils/redis.py` 的 async client 绑死在建它的 event loop 上，换 loop 后读写静默变 None（降级语义吞掉 `Event loop is closed`）——`_connect` 现在认 `get_running_loop()` 变化重建。
 - **S5 三片就此全闭**：`exp_pool/` schema/serializers/manager/decorator 四件落地 + `@exp_cache` 真接线 `RoleZero.llm_cached_think`（命中=零模型调用，池默认关，`EXP_POOL__*` 开）。源 990 行的 chroma/bm25 与 LLM judge/ranker 按判定不复制，排序换成 Redis 命中计数（键=点 id=uuid5(tag,req)，三处同一派生式）。详见 `施工2` 的 S5.3 落地状态。
-- 门禁基线更新：**十个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / s3b(10) / s4(35) / **s5_memory_rag(24)** / **s8_runner_meter(4)** + test_p1 / test_roles_registry / test_e2e_classic_line。
+- 门禁基线更新：**十个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / **s3b(11)** / s4(35) / **s5_memory_rag(24)** / **s8_runner_meter(4)** + test_p1 / test_roles_registry / test_e2e_classic_line。
 - hit-rate 表复测会漂（HNSW 近似检索 + IDF 实时统计，4/4→3/4）：方向性结论仍成立，但 S9 要可复现数字得钉 ef/exact——口径记在 `施工2` S5.2 末。
+
+### 2026-09-15 深夜三段 · 真模型首次完整跑通（第十一处闭合，提交 `5f6225f`）
+
+复跑（`real_e2e_d`）在 Engineer 阶段又现形一处，且**根因不在报错点**：`ValueError: 非法产物文件名 ''（子目录 src）`。往上查穿的实是——`classic_team` 组队**没给任何 Agent 传 watch**，而 `Agent._observe` 默认只订阅 `UserRequirement`：SOP 把消息路由到了角色，角色却在观察层把跨角色消息整条丢掉，退化成拿空记忆干活。这场实测的直接后果：`design.md`/`tasks.json` 是模型**对着空需求编出来的通用套话**（node_modules/package.json，tinycli 根本不需要），Engineer 拿空 filename 烧掉一次真钱后被产物仓写拒炸掉会话。e2e 自测没抓到是因为它手写 `watch={"WriteTasks"}`——**生产组队与测试组队两套装配各长各的**，S3b t10 的「两套表互洽」教训第三次应验，这次是三张表（SOP 路由 × watch 订阅 × 产物契约）。
+
+- 修法（三处）：`classic_team` 每角色的 watch 对齐 SOP 入边；`WriteCode` 空 filename **软失败**（不进模型不烧钱、不抛、错误回喂自愈）；`DebugError` 回流消息补 `filename=code_filename` 对齐消费方键名。
+- 门禁：**s3b t11** 双向钉——SOP 每个 cause_by 必须 ∈ 目标角色 watch、watch 不许订阅 SOP 外孤儿 tag、`Engineer._observe` 行为级收到 `WriteTasks`、WriteCode 空上下文 FakeLLM 零调用。
+- 🏁 **首战完整跑通**（`real_e2e_e`，21:51–21:58）：PRD→Design→Tasks→Engineer 写出 `src/tinycli/main.py`（argparse，`--version` 真打 `0.1.0`，按真需求只此一文件）→QA WriteTest→END，`finished` 无错。产物内容跟着需求走（不再编 node_modules），watch 接线生效的直接证据。
+- 计量合流实战实证：跑动中 cost 逐笔涨（0→471/6002→1764/13388→终 2823/31856），失败/完成快照都在 sessions.json。
+- ⚠ 新现形（都有当场证据，未修）：
+  1. **`manual_real_e2e` 打完 FINAL 后挂住不退出**（两场都这样，events/tree 两行没打出来）——嫌疑在 app shutdown 没关 `AsyncSqliteSaver`（s3b 早有 `close_all()` 的同类先例注释）。归 S7 平台服务一并修。
+  2. **产物混头**：`main.py` 首行是 `## tinycli/main.py`——`_parse_code` 取了围栏体但把 markdown 小节头也带进文件（WriteCode 输出格式是 `## file name\n```python…```），纯外观但会让 `python main.py` 直接 SyntaxError，S6 的 fixture 该钉"产物必须可执行"。
+  3. **真模型的 `prompt_tokens` 报得极小**（本场终值 2823，对五角色的完整 system+context 不合理）：qwen MaaS 大概率按**缓存口径**报（隐式前缀缓存命中不计），token 账与计费口径要在 S9 双跑前对齐清楚。
 
 ### 本次审查缺陷清单（标「实测」的都已当场复现，非推测）
 
