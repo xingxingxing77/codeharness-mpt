@@ -57,5 +57,9 @@ class DebugError(BaseAction):
                        cause_by=self.name, sent_from="Engineer",
                        instruct_content={"code_filename": ctx.code_filename,
                                          "test_filename": ctx.test_filename,
-                                         "output_filename": ctx.output_filename},
+                                         "output_filename": ctx.output_filename,
+                                         # SOP 把 DebugError 路由回 Engineer，而 Engineer 的动作吃
+                                         # CodingContext.filename——只带 code_filename 等于回流空转
+                                         # （WriteCode 会走「缺上下文」软失败）。同一条修复回路两个键名对齐消费方。
+                                         "filename": ctx.code_filename},
                        instruct_schema="DebugOutput")

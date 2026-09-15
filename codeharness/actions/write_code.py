@@ -2,6 +2,7 @@
 get_codes(:168) 的"排除自身文件"语义保留；EditorReporter 换 editor_block 报道。"""
 from pathlib import Path
 from codeharness.base.action import BaseAction
+from codeharness.logs import logger
 from codeharness.schema import Message, Document, CodingContext
 from codeharness.const import RepoName, DocName
 from codeharness.document_store.artifact_store import ArtifactStore
@@ -58,6 +59,14 @@ ATTENTION: Use '##' to SPLIT SECTIONS, not '#'. Output format carefully referenc
 class WriteCode(BaseAction):
     async def run(self, msg: Message) -> Message:
         ctx = CodingContext(**(msg.instruct_content or {}))
+        if not ctx.filename:
+            # 空 filename 不进模型、不抛：真模型第十一处——路由没带 CodingContext 时这里
+            # 先烧一次真钱再被产物仓的写拒 ValueError 吹掉整场会话。错误回喂让角色自愈，
+            # 断因（watch 缺失/上下文键名漂移）由 s3b t11 的表自洽门禁负责。
+            logger.warning("WriteCode 未拿到 filename：上游 Send 缺 CodingContext 上下文")
+            return Message(content="[缺少任务上下文] 未收到 filename，本轮不写代码；"
+                                    "触发消息需携带 instruct_schema=CodingContext。",
+                           role="assistant", cause_by=self.name, sent_from="Engineer")
         store = ArtifactStore.active()
         design = (await store.get(RepoName.DOCS, DocName.DESIGN)) or Document(content="")
         tasks = (await store.get(RepoName.DOCS, DocName.TASKS)) or Document(content="")

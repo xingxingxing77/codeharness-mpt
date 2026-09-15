@@ -264,11 +264,50 @@ def t10_default_agents_cover_sop_targets():
         _fail(f"10. default_team 与经典线同名({sorted(overlap)})，换错兜底就测不出来了")
 
 
+def t11_classic_team_watch_covers_sop():
+    """经典组队的 watch 与 SOP 路由表必须双向自洽（真模型第十一处的根因门禁）。
+    实测链：classic_team 没给 watch → `Agent._observe` 默认只订阅 UserRequirement →
+    路由进来的消息整条被丢 → Architect/PMManager 拿空记忆让模型编造产物、
+    Engineer 空 filename 烧一次真钱再被产物仓写拒吹掉整场会话。
+    断言打在生产组队的表上，不是 e2e 手搭的那套——两套表各长各的，正是这个洞的成因。"""
+    import codeharness.team as T
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.actions.write_code import WriteCode
+    from codeharness.const import RequirementTag
+    keep, T._make_llm = T._make_llm, lambda cost_manager=None: FakeLLM(["{}"])
+    try:
+        agents = T._default_agents()
+    finally:
+        T._make_llm = keep
+    for cause_by, targets in SOP.items():
+        for t in targets:
+            if t not in agents:
+                _fail(f"11. SOP 路由目标 {t} 不在组队里（{cause_by}）")
+            if cause_by not in agents[t].watch:
+                _fail(f"11. {t} 的 watch={sorted(agents[t].watch)} 收不到路由它的 {cause_by}——"
+                      f"消息会在 _observe 被静默丢掉")
+    for name, ag in agents.items():
+        orphans = {w for w in ag.watch if w not in SOP and w != RequirementTag.USER_REQUIREMENT}
+        if orphans:
+            _fail(f"11. {name} 订阅了 SOP 里不存在的 tag: {sorted(orphans)}")
+    eng = agents["Engineer"]                      # 行为级：表配对了，消息真收得到
+    got = asyncio.run(eng._observe({"inbox": [Message(content="写 main.py",
+                                                      cause_by=RequirementTag.WRITE_TASKS)],
+                                    "memory": []}))
+    if not got["inbox"]:
+        _fail("11. Engineer._observe 仍把 WriteTasks 丢出收件箱")
+    fake = FakeLLM(["```python\nx=1\n```"])       # 软失败：空 filename 不进模型、不抛错
+    soft = asyncio.run(WriteCode(llm=fake).run(Message(content="无上下文的触发")))
+    if fake.calls or "filename" not in soft.content:
+        _fail(f"11. WriteCode 空 filename 未软失败（llm.calls={len(fake.calls)}）: {soft.content!r}")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
-              t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets]
+              t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
+              t11_classic_team_watch_covers_sop]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -277,7 +316,8 @@ def main():
     asyncio.run(close_all())
     print(f"\nS3(b) 门禁通过：{len(checks)} 组 —— R3 路由 5 组（BY_ORDER 全跑完/精准激活/显式指名/"
           f"<self> 目标校验/订阅可证伪）+ R4a 持久化 1 组 + R5 interrupt-resume 跨实例 1 组 + "
-          f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组")
+          f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
+          f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组")
 
 
 if __name__ == "__main__":

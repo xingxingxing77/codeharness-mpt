@@ -75,7 +75,12 @@ def _default_agents(cost_manager=None):
 
 
 def classic_team(llm):
-    """经典 Role 线五角色（参考速查全图）。每个 Agent 的 actions 即第 9 步的实现类。"""
+    """经典 Role 线五角色（参考速查全图）。每个 Agent 的 actions 即第 9 步的实现类。
+
+    ⚠ watch 集合逐个对齐 `team_graph.SOP` 的入边（真模型第十一处的根因，s3b t11 双向钉住）：
+    `Agent._observe` 默认只订阅 UserRequirement——缺 watch 的角色把路由进来的消息整条丢掉，
+    退化成拿空记忆干活（上游产物没了、内容全靠模型编），Engineer 则空 filename 一路炸到崩。
+    测试手写了 watch 而生产组队漏写，正是「两套表必须互洽」教训的又一处。"""
     from codeharness.roles.agent import Agent
     from codeharness.actions.write_prd import WritePRD
     from codeharness.actions.design_api import WriteDesign
@@ -90,13 +95,19 @@ def classic_team(llm):
                             "goal": "write a PRD"}, [WritePRD(llm=llm)], llm, max_loops=2),
         "Architect": Agent({"name": "Architect", "profile": "Architect",
                             "goal": "design a concise, usable, complete software system"},
-                           [WriteDesign(llm=llm)], llm, max_loops=2),
+                           [WriteDesign(llm=llm)], llm, max_loops=2,
+                           watch={RequirementTag.WRITE_PRD}),
         "PMManager": Agent({"name": "PMManager", "profile": "Project Manager",
-                            "goal": "break down tasks"}, [WriteTasks(llm=llm)], llm, max_loops=2),
+                            "goal": "break down tasks"}, [WriteTasks(llm=llm)], llm, max_loops=2,
+                           watch={RequirementTag.WRITE_DESIGN}),
         "Engineer":  Agent({"name": "Engineer", "profile": "Engineer", "goal": "write code"},
                            [WriteCode(llm=llm), SummarizeCode(llm=llm)], llm,
-                           react_mode="BY_ORDER", max_loops=4),
+                           react_mode="BY_ORDER", max_loops=4,
+                           watch={RequirementTag.WRITE_TASKS,
+                                  RequirementTag.WRITE_CODE_PLAN_AND_CHANGE,
+                                  RequirementTag.FIX_BUG, RequirementTag.DEBUG_ERROR}),
         "QA":        Agent({"name": "QA", "profile": "QA Engineer", "goal": "test the code"},
                            [WriteTest(llm=llm), RunCode(llm=llm), DebugError(llm=llm)], llm,
-                           react_mode="REACT", max_loops=5),
+                           react_mode="REACT", max_loops=5,
+                           watch={RequirementTag.SUMMARIZE_CODE}),
     }
