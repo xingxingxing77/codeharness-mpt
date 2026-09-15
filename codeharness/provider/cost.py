@@ -59,6 +59,10 @@ class CostManager(BaseModel):
         else:
             usage = (getattr(resp, "response_metadata", None) or {}).get("token_usage") or {}
             pt, ct = usage.get("prompt_tokens", 0) or 0, usage.get("completion_tokens", 0) or 0
+        if pt + ct == 0:
+            # 漏账必须可见：update_cost 对 0 静默 return，真模型实测一场会话里几十次调用
+            # 只有零星几笔入账时无从分辨"哪条路没回执"（2026-09-15）。有 warning 才有可 grep 的账差。
+            logger.warning(f"add_usage: response 无 usage，本笔不进账 (model={model}, tag={tag})")
         self.update_cost(pt, ct, model)
         self.records.append({"tag": tag, "model": model, "pt": pt, "ct": ct})
 

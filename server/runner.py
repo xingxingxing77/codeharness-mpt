@@ -17,6 +17,17 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _seeded_ledger(saved: dict):
+    """进程重启后的 resume 路径：账本从会话记录里上次落盘的快照起算。
+    不播种的话新账本从 0 起，终态快照会把历史用量整段覆盖掉（合流断点之二）。"""
+    from codeharness.provider.cost import CostManager
+    cm = CostManager()
+    cm.total_prompt_tokens = int(saved.get("total_prompt_tokens", 0) or 0)
+    cm.total_completion_tokens = int(saved.get("total_completion_tokens", 0) or 0)
+    cm.total_cost = float(saved.get("total_cost", 0) or 0)
+    return cm
+
+
 class SessionRunner:
     def __init__(self, store, bus, llm_defaults: dict | None = None):
         self.store, self.bus = store, bus
@@ -65,10 +76,9 @@ class SessionRunner:
         session = self.store.get(sid)
         if not session:
             return None
-        from codeharness.provider.cost import CostManager
         from codeharness.team import prepare_project
         project = self.projects[sid] = session.project_name or sid
-        self.costs.setdefault(sid, CostManager())
+        self.costs.setdefault(sid, _seeded_ledger(session.cost or {}))
         team, config, _init = prepare_project(session.idea, project, checkpointer=await self._saver(),
                                               cost_manager=self.costs[sid])
         # 重建出来的图只用于 resume：init 不能再喂一遍，否则等于重开一个线程
@@ -219,10 +229,30 @@ class SessionRunner:
         finally:
             self.tasks.pop(sid, None)
 
-    # ---- astream_events 翻译（只两件事，其余块走报道槽） --------------------
+    def _sync_cost(self, sid: str):
+        """每笔 LLM 调用落账后把账本合进会话态与事件流（GET 轮询与 SSE 各读一头）。
+        ⚠ 读的是 `self.costs[sid]`——必须与图内 gateway 持同一个实例，双账本正是恒 0 的根因；
+        快照可能比最后一笔晚到一步（on_chat_model_end 的回调先于网关落账），终态快照兜底。"""
+        cm = self.costs.get(sid)
+        session = self.store.get(sid)
+        if cm is None or session is None:
+            return
+        c = cm.get_costs()
+        cost = {"total_cost": round(c.total_cost, 4),
+                "total_prompt_tokens": c.total_prompt_tokens,
+                "total_completion_tokens": c.total_completion_tokens}
+        self.store.set_cost(sid, cost, persist=True)
+        status = str(session.status.value if hasattr(session.status, "value") else session.status)
+        self.bus.publish(sid, kind="status",
+                         value={"status": status, "error": session.error,
+                                "cost": cost, "message": ""})
+
+    # ---- astream_events 翻译（LLM 用量合流与打字机、interrupt，其余块走报道槽） ----
     def _translate(self, sid: str, ev: dict):
         kind = ev.get("event", "")
-        if kind == "on_chat_model_stream":
+        if kind == "on_chat_model_end":
+            self._sync_cost(sid)
+        elif kind == "on_chat_model_stream":
             # structured 输出不进这里做打字机（内核 Thought 块整段上屏）；这里只兜底裸文本流
             chunk = ev["data"]["chunk"]
             if getattr(chunk, "content", ""):
@@ -246,7 +276,7 @@ class SessionRunner:
             cost = {"total_cost": round(c.total_cost, 4),
                     "total_prompt_tokens": c.total_prompt_tokens,
                     "total_completion_tokens": c.total_completion_tokens}
-            self.store.set_cost(session.id, cost)
+            self.store.set_cost(session.id, cost, persist=True)
         self.bus.publish(session.id, kind="status",
                          value={"status": str(session.status.value if hasattr(session.status, "value")
                                                else session.status),

@@ -82,5 +82,7 @@ class SessionStore:
             self._persist()
         return self._sessions[sid]
 
-    def set_cost(self, sid: str, cost: dict):
-        self.update(sid, persist=False, cost=cost)
+    def set_cost(self, sid: str, cost: dict, persist: bool = False):
+        """persist=True：崩了也能从 sessions.json 拿到最近一次落盘的账（S9 双跑靠它）。
+        ponytail: 每次合流重写整份 JSON，量级到几百会话时换 S7 的 Redis 会话态。"""
+        self.update(sid, persist=persist, cost=cost)
