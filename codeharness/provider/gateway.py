@@ -27,10 +27,6 @@ from codeharness.logs import log_llm_stream, logger
 from codeharness.const import USE_CONFIG_TIMEOUT
 
 
-class NoMoneyException(Exception):
-    """预算耗尽。与 provider/cost.py 同一异常类（team_graph.budget_guard 抛出）。"""
-
-
 def _message_to_dict(m: Union[str, dict, BaseMessage]) -> dict:
     """把单条消息归一成 openai 的 {role, content} dict（源 format_msg 的叶子）。"""
     if isinstance(m, str):
@@ -69,6 +65,9 @@ class LLMGateway:
             streaming=cfg.stream,
             timeout=cfg.timeout or None,
         )
+        if cfg.stream:
+            # 没有它，OpenAI 兼容端点的流式响应末块不回 token_usage → add_usage(0,0) → 整条线账为 0
+            kwargs["stream_usage"] = True
         if cfg.top_p != 1.0:
             kwargs["top_p"] = cfg.top_p
         if cfg.n is not None:

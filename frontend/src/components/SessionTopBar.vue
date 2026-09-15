@@ -50,7 +50,7 @@
 
     <!-- 右侧公共区 -->
     <span v-if="!home" class="cost" :title="costTip">
-      ${{ (cost.total_cost ?? 0).toFixed(3) }}<template v-if="cost.max_budget"> / ${{ cost.max_budget }}</template>
+      ${{ (cost.total_cost ?? 0).toFixed(3) }}
     </span>
     <button v-if="!home" class="icon-btn" title="审查代码变更" @click="openReview">
       <Icon name="sliders" :size="18" />
@@ -158,7 +158,6 @@ async function restart() {
     await store.createSession({
       idea: cur.idea,
       project_name: '',
-      investment: cur.investment,
       n_round: cur.n_round,
       llm: cur.llm_override
     })

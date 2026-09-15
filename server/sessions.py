@@ -22,7 +22,6 @@ class Session(BaseModel):
     id: str
     idea: str
     project_name: str
-    investment: float = 3.0
     n_round: int = 5
     status: SessionStatus = SessionStatus.created
     llm_override: dict = Field(default_factory=dict)
@@ -57,11 +56,11 @@ class SessionStore:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self.path)
 
-    def create(self, idea: str, investment: float = 3.0, n_round: int = 5,
+    def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: Optional[dict] = None) -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
-        s = Session(id=sid, idea=idea, project_name=name, investment=investment, n_round=n_round,
+        s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name),      # 产物目录=会话目录（前端文件树读这里）
                     created_at=_now())

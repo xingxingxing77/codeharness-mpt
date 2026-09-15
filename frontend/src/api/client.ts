@@ -23,7 +23,6 @@ export const api = {
   createSession: (payload: {
     idea: string
     project_name?: string
-    investment?: number
     n_round?: number
     llm?: Record<string, any>
   }) => req<Session>('POST', '/api/sessions', payload),

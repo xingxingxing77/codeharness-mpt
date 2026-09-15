@@ -666,7 +666,6 @@ class TeamState(BaseModel):
     """图状态的一部分（TypedDict 版在 environment/team_graph.py 内定义）。"""
 
     round: int = 0
-    budget_used: float = 0.0
     debug_rounds: int = 0
     finished: bool = False
 

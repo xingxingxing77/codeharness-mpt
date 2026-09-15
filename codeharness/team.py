@@ -4,7 +4,7 @@ from codeharness.schema import Message
 from codeharness.const import RequirementTag, TEAMLEADER_NAME
 
 
-def default_team(llm, cost_manager=None, env_desc: str = "a software company"):
+def default_team(llm, env_desc: str = "a software company"):
     """= 源 software_company.py 组队（RoleZero 系，参考速查 §4）；经典线组队见 第 9 步 §4"""
     from codeharness.roles.role_zero import RoleZero
     from codeharness.prompts.role_zero import SYSTEM_PROMPT
@@ -19,45 +19,41 @@ def default_team(llm, cost_manager=None, env_desc: str = "a software company"):
             for name, (prof, goal) in profiles.items()}
 
 
-async def run_project(idea: str, project_id: str, investment: float | None = None,
-                      agents: dict | None = None, checkpointer=None):
+async def run_project(idea: str, project_id: str, agents: dict | None = None,
+                      checkpointer=None, cost_manager=None):
     """async generator：产出 astream_events 事件（脚本场景）。runner 用 prepare_project。"""
     if agents is None:
-        agents = default_team(llm=_make_llm(cost_manager))
+        agents = default_team(_make_llm(cost_manager))
     from codeharness.environment.team_graph import build_team
     team = build_team(agents, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "docs": {}, "round": 0,
-            "budget_used": 0.0, "debug_rounds": 0, "finished": False}
+            "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
     async for ev in team.astream_events(init, config, version="v2"):
         yield ev
 
 
-def prepare_project(idea: str, project_id: str, investment: float | None = None,
-                    agents: dict | None = None, checkpointer=None):
+def prepare_project(idea: str, project_id: str, agents: dict | None = None,
+                    checkpointer=None, cost_manager=None):
     """runner 专用（第 10 步 §3.5）：返回 (graph, config, init) 三件套，由 runner 自己驱动 astream——
-    interrupt resume 必须持有同一 graph 实例与 thread_id。"""
+    interrupt resume 必须持有同一 graph 实例与 thread_id。
+
+    ⚠ `cost_manager` 必须由调用方建好传进来：图内部各角色的 LLM 共用这一个实例，
+    调用方手上的另一个实例只会记到 0（这个断链曾让前端用量恒为 0）。"""
     from codeharness.environment.team_graph import build_team
-    from codeharness.provider.gateway import LLMGateway
-    from codeharness.provider.cost import CostManager
-    from codeharness.configs.settings import settings
     if agents is None:
-        agents = default_team(LLMGateway(
-            cost_manager=CostManager(max_budget=investment or settings.max_budget)))
+        agents = default_team(_make_llm(cost_manager))
     team = build_team(agents, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "docs": {}, "round": 0,
-            "budget_used": 0.0, "debug_rounds": 0, "finished": False}
+            "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
     return team, config, init
 
 
 def _make_llm(cost_manager=None):
     from codeharness.provider.gateway import LLMGateway
-    from codeharness.configs.settings import settings
     from codeharness.provider.cost import CostManager
-    return LLMGateway(cost_manager=cost_manager or CostManager(max_budget=settings.max_budget))
+    return LLMGateway(cost_manager=cost_manager or CostManager())
 
 
 def classic_team(llm):

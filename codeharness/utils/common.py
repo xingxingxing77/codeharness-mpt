@@ -320,18 +320,6 @@ class CodeParser:
         return tasks
 
 
-class NoMoneyException(Exception):
-    """Raised when the operation cannot be completed due to insufficient funds"""
-
-    def __init__(self, amount, message="Insufficient funds"):
-        self.amount = amount
-        self.message = message
-        super().__init__(self.message)
-
-    def __str__(self):
-        return f"{self.message} -> Amount required: {self.amount}"
-
-
 def print_members(module, indent=0):
     """
     https://stackoverflow.com/questions/1796180/how-can-i-get-a-list-of-all-classes-within-current-module-in-python

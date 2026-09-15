@@ -2,7 +2,6 @@ export interface Session {
   id: string
   idea: string
   project_name: string
-  investment: number
   n_round: number
   status: string // created | running | awaiting_human | stopping | finished | stopped | failed
   llm_override: Record<string, any>

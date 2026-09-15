@@ -57,7 +57,6 @@ import McpPage from './settings/McpPage.vue'
 import PersonalizePage from './settings/PersonalizePage.vue'
 import ProfilePage from './settings/ProfilePage.vue'
 import ShortcutsPage from './settings/ShortcutsPage.vue'
-import UsagePage from './settings/UsagePage.vue'
 import WorktreesPage from './settings/WorktreesPage.vue'
 
 const ui = useUiStore()
@@ -79,8 +78,7 @@ const NAV = [
   { key: 'worktrees', icon: 'branch', label: '工作树' },
   { key: 'browser', icon: 'window', label: '浏览器' },
   { key: 'computer', icon: 'cursor', label: '电脑操控' },
-  { key: 'archived', icon: 'archive', label: '已归档对话' },
-  { key: 'usage', icon: 'coins', label: '使用情况和计费' }
+  { key: 'archived', icon: 'archive', label: '已归档对话' }
 ]
 
 const PAGES: Record<string, any> = {
@@ -98,8 +96,7 @@ const PAGES: Record<string, any> = {
   worktrees: WorktreesPage,
   browser: BrowserPage,
   computer: ComputerPage,
-  archived: ArchivedPage,
-  usage: UsagePage
+  archived: ArchivedPage
 }
 
 const pageComp = computed(() => PAGES[ui.settingsPage] || GeneralPage)

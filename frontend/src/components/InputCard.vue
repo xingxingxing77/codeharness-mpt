@@ -20,7 +20,7 @@
         @keydown="onKey"
       />
       <div class="irow">
-        <button class="icon-btn" title="高级设置（预算 / LLM 覆盖）" @click="openAdvanced">
+        <button class="icon-btn" title="高级设置（LLM 覆盖）" @click="openAdvanced">
           <Icon name="plus" :size="18" />
         </button>
 
@@ -134,7 +134,7 @@
         <div class="menu-divider" />
         <div class="menu-item" @click="openAdvanced">
           <Icon name="plus" :size="15" />
-          <span class="grow">更多设置（预算 / LLM）...</span>
+          <span class="grow">更多设置（LLM 覆盖）...</span>
         </div>
       </div>
     </div>
@@ -251,7 +251,7 @@ function openAdvanced() {
 function usage() {
   menuMode.value = false
   const c = store.cost || {}
-  message.info(`已用 $${(c.total_cost ?? 0).toFixed(3)}${c.max_budget ? ` / 预算 $${c.max_budget}` : ''}`)
+  message.info(`已用 $${(c.total_cost ?? 0).toFixed(3)} · token ${c.total_prompt_tokens ?? 0}/${c.total_completion_tokens ?? 0}`)
 }
 
 function grow() {
@@ -282,7 +282,6 @@ async function send() {
       await store.createSession({
         idea,
         project_name: ui.composer.project === '不使用项目' ? undefined : ui.composer.project,
-        investment: 3.0,
         n_round: ui.composer.rounds,
         llm: {}
       })

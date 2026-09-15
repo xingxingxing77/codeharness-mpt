@@ -98,8 +98,8 @@
         </div>
         <div class="s-row">
           <Icon name="coins" :size="15" />
-          <span class="grow">剩余用量</span>
-          <span class="sub">${{ (store.cost?.total_cost ?? 0).toFixed(3) }}<template v-if="store.cost?.max_budget"> / ${{ store.cost.max_budget }}</template></span>
+          <span class="grow">已用</span>
+          <span class="sub">${{ (store.cost?.total_cost ?? 0).toFixed(3) }}</span>
         </div>
         <div class="menu-divider" />
         <div class="s-row">

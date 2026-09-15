@@ -11,7 +11,6 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 class CreateSessionReq(BaseModel):
     idea: str = Field(min_length=1)
     project_name: str = ""
-    investment: float = 3.0
     n_round: int = 5
     llm: dict = Field(default_factory=dict)
 
@@ -36,7 +35,7 @@ def list_sessions(request: Request):
 
 @router.post("")
 async def create_session(req: CreateSessionReq, request: Request):
-    s = _get(request, "store").create(idea=req.idea, investment=req.investment, n_round=req.n_round,
+    s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
                                       project_name=req.project_name.strip(), llm_override=req.llm)
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
     return s.model_dump()

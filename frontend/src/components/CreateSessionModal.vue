@@ -27,9 +27,6 @@
           </n-form-item>
         </n-gi>
       </n-grid>
-      <n-form-item label="预算（美元，超限自动停止）">
-        <n-input-number v-model:value="form.investment" :min="0.1" :max="100" :step="0.5" style="width: 200px" />
-      </n-form-item>
 
       <n-collapse>
         <n-collapse-item title="高级：LLM 覆盖（留空使用服务端 config2.yaml）" name="llm">
@@ -96,7 +93,6 @@ const form = reactive({
   idea: '',
   project_name: '',
   n_round: 5,
-  investment: 3.0,
   llm: { model: '', api_type: '', base_url: '', api_key: '' } as Record<string, string>
 })
 
@@ -124,13 +120,12 @@ async function submit() {
     await store.createSession({
       idea: form.idea.trim(),
       project_name: form.project_name.trim() || undefined,
-      investment: form.investment,
       n_round: form.n_round,
       llm: cleanOverride()
     })
     await store.start()
     ui.showCreate = false
-    Object.assign(form, { idea: '', project_name: '', n_round: 5, investment: 3.0 })
+    Object.assign(form, { idea: '', project_name: '', n_round: 5 })
     form.llm = { model: '', api_type: '', base_url: '', api_key: '' }
   } catch (e: any) {
     error.value = e.message || String(e)

@@ -1,7 +1,7 @@
 """S2 门禁：LLM 网关 + 修复管线 + 配置与成本。零联网、零 token 花费。
 
 覆盖 docs/施工1 的 S2 门禁三条（payload 快照 / FakeLLM 记账非零 / 不重复计数），
-另加源符号面对齐、repair 组合档、预算语义、未支持厂商不静默退回。
+另加源符号面对齐、repair 组合档、只读计量与预算不回潮、未支持厂商不静默退回。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s2_gateway.py
@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from codeharness.configs.llm_config import LLMConfig, LLMType
 from codeharness.configs.settings import RedisConfig, Settings, settings
-from codeharness.provider.cost import CostManager, NoMoneyException
+from codeharness.provider.cost import CostManager, TokenCostManager
 from codeharness.provider.fake import FakeLLM
 from codeharness.provider.gateway import LLMGateway
 
@@ -26,7 +26,7 @@ def _gw(cfg=None, reply="好的", usage=None, structured_result=None, structured
     """造一个不触网的 gateway：模型换成桩，成本账本独立。"""
     g = LLMGateway.__new__(LLMGateway)
     g.cfg = cfg or LLMConfig(model="gpt-4o", api_key="sk-test", max_token=1024)
-    g.cost_manager = CostManager(max_budget=10.0)
+    g.cost_manager = CostManager()
     g._model = _Stub(reply, usage, structured_result, structured_error)
     return g
 
@@ -295,35 +295,46 @@ def t10_settings():
         _fail("10. settings 缺 repair_llm_output 开关（repair 层读它）")
 
 
-# ---------- 11. 预算：源只有事后 _check_balance，预测式判断是新栈自有 ----------
-def t11_budget():
-    cm = CostManager(max_budget=0.001)
+# ---------- 11. 计量：只读累计；预算强制不得回潮 ----------
+def t11_usage():
+    cm = CostManager()
     cm.update_cost(1000, 1000, "gpt-4o")
-    if cm.total_cost < 0.001:
-        _fail(f"11. update_cost 没累计: {cm.total_cost}")
-    if cm.is_within_budget(estimated_cost=1.0):
-        _fail("11. 超预算却被判为在预算内")
-    # 已超支时即便预估 0 也不放行——与源 `>=` 语义一致（源 CostManager 无预测式方法，此为新增）
-    if cm.is_within_budget(estimated_cost=0.0):
-        _fail("11. 已超支却放行零成本预估")
-    before = cm.total_budget
-    cm.update_budget(0.5)
-    if cm.total_budget != before + 0.5:
-        _fail("11. update_budget 未累加")
-    try:
-        cm.check_budget()
-    except NoMoneyException as e:
-        # 源 team.py:100 是两参抛出：NoMoneyException(total_cost, "Insufficient funds: ...")
-        if len(e.args) != 2 or abs(e.args[0] - cm.total_cost) > 1e-12 or "Insufficient funds" not in e.args[1]:
-            _fail(f"11. NoMoneyException 参数形式与源不符: {e.args!r}")
-    else:
-        _fail("11. check_budget 未在超支时抛 NoMoneyException")
-    if CostManager(max_budget=0).is_within_budget(estimated_cost=1e9) is not True:
-        _fail("11. max_budget<=0 应视为不限预算（新栈语义）")
-    ok = CostManager(max_budget=100.0)
-    if not ok.is_within_budget(estimated_cost=0.01):
-        _fail("11. 远未触顶却被拒绝")
-    ok.check_budget()
+    if cm.total_prompt_tokens != 1000 or cm.total_completion_tokens != 1000 or cm.total_cost <= 0:
+        _fail(f"11. update_cost 累计不对: {cm.get_costs()}")
+    c = cm.get_costs()
+    if len(c) != 3:
+        _fail(f"11. Costs 应只有 pt/ct/cost 三个只读字段: {c}")
+    # 未知模型：记 token 但不算钱（价目表缺项不得污染成本）
+    cm2 = CostManager()
+    cm2.update_cost(10, 10, "no-such-model-xyz")
+    if cm2.total_prompt_tokens != 10 or cm2.total_cost != 0:
+        _fail(f"11. 未知模型应记 token 不计成本: {cm2.get_costs()}")
+    # 免费模型走 TokenCostManager
+    cm3 = TokenCostManager()
+    cm3.update_cost(5, 5, "gpt-4o")
+    if cm3.total_cost != 0 or cm3.total_prompt_tokens != 5:
+        _fail("11. TokenCostManager 不该算钱")
+    # 预算强制已作废：这些符号存在即为回潮
+    for name in ("max_budget", "total_budget", "check_budget", "is_within_budget", "update_budget"):
+        if hasattr(CostManager, name) or name in CostManager.model_fields:
+            _fail(f"11. 预算符号回潮: {name}")
+    import codeharness.provider.cost as cost_mod
+    import codeharness.provider.gateway as gw
+    import codeharness.utils.common as common_mod
+    for mod in (cost_mod, gw, common_mod):
+        if hasattr(mod, "NoMoneyException"):
+            _fail(f"11. NoMoneyException 回潮: {mod.__name__}")
+    # 价目表单源：两份字典必然调价漏一处（注意别比实例字段——pydantic 会拷贝 dict 默认值）
+    from codeharness.utils import token_counter
+    if token_counter.TOKEN_COSTS is not cost_mod.TOKEN_COSTS:
+        _fail("11. TOKEN_COSTS 出现第二真源")
+    # 真模型流式必须带 stream_usage，否则末块无 usage、整条线账为 0（FakeLLM 自造 metadata 测不出）
+    m = LLMGateway._build(LLMConfig(model="gpt-4o", api_key="sk-test", stream=True))
+    if getattr(m, "stream_usage", None) is not True:
+        _fail("11. 流式未开 stream_usage —— 真模型记账恒 0")
+    m2 = LLMGateway._build(LLMConfig(model="gpt-4o", api_key="sk-test", stream=False))
+    if getattr(m2, "streaming", False) or getattr(m2, "stream_usage", None):
+        _fail("11. stream=False 却建成了流式模型")
 
 
 # ---------- 12. structured 回落修复档 + aask_code ----------
@@ -353,13 +364,13 @@ def t12_structured_and_code():
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
-              t8_retry_parse, t9_extract_helpers, t10_settings, t11_budget, t12_structured_and_code]
+              t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS2 门禁全部通过：{len(checks)} 组（cfg→客户端快照 / 未支持厂商显式失败 / format_msg / "
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
-          f"配置字段照源与 env 注入 / 预算语义 / structured 回落与 aask_code）")
+          f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code）")
 
 
 if __name__ == "__main__":

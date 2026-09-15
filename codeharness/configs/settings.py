@@ -75,7 +75,6 @@ class Settings(BaseSettings):
 
     workspace_root: str = "./workspace"
     memory_overflow_size: int = 200
-    max_budget: float = 10.0
     enable_rag: bool = True
 
     # 源 config2.py 的 Config 级开关（repair.py 与 gateway 的重试层读它）
