@@ -36,7 +36,7 @@ class QdrantConfig(BaseModel):
     port: Optional[int] = None
     url: str = "http://localhost:6333"
     api_key: str = ""
-    collection_name: str = "m3"
+    collection_prefix: str = "codeharness"    # R9：单 collection 的名字，租户靠 payload 隔离
 
 
 class RedisConfig(BaseModel):

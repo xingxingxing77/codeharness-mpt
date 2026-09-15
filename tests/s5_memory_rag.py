@@ -13,8 +13,10 @@
 """
 import asyncio
 import json
+import os
 import sys
 import uuid
+from pathlib import Path
 
 import redis as sync_redis
 
@@ -250,6 +252,254 @@ def t11_observe_dedupes_and_survives_partial_results():
     print("  t11 结果去重、无 results 的轮不报错")
 
 
+# ---------------- R9 · Qdrant named vectors / hybrid / 多租户 ----------------
+GATE_COLL = "s5gate"            # 自测专用集合，绝不碰生产 collection
+
+
+def live_qdrant() -> bool:
+    import httpx
+    from codeharness.configs.settings import settings
+    try:
+        return httpx.get(f"{settings.qdrant.url}/healthz", timeout=3).status_code == 200
+    except Exception:
+        return False
+
+
+def gate_store():
+    from codeharness.document_store.qdrant_store import QdrantStore
+    return QdrantStore(collection=GATE_COLL)
+
+
+def pid(tag: str) -> str:
+    """Qdrant 点 id 只收无符号整数或 UUID，自测里的可读名字统一派生成 UUID。"""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, tag))
+
+
+class HashEmbeddings:
+    """确定性 bag-of-chars 假 embedding：离线、可复现，dense 只看得见字符重叠（正是对照实验要利用的）。"""
+
+    dim = 64
+
+    def _v(self, text: str) -> list[float]:
+        v = [0.0] * self.dim
+        for ch in text:
+            v[ord(ch) % self.dim] += 1.0
+        n = sum(x * x for x in v) ** 0.5 or 1.0
+        return [x / n for x in v]
+
+    async def aembed_documents(self, texts):
+        return [self._v(t) for t in texts]
+
+    async def aembed_query(self, q):
+        return self._v(q)
+
+
+class BoomEmbeddings(HashEmbeddings):
+    async def aembed_documents(self, texts):
+        raise ConnectionError("embedding 端点不在线")
+
+    async def aembed_query(self, q):
+        raise ConnectionError("embedding 端点不在线")
+
+
+def t12_collection_shape():
+    """R9 的四条形态必须在真集合上看得见，不是配置字符串。"""
+    if not live_qdrant():
+        print("  t12 跳过（无 Qdrant）")
+        return
+    from qdrant_client import QdrantClient
+    st = gate_store()
+    asyncio.run(st.ensure(HashEmbeddings().dim))
+    c = QdrantClient(url=settings.qdrant.url)
+    info = c.get_collection(GATE_COLL)
+    assert "dense" in str(info.config.params.vectors), info.config.params.vectors
+    assert "sparse" in str(info.config.params.sparse_vectors)
+    assert "int8" in str(info.config.quantization_config).lower(), "标量量化没生效"
+    schema = info.payload_schema
+    assert "user_id" in schema and "doc_type" in schema, list(schema)
+    assert schema["user_id"].params.is_tenant is True, "user_id 没建成租户索引"
+    assert not schema["doc_type"].params.is_tenant, "doc_type 不该是租户索引"
+    print("  t12 集合形态：named dense+sparse(IDF)+INT8 量化+user_id 租户索引")
+
+
+def t13_tenant_and_doctype_isolation():
+    if not live_qdrant():
+        print("  t13 跳过（无 Qdrant）")
+        return
+    from codeharness.document_store.qdrant_store import Point
+    st = gate_store()
+    emb = HashEmbeddings()
+    asyncio.run(st.write([
+        Point(id=pid("u1-kb"), text="alpha 租户的 kb 内容 zzz", dense=emb._v("alpha 租户的 kb 内容 zzz"),
+              doc_type="kb", user_id="u1"),
+        Point(id=pid("u2-kb"), text="alpha 租户的 kb 内容 zzz", dense=emb._v("alpha 租户的 kb 内容 zzz"),
+              doc_type="kb", user_id="u2"),
+        Point(id=pid("u1-mem"), text="alpha 租户的 kb 内容 zzz", dense=emb._v("alpha 租户的 kb 内容 zzz"),
+              doc_type="memory", user_id="u1")]))
+    q = emb._v("alpha 租户的 kb 内容 zzz")
+    ids = lambda hits: {h.id for h in hits}
+    assert ids(asyncio.run(st.search("alpha zzz", q, user_id="u1", doc_type="kb"))) == {pid("u1-kb")}
+    assert ids(asyncio.run(st.search("alpha zzz", q, user_id="u1"))) == {pid("u1-kb"), pid("u1-mem")}
+    assert ids(asyncio.run(st.search("alpha zzz", q, user_id="u2", doc_type="memory"))) == set()
+    print("  t13 单集合内 user_id 与 doc_type 双向隔离（跨租户/跨切片都查不到）")
+
+
+def t14_sparse_indices_are_process_stable():
+    """维度必须跨进程稳定：`str.hash()` 按进程加盐，用它做 sparse 下标 = 索引随重启失效。"""
+    import json
+    import subprocess
+    from codeharness.document_store.qdrant_store import sparse_from_text
+    text = "session_root 会话隔离 123"
+    a = sparse_from_text(text)
+    code = ("import json;from codeharness.document_store.qdrant_store import sparse_from_text as s;"
+            f"print(json.dumps(s({text!r}).indices))")
+    env = {**os.environ, "PYTHONHASHSEED": "12345",
+           "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env=env, timeout=90).stdout.strip()
+    assert out and json.loads(out) == list(a.indices), f"换进程加盐后维度变了：{out} vs {a.indices}"
+    print("  t14 sparse 下标用 crc32，跨进程（换 PYTHONHASHSEED）稳定")
+
+
+def t15_longterm_overflow_recall_roundtrip():
+    if not live_qdrant():
+        print("  t15 跳过（无 Qdrant）")
+        return
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.schema import Message
+    CURRENT_PROJECT.set("s5_r9_proj")
+    ltm = LongTermMemory(embeddings=HashEmbeddings(), user_id="u_r9", store=gate_store())
+    n = asyncio.run(ltm.overflow([Message(content="run_proc 在 Windows 上按进程树杀子进程",
+                                         role="user", sent_from="Alex"),
+                                  Message(content="同上", role="user")]))
+    assert n == 2 and asyncio.run(ltm.overflow([Message(content="run_proc 在 Windows 上按进程树杀子进程",
+                                                        role="user", sent_from="Alex")])) == 1
+    hits = asyncio.run(ltm.recall("run_proc 超时怎么保留输出", k=3))
+    assert any("进程树" in h.content for h in hits), hits
+    one = next(h for h in hits if "进程树" in h.content)
+    assert one.sent_from == "Alex" and one.role == "user"
+    asyncio.run(ltm.drop())
+    assert asyncio.run(ltm.recall("run_proc", k=3)) == []
+    print("  t15 LongTermMemory 入库幂等 + 召回字段完整 + drop 收口")
+
+
+def t16_rolezero_uses_longterm_recall():
+    """role_zero.py:49 的 self.ltm 此前从不被构造，recall 分支是死代码。"""
+    if not live_qdrant():
+        print("  t16 跳过（无 Qdrant）")
+        return
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.schema import Message
+    CURRENT_PROJECT.set("s5_r9_proj")
+    ltm = LongTermMemory(embeddings=HashEmbeddings(), user_id="u_r9", store=gate_store())
+    asyncio.run(ltm.overflow([Message(content="既有约定：门禁一律不花钱", role="user", sent_from="Memo")]))
+    role = _role()
+    role.ltm = ltm
+    asyncio.run(role._think({"task": "给项目加个门禁", "history": [], "experience": "",
+                            "respond_language": "中文", "finished": False}))
+    joined = " ".join(str(getattr(m, "content", m)) for m in role.llm.payloads[-1])
+    assert "门禁一律不花钱" in joined, "召回的经验没进 prompt"
+    asyncio.run(ltm.drop())
+    print("  t16 召回的经验真出现在发给模型的 prompt 里")
+
+
+def t17_embedding_outage_degrades_not_crashes():
+    """embedding 端点下线是运行态，不是编程错误：只降级 + 留痕，不能把角色跑死。"""
+    if not live_qdrant():
+        print("  t17 跳过（无 Qdrant）")
+        return
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.schema import Message
+    CURRENT_PROJECT.set("s5_r9_boom")
+    role = _role(memory_k=1)
+    role.ltm = LongTermMemory(embeddings=BoomEmbeddings(), user_id="u_boom", store=gate_store())
+    assert asyncio.run(role._ltm_recall("任何任务")) == ""
+    role.memory.add(Message(content="第一条", role="user"))
+    role.memory.add(Message(content="第二条", role="user"))
+    asyncio.run(role._compress())                   # 入库失败 → warning，不抛
+    assert role.memory.count() == 1
+    print("  t17 embedding 不可用：召回与入库都只降级不抛")
+
+
+CORPUS_QUERY = [  # (标识符, query)：gold 与干扰项共用同一段中文尾，只差那个标识符的拼写
+    ("run_proc", "run_proc 的超时行为是怎么处理的"),
+    ("session_root", "session_root 返回的是哪个目录"),
+    ("is_relative_to", "判越界为什么要用 is_relative_to"),
+    ("stream_usage", "流式调用为什么要开 stream_usage"),
+]
+TAIL = "这一条说明写在本仓的施工文档里，涉及超时、目录、日志与重试的默认行为，生产环境请按约定办。"
+
+
+def near_miss(key: str) -> list[str]:
+    """五种变异都保证「词形不同」：大小写变体与「gold 的超集」不能用，它们在词法上等价，会把对照稀释掉。
+    字符集却高度重合（反转、去下划线、换尾缀）—— 正是字符袋 dense 分不开、分词 sparse 分得开的那一类。"""
+    return [key[:-1], key.replace("_", ""), key[:-2] + "ive", key[::-1], key.replace("_", "x")]
+
+
+def t18_hitrate_single_vs_hybrid_table():
+    """S5 唯一的升级度量：同一批 query，dense-only 与 hybrid(dense+sparse) 的 hit-rate@5，两份都存盘。
+
+    没有这张表，S5 就只是"改写了"，不是"升级了"（docs §S5 门禁原话）。
+    对照靠的是假 dense 的真实缺陷：bag-of-chars 只有字符重叠、没有词边界，
+    近似拼写的干扰项一批量塞进语料就把 gold 挤出 top-5；词法 sparse 有词边界 + 服务端 IDF，仍能置顶。
+    真 bge-m3 上线后要拿同一份 query 集重测一遍（那张表才是 S9 的基线）。
+    """
+    if not live_qdrant():
+        print("  t18 跳过（无 Qdrant）")
+        return
+    import json
+    from codeharness.document_store.qdrant_store import Point
+    st = gate_store()
+    emb = HashEmbeddings()
+    docs = []                                    # (text, 是否 gold, gold key)
+    for key, _ in CORPUS_QUERY:
+        docs.append((f"{TAIL} 关键实现见 {key}。", True, key))
+        docs += [(f"{TAIL} 相关实现见 {w}。", False, key) for w in near_miss(key)]
+    asyncio.run(st.write([Point(id=pid(f"bench{i}"), text=t, dense=emb._v(t), doc_type="kb",
+                                user_id="u_bench") for i, (t, _, _) in enumerate(docs)]))
+    n, rows = len(CORPUS_QUERY), []
+    ranks = {"dense_only": [], "hybrid": []}
+    for key, query in CORPUS_QUERY:
+        want = next(pid(f"bench{i}") for i, (t, gold, g) in enumerate(docs) if gold and g == key)
+        got = {}
+        for mode, hyb in (("dense_only", False), ("hybrid", True)):
+            ids = [h.id for h in asyncio.run(st.search(query, emb._v(query), k=5, hybrid=hyb,
+                                                       doc_type="kb", user_id="u_bench"))]
+            got[mode] = ids.index(want) + 1 if want in ids else None
+            ranks[mode].append(got[mode])
+        rows.append({"query": query, "gold": key, "rank_dense_only": got["dense_only"],
+                    "rank_hybrid": got["hybrid"]})
+
+    def hit(rs, k):
+        return sum(1 for r in rs if r is not None and r <= k)
+
+    def mean(rs):
+        v = [r for r in rs if r is not None]
+        return round(sum(v) / len(v), 3) if v else None
+
+    at = {f"{m}_hit@{k}": hit(ranks[m], k) for m in ranks for k in (1, 3, 5)}
+    out = Path(settings.workspace_root).parent / "storage" / "benchmark"
+    out.mkdir(parents=True, exist_ok=True)
+    table = {"metric": "hit-rate@k + mean rank", "corpus": len(docs), "queries": n,
+             "dense_only": {"hit@1": at["dense_only_hit@1"] / n, "hit@3": at["dense_only_hit@3"] / n,
+                            "hit@5": at["dense_only_hit@5"] / n, "mean_rank": mean(ranks["dense_only"])},
+             "hybrid": {"hit@1": at["hybrid_hit@1"] / n, "hit@3": at["hybrid_hit@3"] / n,
+                        "hit@5": at["hybrid_hit@5"] / n, "mean_rank": mean(ranks["hybrid"])},
+             "embedding": "hash-fake(64d, bag-of-chars)", "sparse": "crc32 token tf + 服务端 IDF",
+             "note": "语料 24 条时 hit@5 两边都饱和，差额只出现在 @1/@3 与平均名次；"
+                     "假 dense 无词边界，真 bge-m3 上线后要拿同一份 query 集重测",
+             "rows": rows}
+    (out / "s5_hitrate.json").write_text(json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    asyncio.run(st.delete_scope(doc_type="kb", user_id="u_bench"))
+    d, h = table["dense_only"], table["hybrid"]
+    assert h["hit@5"] >= d["hit@5"], f"hybrid 的 hit@5 退步了：{table}"
+    assert h["hit@1"] > d["hit@1"] and h["mean_rank"] < d["mean_rank"], \
+        f"hybrid 没把 gold 顶到更前，融合这一路没起作用：{table}"
+    print(f"  t18 hit@1 {at['dense_only_hit@1']}/{n}→{at['hybrid_hit@1']}/{n}，"
+          f"hit@5 {at['dense_only_hit@5']}/{n}→{at['hybrid_hit@5']}/{n}，"
+          f"mean rank {d['mean_rank']}→{h['mean_rank']}；表已存 storage/benchmark/s5_hitrate.json")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -258,20 +508,33 @@ def main():
               t7_tool_results_feed_next_round_prompt, t8_no_brain_windows_at_prompt_time,
               t9_brain_overflow_summarizes_and_restores,
               t10_memory_keys_are_per_role_and_per_session,
-              t11_observe_dedupes_and_survives_partial_results]
+              t11_observe_dedupes_and_survives_partial_results,
+              t12_collection_shape, t13_tenant_and_doctype_isolation,
+              t14_sparse_indices_are_process_stable, t15_longterm_overflow_recall_roundtrip,
+              t16_rolezero_uses_longterm_recall, t17_embedding_outage_degrades_not_crashes,
+              t18_hitrate_single_vs_hybrid_table]
     if not live_redis():
-        print("⚠ 没连上 Redis：t1/t3/t5/t9 会跳过，降级路径（t2）仍会验。生产上 Redis 是可选依赖。")
+        print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
+    if not live_qdrant():
+        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18 跳过。"
+              f"R9 这层的门禁必须起容器跑一次才算数。")
     for fn in checks:
         fn()
     try:
-        r = sync_redis.Redis(host=settings.redis.host, port=settings.redis.port)
-        r.delete(*KEYS)
+        sync_redis.Redis(host=settings.redis.host, port=settings.redis.port).delete(*KEYS)
     except Exception as e:
         print(f"  （清理 Redis key 失败，不影响结论：{type(e).__name__}）")
-    print(f"\nS5.1 门禁通过：{len(checks)} 组 —— Redis 薄壳 2 组（真往返+TTL/死端口静默降级）"
-          f"+ BrainMemory 4 组（dirty 才写盘/溢出判定有读者/摘要滚动落盘/分窗带重叠）"
-          f"+ RoleZero 工作记忆 5 组（工具结果回喂下一轮 prompt/无 brain 只截窗/溢出摘要可恢复/"
-          f"key 按会话+角色隔离/结果去重与空 results 容错）")
+    if live_qdrant():
+        try:
+            asyncio.run(gate_store().drop())        # 自测集合不留残余
+        except Exception as e:
+            print(f"  （清理 {GATE_COLL} 集合失败：{type(e).__name__}）")
+    print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.1 记忆 11 组（Redis 真往返与死端口降级/"
+          f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/RoleZero 结果回喂、"
+          f"截窗、摘要可恢复、key 按会话+角色隔离、去重容错）"
+          f"+ S5.2 R9 检索 7 组（集合形态 named+sparse+INT8+租户索引/单集合双向隔离/"
+          f"sparse 下标跨进程稳定/长期记忆入库幂等与召回字段/召回真进 prompt/"
+          f"embedding 下线只降级/hit-rate@5 对照表存盘）")
 
 
 if __name__ == "__main__":

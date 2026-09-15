@@ -81,11 +81,19 @@ class RoleZero:
                                         sent_from=self.profile["name"]))
 
     async def _compress(self):
-        """超窗：窗口外那截交给 BrainMemory 滚动摘要并落 Redis，进程内只留窗口。"""
-        if self.brain is None or len(self.memory.storage) <= self.memory_k:
+        """超窗：窗口外那截按源的分工两路走——逐字引用进 Qdrant(ltm)，背景理解进摘要(brain)。"""
+        if len(self.memory.storage) <= self.memory_k or (self.brain is None and self.ltm is None):
             return
         evicted = self.memory.storage[:-self.memory_k]
         self.memory.storage = self.memory.storage[-self.memory_k:]
+        if self.ltm is not None:
+            try:
+                await self.ltm.overflow(evicted)
+            except Exception as e:                    # embedding/Qdrant 不可用只降级，不能把角色跑死
+                logger.warning(f"{self.profile['name']} 长期记忆入库失败，本批只走摘要: "
+                               f"{type(e).__name__}: {e}")
+        if self.brain is None:
+            return
         for m in evicted:
             self.brain.add_history(m)
         try:
@@ -93,6 +101,15 @@ class RoleZero:
         except ValueError as e:                     # 摘要没产出不能把记忆丢了——退回原样，下轮再试
             logger.warning(f"{self.profile['name']} 记忆压缩失败，保留窗口外 {len(evicted)} 条不裁剪: {e}")
             self.memory.storage = evicted + self.memory.storage
+
+    async def _ltm_recall(self, task: str) -> str:
+        """新任务先召回同项目的历史（源 _retrieve_experience:449 的位置）。"""
+        try:
+            return "\n".join(m.content for m in await self.ltm.recall(task, k=3))
+        except Exception as e:
+            logger.warning(f"{self.profile['name']} 长期记忆召回失败，按无经验继续: "
+                           f"{type(e).__name__}: {e}")
+            return ""
 
     def _context_messages(self) -> list:
         out = []
@@ -137,8 +154,7 @@ class RoleZero:
         await self._compress()
         experience = s.get("experience", "")
         if self.ltm and not experience:                       # 源 :213 _retrieve_experience + 第 4 步 recall
-            memories = await self.ltm.recall(s["task"], k=3)
-            experience = "\n".join(m.content for m in memories)
+            experience = await self._ltm_recall(s["task"])
 
         tool_info = json.dumps({n: {"description": t.description} for n, t in self.tools.items()},
                                ensure_ascii=False)

@@ -10,8 +10,14 @@ def default_team(llm, env_desc: str = "a software company"):
     所以现在**不参与默认兜底**——默认见 `_default_agents`。"""
     from codeharness.roles.role_zero import RoleZero
     from codeharness.prompts.role_zero import SYSTEM_PROMPT
+    from codeharness.configs.settings import settings
     from codeharness.memory.brain_memory import BrainMemory
     from codeharness.tools import REGISTRY
+    ltm = None
+    if settings.enable_rag:                                 # 这个开关此前零读者，现在真管记忆召回
+        from codeharness.memory.longterm import LongTermMemory
+        from codeharness.provider.gateway import LLMGateway
+        ltm = LongTermMemory(embeddings=LLMGateway.embeddings())   # project 用时现取，三角色共用
     profiles = {                                    # 字段逐字抄自 roles/ 对应文件（参考速查 §4）
         TEAMLEADER_NAME: ("Team Leader", "lead a team to fulfill requirements efficiently"),
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
@@ -20,7 +26,7 @@ def default_team(llm, env_desc: str = "a software company"):
     # 每角色一个 brain：key 按角色名分（RoleZero._brain_key），Redis 挂了也只是不摘要，不影响跑
     return {name: RoleZero({"name": name, "profile": prof, "goal": goal},
                            REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
-                           brain=BrainMemory())
+                           brain=BrainMemory(), longterm_memory=ltm)
             for name, (prof, goal) in profiles.items()}
 
 
