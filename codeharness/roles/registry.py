@@ -11,6 +11,7 @@ from codeharness.const import RequirementTag, TEAMLEADER_NAME
 from codeharness.roles.agent import Agent
 from codeharness.roles.role_zero import RoleZero
 from codeharness.tools import REGISTRY
+from codeharness.tools.tool_registry import TOOL_REGISTRY
 from codeharness.actions.write_prd import WritePRD
 from codeharness.actions.project_management import WriteTasks
 from codeharness.actions.write_code import WriteCode
@@ -78,7 +79,7 @@ def Assistant(llm, **kw):
 
 def SweAgent(llm, **kw):
     """源 roles/di/swe_agent.py（Swen / Issue Solver）：终端命令为主的修复型 RoleZero"""
-    terminal_tools = [t for t in REGISTRY if t.name in ("execute_shell_async", "read_file", "write_file")]
+    terminal_tools = TOOL_REGISTRY.select("terminal", "file")
     return RoleZero({"name": "Swen", "profile": "Issue Solver",
                      "goal": "Resolve GitHub issue or bug in any existing codebase"},
                     terminal_tools, llm,

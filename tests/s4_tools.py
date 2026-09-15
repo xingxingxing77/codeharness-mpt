@@ -20,7 +20,8 @@ from codeharness.report import BlockType
 from codeharness.runtime import REPORT_SINK
 from codeharness.schema import RunCodeContext
 from codeharness.tools import (REGISTRY, _root, _safe, execute_shell_async, read_file,
-                               search_internet, write_file)
+                               search_internet, tool_registry, write_file)
+from codeharness.tools.tool_registry import TOOL_REGISTRY, register_tool
 from codeharness.tools.sandbox import run_context, run_python_code
 
 BASE = Path(tempfile.mkdtemp(prefix="s4gate_"))
@@ -162,6 +163,52 @@ def t14_default_workdir_and_scratch_stay_inside():
     assert scratch.exists() and all(p.is_relative_to(_root()) for p in scratch.glob("run_*.py"))
 
 
+def _capture_warnings():
+    seen = []
+    orig = tool_registry._warn
+    tool_registry._warn = seen.append
+    return seen, orig
+
+
+def t15_registry_and_tools_share_one_source():
+    assert {t.name for t in REGISTRY} == set(TOOL_REGISTRY.tools) == {
+        "write_file", "read_file", "execute_shell_async", "search_internet"}
+    assert sorted(TOOL_REGISTRY.tags()) == ["file", "terminal", "web"]
+
+
+def t16_select_unions_names_and_tags_without_duplicates():
+    got = [t.name for t in TOOL_REGISTRY.select("write_file", "file")]
+    assert sorted(got) == ["read_file", "write_file"] and got.count("write_file") == 1, got
+
+
+def t17_unknown_key_warns_and_is_skipped():
+    seen, orig = _capture_warnings()
+    try:
+        got = [t.name for t in TOOL_REGISTRY.select("no_such_tool", "terminal")]
+    finally:
+        tool_registry._warn = orig
+    assert got == ["execute_shell_async"], got
+    assert len(seen) == 1 and "no_such_tool" in seen[0], seen
+
+
+def t18_register_tool_requires_langchain_tool():
+    seen, orig = _capture_warnings()
+    try:
+        @register_tool(tags=["bogus"])
+        def not_a_tool(x):
+            return x
+    finally:
+        tool_registry._warn = orig
+    assert seen and "不是 LangChain tool" in seen[0], seen
+    assert "bogus" not in TOOL_REGISTRY.tags() and not_a_tool.__name__ not in TOOL_REGISTRY.tools
+
+
+def t19_swe_agent_tool_set_comes_from_tags():
+    # roles/registry.py 的 SweAgent 取法：终端 + 文件，不许静默漂成全量工具
+    assert {t.name for t in TOOL_REGISTRY.select("terminal", "file")} == {
+        "execute_shell_async", "write_file", "read_file"}
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -170,15 +217,21 @@ def main():
               t9_shell_output_truncated, t10_search_uses_stub_and_truncates,
               t11_search_degrades_on_failure, t12_sandbox_runs_and_reports_exit_code,
               t13_run_context_honors_working_directory,
-              t14_default_workdir_and_scratch_stay_inside]
+              t14_default_workdir_and_scratch_stay_inside,
+              t15_registry_and_tools_share_one_source,
+              t16_select_unions_names_and_tags_without_duplicates,
+              t17_unknown_key_warns_and_is_skipped,
+              t18_register_tool_requires_langchain_tool,
+              t19_swe_agent_tool_set_comes_from_tags]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     shutil.rmtree(BASE, ignore_errors=True)
     assert not BASE.exists()
-    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 1 组 + 越界防护 3 组（兄弟目录前缀回归/父目录与绝对路径/"
-          f"scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）+ shell 2 组 + "
-          f"搜索 2 组（零外网 stub 与降级）+ 沙箱 3 组（退出码/超时/工作目录）")
+    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（四项工具登记/名字与 tag 并集去重/"
+          f"未知 key 告警跳过/漏 @tool 不登记/SweAgent 取法）+ 越界防护 3 组（兄弟目录前缀回归/"
+          f"父目录与绝对路径/scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）"
+          f"+ shell 2 组 + 搜索 2 组（零外网 stub 与降级）+ 沙箱 3 组（退出码/超时/工作目录）")
 
 
 if __name__ == "__main__":

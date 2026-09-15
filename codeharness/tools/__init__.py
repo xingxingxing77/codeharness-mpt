@@ -1,10 +1,11 @@
-"""工具注册表：@tool 替代源 tools/tool_registry.py；实现来自 tools/libs（复制件）。
+"""工具层：@tool 造 LangChain 工具，@register_tool 登记进 TOOL_REGISTRY（R8 剩下的那半件）。
 工具输出统一打 log_tool_output（第 1 步 logs.py 的槽）+ 报道块（report.py）——前端面板数据源。"""
 import asyncio
 from pathlib import Path
 from langchain_core.tools import tool
 from codeharness.configs.settings import settings
 from codeharness.logs import ToolLogItem, log_tool_output
+from codeharness.tools.tool_registry import TOOL_REGISTRY, register_tool
 
 
 def _root() -> Path:
@@ -18,6 +19,7 @@ def _safe(path: str) -> Path | None:
     return target if target.is_relative_to(root) else None
 
 
+@register_tool(tags=["file"])
 @tool
 async def write_file(path: str, content: str) -> str:
     """写入工作区文件（相对路径，禁止越界），返回确认信息"""
@@ -33,6 +35,7 @@ async def write_file(path: str, content: str) -> str:
     return f"已写入 {path}（{len(content)} 字符）"
 
 
+@register_tool(tags=["file"])
 @tool
 def read_file(path: str) -> str:
     """读取工作区文件内容"""
@@ -42,6 +45,7 @@ def read_file(path: str) -> str:
     return t.read_text(encoding="utf-8")[:20000]
 
 
+@register_tool(tags=["terminal"])
 @tool
 async def execute_shell_async(command: str, timeout: int = 60) -> str:
     """在 workspace 目录执行 shell 命令（异步版，图节点里用）"""
@@ -62,6 +66,7 @@ async def execute_shell_async(command: str, timeout: int = 60) -> str:
         return text
 
 
+@register_tool(tags=["web"])
 @tool
 def search_internet(query: str) -> str:
     """联网搜索。实现：langchain_community DuckDuckGo（无 key）；限流时返回降级文案"""
@@ -72,5 +77,5 @@ def search_internet(query: str) -> str:
         return f"[搜索暂不可用: {e}]"
 
 
-REGISTRY = [write_file, read_file, execute_shell_async, search_internet]
+REGISTRY = TOOL_REGISTRY.all()      # 全量视图；按 profile 选子集用 TOOL_REGISTRY.select(name|tag)
 # git_run / scrape_web：tools/libs/git.py、web_scraping.py 复制后按 write_file 同样方式包 @tool（各 ~10 行）
