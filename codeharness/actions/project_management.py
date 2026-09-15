@@ -31,6 +31,10 @@ class WriteTasks(BaseAction):
         content = tasks.model_dump_json()
         await ArtifactStore.active().save(RepoName.DOCS, Document(filename=DocName.TASKS, content=content))
         files = [t.filename for t in tasks.task_list]
+        if not files:
+            # 空清单会生成零条 Send：路由不报错，会话以 finished 收场却一行代码都没写（真模型实测）
+            raise ValueError(f"WriteTasks 拆不出任何文件级任务，拒绝以「成功」收场。"
+                             f"设计文档片段: {(design.content if design else msg.content)[:200]}")
         return Message(content="任务拆解完成: " + ", ".join(files), role="assistant",
                        cause_by=self.name, sent_from="PMManager",
                        instruct_content=tasks.model_dump(), instruct_schema="TaskList")

@@ -289,11 +289,25 @@ def t13_artifact_filename_gate():
         asyncio.run(store.save(RepoName.SRC, Document(filename="pkg/util.py", content="A = 1")))
         if not (store.root / "src" / "main.py").exists() or not (store.root / "src" / "pkg" / "util.py").exists():
             _fail("13. 合法名（含嵌套 pkg/util.py）写不下去，闸口管太宽")
+        # 读侧要软退化：非法名 = 没有这个产物（DebugError 靠它走「缺少修复上下文」，不是崩）
+        for bad in ("", "   ", "/etc/passwd", "../../outside.py"):
+            if asyncio.run(store.get(RepoName.SRC, bad)) is not None:
+                _fail(f"13. 非法名读侧没软退化成 None: {bad!r}")
         try:
             TaskItem(filename="")
             _fail("13. TaskItem 允许空 filename，问题会一路跑到写盘")
         except ValidationError:
             pass
+        # 空 task_list = 零条 Send = 会话以 finished 收场却什么都没写（真模型实测的假成功）
+        from codeharness.actions.project_management import WriteTasks
+        from codeharness.provider.fake import FakeLLM
+        from codeharness.schema import Message
+        try:
+            asyncio.run(WriteTasks(llm=FakeLLM(['{"task_list": []}'])).run(Message(content="拆不出东西的设计")))
+            _fail("13. 空任务清单被放过了，会话会假成功收场")
+        except ValueError as e:
+            if "拆不出任何文件级任务" not in str(e):
+                _fail(f"13. 空任务清单的报错没说清: {e}")
     finally:
         settings.workspace_root = keep_ws
         CURRENT_PROJECT.set(keep_proj)

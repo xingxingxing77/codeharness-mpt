@@ -21,14 +21,20 @@ class ArtifactStore:
         这是前端文件树（/{sid}/workspace/files）能看到产物的关键（第 10 步 §2）"""
         return cls()
 
-    def _path(self, subdir: str, filename: str) -> Path:
-        """filename 来自模型产出，这里是不二闸口。空串会让路径塌成目录本身
-        （`root/src/"" == root/src`），`write_text` 直接抛 `PermissionError [Errno 13]`，
-        整场会话只剩一句看不懂的错误码（2026-09-15 真模型实测）。
-        允许合法嵌套名（pkg/util.py），但绝对路径与越出会话根的 `..` 一律拒。"""
+    def _checked(self, subdir: str, filename: str) -> Path | None:
+        """filename 来自模型产出：空串会让路径塌成目录本身（`root/src/"" == root/src`），
+        `write_text` 抛 `PermissionError [Errno 13]`，读则是拿到一个目录（2026-09-15 真模型实测）。
+        这里只判定不抛——写要拒、读要按「没有这个产物」软退化，两种语义由调用方决定。
+        允许合法嵌套名（pkg/util.py）；绝对路径与越出会话根的 `..` 一律算非法。"""
         fn = (filename or "").strip()
         p = self.root / subdir / fn
         if not fn or Path(fn).is_absolute() or not p.resolve().is_relative_to(self.root.resolve()):
+            return None
+        return p
+
+    def _path(self, subdir: str, filename: str) -> Path:
+        p = self._checked(subdir, filename)
+        if p is None:
             raise ValueError(f"非法产物文件名 {filename!r}（子目录 {subdir}）："
                              f"空串会写到目录本身，绝对路径或越出会话根的直接拒")
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -52,8 +58,8 @@ class ArtifactStore:
         return doc
 
     async def get(self, subdir: str, filename: str) -> Document | None:
-        path = self._path(subdir, filename)
-        if not path.exists():
+        path = self._checked(subdir, filename)          # 非法名 = 没有这个产物，读侧软退化为 None
+        if path is None or not path.exists():
             return None
         content = await asyncio.to_thread(
             path.read_text, encoding="utf-8", errors="replace")   # 容忍历史遗留的非 utf-8 文件

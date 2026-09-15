@@ -114,8 +114,32 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **RoleZero 工作记忆接线**（本步的真实缺口，不是行数缺口）：实测 `_think` 此前每轮只发 `[System, Human]` **两条**消息，`_act` 拿到的工具结果**从不回喂**，而 `CMD_PROMPT` 反复要求 "review the conversation history" → 跨轮失忆。现在 `Memory` 做窗口（`memory_k` 默认取 `settings.memory_overflow_size`，**该字段第一次有读者**），溢出交 `BrainMemory` 摘要落 Redis，key = `BRAIN_MEMORY:default:{会话目录}/{角色名}`（复用 `CURRENT_PROJECT`，与 `session_root` 同一接缝）。t7 断言打在 FakeLLM 收到的 messages 上：`已写入 prd.md` 确实出现在下一轮 payload。
 - **P0（实测，非推测）**：runner 不传 `agents` 时兜底走 `default_team`（TeamLeader/Alice/Bob），**三个名字无一在 `team_graph.SOP` 目标里** → LangGraph 只打一行 `Ignoring unknown node name PM`，**整场会话零次 LLM 调用**就算跑完（`prepare_project` + `ainvoke` 实测 `fake.calls == 0`）。这就是「八个自测全绿而 Web 会话其实什么都没干」的又一个真实路径洞。修法：兜底改 `_default_agents()` → `classic_team`，并补 `classic_team` 缺的第 5 个角色 `Architect`（docstring 自称五角色、`WriteDesign` 的 `sent_from` 也写着 `"Architect"`，实际只建了四个）。修后同一冒烟 `LLM_CALLS=3`。**S3(b) 新增 t10** 双向钉住「兜底角色名覆盖 SOP 目标」+「default_team 与经典线名字互斥」，`default_team` 降为 S6 动态范式的备选组队（已写明不参与默认路由）。
 - 顺带修一处一调即炸的接缝：`BrainMemory._get_summary` 原本照源传 `stream=False`，而 `provider/fake.FakeLLM.aask` 签名不收 `stream` → 自测路径必 `TypeError`。本仓 `LLMGateway.aask` 默认即 `stream=False`，去掉该关键字两边都通。
-- 门禁基线：**九个自测脚本全 exit 0** —— s1(12) / s2(12) / s3a(12) / **s3b(10)** / s4(35) / **s5_memory_rag(11)** + test_p1 / test_roles_registry / test_e2e_classic_line。仍**全部 FakeLLM 驱动，真实模型至今没端到端跑过一次**。
-- **S5 剩余**：S5.2 R9（Qdrant named vectors + 单 collection payload 多租户 + hit-rate@5 单向量 vs hybrid 对比表，`longterm`/`exp_store`/`knowledge` 三件都还是「单 dense 向量 + 每租户一 collection」的老形态且零调用者）；S5.3 `exp_pool` 闭环。`brain` 的 Redis 恢复只接了 `RoleZero._think` 首轮 loads，runner 侧的会话级 resume 仍等 S7。
+- 门禁基线：**九个不花钱的自测脚本全 exit 0** —— s1(12) / **s2(13)** / **s3a(13)** / **s3b(10)** / s4(35) / **s5_memory_rag(18)** + test_p1 / test_roles_registry / test_e2e_classic_line。
+- **S5.2 已落地**（R9 检索层，详见 `施工2` 的 S5.2 落地状态）：`document_store/qdrant_store.py` 四形态实测在真集合上可见，`longterm`/`exp_store`/`knowledge` 三件改接，`storage/benchmark/s5_hitrate.json` 记下 `hit@1 2/4→4/4`、`mean rank 1.75→1.0`。**S5 只剩 S5.3 `exp_pool` 闭环**；`brain` 的会话级 resume 仍等 S7。
+
+### 2026-09-15 深夜 · 真模型首跑（`.env` 已配 qwen3.8-flash + 本机 Qdrant 容器）
+
+**「真实模型至今没端到端跑过一次」这句话从今天起不成立了。** 用 `tests/manual_real_e2e.py`（花真钱，不进九件套门禁）连跑 8 场真实会话，把 FakeLLM 全绿也照不出来的东西一批批炸出来，全部当场修掉并钉进不花钱的门禁：
+
+| 现形 | 根因 | 修法与断言 |
+|---|---|---|
+| token 记账恒 0 | `cfg.stream` 默认 True → `ChatOpenAI(streaming=True)` 把用量只写进 `usage_metadata`，`add_usage` 读的是 `response_metadata.token_usage` | 标准口径优先、legacy 兜底；S2 t13 |
+| 动态范式每轮思考不进账 | `structured()` 直接 `with_structured_output().ainvoke`，**绕开 `ainvoke` 这个唯一记账出口** | 内部改 `include_raw=True` 自记（顺带修好 `list` 字段解析成 `[', ']`）；S2 t13 打桩钉住 |
+| 流式仍记 0 | 聚合只取末块 metadata，而 usage 常在中间块（末块是 None） | 边收边留最后一个带 usage 的块；S2 t13 |
+| 被截断的调用不记账 | 抛异常路径不走记账；`LengthFinishReasonError` 的 usage 挂在 `ChatCompletion.usage` 上 | `_account` 移到 raise 之前并支持两种形态 |
+| 长产出必然截断 | `.env` 写的是 `LLM__MAX_TOKENS`（复数），字段实为 `max_token`（单数，照源）→ 被 `extra="ignore"` 静默丢掉；thinking 模型的 reasoning 也算在预算里 | 实测 4096/8192 截断、**16384 通**；`.env` 已改单数 |
+| 截断后整场会话崩掉 | `_fix_unclosed` 只补 `]`，「整棵对象少 `}`」「断在字符串里」两种最常见截断等于白放 | 按括号栈补齐；S2 t13 三种形态逐个钉 |
+| `KeyError: 'filename'` | `TaskList.task_list: list[dict]` 等于没契约，真模型回了缺 filename 的条目 | 改具名 `TaskItem`（`filename` 必填非空）；S3(a) t13 |
+| `PermissionError [Errno 13] 'workspace/x/src'` | `filename=""` 时路径塌成目录本身，`write_text` 打到目录上 | `_checked` 一处判定：**写拒、读软退 None**（`DebugError` 靠它走「缺少修复上下文」）；S3(a) t13 |
+| 会话 `finished` 却零代码 | 真模型回了 `task_list=[]` → 零条 Send → 路由不报错地跑到收场 | `WriteTasks` 空清单就地抛并带上设计文档片段；S3(a) t13 |
+
+**仍未闭合（都有实测证据，按优先级）**：
+1. **runner 的用量快照不合流**：跑动中 `GET /sessions/{sid}` 的 `cost` 恒 0，只在 `_publish_status` 时刷一次；且各场冒烟的最终 pt 数（490 / 3116 / 4424）与真实调用量不成比例——账本合流这条要专门查（还债清单 #1 的残尾）。
+2. **embedding 端点没配**：`.env` 无 `EMBEDDING__*`，默认指向离线 `localhost:9998`，所以 `LongTermMemory`/`KnowledgeBase`/`ExpStore` 的**真语义向量路径至今没跑过一次**（S5 门禁用的是 hash-fake），hit-rate 表的真值要等它上线重测。
+3. **`qwen3.8-flash` 不在 `TOKEN_COSTS`** → token 记账正常、`total_cost` 恒 0（要价目表补一行才会出钱数）。
+4. **LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"——checkpointer 的 msgpack 白名单要显式配（S7）。
+5. `structured` 的 `include_raw` 路径每次调用会打一条 pydantic 序列化 `UserWarning`（噪声，未影响结果）。
+
 
 ### 本次审查缺陷清单（标「实测」的都已当场复现，非推测）
 
