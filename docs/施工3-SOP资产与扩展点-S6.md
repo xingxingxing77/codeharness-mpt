@@ -106,3 +106,9 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 - `RebuildClassView` Action：pyreverse 类面 + AST 文件面（`_diff_path`/`_align_root` 对齐同一根）→ SPO 图 → `resources/data_api_design/class_view.class_diagram.mmd`（方案 C 的 .mmd 真源）+ `docs/graph_repo/class_view.json`；aiofiles 直写换 asyncio.to_thread（本仓零 aiofiles 依赖）。
 **剩余三件判词（2c 内自洽收口，不是烂尾）**：`rebuild_sequence_view`(605) 等类图数据被 RAG/前端真实消费过再搬（全仓最大单件，源侧测试也最薄，先验证数据形状再动）；`import_repo`(226) **并入 N2 批 5**（它耦合 git_clone/GitRepository/archive——全是判"被 ArtifactStore 覆盖"的件，平台的外部仓库导入该是扩展点工具不是会话 Action）；`extract_readme`(123) 归 2b 搜索研究批。三件去向已在判定表"三个判定必须自洽"的约束下显式登记。
 **未动**：2b–2f 其余、批 3–5。
+
+**批 2b ✅ 搜索研究（同日，提交 `bf5c7ff`，s6 门禁 16 组）**：
+- `Research`：stub 重写为源三件套的合成管线（源把三件拆开是给它的 Role 循环用的，本仓一个 Action 顺序走完）——关键词→搜索→拆解子问题 / 子问题→搜索→LLM 排序→逐结果摘要 / 汇总报告。八段 prompt 常量**构建脚本自源逐字节摘取**；`reduce_message_length` 与源 `:343` 的语言后缀 system 照留；`Not relevant.` 过滤语义照留。**联网只发生在 `search_internet` 工具**（t15 把工具替身挂在接缝上，七次模型调用的腿序就是契约）；playwright 浏览腿判「推迟」，摘要以搜索快照文本降级顶上——管线不砍，取材深度受限如实注明。
+- `SearchAndSummarize`：自造 prompt 换成源 SYSTEM/PROMPT 逐字（sales/food 三常量入 t11 推迟豁免表），对话历史按源走。
+- **t11 换了比对法**：从「值当子串搜源文件文本」改成 **AST 取源顶层常量值比对**——前者对带 `\` 续行的常量是错的（`CONDUCT_RESEARCH_PROMPT` 当场假失败），且值比对才是真正的「逐字」。
+- 三只长尾小件不搬，判定表 §一 自查追加行已登记（两只源自身孤儿 + 一只并入浏览器推迟面）。

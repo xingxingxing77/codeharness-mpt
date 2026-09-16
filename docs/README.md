@@ -186,6 +186,14 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **第十二处现形并闭合**（`a6cb4b6`）：这场的会话本体 `failed` 在一个新漂移上——真模型这回给的是 `filename='/main.py'`（带前导斜杠的绝对路径）。产物仓 `_checked` 按契约**写拒是对的**（e005884 的判决没变），错的是那个 `ValueError` 一路吹穿 team graph，把已完成角色与花掉的 1512/7322 token 全部陪葬——**经典线 `Agent._act` 缺 RoleZero 早已立规的 self-heal 收口**。修法：Action 抛异常 → `[错误]` 消息回喂记忆走下一轮；`GraphInterrupt` 是唯一必须照抛的（interrupt/resume 靠它）。门禁 s3b t12 双条钉死（普通异常回喂进记忆 / GraphInterrupt 穿透）。
 - 门禁基线：**十个不花钱脚本全 exit 0**，s3b 升至 12 组、s8_runner_meter 升至 6 组。
 
+### 2026-09-16 下午 · S6 开工（批1/2a/2c 类图/2b 四片，提交 `89283e9`…`bf5c7ff`）
+
+- **S6 批1 ✅**：16 件 prompt 逐字复制 + s6 门禁（AST 顶层字符串常量与源比对）；mermaid 拍板方案 C。
+- **批 2a ✅ 十件**：WritePRD 三情形 / WriteDesign 源五字段+REFINED / RunCode 复盘段 / WriteTasks requirements 聚合 / WriteCode 三路上下文 / WriteCodeReview k 轮循环等，每件一 fixture。
+- **批 2c 类图半边 ✅**：repo_parser 63→1086 行照源 + **Windows 路径校准三坑**（反斜杠折叠、盘符键空间、package_root 还原）；graph_repository 三件套；RebuildClassView 落地——全仓最大真实缺口收口。`rebuild_sequence_view`(605) 待类图被真实消费后接；`import_repo` 并入 N2；`extract_readme` 归 2b 研究面。
+- **批 2b ✅**：Research 三腿管线 + SearchAndSummarize 源逐字——联网只走 `search_internet` 工具接缝，t15 钉七次调用序；三只源自身孤儿/浏览器包装件按自查纪律登记不搬（判定表 §一 追加行 + 「`改` 之前也要 grep」新纪律）。
+- 门禁基线：**十一个不花钱脚本全 exit 0** —— s1(12)/s2(14)/s3a(13)/s3b(12)/s4(35)/s5(25)/**s6(16)**/s8(6) + test_p1/test_roles_registry/test_e2e_classic_line。t11 比对法升级为 AST 值比对（文件子串法对 `\` 续行常量假阳性）。
+
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
 1. **`.gitignore` 最后一行 `docs/` 仍未删**（2026-09-14 复测：`git ls-files docs` 为空）。全套文档至今**零版本控制**——本轮全部改判只存在于工作区，一次误 `clean` 就蒸发。**开工第一件事仍是删这行并提交 docs/。**
