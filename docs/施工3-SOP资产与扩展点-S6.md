@@ -72,9 +72,24 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 - **验收标准(必须能演示)**:不修改任何内核文件,用一个脚本注册"新角色 + 新 Action + 新 Tool",跑通一条完整会话。**这条能过,才叫平台;过不了,S6 只是搬代码。**
 
 ## 门禁 `tests/s6_sop.py`
-1. 每个新增 Action 恰好一个 FakeLLM fixture,断言 `instruct_content` 字段集合与源 schema 一致
-2. `build_role(每个源角色名)` 不抛,profile 与源字符串相等
-3. 经典线端到端:需求→PRD→设计→任务→代码→测试→沙箱真跑 pytest(**你现有 `test_e2e_classic_line.py` 就是这条,保持绿**)
-4. prompt 逐字 diff 为空
-5. **N2 演示脚本**:外部注册一个新角色并跑通
+1. 每个新增 Action 恰好一个 FakeLLM fixture,断言 `instruct_content` 字段集合与源 schema 一致 ✅(2a 已加者)
+2. `build_role(每个源角色名)` 不抛,profile 与源字符串相等 —— 未落(批3)
+3. 经典线端到端:需求→PRD→设计→任务→代码→测试→沙箱真跑 pytest(**你现有 `test_e2e_classic_line.py` 就是这条,保持绿**) ✅全程绿
+4. prompt 逐字 diff 为空 ✅(t1/t4,AST 顶层字符串常量比对)
+5. **N2 演示脚本**:外部注册一个新角色并跑通 —— 未落(批5)
 6. **度量**:2a 加厚前后,同一 idea 的 SOP 完成率与 **token** 对比(FakeLLM 下看结构完整性即可,真模型对比留 S9；成本只记录不作判据)
+
+## S6 落地状态（2026-09-16，门禁 `tests/s6_sop.py` 7 组，提交 `89283e9`+`02cfc04`）
+
+**批 1 ✅ 全量**：16 件 prompt 按源目录结构复制（`prompts/` + `prompts/di/`）。**重写只允许打在 import 语句的物理行上**（AST 定位）——第一版按行首正则误伤过 prompt 正文的示例代码、全局 replace 又改坏 `generate_skill.md` 与 `REFLECTION_SYSTEM_MSG`，两处都被门禁当场抓出。t1 的口径因此不是"文件文本 diff"而是**每个模块级字符串常量与源的 AST 相等**（比中 54 项；import 前缀本来必须变，逐字性的对象是字符串）。依赖件：`strategy/task_type.py` 逐字复制；`tools/libs/data_preprocess.py` 只带 prompt 需要的 `get_column_info`（源全件拖 sklearn+tool_registry，工具注册面在 S4 的 REGISTRY）。运行时改件 `prompts/role_zero.py`（S3 期本地化）**保留不动**——逐字资产在 `prompts/di/role_zero.py`，是否并回归批 3。
+
+**批 2a ✅ 先还最欠的四件**（加厚按业务分支齐否计，不凑行数）：
+- `WritePRD` 82→147：源三情形全落（bugfix / 新建 / 增量 REFINED）；判定 instruction 逐字取 `write_prd_an.py:171-186` 进 field description（structured 吃 JSON schema，模型看到的就是源那句）；象限图按**方案 C** 落 `resources/competitive_analysis.mmd`。
+- `WriteDesign` 48→105：字段集改为与源 NODES 一致——**project_name 移出**（源注释已把项目名生成移交 WritePRD）、补 `anything_unclear`；新建/REFINED 双 prompt 逐字（`design_api_an.py:12-95`）；产物三件：`design.json`（机器真源，=源 system_design.json 的等价）+ `design.md`（人读）+ 两图 `.mmd`。
+- `RunCode` 29→94：补上源整段缺失的 **LLM 复盘段**（PROMPT_TEMPLATE/TEMPLATE_CONTEXT 逐字，File To Rewrite/Send To 进存档与消息）；`ok` 判据仍 return_code，"Ran N tests OK" 死正则不复活；复盘失败只降级——模型挂了不能吞掉已跑完的测试结果。
+- `WriteTasks` 40→112：schema 补齐源三键（`required_packages`/`shared_knowledge`）；增量合并照源 `_update_tasks:134`（NEW_REQ_TEMPLATE 逐字）；**`requirements.txt` 聚合落地**（源 `_update_requirements:154`，此前本仓完全没有这件——QA 的依赖声明真源）。
+- 门禁 t3–t7：每 Action 一个 FakeLLM 剧本 + 模板逐字比对；`test_e2e_classic_line` 全程保持绿（加厚没打断下游）。
+
+**显式拍板（批2 第 4/5 条要求的"两者选一但必须显式"）**：Reporter 走**改调用点**——全部用 `docs_block/task_block` 上下文管理器，不回补 `DocsReporter` 类名形态；路由 tag 全短名（`schema._tag` 制，`any_to_str` 零出现）。
+**判 `推迟` 的源面（有理由，不是漏）**：三件的 `_execute_api`（任意路径出口与 per-session 边界冲突，N2 需要时按会话内口径重写）；`RunCode` mode=text 的 in-process exec（沙箱纪律：执行只走子进程）；多 PRD 文件循环与 git changed_files 记账（ProjectRepo 制，本仓单 PRD 会话制无对应物）。
+**未动**：2a 其余六件（write_code/write_code_review/write_test/debug_error/summarize_code/prepare_documents）与 2b–2f、批 3–5。
