@@ -82,7 +82,9 @@ class RunCode(BaseAction):
                 command=" ".join(ctx.command), outs=combined.stdout[:500], errs=combined.stderr[:10000])))
         except Exception as e:
             logger.warning(f"RunCode 复盘失败，按无摘要存档: {type(e).__name__}: {e}")
-        out_name = ctx.output_filename or f"output_{ctx.test_filename or 'run'}.json"
+        # 命名对齐源 write_code.py:52 的消费侧：`test_{code_filename}.json`——WriteCode 下一轮
+        # 就是按这个名字捞上一轮 stderr 当 logs 的，两处字面量必须同步（DocName 同款一致性敏感）。
+        out_name = ctx.output_filename or f"test_{ctx.code_filename or ctx.test_filename or 'run'}.json"
         await store.save(RepoName.TEST_OUTPUTS, Document(filename=out_name, content=combined.model_dump_json()))
         ok = combined.return_code == 0
         return Message(content=(f"测试通过\n{combined.summary}" if ok

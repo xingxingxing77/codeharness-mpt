@@ -264,7 +264,8 @@ def t7_run_code_summary():
             Message(content="跑", instruct_content=ctx.model_dump(), instruct_schema="RunCodeContext")))
         assert "测试失败" in out.content
         import json as _j
-        saved = store.root / RepoName.TEST_OUTPUTS / "output_test_fail.py.json"
+        # 命名对齐源消费侧约定 test_{code_filename}.json；本场景无 code_filename 退到 test_{test}.json
+        saved = store.root / RepoName.TEST_OUTPUTS / "test_test_fail.py.json"
         assert saved.exists() and "File To Rewrite" in _j.loads(saved.read_text(encoding="utf-8"))["summary"], \
             "RunCodeResult.summary 没进存档"
         assert "QaEngineer" in out.content, "复盘摘要没回给路由可见的消息"
@@ -272,6 +273,126 @@ def t7_run_code_summary():
         shutil.rmtree(_ws("s6run"), ignore_errors=True)
         CURRENT_PROJECT.set("")
     print("  t7 RunCode：沙箱真跑 pytest + 复盘段进存档与消息（ok 仍按 return_code，不复活死正则）")
+
+
+def t8_prepare_documents_instruct():
+    """放行件也必须带结构化上下文（源 :76 PrepareDocumentsOutput：project_path/requirements/prd_filenames）。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.prepare_documents import PrepareDocuments
+    from codeharness.const import DocName, RepoName
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Message
+    try:
+        store = _fixture_store("s6prep")
+        out = A.run(PrepareDocuments(llm=None).run(Message(content="做个工具", cause_by="UserRequirement")))
+        assert (store.root / RepoName.DOCS / DocName.REQUIREMENT).exists()
+        assert set(out.instruct_content) == {"project_path", "requirements_filename", "prd_filenames"}
+        assert out.content == "做个工具" and out.instruct_schema == "PrepareDocumentsOutput"
+    finally:
+        shutil.rmtree(_ws("s6prep"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t8 PrepareDocuments：需求落盘 + PrepareDocumentsOutput 三键齐")
+
+
+def t9_write_code_three_contexts():
+    """源 :52-64 的三路上下文（上一轮 test 输出 stderr / code_summary / bugfix 工单）此前全是空串。
+    断言：三路都进了 prompt、other-file 上下文排除了自身、bugfix 消费即删（源 :163 防冲突）。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.write_code import WriteCode
+    from codeharness.const import BUGFIX_FILENAME, DocName, RepoName
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message, RunCodeResult
+    try:
+        store = _fixture_store("s6wc")
+        A.run(store.save(RepoName.DOCS, Document(filename=DocName.DESIGN_JSON, content=DESIGN_JSON)))
+        A.run(store.save(RepoName.DOCS, Document(filename=DocName.TASKS, content=TASKS_JSON)))
+        A.run(store.save(RepoName.SRC, Document(filename="util.py", content="CONST = 1")))
+        A.run(store.save(RepoName.TEST_OUTPUTS, Document(
+            filename="test_main.py.json",
+            content=RunCodeResult(stderr="AssertionError: boom-in-main", return_code=1).model_dump_json())))
+        A.run(store.save(RepoName.DOCS, Document(filename=DocName.CODE_SUMMARY, content="TODOs: main.py 缺 --version")))
+        A.run(store.save(RepoName.DOCS, Document(filename=BUGFIX_FILENAME, content="程序启动就崩")))
+        llm = FakeLLM(["```python\nprint('v2')\n```"])
+        out = A.run(WriteCode(llm=llm).run(Message(content="写 main.py", instruct_content={"filename": "main.py"},
+                                                  instruct_schema="CodingContext")))
+        asked = str(llm.calls[0])
+        assert "boom-in-main" in asked, "logs 路没进 prompt"
+        assert "缺 --version" in asked, "summary_log 路没进 prompt"
+        assert "程序启动就崩" in asked, "feedback 路没进 prompt"
+        assert "CONST = 1" in asked and "### File Name: `main.py`" not in asked, "get_codes 排除自身失效"
+        assert not (store.root / RepoName.DOCS / BUGFIX_FILENAME).exists(), "bugfix 没消费即删"
+        assert "已写 main.py" in out.content
+    finally:
+        shutil.rmtree(_ws("s6wc"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t9 WriteCode：logs/summary/bugfix 三路进 prompt、排除自身、工单消费即删")
+
+
+def t10_write_code_review_rounds():
+    """k 轮评审→重写→复审（源 :120-160 的循环）：LGTM 即停并带轮次；LBTM 就地重写落盘；
+    评审 prompt 必须含源 FORMAT_EXAMPLE 的示例段。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.write_code_review import WriteCodeReview
+    from codeharness.configs.settings import settings
+    from codeharness.const import DocName, RepoName
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message
+    keep, settings.code_validate_k_times = settings.code_validate_k_times, 2
+    try:
+        store = _fixture_store("s6cr")
+        A.run(store.save(RepoName.SRC, Document(filename="main.py", content="print(1)")))
+        llm = FakeLLM(["## Code Review Result\nLBTM", "```python\nprint(2)\n```",
+                       "## Code Review Result\nLGTM", "```python\nnever\n```"])
+        out = A.run(WriteCodeReview(llm=llm).run(
+            Message(content="评审", instruct_content={"filename": "main.py"}, instruct_schema="CodingContext")))
+        assert "LGTM 第2轮" in out.content, out.content
+        assert (store.root / RepoName.SRC / "main.py").read_text(encoding="utf-8") == "print(2)"
+        assert "Code Review Format example 1" in str(llm.calls[0]), "FORMAT_EXAMPLE 没进评审 prompt"
+        assert "print(2)" in str(llm.calls[2]), "复审轮的 iterative 代码应是重写后的"
+    finally:
+        settings.code_validate_k_times = keep
+        shutil.rmtree(_ws("s6cr"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t10 WriteCodeReview：LBTM→重写→第2轮 LGTM 即停，重写即落盘，复审吃新代码")
+
+
+def t11_action_prompts_verbatim():
+    """批 2a 各件的 prompt 常量必须与源文件**逐字节**同段存在（防转抄漂移）。"""
+    from codeharness.actions import design_api, prepare_documents, project_management, run_code
+    from codeharness.actions import summarize_code, write_code, write_code_review, write_prd, write_test
+    pairs = [
+        (write_prd, "metagpt/actions/write_prd.py", ["CONTEXT_TEMPLATE", "NEW_REQ_TEMPLATE"]),
+        (write_test, "metagpt/actions/write_test.py", ["PROMPT_TEMPLATE"]),
+        (run_code, "metagpt/actions/run_code.py", ["PROMPT_TEMPLATE", "TEMPLATE_CONTEXT"]),
+        (design_api, "metagpt/actions/design_api.py", ["NEW_REQ_TEMPLATE"]),
+        (project_management, "metagpt/actions/project_management.py", ["NEW_REQ_TEMPLATE"]),
+        (summarize_code, "metagpt/actions/summarize_code.py", ["PROMPT_TEMPLATE", "FORMAT_EXAMPLE"]),
+        (write_code, "metagpt/actions/write_code.py", ["PROMPT_TEMPLATE"]),
+        (write_code_review, "metagpt/actions/write_code_review.py",
+         ["PROMPT_TEMPLATE", "EXAMPLE_AND_INSTRUCTION", "FORMAT_EXAMPLE", "REWRITE_CODE_TEMPLATE"]),
+    ]
+    src_root = REPO.parent / "MetaGPT" / "metagpt"
+    missing_src = []
+    n = 0
+    for mod, rel, names in pairs:
+        f = src_root.parent / rel
+        if not f.exists():
+            missing_src.append(rel)
+            continue
+        text = f.read_text(encoding="utf-8")
+        for k in names:
+            v = getattr(mod, k)
+            assert v in text, f"{mod.__name__}.{k} 与源不逐字（write_prd 系引 write_prd_an/design_api_an 的除外）"
+            n += 1
+    if missing_src:
+        print(f"  t11 部分供体缺失 {missing_src}（本机在跑时应为 0）")
+    assert n >= 12, f"逐字比对数 {n} 太少"
+    print(f"  t11 批2a prompt 常量 {n} 段与源逐字节同段存在")
 
 
 def _ws(tag):
@@ -282,10 +403,12 @@ def _ws(tag):
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
-              t5_write_design_branches, t6_write_tasks_requirements, t7_run_code_summary]
+              t5_write_design_branches, t6_write_tasks_requirements, t7_run_code_summary,
+              t8_prepare_documents_instruct, t9_write_code_three_contexts,
+              t10_write_code_review_rounds, t11_action_prompts_verbatim]
     for c in checks:
         c()
-    print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 加厚 fixture/模板逐字 5 组"
+    print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件的全套 fixture 与逐字比对 9 组"
           f"；后续批在此续加（build_role 全名 / N2 外部注册演示 / 2b-2f 各 Action 一 fixture）")
 
 

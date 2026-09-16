@@ -4,7 +4,7 @@ from pathlib import Path
 from codeharness.base.action import BaseAction
 from codeharness.logs import logger
 from codeharness.schema import Message, Document, CodingContext
-from codeharness.const import RepoName, DocName
+from codeharness.const import BUGFIX_FILENAME, RepoName, DocName
 from codeharness.document_store.artifact_store import ArtifactStore
 
 PROMPT_TEMPLATE = """
@@ -41,10 +41,15 @@ ATTENTION: Use '##' to SPLIT SECTIONS, not '#'. Output format carefully referenc
 ## {demo_filename}.py
 ...
 ```
+## Code: {demo_filename}.js
+```javascript
+// {demo_filename}.js
+...
+```
 
 # Instruction: Based on the context, follow "Format example", write code.
 
-## Code: {filename}. Write code with triple quote, based on the following attentions and context.
+## Code: {filename}. Write code with triple quoto, based on the following attentions and context.
 1. Only One file: do your best to implement THIS ONLY ONE FILE.
 2. COMPLETE CODE: Your code will be part of the entire project, so please implement complete, reliable, reusable code snippets.
 3. Set default value: If there is any setting, ALWAYS SET A DEFAULT VALUE, ALWAYS USE STRONG TYPE AND EXPLICIT VARIABLE. AVOID circular import.
@@ -54,6 +59,19 @@ ATTENTION: Use '##' to SPLIT SECTIONS, not '#'. Output format carefully referenc
 7. Write out EVERY CODE DETAIL, DON'T LEAVE TODO.
 
 """
+
+
+async def build_code_context(store: ArtifactStore, exclude: str) -> str:
+    """源 WriteCode.get_codes(:168)：同项目其他文件作上下文、排除当前文件。
+    生成侧（本件）与评审侧（write_code_review）共用一个实现——源也是 review 调 WriteCode 的这个。"""
+    parts = []
+    for f in store.all_files(RepoName.SRC):
+        if f == exclude:
+            continue
+        d = await store.get(RepoName.SRC, f)
+        if d:
+            parts.append(f"### File Name: `{f}`\n```\n{d.content}\n```\n")
+    return "\n".join(parts)
 
 
 class WriteCode(BaseAction):
@@ -68,19 +86,26 @@ class WriteCode(BaseAction):
                                     "触发消息需携带 instruct_schema=CodingContext。",
                            role="assistant", cause_by=self.name, sent_from="Engineer")
         store = ArtifactStore.active()
-        design = (await store.get(RepoName.DOCS, DocName.DESIGN)) or Document(content="")
+        design = (await store.get(RepoName.DOCS, DocName.DESIGN_JSON)
+                  or await store.get(RepoName.DOCS, DocName.DESIGN)) or Document(content="")
         tasks = (await store.get(RepoName.DOCS, DocName.TASKS)) or Document(content="")
-        # 源 get_codes(:168)：同项目其他文件的代码作为上下文，排除当前文件
-        parts = []
-        for f in store.all_files(RepoName.SRC):
-            if f == ctx.filename:
-                continue
-            d = await store.get(RepoName.SRC, f)
-            if d:
-                parts.append(f"### File Name: `{f}`\n```\n{d.content}\n```\n")
-        others = "\n".join(parts)
+        others = await build_code_context(store, ctx.filename)
+        # 源 :52-57：三路上下文——上一轮跑测的 stderr、code_summary 的复盘存档、bugfix 工单。
+        # 本仓 output 命名对齐源 test_{code_filename}.json（RunCode 默认出口同步改，两处必须一致）。
+        logs = ""
+        test_out = await store.get(RepoName.TEST_OUTPUTS, f"test_{ctx.filename}.json")
+        if test_out:
+            from codeharness.schema import RunCodeResult
+            logs = RunCodeResult.model_validate_json(test_out.content).stderr
+        summary_doc = await store.get(RepoName.DOCS, DocName.CODE_SUMMARY)
+        feedback = ""
+        bugfix = await store.get(RepoName.DOCS, BUGFIX_FILENAME)
+        if bugfix:
+            feedback = bugfix.content
+            (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)  # 源 :163「防止冲突」
         prompt = PROMPT_TEMPLATE.format(design=design.content, task=tasks.content, code=others,
-                                        logs="", summary_log="", feedback="",
+                                        logs=logs, summary_log=summary_doc.content if summary_doc else "",
+                                        feedback=feedback,
                                         filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
         rsp = await self._aask(prompt)
         code = _parse_code(rsp)                                  # 见文末工具函数
