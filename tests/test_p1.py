@@ -63,19 +63,26 @@ async def main():
     assert fixed.thought == "fixed"
 
     # ⑤ ExtractReadMe（原"边缘六件"里其余五只 2026-09-16 对账后删除——源侧零消费者，
-    #   只留唯一有真实消费链的这只；判定表 §一 edge_actions 行 + 接线台账 #13）
+    #   只留唯一有真实消费链的这只；B5 起为源四段式：system 逐字 + 四谓词入 SPO 图，台账 #13）
     from codeharness.actions.edge_actions import ExtractReadMe
-    edge_llm = FakeLLM([
-        json.dumps({"summary": "示例库", "installation": "pip install", "configuration": "无", "usages": "import"}),
-    ])
-    rm = await ExtractReadMe(llm=edge_llm).run(Message("# README\n示例"))
-    assert rm.instruct_content["installation"] == "pip install"
+    from codeharness.const import GRAPH_REPO_FILE_REPO
+    edge_llm = FakeLLM(["示例库：做加法", "```bash\ngit clone … && pip install .\n```", "```bash\n```\n",
+                        "```python\nimport demo\n```"])
+    rm = await ExtractReadMe(llm=edge_llm).run(
+        Message(content="# README\n示例库", instruct_content={"repo": "demo"}, instruct_schema="ReadmeSummary"))
+    assert len(edge_llm.calls) == 4, f"源面是四段 aask，实为 {len(edge_llm.calls)}"
+    assert rm.instruct_content["summary"].startswith("示例库")
+    graph_json = Path("workspace/p1_test") / GRAPH_REPO_FILE_REPO / "readme.json"
+    assert graph_json.exists(), "四要素没入 SPO 图"
+    spo = graph_json.read_text(encoding="utf-8")
+    for pred in ("has_summary", "has_install", "has_config", "has_usage"):
+        assert pred in spo, f"图里缺谓词 {pred}"
 
     # ⑥ skills 等价包
     from codeharness.skills.loader import SkillAction
     sk = SkillAction("summarize", llm=FakeLLM(["摘要完成"]))
     assert "摘要完成" in (await sk.run(Message("长文内容"))).content
 
-    print("P1 批次自测全部通过：repo_parser/plan_and_act/reflection/llm_repair/边缘6件/skills")
+    print("P1 批次自测全部通过：repo_parser/plan_and_act/reflection/llm_repair/ExtractReadMe入图/skills")
 
 asyncio.run(main())
