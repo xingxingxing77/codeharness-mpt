@@ -99,8 +99,9 @@ class Agent:
             return END
         return "act"
 
-    # ---- 源 _act(:381-397) 逐行翻译 ----
+    # ---- 源 _act(:381-397) 逐行翻译 + self-heal 收口 ----
     async def _act(self, s: AgentState):
+        from langgraph.errors import GraphInterrupt
         action = self.actions[s["chosen"]]
         if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
             prompt = self._format_inbox(s["inbox"])
@@ -108,10 +109,22 @@ class Agent:
         else:                                                # BY_ORDER 第 2+ 动作：收件箱已清，退化为最近记忆
             trig = s["memory"][-1] if s["memory"] else Message(content="")
             prompt = trig.content
-        result = await action.run(Message(
-            content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,
-            instruct_content=trig.instruct_content,          # 上下文模型透传（CodingContext/TestingContext 的接缝）
-            instruct_schema=trig.instruct_schema))
+        try:
+            result = await action.run(Message(
+                content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,
+                instruct_content=trig.instruct_content,      # 上下文模型透传（CodingContext/TestingContext 的接缝）
+                instruct_schema=trig.instruct_schema))
+        except GraphInterrupt:
+            raise                                            # interrupt 靠抛异常暂停图，绝不能吞（role_zero 同律）
+        except Exception as e:
+            # Action 抛错 → 错误消息回喂记忆，下一轮自愈——真模型输出漂移是常态（第十二处：
+            # WriteTasks 给了 filename="/main.py"，产物仓按契约写拒，这异常原本一路吹穿
+            # team graph，把已完成的角色与花掉的钱全部陪葬）。拒写是对的，炸会话不是。
+            from codeharness.logs import logger
+            logger.warning(f"{self.profile['name']}.{action.name} 抛错，回喂自愈: "
+                           f"{type(e).__name__}: {e}")
+            result = Message(content=f"[错误] {action.name} 执行失败: {type(e).__name__}: {e}",
+                             role="user", cause_by=action.name, sent_from=self.profile["name"])
         if isinstance(result, Message):
             msg = result
         else:

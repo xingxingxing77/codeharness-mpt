@@ -302,12 +302,47 @@ def t11_classic_team_watch_covers_sop():
         _fail(f"11. WriteCode 空 filename 未软失败（llm.calls={len(fake.calls)}）: {soft.content!r}")
 
 
+def t12_action_exception_feeds_back():
+    """第十二处门禁：Action 抛错=错误消息回喂记忆（产物仓写拒是对的，吹掉整场会话不是）；
+    GraphInterrupt 是唯一必须照抛的异常（interrupt/resume 机制靠它暂停图）。"""
+    from langgraph.errors import GraphInterrupt
+    from codeharness.roles.agent import Agent
+
+    class Boom(BaseAction):
+        output_schema = Rec
+        async def run(self, msg: Message) -> Message:
+            raise ValueError("非法产物文件名 '/main.py'")
+
+    class BoomInterrupt(BaseAction):
+        output_schema = Rec
+        async def run(self, msg: Message) -> Message:
+            raise GraphInterrupt()
+
+    def st(name, act):
+        return {"name": "E", "inbox": [Message(content="go", cause_by="WriteTasks")],
+                "memory": [], "action_cursor": -1, "chosen": act, "loops": 1, "output": []}
+
+    ag = Agent({"name": "E", "profile": "p", "goal": "g"},
+               [Boom(llm=None), BoomInterrupt(llm=None)], None, max_loops=2)
+    r = asyncio.run(ag._act(st("E", "Boom")))
+    out = r["output"][0]
+    if not out.content.startswith("[错误]") or "非法产物文件名" not in out.content or out.cause_by != "Boom":
+        _fail(f"12. Action 异常未回喂自愈: {out.content!r}")
+    if out not in r["memory"]:
+        _fail("12. 错误消息没进记忆，下一轮想修都没得看")
+    try:
+        asyncio.run(ag._act(st("E", "BoomInterrupt")))
+        _fail("12. GraphInterrupt 被吞了——interrupt/resume 会静默失效")
+    except GraphInterrupt:
+        pass
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
-              t11_classic_team_watch_covers_sop]
+              t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -317,7 +352,7 @@ def main():
     print(f"\nS3(b) 门禁通过：{len(checks)} 组 —— R3 路由 5 组（BY_ORDER 全跑完/精准激活/显式指名/"
           f"<self> 目标校验/订阅可证伪）+ R4a 持久化 1 组 + R5 interrupt-resume 跨实例 1 组 + "
           f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
-          f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组")
+          f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组")
 
 
 if __name__ == "__main__":
