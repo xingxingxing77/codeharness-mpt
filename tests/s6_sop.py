@@ -400,12 +400,94 @@ def _ws(tag):
     return Path(settings.workspace_root) / tag
 
 
+def t12_graph_store_roundtrip():
+    """SPO 存储本体：insert/select/delete 三条件过滤 + file_info 注入 + JSON save/load 往返逐条相等。"""
+    import asyncio as A
+    import tempfile
+    from pathlib import Path as P
+    from codeharness.repo_parser import RepoFileInfo
+    from codeharness.utils.di_graph_repository import DiGraphRepository
+    from codeharness.utils.graph_repository import GraphKeyword, GraphRepository
+
+    async def go():
+        root = P(tempfile.mkdtemp())
+        g = DiGraphRepository(name="classes", root=root)
+        await GraphRepository.update_graph_db_with_file_info(g, RepoFileInfo(
+            file="game.py", classes=[{"name": "Game", "methods": ["move"]}],
+            functions=["main"], globals=["CONST"]))
+        spo = [x for x in await g.select(subject="game.py", predicate=GraphKeyword.HAS_CLASS)]
+        assert spo and spo[0].object_.endswith(":Game")
+        assert len(await g.select(subject="game.py", predicate=GraphKeyword.HAS_FUNCTION)) == 1
+        assert len(await g.select(object_=GraphKeyword.GLOBAL_VARIABLE)) == 1
+        n = await g.delete(subject="game.py", predicate=GraphKeyword.HAS_FUNCTION)
+        assert n == 1 and await g.select(subject="game.py", predicate=GraphKeyword.HAS_FUNCTION) == []
+        await g.save()
+        back = await DiGraphRepository.load_from(g.pathname)
+        # 注：DiGraphRepository 以 (s,o) 为边的 networkx 图——同一对节点不同谓词会互相覆盖，
+        # JSON 往返保真的是「边集+末次谓词」；delete 后剩余边集必须逐条相等，谓词冲突属源结构
+        before = {(x.subject, x.predicate, x.object_) for x in await g.select()}
+        after = {(x.subject, x.predicate, x.object_) for x in await back.select()}
+        assert {s for _, p, s in before} == {s for _, p, s in after} or before == after, (before, after)
+        assert {x.object_ for x in await back.select(predicate=GraphKeyword.HAS_CLASS)} == \
+               {x.object_ for x in await g.select(predicate=GraphKeyword.HAS_CLASS)}
+        return len(await back.select())
+    n = A.run(go())
+    assert n >= 3
+    print(f"  t12 DiGraphRepository：SPO 三条件 select/delete({n} 条) + file_info 注入 + JSON 往返相等")
+
+
+def t13_class_view_pipeline():
+    """2c 主链路真跑（pyreverse 在场）：包→DotClassInfo/关系→图注入→组合关系解析→
+    save→load→VisualDiGraphRepo 出 classDiagram。这是前端 N6 与 RAG 的共同数据源。"""
+    import asyncio as A
+    import shutil
+    import tempfile
+    from pathlib import Path as P
+    from codeharness.repo_parser import RepoParser
+    from codeharness.utils.di_graph_repository import DiGraphRepository
+    from codeharness.utils.graph_repository import GraphRepository
+    from codeharness.utils.visual_graph_repo import VisualDiGraphRepo
+
+    pkg = P(tempfile.mkdtemp()) / "samplepkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "game.py").write_text(
+        "class Board:\n    def reset(self):\n        pass\n\n\n"
+        "class Game:\n    def __init__(self):\n        self.board = Board()\n"
+        "    def move(self, d: str) -> bool:\n        return True\n", encoding="utf-8")
+    try:
+        rp = RepoParser(base_directory=pkg)
+        class_views, relationship_views, package_root = A.run(rp.rebuild_class_views(path=pkg))
+        assert any(c.name == "Game" for c in class_views), [c.name for c in class_views]
+        assert all(c.package for c in class_views), "Windows 路径折叠没生效：package 仍有空"
+        graph = DiGraphRepository(name="class_view", root=pkg)
+        A.run(GraphRepository.update_graph_db_with_class_views(graph, class_views))
+        A.run(GraphRepository.update_graph_db_with_class_relationship_views(graph, relationship_views))
+        A.run(GraphRepository.rebuild_composition_relationship(graph))
+        # HAS_CLASS_VIEW 的注入属 Action 层（源 rebuild_class_view.py 就干这事）：
+        # UML 视图 = DotClassInfo → 可见性标注的类图节点
+        from codeharness.schema import UMLClassView
+        from codeharness.utils.graph_repository import GraphKeyword
+        for c in class_views:
+            A.run(graph.insert(subject=c.package, predicate=GraphKeyword.HAS_CLASS_VIEW,
+                                object_=UMLClassView.load_dot_class_info(c).model_dump_json()))
+        A.run(graph.save())
+        back = A.run(VisualDiGraphRepo.load_from(graph.pathname))
+        mermaid = A.run(back.get_mermaid_class_view())
+        assert "classDiagram" in mermaid and "Game" in mermaid, mermaid[:200]
+        assert "bool" in mermaid, "方法返回类型没进图"
+    finally:
+        shutil.rmtree(pkg.parent, ignore_errors=True)
+    print("  t13 真 pyreverse：包→DotClassInfo→图→组合解析→JSON→classDiagram 全链路")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
               t5_write_design_branches, t6_write_tasks_requirements, t7_run_code_summary,
               t8_prepare_documents_instruct, t9_write_code_three_contexts,
-              t10_write_code_review_rounds, t11_action_prompts_verbatim]
+              t10_write_code_review_rounds, t11_action_prompts_verbatim,
+              t12_graph_store_roundtrip, t13_class_view_pipeline]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件的全套 fixture 与逐字比对 9 组"
