@@ -948,13 +948,15 @@ class RepoParser(BaseModel):
         # _create_path_mapping 的键、root_namespace 的 "." 前缀、切片下标三者才能对上。
         # 不折叠时 pyreverse 给的 `p1.game.Board` 全被误裁成空串（t13 实测 pkg=''）。
         path = str(path).replace("\\", "/")
-        if re.match(r"^[A-Za-z]:", path):
-            path = "/" + path
-        full_key = path.lstrip("/").replace("/", ".")
+        # 键空间补前导 "/" 求同构，但返回给调用方的 package_root 不能带它
+        # （否则 _diff_path 里与 Path.resolve() 的 Windows 形态对不上，relative_to 直接抛）
+        path_for_key = "/" + path if re.match(r"^[A-Za-z]:", path) else path
+        full_key = path_for_key.lstrip("/").replace("/", ".")
         root_namespace = RepoParser._find_root(full_key, c.package)
         root_path = root_namespace.replace(".", "/")
 
-        mappings = RepoParser._create_path_mapping(path=path)
+        # 传 path_for_key：mapping 键必须与 root_namespace 一样带前导 "."，切片下标才对齐
+        mappings = RepoParser._create_path_mapping(path=path_for_key)
         new_mappings = {}
         ix_root_namespace = len(root_namespace)
         ix_root_path = len(root_path)
@@ -968,7 +970,10 @@ class RepoParser(BaseModel):
         for _, v in enumerate(relationship_views):
             v.src = RepoParser._repair_ns(v.src, new_mappings)
             v.dest = RepoParser._repair_ns(v.dest, new_mappings)
-        return class_views, relationship_views, str(path)[: len(root_path)]
+        # 从 root_path 还原 package_root（其前导 "/" 是折叠进 key 空间的产物，POSIX 下 lstrip 无害）；
+        # 调用方 RebuildClassView._diff_path 需要它能与 Path.resolve() 直接比长度/相对
+        package_root = root_path.rstrip("/").lstrip("/") if re.match(r"^[A-Za-z]:", path) else str(path)[: len(root_path)]
+        return class_views, relationship_views, package_root
 
     @staticmethod
     def _repair_ns(package: str, mappings: Dict[str, str]) -> str:

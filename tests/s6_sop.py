@@ -481,13 +481,45 @@ def t13_class_view_pipeline():
     print("  t13 真 pyreverse：包→DotClassInfo→图→组合解析→JSON→classDiagram 全链路")
 
 
+def t14_rebuild_class_view_action():
+    """2c 消费方 Action 形态：会话里对 src/ 建图，产出 graph_repo JSON + data_api_design .mmd。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.rebuild_class_view import RebuildClassView
+    from codeharness.const import DATA_API_DESIGN_FILE_REPO, GRAPH_REPO_FILE_REPO, RepoName
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Message
+    try:
+        store = _fixture_store("s6rcv")
+        (store.root / RepoName.SRC).mkdir(parents=True, exist_ok=True)
+        (store.root / RepoName.SRC / "__init__.py").write_text("", encoding="utf-8")
+        (store.root / RepoName.SRC / "game.py").write_text(
+            "class Board:\n    def reset(self):\n        pass\n\n\nclass Game:\n"
+            "    def __init__(self):\n        self.board = Board()\n"
+            "    def move(self, d: str) -> bool:\n        return True\n", encoding="utf-8")
+        out = A.run(RebuildClassView(llm=None).run(
+            Message(content=str(store.root / RepoName.SRC))))
+        assert "类图重建完成" in out.content, out.content
+        mmd = store.root / DATA_API_DESIGN_FILE_REPO / "class_view.class_diagram.mmd"
+        assert mmd.exists()
+        text = mmd.read_text(encoding="utf-8")
+        assert "classDiagram" in text and "class Board" in text and "class Game" in text, text
+        assert "*--" in text, "组合关系（Game 的 board 属性）没进图"
+        assert (store.root / GRAPH_REPO_FILE_REPO / "class_view.json").exists()
+    finally:
+        shutil.rmtree(_ws("s6rcv"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t14 RebuildClassView：src 建图→graph_repo JSON→.mmd（类+组合边齐）")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
               t5_write_design_branches, t6_write_tasks_requirements, t7_run_code_summary,
               t8_prepare_documents_instruct, t9_write_code_three_contexts,
               t10_write_code_review_rounds, t11_action_prompts_verbatim,
-              t12_graph_store_roundtrip, t13_class_view_pipeline]
+              t12_graph_store_roundtrip, t13_class_view_pipeline,
+              t14_rebuild_class_view_action]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件的全套 fixture 与逐字比对 9 组"
