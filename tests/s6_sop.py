@@ -590,6 +590,81 @@ def t16_search_and_summarize_history():
     print("  t16 SearchAndSummarize：源逐字 PROMPT + 历史注入 + 降级不拦答")
 
 
+def t17_role_profile_parity():
+    """施工3 门禁第 2 条 + 批3 对账：①源 19 个角色类 ↔ registry 名集合互洽（RoleZero 是引擎不在注册表，
+    SWEAgent↔SweAgent 是唯一改名）；②每个注册角色的 name/profile/goal 与源类属性**逐字相等**
+    （AST 提取；源字段是模板占位（Teacher 的 {teaching_language}）或缺席（Sales 无 goal）则跳过该字段）；
+    ③registry 的 actions import 无一闲置（孤儿 import = 对账不过——批2 盘点教训的机器版）。"""
+    from codeharness.roles import registry as R
+
+    src_dir = REPO.parent / "MetaGPT" / "metagpt" / "roles"
+
+    def cls_attrs(f):
+        out = {}
+        try:
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            return out
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            kv = {}
+            for b in node.body:
+                if not isinstance(b, (ast.Assign, ast.AnnAssign)):
+                    continue
+                t = b.targets[0] if isinstance(b, ast.Assign) else b.target
+                if isinstance(t, ast.Name) and t.id in ("name", "profile", "goal") \
+                        and isinstance(b.value, ast.Constant) and isinstance(b.value.value, str):
+                    kv[t.id] = b.value.value
+            if kv.get("profile") or kv.get("goal"):
+                out[node.name] = kv
+        return out
+
+    source = {}
+    for f in sorted(src_dir.rglob("*.py")):
+        if f.name in ("role.py", "prompt.py", "__init__.py"):
+            continue
+        source.update(cls_attrs(f))
+    if not source:
+        print("  t17 跳过（供体角色文件不在）")
+        return
+    ALIAS = {"SweAgent": "SWEAgent"}
+    missing = set(source) - {"RoleZero"} - {ALIAS.get(k, k) for k in R.ALL_ROLES}
+    assert not missing, f"源角色未注册: {sorted(missing)}"
+
+    # 显式「功能等价件」：源件依赖被排除清单的 SK/OCR 服务，profile 文案随重写有意不同
+    # （各自 docstring 已声明）——只豁免这三个字符串字段，其余字段照旧逐字。
+    EQUIVALENT = {"Assistant", "InvoiceOCRAssistant"}
+    from codeharness.provider.fake import FakeLLM
+    checked = 0
+    for reg_name, factory in R.ALL_ROLES.items():
+        role = factory(llm=FakeLLM(["{}"]))
+        prof = getattr(role, "profile", {}) or {}
+        src_kv = source.get(ALIAS.get(reg_name, reg_name), {})
+        for k in ("name", "profile", "goal"):
+            want = src_kv.get(k)
+            got = prof.get(k) if isinstance(prof, dict) else getattr(role, k, None)
+            if want is None or "{" in want:      # 源缺席 / 模板占位不硬对
+                continue
+            if reg_name in EQUIVALENT:
+                continue
+            assert got == want, f"{reg_name}.{k}: 本仓 {got!r} ≠ 源 {want!r}"
+            checked += 1
+    assert checked >= 30, f"逐字对账字段数仅 {checked}，注册表 profile 面缩水"
+
+    # ③ registry 的 actions import 闲置检查（edge_actions 教训：能力件必须有名分——角色或判定表）
+    reg_src = (REPO / "codeharness" / "roles" / "registry.py").read_text(encoding="utf-8")
+    tree = ast.parse(reg_src)
+    imported = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("codeharness.actions"):
+            imported.update(a.asname or a.name for a in node.names)
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    idle = imported - used
+    assert not idle, f"registry 闲置 import（对账不过）: {sorted(idle)}"
+    print(f"  t17 角色对账：{len(R.ALL_ROLES)} 角色注册齐、profile 三字段 {checked} 项与源逐字、registry 无闲置 import")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -598,7 +673,7 @@ def main():
               t10_write_code_review_rounds, t11_action_prompts_verbatim,
               t12_graph_store_roundtrip, t13_class_view_pipeline,
               t14_rebuild_class_view_action, t15_research_three_legs,
-              t16_search_and_summarize_history]
+              t16_search_and_summarize_history, t17_role_profile_parity]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"

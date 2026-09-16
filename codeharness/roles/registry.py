@@ -12,15 +12,13 @@ from codeharness.roles.agent import Agent
 from codeharness.roles.role_zero import RoleZero
 from codeharness.tools import REGISTRY
 from codeharness.tools.tool_registry import TOOL_REGISTRY
-from codeharness.actions.write_prd import WritePRD
-from codeharness.actions.project_management import WriteTasks
+# WritePRD/WriteTasks/PrepareDocuments 不在本表 import——经典线流水线由 team.classic_team 装配，
+# 这里 import 它们就是死代码（t17 闲置检查抓出的 4 处之一批）。
 from codeharness.actions.write_code import WriteCode
 from codeharness.actions.summarize_code import SummarizeCode
 from codeharness.actions.write_test import WriteTest
 from codeharness.actions.run_code import RunCode
 from codeharness.actions.debug_error import DebugError
-from codeharness.actions.write_code_plan_and_change import WriteCodePlanAndChange
-from codeharness.actions.prepare_documents import PrepareDocuments
 from codeharness.actions.research import Research
 from codeharness.actions.search_and_summarize import SearchAndSummarize
 from codeharness.actions.talk_action import TalkAction
@@ -35,28 +33,29 @@ from codeharness.actions.data_analysis import WriteAnalysisCode, RunPythonCode
 def TeamLeader(llm, **kw):
     """源 roles/di/team_leader.py：调度中枢"""
     return RoleZero({"name": TEAMLEADER_NAME, "profile": "Team Leader",
-                     "goal": "lead a team to fulfill requirements efficiently"},
+                     "goal": "Manage a team to assist users"},     # 源 team_leader.py 逐字（t17 对账抓出旧抄错）
                     REGISTRY, llm, **kw)
 
 
 def ProductManager(llm, **kw):
     """源 roles/product_manager.py:33-38（字段逐字）"""
     return RoleZero({"name": "Alice", "profile": "Product Manager",
-                     "goal": "Create a Product Requirement Document or market research/competitive product research"},
+                     "goal": "Create a Product Requirement Document or market research/competitive product research."},
                     REGISTRY, llm, **kw)
 
 
 def Architect(llm, **kw):
     """源 roles/architect.py:29-30"""
     return RoleZero({"name": "Bob", "profile": "Architect",
-                     "goal": "design a concise, usable, complete software system. output the system design"},
+                     "goal": "design a concise, usable, complete software system. output the system design."},
                     REGISTRY, llm, **kw)
 
 
 def ProjectManager(llm, **kw):
     """源 roles/project_manager.py:25-26（Eve）"""
     return RoleZero({"name": "Eve", "profile": "Project Manager",
-                     "goal": "Improve efficiency and quality of project delivery by decomposing tasks"},
+                     "goal": "break down tasks according to PRD/technical design, generate a task list, "
+                             "and analyze task dependencies to start with the prerequisite modules"},
                     REGISTRY, llm, **kw)
 
 
@@ -105,7 +104,10 @@ def Engineer(llm, **kw):
     return _classic("Alex", "Engineer", "write elegant, readable, extensible, efficient code",
                     [WriteCode(llm=llm), SummarizeCode(llm=llm)], llm,
                     watch={RequirementTag.WRITE_TASKS, RequirementTag.SUMMARIZE_CODE,
-                           RequirementTag.WRITE_CODE, RequirementTag.FIX_BUG}, **kw)
+                           RequirementTag.WRITE_CODE, RequirementTag.FIX_BUG,
+                           RequirementTag.WRITE_CODE_REVIEW,
+                           RequirementTag.WRITE_CODE_PLAN_AND_CHANGE},   # 源 engineer.py:106 订阅集补齐
+                    **kw)
 
 
 def QaEngineer(llm, **kw):

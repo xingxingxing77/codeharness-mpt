@@ -19,7 +19,7 @@ def default_team(llm, env_desc: str = "a software company"):
         from codeharness.provider.gateway import LLMGateway
         ltm = LongTermMemory(embeddings=LLMGateway.embeddings())   # project 用时现取，三角色共用
     profiles = {                                    # 字段逐字抄自 roles/ 对应文件（参考速查 §4）
-        TEAMLEADER_NAME: ("Team Leader", "lead a team to fulfill requirements efficiently"),
+        TEAMLEADER_NAME: ("Team Leader", "Manage a team to assist users"),   # t17 对账：源逐字
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
         "Bob":   ("Architect", "design a concise, usable, complete software system"),
     }
