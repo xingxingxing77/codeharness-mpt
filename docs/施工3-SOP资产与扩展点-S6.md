@@ -104,7 +104,7 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 - **Windows 路径校准是这片的真风险**（判 `改` 的核心）：源 `_repair_namespaces`/`_create_path_mapping` 假设 POSIX 正斜杠路径——Windows 反斜杠不折叠时 pyreverse 的包名全被误裁成空串（t13 实测 pkg=''），盘符前导 `/` 补进键空间后 mapping 键与前导点根又差一字符（切片错位），两处都必须在同一函数里对齐、返回给 `_diff_path` 的 package_root 还要剥回平台形态。三次踩坑全部当场复现当场修，t13/t14 双向钉住。
 - `graph_repository`(394)/`di_graph_repository`(168)/`visual_graph_repo`(162) 三件套照源落地（判 `改`=只改 import 前缀），networkx 3.4.2 在场；t12 钉 SPO 三条件过滤 + JSON 往返相等。
 - `RebuildClassView` Action：pyreverse 类面 + AST 文件面（`_diff_path`/`_align_root` 对齐同一根）→ SPO 图 → `resources/data_api_design/class_view.class_diagram.mmd`（方案 C 的 .mmd 真源）+ `docs/graph_repo/class_view.json`；aiofiles 直写换 asyncio.to_thread（本仓零 aiofiles 依赖）。
-**剩余三件判词（2c 内自洽收口，不是烂尾）**：`rebuild_sequence_view`(605) 等类图数据被 RAG/前端真实消费过再搬（全仓最大单件，源侧测试也最薄，先验证数据形状再动）；`import_repo`(226) **并入 N2 批 5**（它耦合 git_clone/GitRepository/archive——全是判"被 ArtifactStore 覆盖"的件，平台的外部仓库导入该是扩展点工具不是会话 Action）；`extract_readme`(123) 归 2b 搜索研究批。三件去向已在判定表"三个判定必须自洽"的约束下显式登记。
+**剩余三件判词（2c 内自洽收口，不是烂尾）**：`rebuild_sequence_view`(605) 等类图数据被 RAG/前端真实消费过再搬（全仓最大单件，源侧测试也最薄，先验证数据形状再动）；`import_repo`(226) **并入 N2 批 5**（它耦合 git_clone/GitRepository/archive——全是判"被 ArtifactStore 覆盖"的件，平台的外部仓库导入该是扩展点工具不是会话 Action）；`extract_readme`(123)——2b 盘点改口：**`edge_actions.py` 里早有 ExtractReadMe**（S6 前预埋），真缺口不是"没搬"而是"没接"：它连同 WriteDocstring/WriteDesignReview/WriteReview/AnalyzeRequirements/GenerateQuestions 共六只孤儿类无任何角色 import（批2 盘点 grep 实测，判定表 §一 追加行登记）。批 3 角色对齐时逐只处置：补进源对应角色的 actions 清单，或按「零调用者=死分支」删除（先例 `summarizing.py`）。三件去向已在判定表"三个判定必须自洽"的约束下显式登记。
 **未动**：2b–2f 其余、批 3–5。
 
 **批 2b ✅ 搜索研究（同日，提交 `bf5c7ff`，s6 门禁 16 组）**：
