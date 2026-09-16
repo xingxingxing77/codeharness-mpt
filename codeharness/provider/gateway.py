@@ -84,10 +84,15 @@ class LLMGateway:
 
     @staticmethod
     def embeddings():
-        """bge-m3 embedding 工厂（1024 维，OpenAI 兼容端点）。向量模型不走 gateway。"""
+        """bge-m3 embedding 工厂（1024 维，OpenAI 兼容端点）。向量模型不走 gateway。
+
+        ⚠ `check_embedding_ctx_length=False`：langchain 默认先用 tiktoken 把输入编码成
+        token-id 数组再发——本机 ollama 的 /v1/embeddings 只收字符串，收数组直接
+        `400 invalid input type`（2026-09-16 实测）。直发原文，本地端点自己管分词。"""
         from codeharness.configs.settings import settings
         return OpenAIEmbeddings(model=settings.embedding.model, base_url=settings.embedding.base_url,
-                                api_key=settings.embedding.api_key or "EMPTY")
+                                api_key=settings.embedding.api_key or "EMPTY",
+                                check_embedding_ctx_length=False)
 
     # ---- 源 BaseLLM 的公开面 --------------------------------------------------
     def format_msg(self, messages: Union[str, dict, BaseMessage, list]) -> list[BaseMessage]:

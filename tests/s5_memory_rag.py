@@ -717,6 +717,84 @@ def t24_rolezero_think_wired():
     print("  t24 RoleZero.llm_cached_think 接线：命中零模型调用，关池透传，tag=类名.方法名")
 
 
+def live_embedding() -> bool:
+    """真 bge-m3（本机 ollama）探活：能返回 1024 维才算在线。"""
+    try:
+        from codeharness.provider.gateway import LLMGateway
+        v = asyncio.run(LLMGateway.embeddings().aembed_query("探活"))
+        return len(v) == settings.embedding.dim
+    except Exception:
+        return False
+
+
+def t25_real_bge_semantic_path():
+    """真语义向量首跑（S5.2 欠账：三层此前只跑过 hash-fake）。
+    断言要的是 hash-fake 给不出的能力：**改写**（零共同标识符）仍召回——
+    bag-of-chars 看字面，bge-m3 看意思。表存 storage/benchmark/s5_hitrate_bge.json（S9 基线）。
+    专属 1024 维集合 s5gate_bge，与 64 维的假 embedding 集合互不污染。"""
+    if not (live_qdrant() and live_embedding()):
+        print("  t25 跳过（Qdrant 或真 embedding 不在线）")
+        return
+    from codeharness.document_store.qdrant_store import Point, QdrantStore
+    from codeharness.document_store.exp_store import ExpStore
+    from codeharness.exp_pool.manager import ExperienceManager, HitCounter
+    from codeharness.exp_pool.schema import Experience
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.gateway import LLMGateway
+    from codeharness.schema import Message
+
+    bge = QdrantStore(collection="s5gate_bge")
+    emb = LLMGateway.embeddings()
+    CURRENT_PROJECT.set("s5_bge_proj")
+    # 1) LongTermMemory：同义改写检索，且必须赢过字面重叠更多的干扰条目
+    ltm = LongTermMemory(embeddings=emb, user_id="u_bge", store=bge)
+    asyncio.run(ltm.overflow([
+        Message(content="终端执行超时子进程挂住，要按进程树整体杀掉", role="user", sent_from="Memo"),
+        Message(content="进程监视器每 30 秒轮询一次子进程状态并写日志", role="user", sent_from="Memo2")]))
+    hits = asyncio.run(ltm.recall("程序卡着不退出，残留的进程怎么全部清掉", k=2))
+    assert hits and "进程树" in hits[0].content, \
+        f"真语义召回失败/排序不对（首位应是改写匹配）: {[h.content for h in hits]}"
+    asyncio.run(ltm.drop())
+    # 2) 经验池：改写 req 也召得回（判定阈值在装饰器侧，这里只验检索面）
+    store = ExpStore(embeddings=emb, user_id="u_bge_exp", store=bge)
+    mgr = ExperienceManager(store=store, counter=HitCounter(user_id="u_bge_exp"))
+    asyncio.run(mgr.create_exp(Experience(req="终端执行超时子进程挂住", resp="按进程树杀", tag="RoleZero.llm_cached_think")))
+    got = asyncio.run(mgr.query_exps("程序卡住不退出如何清理残留进程", tag="RoleZero.llm_cached_think"))
+    assert got and got[0][0].resp == "按进程树杀" and got[0][1] > 0.5, got
+    # 3) hit-rate：与 t18 同一份 query 集，真 embedding 重测存盘
+    docs = []
+    for key, _ in CORPUS_QUERY:
+        docs.append((f"{TAIL} 关键实现见 {key}。", True, key))
+        docs += [(f"{TAIL} 相关实现见 {w}。", False, key) for w in near_miss(key)]
+    vecs = asyncio.run(emb.aembed_documents([t for t, _, _ in docs]))
+    asyncio.run(bge.write([Point(id=pid(f"bge{i}"), text=t, dense=list(v), doc_type="kb",
+                                 user_id="u_bge_bench")
+                           for i, ((t, _, _), v) in enumerate(zip(docs, vecs))]))
+    n, rows, ranks = len(CORPUS_QUERY), [], {"dense_only": [], "hybrid": []}
+    for key, query in CORPUS_QUERY:
+        want = next(pid(f"bge{i}") for i, (t, gold, g) in enumerate(docs) if gold and g == key)
+        qv = asyncio.run(emb.aembed_query(query))
+        for mode, hyb in (("dense_only", False), ("hybrid", True)):
+            ids = [h.id for h in asyncio.run(bge.search(query, list(qv), k=5, hybrid=hyb,
+                                                        doc_type="kb", user_id="u_bge_bench"))]
+            ranks[mode].append(ids.index(want) + 1 if want in ids else None)
+        rows.append({"query": query, "gold": key,
+                     "rank_dense_only": ranks["dense_only"][-1], "rank_hybrid": ranks["hybrid"][-1]})
+    hit = lambda rs: sum(1 for r in rs if r is not None and r <= 5)
+    assert hit(ranks["dense_only"]) == n and hit(ranks["hybrid"]) == n, rows   # 真模型下 gold 必须全在 top5
+    out = Path(settings.workspace_root).parent / "storage" / "benchmark"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "s5_hitrate_bge.json").write_text(json.dumps(
+        {"metric": "hit-rate@5, 真 bge-m3 语义路径", "corpus": len(docs), "queries": n,
+         "dense_only_hit@5": hit(ranks["dense_only"]), "hybrid_hit@5": hit(ranks["hybrid"]),
+         "ranks": {k: v for k, v in ranks.items()}, "rows": rows,
+         "note": "S9 基线表；与 s5_hitrate.json（hash-fake）同 query 集，这张才是真实语义的对照"},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    asyncio.run(bge.drop())
+    print(f"  t25 真 bge-m3：改写召回排第一、经验回放命中、hit@5 {hit(ranks['dense_only'])}/{n}"
+          f"→{hit(ranks['hybrid'])}/{n} 全收；表已存 s5_hitrate_bge.json")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -732,12 +810,16 @@ def main():
               t18_hitrate_single_vs_hybrid_table,
               t19_exp_schema_roundtrip, t20_serializer_think_roundtrip,
               t21_hit_count_reorders, t22_exp_cache_semantics,
-              t23_exp_store_replay_on_qdrant, t24_rolezero_think_wired]
+              t23_exp_store_replay_on_qdrant, t24_rolezero_think_wired,
+              t25_real_bge_semantic_path]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
-        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23 跳过。"
+        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23/t25 跳过。"
               f"R9 这层的门禁必须起容器跑一次才算数。")
+    if not live_embedding():
+        print(f"⚠ 真 embedding 不在线（{settings.embedding.base_url} / {settings.embedding.model}）："
+              f"t25 跳过——语义路径的门禁要连 ollama 跑一次才算数。")
     for fn in checks:
         fn()
     try:
@@ -749,7 +831,7 @@ def main():
             asyncio.run(gate_store().drop())        # 自测集合不留残余
         except Exception as e:
             print(f"  （清理 {GATE_COLL} 集合失败：{type(e).__name__}）")
-    print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.3 经验池 6 组（Experience 逐字段 roundtrip/"
+    print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.3 经验池与真语义 7 组（Experience 逐字段 roundtrip/"
           f"think 载荷无损往返与裁剪键/命中计数改变排序/@exp_cache 开关矩阵/"
           f"真 Qdrant+Redis 存取回放/RoleZero 接线命中零模型调用）"
           f"+ S5.1 记忆 11 组（Redis 真往返与死端口降级/"

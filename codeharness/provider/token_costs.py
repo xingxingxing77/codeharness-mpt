@@ -6,6 +6,11 @@
 """
 
 TOKEN_COSTS = {
+    # ⚠ 本表其余行是美元/千 token；这一行是**人民币/千 token**（用户 2026-09-16 报价：
+    # 输入 0.8 元/百万、输出 2.7 元/百万；缓存命中输入 0.1 元/百万，本行不区分——
+    # usage 里的 cache_read 字段 MaaS 没回传，缓存口径记账归 S9 双跑对齐时处理）。
+    # 前端 "$已用" 的货币符号是展示层问题，按行记账不跨币种换算。
+    "qwen3.8-flash": {"prompt": 0.0008, "completion": 0.0027},
     "anthropic/claude-3.5-sonnet": {"prompt": 0.003, "completion": 0.015},
     "gpt-3.5-turbo": {"prompt": 0.0015, "completion": 0.002},
     "gpt-3.5-turbo-0301": {"prompt": 0.0015, "completion": 0.002},
