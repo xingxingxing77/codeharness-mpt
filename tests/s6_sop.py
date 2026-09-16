@@ -695,6 +695,82 @@ def t18_strategy_switch():
     print("  t18 N3 策略字段：注册自报 / 换装生效 / 两族拒绝路径各一条")
 
 
+def t19_ext_api_acceptance():
+    """施工3 门禁第 5 条=平台的验收线：**不修改任何内核文件**，只经 ext_api/sop 公共面——
+    注册新 Action + 新 Tool + 新角色 + 新 SOP 模板，跑通一整场会话。
+    （内置件拒绝覆盖/非 BaseAction 拒绝进门/RoleZero 命令面即时可见，三条守卫各一断言。）"""
+    import asyncio as A
+    from langchain_core.tools import tool as lc_tool
+    from codeharness.base.action import BaseAction
+    from codeharness.const import RequirementTag
+    from codeharness.environment.team_graph import build_team
+    from codeharness.ext_api import register_action, register_role, register_tool
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.roles.registry import ALL_ROLES, build_role
+    from codeharness.schema import Message
+    from codeharness.sop.builder import build_team_from_template, get_template
+    from codeharness.tools import REGISTRY
+    from codeharness.tools.tool_registry import TOOL_REGISTRY
+
+    @register_action
+    class Haiku(BaseAction):                     # ① 新 Action：内核动作表不认识它
+        async def run(self, msg: Message) -> Message:
+            return Message(content=f"[haiku]{msg.content[:6]}", role="assistant",
+                           cause_by=self.name, sent_from="Poet")
+
+    @lc_tool
+    def ext_count_chars(text: str) -> str:
+        """统计文本字符数（扩展工具样例）"""
+        return str(len(text))
+
+    try:
+        register_tool(ext_count_chars)          # ② 新 Tool
+        assert "ext_count_chars" in {t.name for t in REGISTRY}
+        leader = build_role("TeamLeader", FakeLLM(["{}"]))
+        assert "ext_count_chars" in leader.tools, "RoleZero 命令面看不到新工具=列表引用被换了"
+        try:
+            register_tool(ext_count_chars)
+            raise AssertionError("同名工具必须拒绝（不许覆盖内核件）")
+        except ValueError as e:
+            assert "已存在" in str(e)
+        try:
+            register_action(object())
+            raise AssertionError("非 BaseAction 必须拒绝")
+        except TypeError as e:
+            assert "BaseAction" in str(e)
+
+        un = register_role("Poet", lambda llm, **kw: Agent(   # ③ 新角色
+            {"name": "Poet", "profile": "Poet", "goal": "write haiku"},
+            [Haiku(llm=llm)], llm, watch={RequirementTag.USER_REQUIREMENT}))
+        assert "Poet" in ALL_ROLES
+        try:
+            register_role("Engineer", lambda llm, **kw: None)
+            raise AssertionError("内置角色必须拒绝被覆盖")
+        except ValueError as e:
+            assert "已存在" in str(e)
+
+        team = build_team({"Poet": build_role("Poet", FakeLLM(["-"]))},   # ④ 新订阅表+整场会话
+                          sop={RequirementTag.USER_REQUIREMENT: ["Poet"]})
+        init = {"messages": [Message(content="春眠不觉晓", cause_by=RequirementTag.USER_REQUIREMENT)],
+                "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
+        out = A.run(team.ainvoke(init, {"configurable": {"thread_id": "t19ext"},
+                                        "recursion_limit": 12}))
+        assert out["messages"][-1].content.startswith("[haiku]"), out["messages"][-1].content
+
+        tpl = get_template("classic_sop")        # ⑤ N7：内置经典线也是模板对象
+        assert set(tpl.build_agents(FakeLLM(["{}"]))) == {"PM", "Architect", "PMManager", "Engineer", "QA"}
+        t2, _cfg, _i = build_team_from_template("classic_sop", FakeLLM(["{}"]))
+        assert t2 is not None
+    finally:
+        un()
+        TOOL_REGISTRY.tools.pop("ext_count_chars", None)
+        TOOL_REGISTRY.by_tag.get("ext", {}).pop("ext_count_chars", None)
+        REGISTRY[:] = [t for t in REGISTRY if t.name != "ext_count_chars"]
+        assert "Poet" not in ALL_ROLES and all(t.name != "ext_count_chars" for t in REGISTRY)
+    print("  t19 验收线：不改内核跑通新角色+Action+Tool+模板整场会话，三条守卫 + 完全回滚")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -703,7 +779,8 @@ def main():
               t10_write_code_review_rounds, t11_action_prompts_verbatim,
               t12_graph_store_roundtrip, t13_class_view_pipeline,
               t14_rebuild_class_view_action, t15_research_three_legs,
-              t16_search_and_summarize_history, t17_role_profile_parity]
+              t16_search_and_summarize_history, t17_role_profile_parity,
+              t18_strategy_switch, t19_ext_api_acceptance]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"
