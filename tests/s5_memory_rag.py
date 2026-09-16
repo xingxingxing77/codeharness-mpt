@@ -795,6 +795,95 @@ def t25_real_bge_semantic_path():
           f"→{hit(ranks['hybrid'])}/{n} 全收；表已存 s5_hitrate_bge.json")
 
 
+def t26_plan_state_machine_wired():
+    """台账 #10：Plan.* 不再是吞命令的字符串桩——schema.Plan 的拓扑排序/游标推进/级联 reset
+    有运行时读者；参数错（未知依赖断言）走 _act 的 [错误] self-heal 回喂。"""
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+
+    def act(rz, cmd, args):
+        s = {"task": "做个计算器", "history": [{"thought": "先立计划",
+             "commands": [{"command_name": cmd, "args": args}], "results": []}],
+             "experience": "", "respond_language": "中文", "finished": False}
+        out = asyncio.run(rz._act(s))
+        return out["history"][-1]["results"][-1]["result"]
+
+    CURRENT_PROJECT.set("s5plan")
+    try:
+        rz = RoleZero({"name": "RZP", "profile": "p", "goal": "g"}, [], FakeLLM([]))
+        rz._plan_goal = "做个计算器"
+        r = act(rz, "Plan.append_task", {"task_id": "T1", "dependent_task_ids": [],
+                                         "instruction": "设计接口", "assignee": "RZP"})
+        assert "共 1 任务" in r, r
+        r = act(rz, "Plan.append_task", {"task_id": "T2", "dependent_task_ids": ["T1"],
+                                         "instruction": "实现加法", "assignee": "RZP"})
+        assert "共 2 任务" in r, r
+        r = act(rz, "Plan.finish_current_task", {})
+        assert "已推进 → T2" in r and "计划完成: False" in r, r
+        status, cur = rz._plan_status({"history": []})
+        assert "[x] T1" in status and "[ ] T2" in status and cur.startswith("T2"), (status, cur)
+        act(rz, "Plan.reset_task", {"task_id": "T1"})   # 级联：T1 未完成，游标回 T1
+        assert rz.plan.current_task.task_id == "T1" and not rz.plan.tasks[0].is_finished
+        r = act(rz, "Plan.append_task", {"task_id": "T9", "dependent_task_ids": ["NOPE"],
+                                         "instruction": "坏任务", "assignee": "RZP"})
+        assert r.startswith("[错误]"), f"未知依赖必须回喂自愈而不是静默: {r}"
+    finally:
+        CURRENT_PROJECT.set("")
+    print("  t26 计划状态机：Plan 四命令真驱动 schema.Plan（拓扑/游标/级联 reset/错误回喂）")
+
+
+def t27_di_review_gate_blocks_until_resume():
+    """台账 #12（源 planner.py:96/:104 的 ask_review 环）：auto_run=False 时不 resume 不放行——
+    计划闸卡住时执行件一次模型都不进；"no" 回喂重规划、"confirm" 才执行；任务验收闸同理。
+    词表判定（confirm/continue/c/yes/y 或含 confirm）逐字照源 ask_review.py:60。"""
+    from langgraph.types import Command
+    # 本文件顶部的 FakeLLM 是摘要记账 stub（吃 summary= 入参）；这里要的是按剧本回放的那只
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.strategy.plan_and_act import PlanAndActAgent
+    one = {"task_id": "T1", "dependent_task_ids": [], "instruction": "读 CSV", "assignee": "David"}
+    plan = json.dumps({"goal": "分析数据", "tasks": [one]})
+    llm = FakeLLM([plan, plan, "```python\nprint('done 42')\n```", "结论：均值 42"])
+    agent = PlanAndActAgent({"name": "David", "profile": "Data Interpreter", "goal": "analyze"},
+                            llm, auto_run=False)
+    g = agent.build()
+    cfg = {"configurable": {"thread_id": "t27"}}
+    init = {"goal": "分析数据", "plan": {}, "task_idx": 0, "code": "", "results": [],
+            "finished": False, "plan_ok": False, "feedback": ""}
+    out = asyncio.run(g.ainvoke(init, cfg))
+    assert "__interrupt__" in out, "计划闸没卡住：不 resume 就往下跑了"
+    assert len(llm.calls) == 1, f"闸住时执行件不得进模型: {len(llm.calls)}"
+    out = asyncio.run(g.ainvoke(Command(resume="no, 先检查文件存在"), cfg))
+    assert "__interrupt__" in out, "未确认的计划必须重规划后仍回闸"
+    assert len(llm.calls) == 2, "重规划应再问 planner 一次"
+    out = asyncio.run(g.ainvoke(Command(resume="confirm"), cfg))
+    assert "__interrupt__" in out, "任务执行完应停在验收闸（源 :104）"
+    out = asyncio.run(g.ainvoke(Command(resume="yes"), cfg))
+    assert out["finished"] and any(r["task"] == "__summary__" for r in out["results"]), out["results"]
+    print("  t27 DI 人在环：计划确认+任务验收两闸不 resume 不放行，confirm 词表照源")
+
+
+def t28_ltm_rerank_absorbed_and_degrades():
+    """台账 #11：KnowledgeBase 吸收删除后，精排接缝活在 LongTermMemory._rerank——
+    精排服务离线（本机未部署 reranker 属预期）降级为粗排原序截断且留 warning，不抛。"""
+    from types import SimpleNamespace
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.logs import logger as _lg
+    keep, settings.reranker.base_url = settings.reranker.base_url, "http://127.0.0.1:1"
+    warned = []
+    orig = _lg.warning
+    _lg.warning = lambda *a, **k: warned.append(a)
+    try:
+        hits = [SimpleNamespace(id=f"p{i}", payload={"text": f"t{i}"}) for i in range(4)]
+        ltm = LongTermMemory.__new__(LongTermMemory)     # _rerank 不吃 store/embeddings，直测接缝
+        got = asyncio.run(ltm._rerank("q", hits, k=3))
+        assert [h.payload["text"] for h in got] == ["t0", "t1", "t2"], got
+        assert any("精排" in str(w) for w in warned), "降级必须留痕（docs P1：静默缺席是坑）"
+    finally:
+        _lg.warning = orig
+        settings.reranker.base_url = keep
+    print("  t28 精排接缝随吸收进 ltm：离线降级粗排原序 + warning 留痕")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -811,7 +900,8 @@ def main():
               t19_exp_schema_roundtrip, t20_serializer_think_roundtrip,
               t21_hit_count_reorders, t22_exp_cache_semantics,
               t23_exp_store_replay_on_qdrant, t24_rolezero_think_wired,
-              t25_real_bge_semantic_path]
+              t25_real_bge_semantic_path, t26_plan_state_machine_wired,
+              t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

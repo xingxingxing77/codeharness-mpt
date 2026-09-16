@@ -1038,8 +1038,10 @@ def is_func(node) -> bool:
     return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
 
 
-# ---------------- 本仓扩展件（S5 的 KnowledgeBase.ingest 在用，非源面） ----------------
+# ---------------- 本仓扩展件（非源面） ----------------
 # 源面给"类图/序列图结构"，这半截给"代码块 RAG 切分"：两者消费方不同，放一个文件是少文件，不是混职责。
+# ⚠ 生产消费方现状（接线台账 #18）：原设计消费者 rag/knowledge.py 已随 B4.2 吸收删除，
+# 本面现仅剩 test_p1 ① 冒烟；作为 RAG 代码索引的预留面保留，S9 接线前无人调用不新增义务。
 
 
 class CodeChunk(BaseModel):

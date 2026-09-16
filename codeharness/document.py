@@ -222,9 +222,9 @@ class Repo(BaseModel):
         return list(self.docs.values()) + list(self.codes.values())
 
     def eda(self) -> RepoMetadata:
-        """n_docs / n_chars 照源；symbols 依赖 RepoParser.generate_symbols()——
-        codeharness/repo_parser.py 目前只有 CodeChunk（63 行 vs 源 1,023），
-        该能力在 S5/S6 的「repo_parser 还债」批次补齐，这里先返回空列表而不是抛错。"""
+        """n_docs / n_chars / symbols 照源 :231-235。generate_symbols 已由 S6 批2c 落地
+        （repo_parser 1086 行照源整件）；except ImportError 只兜"单文件拷贝跑法"，
+        不再是"能力未落地"的占位注释。"""
         n_docs = sum(len(i) for i in [self.docs, self.codes, self.assets])
         n_chars = sum(sum(len(j.content) for j in i.values()) for i in [self.docs, self.codes, self.assets])
         symbols: list = []
@@ -232,5 +232,5 @@ class Repo(BaseModel):
             from codeharness.repo_parser import RepoParser
             symbols = RepoParser(base_directory=self.path).generate_symbols()
         except ImportError:
-            logger.debug("RepoParser.generate_symbols 未落地，eda().symbols 暂为空（repo_parser 待补）")
+            logger.debug("RepoParser import 失败（单文件跑法），eda().symbols 置空")
         return RepoMetadata(name=self.name, n_docs=n_docs, n_chars=n_chars, symbols=symbols)

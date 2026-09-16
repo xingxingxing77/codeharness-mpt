@@ -22,7 +22,7 @@ from codeharness.exp_pool.serializers import RoleZeroSerializer
 from codeharness.logs import logger
 from codeharness.memory.brain_memory import BrainMemory
 from codeharness.memory.memory import Memory
-from codeharness.schema import Message, Command
+from codeharness.schema import Message, Command, Plan
 from codeharness.prompts.role_zero import (SYSTEM_PROMPT, CMD_PROMPT, ROLE_INSTRUCTION,
                                            TASK_TYPE_DESC)
 
@@ -62,6 +62,29 @@ class RoleZero:
         self.redis_key = redis_key
         self.memory_k = memory_k or settings.memory_overflow_size
         self._brain_loaded = False
+        # 计划状态机（接线台账 #10）：schema.Plan 从此有运行时读者——源 tool_execution_map
+        # :121-124 的 Plan.* 四命令吃它。随会话实例存活；跨进程重启丢计划（与子图 InMemorySaver
+        # 同一层已知债，S7 落盘时一起收）。
+        self.plan: Plan | None = None
+        self._plan_goal = ""
+
+    PLAN_COMMANDS = {   # 源 :121-124 的 Plan 命令面
+        "Plan.append_task": "append_task", "Plan.reset_task": "reset_task",
+        "Plan.replace_task": "replace_task", "Plan.finish_current_task": "finish_current_task",
+    }
+
+    def _run_plan_command(self, name: str, args: dict) -> str:
+        """真身 schema.Plan：拓扑排序/级联 reset/游标推进都在里面。参数错（缺 task_id、
+        未知依赖断言）照源不兜——抛出去由 _act 的 [错误] self-heal 回喂模型重发。"""
+        if self.plan is None:
+            self.plan = Plan(goal=self._plan_goal)
+        fn = getattr(self.plan, self.PLAN_COMMANDS[name])
+        fn(**args)
+        cur = self.plan.current_task
+        where = f"{cur.task_id}: {cur.instruction[:60]}" if cur else "(全部完成)"
+        if name == "Plan.finish_current_task":
+            return f"[plan] 已推进 → {where}; 计划完成: {self.plan.is_plan_finished()}"
+        return f"[plan] 共 {len(self.plan.tasks)} 任务, 当前 → {where}"
 
     def _brain_key(self) -> str:
         """一个角色一个 key：目录名走 CURRENT_PROJECT（与 session_root 同一接缝），不另起一套会话对象。"""
@@ -134,7 +157,15 @@ class RoleZero:
         return s
 
     def _plan_status(self, s: RoleZeroState):
-        """源 :216 get_plan_status 的极简版：Task 数据结构在 prompt 里，计划即 history 里的 Plan 命令记录"""
+        """源 :216 get_plan_status。B4 起计划从**真 Plan 状态机**出（对勾=Task.is_finished、
+        游标=current_task，且 get_plan_status 走 _update_current_task 的拓扑序）；
+        无计划时（首轮或未用过 Plan.* 的任务型角色）退化为 history 的 thought 摘要。"""
+        if self.plan and self.plan.tasks:
+            lines = [f"- [{'x' if t.is_finished else ' '}] {t.task_id}: {t.instruction[:80]}"
+                     + (f" (assignee: {t.assignee})" if t.assignee else "")
+                     for t in self.plan.tasks]
+            cur = self.plan.current_task
+            return "\n".join(lines), f"{cur.task_id}: {cur.instruction[:120]}" if cur else "(all finished)"
         lines = [f"- [{i+1}] {h['thought'][:80]}" for i, h in enumerate(s["history"][-5:])]
         return "\n".join(lines) or "(no plan yet)", f"step {len(s['history'])+1}/{self.max_loops}"
 
@@ -223,8 +254,8 @@ class RoleZero:
                         results.append({"name": name, "result": answer})
                     elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
                         results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
-                    elif name == "Plan.finish_current_task":
-                        results.append({"name": name, "result": "[任务完成]"})
+                    elif name in self.PLAN_COMMANDS:            # 台账 #10：真 Plan 状态机（源 :121-124）
+                        results.append({"name": name, "result": self._run_plan_command(name, args)})
                     elif name in self.tools:
                         out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
                         results.append({"name": name, "result": str(out)[:4000]})
@@ -250,6 +281,10 @@ class RoleZero:
             set_role(name)                      # 报道事件的 role 字段
             inbox = state.get("_inbox") or []
             task = inbox[-1].content if inbox else "continue"
+            if task != "continue":
+                # 新任务→旧计划作废（源：每任务 planner 重立）；"continue" 保计划续跑
+                self.plan = None
+                self._plan_goal = task
             sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
                                        "respond_language": "中文", "finished": False})
             results = sub["history"][-1]["results"] if sub["history"] else []

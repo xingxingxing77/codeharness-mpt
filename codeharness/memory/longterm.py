@@ -3,10 +3,18 @@
 
 `doc_type="memory"` 是与知识库(kb)、经验池(exp) 共用一个 collection 时的切片键；
 `project` 决定召回范围（跨会话、同项目可召回），`user_id` 是租户边界。
+
+recall 带**精排接缝**（`_rerank`，自 `rag/knowledge.py` 吸收而来——那个上层壳零运行时消费者，
+接线台账 #11 判吸收删除；RAG 上半截的检索编排由本件 + exp_pool 承担，对齐源：本 checkout 的
+MetaVectorStore 线同样没接线）。精排离线降级为粗排原序，但留 warning（docs P1）。
 """
 import uuid
 
+import httpx
+
+from codeharness.configs.settings import settings
 from codeharness.document_store.qdrant_store import Point, QdrantStore
+from codeharness.logs import logger
 from codeharness.schema import Message
 
 
@@ -50,11 +58,32 @@ class LongTermMemory:
                   extra={"role": m.role, "cause_by": m.cause_by, "sent_from": m.sent_from})
             for m, v in zip(uniq, vecs) if v])
 
+    async def _rerank(self, query: str, hits: list, k: int) -> list:
+        """bge-reranker /v1/rerank（吸收自 rag/knowledge.py，源语义与降级留痕不变）：
+        粗排命中的文本送精排重排，失败即粗排原序前 k 条；未配置精排服务则直接原序。"""
+        texts = [h.payload["text"] for h in hits]
+        if not settings.reranker.base_url or not texts:
+            return hits[:k]
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.post(f"{settings.reranker.base_url}/rerank",
+                                 json={"model": settings.reranker.model,
+                                       "query": query, "documents": texts, "top_n": len(texts)})
+                r.raise_for_status()
+            order = sorted(r.json()["results"], key=lambda x: x["index"])
+            return [hits[i["index"]] for i in order][:k]
+        except Exception as e:
+            logger.warning(f"精排不可用，已降级为仅粗排（{settings.reranker.base_url}）："
+                           f"{type(e).__name__}: {e}")
+            return hits[:k]
+
     async def recall(self, query: str, k: int = 5) -> list[Message]:
-        """新任务开始时检索回填（调用方：RoleZero._think 里 `_retrieve_experience` 的位置）。"""
+        """新任务开始时检索回填（调用方：RoleZero._think 里 `_retrieve_experience` 的位置）。
+        hybrid 粗排 → reranker 在场则精排重排（台账 #11 的吸收点）。"""
         dense = await self.embeddings.aembed_query(query)
         hits = await self.store.search(query, list(dense), k=k, doc_type="memory",
                                       user_id=self.user_id, project=self.project_id)
+        hits = await self._rerank(query, hits, k)
         return [Message(content=h.payload["text"], role=h.payload.get("role", "user"),
                         cause_by=h.payload.get("cause_by", ""),
                         sent_from=h.payload.get("sent_from", "")) for h in hits]

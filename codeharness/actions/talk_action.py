@@ -6,7 +6,8 @@ from codeharness.schema import Message
 
 
 class TalkAction(BaseAction):
-    kb_context: Optional[str] = None      # CustomerService：FAQ/规则库片段（第 8 步 KnowledgeBase.retrieve）
+    kb_context: Optional[str] = None      # CustomerService：FAQ/规则库片段，由调用方注入
+    # （原设想来源 rag/knowledge.py 已随接线台账 #11 吸收删除；可用来源：LongTermMemory.recall 或人工挂载）
 
     async def run(self, msg: Message) -> Message:
         system = [self.prefix]
