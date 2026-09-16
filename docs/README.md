@@ -145,7 +145,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 - **计量链残尾收掉**（上面「仍未闭合 #1」的详情）。附带修掉一处同族坑：`utils/redis.py` 的 async client 绑死在建它的 event loop 上，换 loop 后读写静默变 None（降级语义吞掉 `Event loop is closed`）——`_connect` 现在认 `get_running_loop()` 变化重建。
 - **S5 三片就此全闭**：`exp_pool/` schema/serializers/manager/decorator 四件落地 + `@exp_cache` 真接线 `RoleZero.llm_cached_think`（命中=零模型调用，池默认关，`EXP_POOL__*` 开）。源 990 行的 chroma/bm25 与 LLM judge/ranker 按判定不复制，排序换成 Redis 命中计数（键=点 id=uuid5(tag,req)，三处同一派生式）。详见 `施工2` 的 S5.3 落地状态。
-- 门禁基线更新：**十一个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / **s3b(12)** / s4(35) / **s5_memory_rag(25)** / **s6_sop(7)** / **s8_runner_meter(6)** + test_p1 / test_roles_registry / test_e2e_classic_line。
+- 门禁基线更新：**十一个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / **s3b(12)** / s4(35) / **s5_memory_rag(25)** / **s6_sop(11)** / **s8_runner_meter(6)** + test_p1 / test_roles_registry / test_e2e_classic_line。
 - hit-rate 表复测会漂（HNSW 近似检索 + IDF 实时统计，4/4→3/4）：方向性结论仍成立，但 S9 要可复现数字得钉 ef/exact——口径记在 `施工2` S5.2 末。
 
 ### 2026-09-15 深夜三段 · 真模型首次完整跑通（第十一处闭合，提交 `5f6225f`）

@@ -79,7 +79,7 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 5. **N2 演示脚本**:外部注册一个新角色并跑通 —— 未落(批5)
 6. **度量**:2a 加厚前后,同一 idea 的 SOP 完成率与 **token** 对比(FakeLLM 下看结构完整性即可,真模型对比留 S9；成本只记录不作判据)
 
-## S6 落地状态（2026-09-16，门禁 `tests/s6_sop.py` 7 组，提交 `89283e9`+`02cfc04`）
+## S6 落地状态（2026-09-16，门禁 `tests/s6_sop.py` 11 组，提交 `89283e9`+`02cfc04`+`599e836`）
 
 **批 1 ✅ 全量**：16 件 prompt 按源目录结构复制（`prompts/` + `prompts/di/`）。**重写只允许打在 import 语句的物理行上**（AST 定位）——第一版按行首正则误伤过 prompt 正文的示例代码、全局 replace 又改坏 `generate_skill.md` 与 `REFLECTION_SYSTEM_MSG`，两处都被门禁当场抓出。t1 的口径因此不是"文件文本 diff"而是**每个模块级字符串常量与源的 AST 相等**（比中 54 项；import 前缀本来必须变，逐字性的对象是字符串）。依赖件：`strategy/task_type.py` 逐字复制；`tools/libs/data_preprocess.py` 只带 prompt 需要的 `get_column_info`（源全件拖 sklearn+tool_registry，工具注册面在 S4 的 REGISTRY）。运行时改件 `prompts/role_zero.py`（S3 期本地化）**保留不动**——逐字资产在 `prompts/di/role_zero.py`，是否并回归批 3。
 
@@ -92,4 +92,11 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 
 **显式拍板（批2 第 4/5 条要求的"两者选一但必须显式"）**：Reporter 走**改调用点**——全部用 `docs_block/task_block` 上下文管理器，不回补 `DocsReporter` 类名形态；路由 tag 全短名（`schema._tag` 制，`any_to_str` 零出现）。
 **判 `推迟` 的源面（有理由，不是漏）**：三件的 `_execute_api`（任意路径出口与 per-session 边界冲突，N2 需要时按会话内口径重写）；`RunCode` mode=text 的 in-process exec（沙箱纪律：执行只走子进程）；多 PRD 文件循环与 git changed_files 记账（ProjectRepo 制，本仓单 PRD 会话制无对应物）。
-**未动**：2a 其余六件（write_code/write_code_review/write_test/debug_error/summarize_code/prepare_documents）与 2b–2f、批 3–5。
+**批 2a 后六件 ✅（提交 `599e836`）**：
+- `WriteCode`：源 :52-64 的**三路上下文**补齐——上一轮跑测 stderr（按源命名 `test_{code_filename}.json` 从 test_outputs 捞）、`code_summary` 复盘存档、bugfix 工单（**消费即删**，源 :163 防冲突）；此前三路全传空串=修复回路失明。`get_codes` 抽成 `build_code_context` 与评审共用（源本就同源，review 调的就是它）。模板恢复源文本（含源 `quoto` 笔误与 js 示例段——逐字优先于"顺手改对"）。
+- `WriteCodeReview`：重建为源 `run` 的 **k 轮 评审→LBTM 就地重写→复审**（新配置 `code_validate_k_times` 照源默认 1）；四段 prompt 常量由构建脚本自源**逐字节摘取**——第一版手抄漏了 FORMAT_EXAMPLE 整段、REWRITE 少 js 分支，教训入档：**逐字件必须脚本搬不手抄**。解析不出代码保上版不写空；每轮即落盘（源由 Role 收尾存，本件改即存，偏离已注明）。
+- `PrepareDocuments`：补发 `PrepareDocumentsOutput`（project_path/requirements_filename/prd_filenames，源 :76）；git 初始化与 `config.update_via_cli` 属源 CLI 立项制不搬。
+- `SummarizeCode`：换成源 PROMPT_TEMPLATE/FORMAT_EXAMPLE 逐字，上下文从产物仓取 design.json+tasks.json+全部 src 带围栏（`get_markdown_code_block_type` 复用）；源的 tenacity 重试不在此重复（gateway._acall 统一收口）。
+- `WriteTest`/`DebugError`：逐段比对判定**已在源语义水位**——write_test 的缺口全在源 Role 侧，debug_error 的"Ran N tests OK"死正则判弃不复活、复盘摘要已由 RunCode 承接。加厚按业务分支计，不为行数凑代码。
+- 门禁 t8–t11：PrepareDocuments 三键、WriteCode 三路上下文+工单消费即删+排除自身、Review k 轮行为、**批 2a 全部 prompt 常量与源逐字节同段存在（14 段）**。
+**未动**：2b–2f、批 3–5。**下一刀**：2c 硬前置 `repo_parser`（63 vs 源 1,023）+ graph_repository 三件套——import_repo/rebuild_class_view/rebuild_sequence_view 四件全压在它身上，也是前端 N6 与 RAG 的共同数据源。
