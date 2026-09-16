@@ -215,6 +215,7 @@ class DocName:
     PRD = "prd.json"
     PRD_MD = "prd.md"
     DESIGN = "design.md"
+    DESIGN_JSON = "design.json"      # 源 system_design.json：机器读的真源；design.md 是人读替身
     TASKS = "tasks.json"
     CODE_SUMMARY = "code_summary.md"
     BUGFIX = "bugfix.md"

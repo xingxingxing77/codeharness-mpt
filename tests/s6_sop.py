@@ -9,6 +9,7 @@
 源仓 E:/MetaGPT 缺失时跳过（供体不是本仓的 CI 依赖），但本机在就必须跑。
 """
 import ast
+import asyncio
 import importlib
 import sys
 from pathlib import Path
@@ -85,12 +86,207 @@ def t2_prompt_imports_and_consumers():
     print(f"  t2 {len(mods)} 件导入冒烟 + get_column_info 真跑 + TaskType 枚举可用")
 
 
+PRD_JSON = ('{"language":"zh","programming_language":"python","original_requirements":"tinycli",'
+            '"project_name":"p","product_goals":["g"],"user_stories":["u"],"competitive_analysis":["a"],'
+            '"competitive_quadrant_chart":"quadrantChart\\n  title t","requirement_analysis":"ra",'
+            '"requirement_pool":[["P0","core"]],"ui_design_draft":"s","anything_unclear":""}')
+
+
+def _run(action, msg):
+    return asyncio.run(action.run(msg))
+
+
+def t3_write_prd_three_branches():
+    """源 docstring 的三情形各一 fixture（门禁第 1 条：每 Action 一个 FakeLLM 剧本）。
+    断言打在**分支行为**上：bugfix 不再发第二次模型调用；增量先问相关性、prompt 里必须
+    带旧 PRD 正文（NEW_REQ_TEMPLATE 的 Legacy Content 段）；新建落三件产物。"""
+    import shutil
+    import codeharness.runtime as rt
+    from codeharness.actions.write_prd import WritePRD
+    from codeharness.const import BUGFIX_FILENAME, DocName, RepoName, RequirementTag
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message
+
+    def fresh(tag):
+        CURRENT_PROJECT.set(tag)
+        store = ArtifactStore.active()
+        shutil.rmtree(store.root, ignore_errors=True)
+        return store
+
+    try:
+        store = fresh("s6prd_new")
+        llm = FakeLLM([PRD_JSON])
+        out = _run(WritePRD(llm=llm), Message(content="做个 tinycli"))
+        assert (store.root / RepoName.PRD / DocName.PRD).exists()
+        assert (store.root / RepoName.PRD / DocName.PRD_MD).exists()
+        assert (store.root / RepoName.RESOURCES / "competitive_analysis.mmd").exists(), "方案C的.mmd没落盘"
+        assert out.cause_by == "WritePRD" and set(out.instruct_content) >= {"project_name"}
+        assert "PRD is completed" in out.content
+
+        store = fresh("s6prd_upd")
+        asyncio.run(store.save(RepoName.PRD, Document(filename=DocName.PRD,
+                                                      content=PRD_JSON.replace("tinycli", "老版本"))))
+        llm = FakeLLM(['{"is_relative":"YES","reason":"同一产品"}', PRD_JSON])
+        out = _run(WritePRD(llm=llm), Message(content="加个 web UI"))
+        assert len(llm.calls) == 2, f"相关性判定 + REFINED 两次调用: {len(llm.calls)}"
+        asked = str(llm.calls[0])
+        assert "Legacy Content" in asked and "加个 web UI" in asked, "NEW_REQ_TEMPLATE 没逐字进判定 prompt"
+
+        store = fresh("s6prd_bug")
+        (store.root / RepoName.SRC).mkdir(parents=True, exist_ok=True)
+        (store.root / RepoName.SRC / "main.py").write_text("x=1\n", encoding="utf-8")
+        llm = FakeLLM(['{"issue_type":"BUG","reason":"崩溃"}', PRD_JSON])
+        out = _run(WritePRD(llm=llm), Message(content="程序启动就崩"))
+        assert out.cause_by == RequirementTag.FIX_BUG, out.cause_by
+        assert (store.root / RepoName.DOCS / BUGFIX_FILENAME).exists()
+        assert len(llm.calls) == 1, "bugfix 分支不该再生成 PRD"
+    finally:
+        for d in ("s6prd_new", "s6prd_upd", "s6prd_bug"):
+            shutil.rmtree(rt.session_root(d), ignore_errors=True)
+        rt.CURRENT_PROJECT.set("")
+    print("  t3 WritePRD 三分支（新建落三产物/增量带 Legacy Content 两段调用/bugfix 单调用转 FixBug）")
+
+
+def t4_action_templates_verbatim():
+    """加厚件里的模板常量与源逐字比对（批2 第 2 条：prompt 常量段保留源文本）。"""
+    src = Path("E:/MetaGPT/metagpt/actions/write_prd.py")
+    if not src.exists():
+        print("  t4 跳过（供体不在）")
+        return
+    s_consts = module_strings(src)
+    d_consts = module_strings(REPO / "codeharness" / "actions" / "write_prd.py")
+    for k in ("CONTEXT_TEMPLATE", "NEW_REQ_TEMPLATE"):
+        assert k in s_consts and s_consts[k] == d_consts.get(k), f"{k} 与源不逐字"
+    print("  t4 CONTEXT_TEMPLATE / NEW_REQ_TEMPLATE 与源逐字相等")
+
+
+DESIGN_JSON = ('{"implementation_approach":"单文件 argparse","file_list":["main.py"],'
+               '"data_structures_and_interfaces":"classDiagram\\nclass Cli","program_call_flow":'
+               '"sequenceDiagram\\nCli->>Cli: run()","anything_unclear":"无"}')
+TASKS_JSON = ('{"task_list":[{"filename":"main.py","task_id":"task_001","dependent_task_ids":[],'
+              '"instruction":"实现 argparse"}],"required_packages":["rich","pydantic"],'
+              '"shared_knowledge":"入口叫 main.py"}')
+
+
+def _fixture_store(tag: str):
+    """一个场景一个会话目录：先删后建，收尾统一清（s6 不留下磁盘垃圾，同 s3b t9 纪律）。"""
+    import shutil
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.runtime import CURRENT_PROJECT
+    CURRENT_PROJECT.set(tag)
+    store = ArtifactStore.active()
+    shutil.rmtree(store.root, ignore_errors=True)
+    return store
+
+
+def t5_write_design_branches():
+    """新建 vs REFINED 增量：prompt 必须分别带上五字段原文与 Legacy Content；
+    产物=design.json（真源）+design.md（人读）+两图 .mmd（方案 C 落盘）。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.design_api import WriteDesign
+    from codeharness.actions.write_prd import WritePRD
+    from codeharness.const import DocName, RepoName
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message
+    try:
+        store = _fixture_store("s6des_new")
+        A.run(store.save(RepoName.PRD, Document(filename=DocName.PRD, content=PRD_JSON)))
+        llm = FakeLLM([DESIGN_JSON])
+        out = A.run(WriteDesign(llm=llm).run(Message(content="设计一下")))
+        assert (store.root / RepoName.DOCS / DocName.DESIGN_JSON).exists()
+        assert (store.root / RepoName.DOCS / DocName.DESIGN).exists()
+        assert (store.root / RepoName.RESOURCES / "data_api_design.mmd").exists()
+        assert (store.root / RepoName.RESOURCES / "seq_flow.mmd").exists(), "方案C 的 .mmd 没落盘"
+        asked = str(llm.calls[0])
+        assert "classDiagram" in asked and "Designing is complete" in out.content
+        assert set(out.instruct_content) == {"implementation_approach", "file_list",
+                                             "data_structures_and_interfaces", "program_call_flow",
+                                             "anything_unclear"}, out.instruct_content.keys()
+        llm2 = FakeLLM([DESIGN_JSON])
+        A.run(WriteDesign(llm=llm2).run(Message(content="改设计了")))     # 旧 design.json 在 → REFINED
+        asked2 = str(llm2.calls[0])
+        assert "Legacy Content" in asked2 and "incremental development" in asked2, "增量分支没走 REFINED 原文"
+    finally:
+        shutil.rmtree(_ws("s6des_new"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t5 WriteDesign：新建落 json/md/两 .mmd、字段集与源 NODES 相等、增量走 Legacy+REFINED 原文")
+
+
+def t6_write_tasks_requirements():
+    """任务表 + required_packages 聚合出 requirements.txt（源 _update_requirements :154 的落地面）。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.project_management import WriteTasks
+    from codeharness.const import DocName, PACKAGE_REQUIREMENTS_FILENAME, RepoName
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message
+    try:
+        store = _fixture_store("s6tasks")
+        A.run(store.save(RepoName.DOCS, Document(filename=DocName.DESIGN_JSON, content=DESIGN_JSON)))
+        llm = FakeLLM([TASKS_JSON])
+        out = A.run(WriteTasks(llm=llm).run(Message(content="拆任务")))
+        assert (store.root / RepoName.DOCS / DocName.TASKS).exists()
+        req = (store.root / PACKAGE_REQUIREMENTS_FILENAME).read_text(encoding="utf-8").splitlines()
+        assert req == ["pydantic", "rich"], req                     # 聚合 + 去重 + 稳定序
+        asked = str(llm.calls[0])
+        assert "argparse" in asked, "任务表 prompt 没读 design.json 的内容"
+        assert out.cause_by == "WriteTasks" and "WBS is completed" in out.content
+        llm2 = FakeLLM([TASKS_JSON])                                 # 旧 tasks 在 → REFINED 增量
+        A.run(WriteTasks(llm=llm2).run(Message(content="再拆")))
+        assert "Legacy Content" in str(llm2.calls[0])
+    finally:
+        shutil.rmtree(_ws("s6tasks"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t6 WriteTasks：requirements.txt 聚合去重、design.json 做底、增量带 Legacy Content")
+
+
+def t7_run_code_summary():
+    """源 run_code 的 LLM 复盘段（此前整段缺失）：跑完必须问一次模型，summary 进存档 JSON。"""
+    import shutil
+    import asyncio as A
+    from codeharness.actions.run_code import RunCode
+    from codeharness.const import RepoName
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Message, RunCodeContext
+    try:
+        store = _fixture_store("s6run")
+        (store.root / RepoName.TESTS).mkdir(parents=True, exist_ok=True)
+        (store.root / RepoName.TESTS / "test_fail.py").write_text("def t():\n    assert False\n", encoding="utf-8")
+        ctx = RunCodeContext(test_filename="test_fail.py")
+        out = A.run(RunCode(llm=FakeLLM(["## instruction:\n断言没写对\n## File To Rewrite:\ntest_fail.py\n"
+                                         "## Status:\nFAIL\n## Send To:\nQaEngineer\n"])).run(
+            Message(content="跑", instruct_content=ctx.model_dump(), instruct_schema="RunCodeContext")))
+        assert "测试失败" in out.content
+        import json as _j
+        saved = store.root / RepoName.TEST_OUTPUTS / "output_test_fail.py.json"
+        assert saved.exists() and "File To Rewrite" in _j.loads(saved.read_text(encoding="utf-8"))["summary"], \
+            "RunCodeResult.summary 没进存档"
+        assert "QaEngineer" in out.content, "复盘摘要没回给路由可见的消息"
+    finally:
+        shutil.rmtree(_ws("s6run"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t7 RunCode：沙箱真跑 pytest + 复盘段进存档与消息（ok 仍按 return_code，不复活死正则）")
+
+
+def _ws(tag):
+    from codeharness.configs.settings import settings
+    return Path(settings.workspace_root) / tag
+
+
 def main():
-    checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers]
+    checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
+              t3_write_prd_three_branches, t4_action_templates_verbatim,
+              t5_write_design_branches, t6_write_tasks_requirements, t7_run_code_summary]
     for c in checks:
         c()
-    print(f"\nS6 门禁（当前批 1 范围）通过：{len(checks)} 组 —— 批 2 起在此文件续加"
-          f"（每 Action 一 fixture / build_role 全名 / N2 外部注册演示 / mermaid 方案 C 落盘口径）")
+    print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 加厚 fixture/模板逐字 5 组"
+          f"；后续批在此续加（build_role 全名 / N2 外部注册演示 / 2b-2f 各 Action 一 fixture）")
 
 
 if __name__ == "__main__":
