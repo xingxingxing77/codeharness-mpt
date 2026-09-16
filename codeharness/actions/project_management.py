@@ -3,7 +3,7 @@
 - `_update_requirements`（源 :154）照搬：Required packages 聚合进会话根 requirements.txt——
   这是 QA RunCode 前的依赖声明真源，此前本仓完全没有这一件；
 - 源的多设计文件循环/changed_files 记账属 ProjectRepo 制不搬；`_execute_api` 判 `推迟`（同 PRD）。"""
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from codeharness.base.action import BaseAction
 from codeharness.const import DocName, PACKAGE_REQUIREMENTS_FILENAME, RepoName
@@ -50,6 +50,25 @@ class TaskItem(BaseModel):
     task_id: str = ""
     dependent_task_ids: list[str] = Field(default_factory=list)
     instruction: str = ""
+
+    @field_validator("filename", mode="after")
+    @classmethod
+    def _normalize_repo_relative(cls, v: str) -> str:
+        """任务文件名一律**相对产物仓**（prompt 要的是 src/tests 内部路径）。真模型双跑实证
+        （s9_dualrun2，2026-09-16）：模型爱把目录前缀写进 filename（"src/api.py"、"/main.py"），
+        拼上 SRC 根成了 src/src/api.py——import 全断，QA 永不通过，k=2 的评审每文件烧满两轮。
+        在这里归一（剥前导 /、./、仓目录名 src/ tests/ docs/ 一次），下游（Send 装配/WriteCode/
+        WriteTest/CR）就只有一个真源，不再各堵各的。包结构（tinycli/main.py）不动。"""
+        v = v.strip()
+        while v.startswith("/"):
+            v = v[1:]
+        if v.startswith("./"):
+            v = v[2:]
+        for repo_dir in ("src/", "tests/", "docs/"):
+            if v.startswith(repo_dir):
+                v = v[len(repo_dir):]
+                break
+        return v
 
 
 class TaskList(BaseModel):

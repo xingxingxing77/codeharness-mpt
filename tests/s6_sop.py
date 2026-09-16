@@ -239,10 +239,16 @@ def t6_write_tasks_requirements():
         llm2 = FakeLLM([TASKS_JSON])                                 # 旧 tasks 在 → REFINED 增量
         A.run(WriteTasks(llm=llm2).run(Message(content="再拆")))
         assert "Legacy Content" in str(llm2.calls[0])
+
+        # 文件名归一（真模型双跑 s9_dualrun2 实证：模型写 "src/api.py"→src/src 断 import）
+        from codeharness.actions.project_management import TaskItem
+        got = [TaskItem(filename=f).filename for f in
+               ("src/api.py", "/main.py", "./cli.py", "tests/test_api.py", "tinycli/main.py", "docs/x.md")]
+        assert got == ["api.py", "main.py", "cli.py", "test_api.py", "tinycli/main.py", "x.md"], got
     finally:
         shutil.rmtree(_ws("s6tasks"), ignore_errors=True)
         CURRENT_PROJECT.set("")
-    print("  t6 WriteTasks：requirements.txt 聚合去重、design.json 做底、增量带 Legacy Content")
+    print("  t6 WriteTasks：requirements.txt 聚合去重、design.json 做底、增量带 Legacy Content、任务名归一（src//tests//绝对路径前缀）")
 
 
 def t7_run_code_summary():
