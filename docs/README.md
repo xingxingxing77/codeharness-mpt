@@ -193,7 +193,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **批 2c 类图半边 ✅**：repo_parser 63→1086 行照源 + **Windows 路径校准三坑**（反斜杠折叠、盘符键空间、package_root 还原）；graph_repository 三件套；RebuildClassView 落地——全仓最大真实缺口收口。`rebuild_sequence_view`(605) 待类图被真实消费后接；`import_repo` 并入 N2；`extract_readme` 已在 `edge_actions.py`（批3 对账定性：能力库，源角色同样不挂）。
 - **批 3 ✅ 角色对账**：t17 三合一机器检查（19 类名集 / profile 三字段与源 AST 逐字 / registry 死 import）——**首跑抓出 8 处账实不符**（TeamLeader.goal 双处抄错、ProjectManager.goal 整句自造、缺尾句号×2、死 import×4），全修。2d/2f 收口：write_plan/execute_nb_code/skill_action 已有等价件（Planner/RunPythonCode/skills.loader），ask_review/prepare_interview 源自身孤儿判 `弃`——**批 2 无遗留缺口**。
 - **批 2b ✅**：Research 三腿管线 + SearchAndSummarize 源逐字——联网只走 `search_internet` 工具接缝，t15 钉七次调用序；三只源自身孤儿/浏览器包装件按自查纪律登记不搬（判定表 §一 追加行 + 「`改` 之前也要 grep」新纪律）。
-- 门禁基线：**十一个不花钱脚本全 exit 0** —— s1(12)/s2(14)/s3a(13)/s3b(12)/s4(35)/s5(25)/**s6(17)**/s8(6) + test_p1/test_roles_registry/test_e2e_classic_line。t11 比对法升级为 AST 值比对（文件子串法对 `\` 续行常量假阳性）。
+- 门禁基线：**十一个不花钱脚本全 exit 0** —— s1(12)/s2(14)/s3a(13)/s3b(12)/s4(35)/s5(25)**s6(18)**/s8(6) + test_p1/test_roles_registry/test_e2e_classic_line。t11 比对法升级为 AST 值比对（文件子串法对 `\` 续行常量假阳性）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 

@@ -74,6 +74,7 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 ## 门禁 `tests/s6_sop.py`
 1. 每个新增 Action 恰好一个 FakeLLM fixture,断言 `instruct_content` 字段集合与源 schema 一致 ✅(2a 已加者)
 2. `build_role(每个源角色名)` 不抛,profile 与源字符串相等 ✅(t17 AST 逐字对账 + test_roles_registry 实例化)
+2b. N3 策略字段 ✅(t18：注册自报/换装/拒绝三路径，批4)
 3. 经典线端到端:需求→PRD→设计→任务→代码→测试→沙箱真跑 pytest(**你现有 `test_e2e_classic_line.py` 就是这条,保持绿**) ✅全程绿
 4. prompt 逐字 diff 为空 ✅(t1/t4,AST 顶层字符串常量比对)
 5. **N2 演示脚本**:外部注册一个新角色并跑通 —— 未落(批5)
@@ -117,3 +118,5 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 - t17 三合一机器检查：源 19 角色类↔registry 名集互洽、name/profile/goal 三字段与源 AST 逐字（40 项过，模板占位/源缺席/两个声明过的功能等价件豁免）、registry 死 import 检查。
 - **首跑抓出 8 处账实不符并全部修正**：TeamLeader.goal 双处抄错（registry+team.py，源是 "Manage a team to assist users"）、ProjectManager.goal 整句自造→源逐字、ProductManager/Architect 缺尾句号×2、registry 四处死 import 清除、Engineer watch 补齐源 engineer.py:106 的两 tag。这正是门禁该有的样子——**"字段逐字抄自源"从注释声明变成机器断言**。
 - 2d/2f 收口结论（判定表 §一 新增两行）：write_plan/execute_nb_code/skill_action 三只已被本仓等价件（Planner/RunPythonCode/skills.loader）覆盖不再单搬；ask_review/prepare_interview 源全仓零调用者判 `弃`。**批 2 无遗留缺口，唯一在途=rebuild_sequence_view**。
+
+**批 4 ✅ N3 执行策略（同日，提交 `dc4a5ed`，s6 门禁 18 组）**：strategy 进 profile（Agent 按 react_mode 自报 sop/react、RoleZero 自报 role_zero）；`build_role(strategy=)` 换装只救经典族 sop↔react，RoleZero 族与非法值显式拒绝（静默降级=profile 说的和跑的不一样，t18 四段断言）。
