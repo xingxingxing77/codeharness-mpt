@@ -362,37 +362,54 @@ def t10_write_code_review_rounds():
 
 
 def t11_action_prompts_verbatim():
-    """批 2a 各件的 prompt 常量必须与源文件**逐字节**同段存在（防转抄漂移）。"""
-    from codeharness.actions import design_api, prepare_documents, project_management, run_code
-    from codeharness.actions import summarize_code, write_code, write_code_review, write_prd, write_test
-    pairs = [
-        (write_prd, "metagpt/actions/write_prd.py", ["CONTEXT_TEMPLATE", "NEW_REQ_TEMPLATE"]),
-        (write_test, "metagpt/actions/write_test.py", ["PROMPT_TEMPLATE"]),
-        (run_code, "metagpt/actions/run_code.py", ["PROMPT_TEMPLATE", "TEMPLATE_CONTEXT"]),
-        (design_api, "metagpt/actions/design_api.py", ["NEW_REQ_TEMPLATE"]),
-        (project_management, "metagpt/actions/project_management.py", ["NEW_REQ_TEMPLATE"]),
-        (summarize_code, "metagpt/actions/summarize_code.py", ["PROMPT_TEMPLATE", "FORMAT_EXAMPLE"]),
-        (write_code, "metagpt/actions/write_code.py", ["PROMPT_TEMPLATE"]),
-        (write_code_review, "metagpt/actions/write_code_review.py",
-         ["PROMPT_TEMPLATE", "EXAMPLE_AND_INSTRUCTION", "FORMAT_EXAMPLE", "REWRITE_CODE_TEMPLATE"]),
-    ]
+    """批 2a/2b 各件的 prompt 常量必须与源**值逐字**相等（防转抄漂移）。
+    比对方式：AST 取源文件顶层字符串常量的值来对——拿值当子串搜文件文本是错的，
+    源里的 `\\` 续行会让文件文本 ≠ 值（research 的 CONDUCT_RESEARCH_PROMPT 当场抓到这个）。"""
     src_root = REPO.parent / "MetaGPT" / "metagpt"
-    missing_src = []
-    n = 0
-    for mod, rel, names in pairs:
-        f = src_root.parent / rel
-        if not f.exists():
-            missing_src.append(rel)
+
+    def source_consts(rel: str) -> dict:
+        p = src_root / rel
+        if not p.exists():
+            return {}
+        out = {}
+        for node in ast.parse(p.read_text(encoding="utf-8")).body:
+            if (isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                out[node.targets[0].id] = node.value.value
+        return out
+
+    # 豁免 = 有意的 `推迟` 面（各件 docstring 已写明去向），缺它们不算漂移
+    pairs = [
+        ("actions/write_prd.py", set()),
+        ("actions/write_test.py", set()),
+        ("actions/run_code.py", set()),
+        ("actions/design_api.py", set()),
+        ("actions/project_management.py", set()),
+        ("actions/summarize_code.py", set()),
+        ("actions/write_code.py", set()),
+        ("actions/write_code_review.py", set()),
+        ("actions/research.py", set()),
+        ("actions/search_and_summarize.py", {"SEARCH_AND_SUMMARIZE_SALES_SYSTEM",
+                                             "SEARCH_AND_SUMMARIZE_SALES_PROMPT", "SEARCH_FOOD"}),
+    ]
+    n, absent_src = 0, []
+    for rel, exempt in pairs:
+        mod_name = "codeharness." + rel.replace("actions/", "actions.").replace(".py", "")
+        mod = importlib.import_module(mod_name)
+        sc = source_consts(rel)
+        if not sc:
+            absent_src.append(rel)
             continue
-        text = f.read_text(encoding="utf-8")
-        for k in names:
-            v = getattr(mod, k)
-            assert v in text, f"{mod.__name__}.{k} 与源不逐字（write_prd 系引 write_prd_an/design_api_an 的除外）"
+        for k, v in sc.items():
+            if not hasattr(mod, k):
+                assert k in exempt, f"{mod_name}.{k} 没搬又不在推迟豁免表"
+                continue
+            assert getattr(mod, k) == v, f"{mod_name}.{k} 与源值不等（转抄漂移）"
             n += 1
-    if missing_src:
-        print(f"  t11 部分供体缺失 {missing_src}（本机在跑时应为 0）")
-    assert n >= 12, f"逐字比对数 {n} 太少"
-    print(f"  t11 批2a prompt 常量 {n} 段与源逐字节同段存在")
+    if absent_src:
+        print(f"  t11 提示：{absent_src} 供体文件本机不在")
+    assert n >= 24, f"逐字比对数 {n} 太少（复制面缩水）"
+    print(f"  t11 批2a+2b prompt 常量 {n} 段与源 AST 值逐字相等（推迟豁免 3 段）")
 
 
 def _ws(tag):
@@ -512,6 +529,67 @@ def t14_rebuild_class_view_action():
     print("  t14 RebuildClassView：src 建图→graph_repo JSON→.mmd（类+组合边齐）")
 
 
+class StubSearch:
+    """search_internet 工具的测试替身：Action 只经 `.ainvoke({"query":...})` 这一个口子碰网。"""
+
+    def __init__(self, text: str = "1. 标题A\n   http://a.example\n   摘要A"):
+        self.text = text
+        self.queries: list[str] = []
+
+    async def ainvoke(self, inp):
+        self.queries.append(inp["query"])
+        return self.text
+
+
+def t15_research_three_legs():
+    """源 research 三腿（关键词→拆解→rank→逐源摘要→报告）；联网全部打在 StubSearch 上，零外网。
+    断言打在三腿调用序与工具接缝出口，不碰真搜索引擎。"""
+    import asyncio as A
+    import codeharness.actions.research as R
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.schema import Message
+
+    stub = StubSearch()
+    keep = R.search_internet
+    R.search_internet = stub
+    # 脚本按调用序：关键词 / 拆解 / rank1 / 摘要1 / rank2 / 摘要2 / 报告
+    llm = FakeLLM(['["tinycli 命令行", "CLI 版本打印"]', '["tinycli 是什么", "怎么打印版本"]',
+                   "[0]", "介绍见 http://a.example", "[0]", "用法：--version 输出 0.1.0，源 http://a.example",
+                   "最终研究报告（APA 链接略）"])
+    try:
+        out = A.run(R.Research(llm=llm).run(Message(content="研究一下 tinycli")))
+        assert out.content == "最终研究报告（APA 链接略）"
+        assert "http://a.example" in out.instruct_content["links"], out.instruct_content
+        assert stub.queries and stub.queries[0] == "tinycli 命令行"   # 关键词腿走的是工具
+        assert len(llm.calls) == 7, f"三腿调用数应为 7，实为 {len(llm.calls)}"
+    finally:
+        R.search_internet = keep
+    print("  t15 Research：三腿管线（关键词/拆解/rank/摘要/报告），联网只经工具接缝")
+
+
+def t16_search_and_summarize_history():
+    """sas 换源逐字 PROMPT 后：对话历史与工具出口必须进 prompt；降级文案不拦回答（源语义）。"""
+    import asyncio as A
+    import codeharness.actions.search_and_summarize as S
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.schema import Message
+
+    stub = StubSearch("[搜索暂不可用: down]")
+    keep = S.search_internet
+    S.search_internet = stub
+    llm = FakeLLM(["基于历史与降级语境的回答"])
+    try:
+        msg = Message(content="MLOps 竞品有哪些", instruct_content={"history": "A: 上次问了 MLOps"})
+        out = A.run(S.SearchAndSummarize(llm=llm, prefix="你是研究员").run(msg))
+        asked = str(llm.calls[0])
+        assert "Dialogue History" in asked and "MLOps" in asked, "源 PROMPT 段或历史没进上下文"
+        assert "搜索暂不可用" in asked and out.content.startswith("基于")
+        assert out.cause_by == "SearchAndSummarize"
+    finally:
+        S.search_internet = keep
+    print("  t16 SearchAndSummarize：源逐字 PROMPT + 历史注入 + 降级不拦答")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -519,11 +597,12 @@ def main():
               t8_prepare_documents_instruct, t9_write_code_three_contexts,
               t10_write_code_review_rounds, t11_action_prompts_verbatim,
               t12_graph_store_roundtrip, t13_class_view_pipeline,
-              t14_rebuild_class_view_action]
+              t14_rebuild_class_view_action, t15_research_three_legs,
+              t16_search_and_summarize_history]
     for c in checks:
         c()
-    print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件的全套 fixture 与逐字比对 9 组"
-          f"；后续批在此续加（build_role 全名 / N2 外部注册演示 / 2b-2f 各 Action 一 fixture）")
+    print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"
+          f"+ 批2b 两件 2 组；后续批在此续加（build_role 全名 / N2 外部注册演示 / 2d-2f 各 Action 一 fixture）")
 
 
 if __name__ == "__main__":
