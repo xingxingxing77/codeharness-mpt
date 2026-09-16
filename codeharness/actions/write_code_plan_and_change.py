@@ -15,6 +15,6 @@ class WriteCodePlanAndChange(BaseAction):
     output_schema = PlanAndChange
 
     async def run(self, msg: Message) -> Message:
-        pac = await self.llm.structured(PlanAndChange).ainvoke(f"{self.prefix}\n{msg.content}")
+        pac = await self._structured(f"{self.prefix}\n{msg.content}", schema=PlanAndChange)
         return Message(content="增量计划完成", role="assistant", cause_by=self.name,
                        instruct_content=pac.model_dump(), instruct_schema="PlanAndChange")

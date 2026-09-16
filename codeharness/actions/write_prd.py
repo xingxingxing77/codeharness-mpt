@@ -92,6 +92,7 @@ class WritePRD(BaseAction):
     """源 docstring 的三情形照抄语义：Bugfix / New requirement / Requirement update。"""
 
     output_schema = PRDOutput
+    patch_exempt = frozenset({"anything_unclear"})   # 源措辞允许答"无"（见基类注释）
 
     async def run(self, msg: Message) -> Message:
         store = ArtifactStore.active()
@@ -115,8 +116,7 @@ class WritePRD(BaseAction):
 
     async def _is_bugfix(self, context: str) -> bool:
         """源 :238：只在已有代码产物时才问模型（无代码就没有"修"的对象）——省一次真调用，照源条件。"""
-        it: IssueType = await self.llm.structured(IssueType).ainvoke(
-            f"{self.prefix}\n{context}", tag=self.name)
+        it: IssueType = await self._structured(f"{self.prefix}\n{context}", schema=IssueType)
         return it.issue_type.upper() == "BUG"
 
     async def _handle_bugfix(self, store: ArtifactStore, msg: Message) -> Message:
@@ -128,24 +128,21 @@ class WritePRD(BaseAction):
                        instruct_schema="IssueDetail")
 
     async def _is_related(self, requirement: str, old_prd: Document) -> bool:
-        rel: IsRelative = await self.llm.structured(IsRelative).ainvoke(
+        rel: IsRelative = await self._structured(
             f"{self.prefix}\n{NEW_REQ_TEMPLATE.format(old_prd=old_prd.content, requirements=requirement)}",
-            tag=self.name)
+            schema=IsRelative)
         return rel.is_relative.upper() == "YES"
 
-    def _ask(self, schema, user_prompt: str):
-        """system=PRD_SYSTEM_PROMPT、user=业务上下文：structured 吃消息列表，
-        system prompt 不再像旧版那样只定义不消费（死资产）。"""
-        from langchain_core.messages import HumanMessage, SystemMessage
-        return self.llm.structured(schema).ainvoke(
-            [SystemMessage(content=PRD_SYSTEM_PROMPT),
-             HumanMessage(content=f"{self.prefix}\n{user_prompt}")], tag=self.name)
+    # 注：此处曾有本类自己的 `_ask(schema, user_prompt)`——它遮蔽了 BaseAction._ask（基类
+    # _structured 的出口），接线台账 #1 切 _structured 时拆掉；system 改经基类 `_structured(system=)` 传，
+    # 消息形态与原来一致（[PRD_SYSTEM_PROMPT, prefix+上下文]）。
 
     async def _new_prd(self, store: ArtifactStore, msg: Message) -> PRDOutput:
         from codeharness.report import docs_block
         async with docs_block("prd", role="PM") as rep:
-            prd: PRDOutput = await self._ask(
-                PRDOutput, CONTEXT_TEMPLATE.format(project_name="", requirements=msg.content))
+            prd: PRDOutput = await self._structured(
+                f"{self.prefix}\n{CONTEXT_TEMPLATE.format(project_name='', requirements=msg.content)}",
+                schema=PRDOutput, system=PRD_SYSTEM_PROMPT)
             await rep.content(prd.model_dump_json())
         await self._save(store, prd)
         return prd
@@ -154,8 +151,9 @@ class WritePRD(BaseAction):
         """源 _merge(:254) + _update_prd：REFINED_PRD 用同一组字段、NEW_REQ_TEMPLATE 做底。"""
         from codeharness.report import docs_block
         async with docs_block("prd-update", role="PM") as rep:
-            refined: PRDOutput = await self._ask(
-                PRDOutput, NEW_REQ_TEMPLATE.format(old_prd=old.content, requirements=msg.content))
+            refined: PRDOutput = await self._structured(
+                f"{self.prefix}\n{NEW_REQ_TEMPLATE.format(old_prd=old.content, requirements=msg.content)}",
+                schema=PRDOutput, system=PRD_SYSTEM_PROMPT)
             await rep.content(refined.model_dump_json())
         await self._save(store, refined)
         return refined

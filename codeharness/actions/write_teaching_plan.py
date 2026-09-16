@@ -23,10 +23,11 @@ class WriteTeachingPlan(BaseAction):
     output_schema = TeachingPlan
 
     async def run(self, msg: Message) -> Message:
-        p: TeachingPlan = await self.llm.structured(TeachingPlan).ainvoke(
-            TEACHING_PLAN_PROMPT.format(teaching_language="English", name="Lily",
-                                        native_language="Chinese", topic=msg.content,
-                                        constraints="writing in English"))
+        p: TeachingPlan = await self._structured(
+            f"{self.prefix}\n" + TEACHING_PLAN_PROMPT.format(teaching_language="English", name="Lily",
+                                                             native_language="Chinese", topic=msg.content,
+                                                             constraints="writing in English"),
+            schema=TeachingPlan)
         doc = await ArtifactStore.active().save(
             RepoName.RESOURCES, Document(filename="teaching_plan.md", content=p.model_dump_json()))
         return Message(content=f"教学计划已完成: {doc.root_relative_path}", role="assistant",

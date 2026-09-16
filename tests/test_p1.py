@@ -62,26 +62,14 @@ async def main():
     fixed = await llm_repair_json('{"thought": "fixed",}', Out, broken_llm)
     assert fixed.thought == "fixed"
 
-    # ⑤ 边缘 Action 六件
-    from codeharness.actions.edge_actions import (WriteDocstring, WriteDesignReview, WriteReview,
-                                                  ExtractReadMe, AnalyzeRequirements, GenerateQuestions)
+    # ⑤ ExtractReadMe（原"边缘六件"里其余五只 2026-09-16 对账后删除——源侧零消费者，
+    #   只留唯一有真实消费链的这只；判定表 §一 edge_actions 行 + 接线台账 #13）
+    from codeharness.actions.edge_actions import ExtractReadMe
     edge_llm = FakeLLM([
-        "```python\ndef add(a, b):\n    \"\"\"求和。\"\"\"\n    return a + b\n```",
-        "设计评审：可行",
-        "总评：良好",
         json.dumps({"summary": "示例库", "installation": "pip install", "configuration": "无", "usages": "import"}),
-        json.dumps({"analysis": ["需要登录", "需要支付"]}),
-        json.dumps({"questions": ["支持微信支付吗?"]}),
     ])
-    assert "求和" in (await WriteDocstring(llm=edge_llm).run(Message("def add(a, b):\n    return a + b"))).content
-    assert "可行" in (await WriteDesignReview(llm=edge_llm).run(Message("设计文档"))).content
-    assert "良好" in (await WriteReview(llm=edge_llm).run(Message("内容"))).content
     rm = await ExtractReadMe(llm=edge_llm).run(Message("# README\n示例"))
     assert rm.instruct_content["installation"] == "pip install"
-    ar = await AnalyzeRequirements(llm=edge_llm).run(Message("做一个商城"))
-    assert "支付" in ar.content
-    gq = await GenerateQuestions(llm=edge_llm).run(Message("讨论记录"))
-    assert "微信支付" in gq.content
 
     # ⑥ skills 等价包
     from codeharness.skills.loader import SkillAction

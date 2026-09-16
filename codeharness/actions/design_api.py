@@ -56,9 +56,10 @@ class DesignOutput(BaseModel):
 class WriteDesign(BaseAction):
     output_schema = DesignOutput
 
+    patch_exempt = frozenset({"anything_unclear"})       # 同 WritePRD：答"无"是合法答复
+
     async def run(self, msg: Message) -> Message:
         from codeharness.report import docs_block
-        from langchain_core.messages import HumanMessage, SystemMessage
         store = ArtifactStore.active()
         prd_doc = await store.get(RepoName.PRD, DocName.PRD)     # 源 :186：上下文读 PRD 文件，不是消息转述
         context = prd_doc.content if prd_doc else msg.content
@@ -72,9 +73,8 @@ class WriteDesign(BaseAction):
             prompt, system = context, DESIGN_SYSTEM_PROMPT
 
         async with docs_block("design", role="Architect") as rep:
-            design: DesignOutput = await self.llm.structured(DesignOutput).ainvoke(
-                [SystemMessage(content=system), HumanMessage(content=f"{self.prefix}\n{prompt}")],
-                tag=self.name)
+            design: DesignOutput = await self._structured(
+                f"{self.prefix}\n{prompt}", schema=DesignOutput, system=system)
             await rep.content(design.model_dump_json())
 
         await store.save(RepoName.DOCS, Document(filename=DocName.DESIGN_JSON,

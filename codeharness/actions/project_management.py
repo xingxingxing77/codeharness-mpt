@@ -65,7 +65,6 @@ class WriteTasks(BaseAction):
 
     async def run(self, msg: Message) -> Message:
         from codeharness.report import task_block
-        from langchain_core.messages import HumanMessage, SystemMessage
         store = ArtifactStore.active()
         design = await store.get(RepoName.DOCS, DocName.DESIGN_JSON) or await store.get(RepoName.DOCS, DocName.DESIGN)
         context = design.content if design else msg.content
@@ -79,8 +78,8 @@ class WriteTasks(BaseAction):
             prompt, system = context, TASKS_SYSTEM_PROMPT
 
         async with task_block(role="PMManager") as rep:
-            tasks: TaskList = await self.llm.structured(TaskList).ainvoke(
-                [SystemMessage(content=system), HumanMessage(content=f"{self.prefix}\n{prompt}")], tag=self.name)
+            tasks: TaskList = await self._structured(
+                f"{self.prefix}\n{prompt}", schema=TaskList, system=system)
             await rep.content(tasks.model_dump_json())
 
         if not tasks.task_list:

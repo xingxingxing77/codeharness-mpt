@@ -26,8 +26,8 @@ class WriteDirectory(BaseAction):
     output_schema = TutorialDirectory
 
     async def run(self, msg: Message) -> Message:
-        d: TutorialDirectory = await self.llm.structured(TutorialDirectory).ainvoke(
-            f"{self.prefix}\nTopic: {msg.content}")
+        d: TutorialDirectory = await self._structured(
+            f"{self.prefix}\nTopic: {msg.content}", schema=TutorialDirectory)
         return Message(content=d.model_dump_json(), role="assistant", cause_by=self.name,
                        sent_from="Stitch", instruct_content=d.model_dump(), instruct_schema="TutorialDirectory")
 

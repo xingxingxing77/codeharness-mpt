@@ -42,6 +42,9 @@ class BaseAction(BaseModel):
     desc: str = ""
     prefix: str = ""                                        # system prompt（Agent.build_prefix 灌入）
     output_schema: ClassVar[Optional[Type[BaseModel]]] = None      # 子类覆盖无需注解
+    # "空值即合法答复"的字段白名单：_is_empty 判空会误伤它们（源的 ActionNode 语义是"缺键"，
+    # 不是"空值"——anything_unclear 答 "" 就是"没有不清楚的"）。缺省不豁免，逐 Action 声明。
+    patch_exempt: ClassVar[frozenset] = frozenset()
     llm: Optional[object] = None                           # LLMGateway / FakeLLM，组队时注入
     max_field_retries: int = 2                             # 补空字段的最多轮数（可按 Action 调）
 
@@ -59,27 +62,35 @@ class BaseAction(BaseModel):
         return await self.llm.aask(prompt, system_msgs=msgs or None, tag=self.name)
 
     # ---- 结构化输出 + 字段级定向重试 ----
-    async def _structured(self, prompt: str):
-        """按 `output_schema` 取结构化结果；空字段定向补问，最多 `max_field_retries` 轮。"""
-        schema = self.output_schema
+    async def _structured(self, prompt: str, schema: Optional[Type[BaseModel]] = None,
+                          system: Optional[str] = None):
+        """按 `schema`（缺省取 `output_schema`）取结构化结果；空字段定向补问，最多 `max_field_retries` 轮。
+        一次 Action 带多个判定 schema（如 WritePRD 的 IssueType/IsRelative）时显式传 `schema`。"""
+        schema = schema or self.output_schema
         if not schema:
             return await self._aask(prompt)
 
-        obj = await self._ask(schema, prompt)
+        obj = await self._ask(schema, prompt, system)
         for _ in range(self.max_field_retries):
-            missing = self._empty_fields(schema, obj)
+            missing = [f for f in self._empty_fields(schema, obj) if f not in self.patch_exempt]
             if not missing:
                 return obj
-            patch = await self._ask(self._partial(schema, missing), self._patch_prompt(prompt, obj, missing))
-            merged = self._merge(obj, patch)
+            patch = await self._ask(self._partial(schema, missing),
+                                    self._patch_prompt(prompt, obj, missing, schema), system)
+            merged = self._merge_patch(obj, patch)
             if merged is None:                              # 合并后校验不过，保留上一轮结果
                 return obj
             obj = merged
         return obj
 
-    async def _ask(self, schema: Type[BaseModel], prompt: str) -> BaseModel:
-        """走网关的结构化通道。失败时由 gateway 的修复档兜底，仍失败则原样抛出。"""
-        return await self.llm.structured(schema).ainvoke(prompt)
+    async def _ask(self, schema: Type[BaseModel], prompt: str, system: Optional[str] = None) -> BaseModel:
+        """全仓 structured 的**唯一出口**（接线台账 #1：actions/ 下不许再有直连 `llm.structured`）。
+        `system` 给定走 [System, Human] 消息形态（对齐源 ActionNode 的双段 prompt），否则裸 prompt。
+        失败时由 gateway 的修复档兜底，仍失败则原样抛出。"""
+        if system is not None:
+            from langchain_core.messages import HumanMessage, SystemMessage
+            prompt = [SystemMessage(content=system), HumanMessage(content=prompt)]
+        return await self.llm.structured(schema).ainvoke(prompt, tag=self.name)
 
     @staticmethod
     def _empty_fields(schema: Type[BaseModel], obj: BaseModel) -> list[str]:
@@ -94,7 +105,9 @@ class BaseAction(BaseModel):
         return create_model(f"{schema.__name__}Patch", **defs)
 
     @staticmethod
-    def _merge(obj: BaseModel, patch: BaseModel) -> Optional[BaseModel]:
+    def _merge_patch(obj: BaseModel, patch: BaseModel) -> Optional[BaseModel]:
+        """⚠ 名字必须与业务方法不撞：曾用名 `_merge` 被 WritePRD._merge（增量 PRD 合并，
+        源同名）遮蔽，补丁轮一触发就 TypeError——接缝名带 `_patch` 后缀就是为了不可撞。"""
         """只覆盖补上的字段，空值不覆盖已有内容。"""
         updates = {k: v for k, v in patch.model_dump().items() if not _is_empty(v)}
         if not updates:
@@ -104,9 +117,10 @@ class BaseAction(BaseModel):
         except Exception:
             return None
 
-    def _patch_prompt(self, prompt: str, obj: BaseModel, missing: list[str]) -> str:
+    def _patch_prompt(self, prompt: str, obj: BaseModel, missing: list[str],
+                      schema: Optional[Type[BaseModel]] = None) -> str:
         """补问上下文 = 原 prompt 尾部 + 已填字段，避免模型重做已完成部分。"""
-        schema = self.output_schema
+        schema = schema or self.output_schema
         fields = "\n".join(f'- "{m}" key containing {self._field_hint(schema, m)};' for m in missing)
         filled = {k: v for k, v in obj.model_dump().items() if not _is_empty(v)}
         return _PATCH_TEMPLATE.format(

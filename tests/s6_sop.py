@@ -771,6 +771,68 @@ def t19_ext_api_acceptance():
     print("  t19 验收线：不改内核跑通新角色+Action+Tool+模板整场会话，三条守卫 + 完全回滚")
 
 
+def t20_structured_patch_live():
+    """接线台账 #1：R2 字段级定向重试接进生产。断言打在**调用序列**上——
+    首轮的空容器字段 → 补丁轮只点名缺失键（不回抛整份 schema、不重做已填）→ merge 后齐；
+    "空值即合法答复"字段（anything_unclear）不触发补丁；补不齐不活锁（max_field_retries 封顶）。"""
+    import json
+    import shutil
+    import codeharness.runtime as rt
+    from codeharness.actions.write_prd import WritePRD
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Message
+
+    def fresh(tag):
+        CURRENT_PROJECT.set(tag)
+        store = ArtifactStore.active()
+        shutil.rmtree(store.root, ignore_errors=True)
+
+    try:
+        fresh("s6r2_patch")
+        half = json.loads(PRD_JSON)
+        half["user_stories"], half["requirement_pool"] = [], []
+        half["anything_unclear"] = ""                       # 合法空答：不该进补丁清单
+        llm = FakeLLM([json.dumps(half, ensure_ascii=False),
+                       json.dumps({"user_stories": ["US1"], "requirement_pool": [["P0", "core"]]},
+                                  ensure_ascii=False)])
+        out = _run(WritePRD(llm=llm), Message(content="做个 tinycli"))
+        assert len(llm.calls) == 2, f"整问 1 次 + 定向补丁 1 次 = 2 次，实际 {len(llm.calls)}"
+        patch_prompt = str(llm.calls[1])
+        missing_seg = patch_prompt.split("## Missing fields")[1].split("## Context")[0]
+        assert "user_stories" in missing_seg and "requirement_pool" in missing_seg
+        assert "anything_unclear" not in missing_seg, "豁免字段漏进了补丁清单"
+        assert "project_name" not in missing_seg, "补丁只许点名缺失字段，不许回抛整份 schema"
+        ic = out.instruct_content
+        assert ic["user_stories"] == ["US1"] and ic["requirement_pool"] == [["P0", "core"]]
+        assert ic["project_name"], "首轮已填字段不能 merge 丢失"
+
+        fresh("s6r2_stub")
+        stub = json.loads(PRD_JSON)
+        stub["competitive_analysis"] = []
+        llm2 = FakeLLM([json.dumps(stub, ensure_ascii=False), '{"competitive_analysis": []}'])
+        out2 = _run(WritePRD(llm=llm2), Message(content="做个 tinycli v2"))
+        assert len(llm2.calls) == 1 + WritePRD().max_field_retries, \
+            f"补不齐必须按重试轮封顶，实际 {len(llm2.calls)} 次"
+        assert out2.instruct_content["project_name"], "截断后保留首轮结果，不空手而归"
+    finally:
+        for d in ("s6r2_patch", "s6r2_stub"):
+            shutil.rmtree(rt.session_root(d), ignore_errors=True)
+        rt.CURRENT_PROJECT.set("")
+    print("  t20 R2 定向补丁在生产路径生效（点名缺字段/豁免合法空答/merge 保已填/封顶不活锁）")
+
+
+def t21_single_structured_seam():
+    """接线台账 #1 的 grep 断言：actions/ 下直连 `.llm.structured(` 归零——
+    结构化输出的唯一出口是 BaseAction._ask（agent/plan_and_act/role_zero 三处非 Action 形态
+    的直连在台账 #1 理由列登记，不属本检查范围）。"""
+    offenders = [str(p.relative_to(REPO)) for p in (REPO / "codeharness" / "actions").rglob("*.py")
+                 if ".llm.structured(" in p.read_text(encoding="utf-8")]
+    assert not offenders, f"绕过 _structured 接缝的 Action: {offenders}"
+    print("  t21 actions/ 结构化调用唯一接缝（.llm.structured 直连=0）")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -780,11 +842,12 @@ def main():
               t12_graph_store_roundtrip, t13_class_view_pipeline,
               t14_rebuild_class_view_action, t15_research_three_legs,
               t16_search_and_summarize_history, t17_role_profile_parity,
-              t18_strategy_switch, t19_ext_api_acceptance]
+              t18_strategy_switch, t19_ext_api_acceptance,
+              t20_structured_patch_live, t21_single_structured_seam]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"
-          f"+ 批2b 两件 2 组；后续批在此续加（build_role 全名 / N2 外部注册演示 / 2d-2f 各 Action 一 fixture）")
+          f"+ 批2b 两件 2 组 + 批3-5 对账/策略/扩展点 3 组 + 接线批 R2 生产化 2 组")
 
 
 if __name__ == "__main__":

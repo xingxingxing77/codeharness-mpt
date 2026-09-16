@@ -195,7 +195,8 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **批 2b ✅**：Research 三腿管线 + SearchAndSummarize 源逐字——联网只走 `search_internet` 工具接缝，t15 钉七次调用序；三只源自身孤儿/浏览器包装件按自查纪律登记不搬（判定表 §一 追加行 + 「`改` 之前也要 grep」新纪律）。
 - **批 4 ✅ N3**：strategy 进 profile（sop/react/role_zero），build_role 换装、两族拒绝路径显式报错（t18）。
 - **批 5 ✅ N2+N7=平台验收线**：ext_api 三件套 + sop 模板；t19 不改内核注册新角色/Action/Tool 跑通整场会话——施工3 原话"这条能过才叫平台"过关。**S6 五批全收口。**
-- 门禁基线：**十一个不花钱脚本全 exit 0** —— s1(12)/s2(14)/s3a(13)/s3b(12)/s4(35)/s5(25)/**s6(19)**/s8(6) + test_p1/test_roles_registry/test_e2e_classic_line。t11 比对法升级为 AST 值比对（文件子串法对 `\` 续行常量假阳性）。
+- 门禁基线：**十一个不花钱脚本全 exit 0** —— s1(12)/s2(14)/s3a(13)/s3b(12)/s4(35)/s5(25)/**s6(21)**/s8(6) + test_p1/test_roles_registry/test_e2e_classic_line。t11 比对法升级为 AST 值比对（文件子串法对 `\` 续行常量假阳性）。
+- **接线批 B0-B1 ✅（同日，判定表 §六 台账开表 + R2 生产化）**：B0 改账三处不实（ask_review 源消费、k_times 抄录错→settings 改回源值 2、edge_actions"能力库"改判）；B1 把 `_structured()` 接进 9 处主线调用点（actions/ 直连归零 t21 钉死），拆掉 write_prd 对基类 `_ask` 的遮蔽、基类 `_merge` 撞名改 `_merge_patch`、`patch_exempt` 豁免合法空答字段——**"写好了没通电"的三颗雷都是通电瞬间炸出来的**；edge_actions 五孤儿随刀删除（台账 #13 半收口）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
