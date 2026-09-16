@@ -88,6 +88,7 @@ def classic_team(llm):
     from codeharness.actions.project_management import WriteTasks
     from codeharness.actions.write_code import WriteCode
     from codeharness.actions.write_code_review import WriteCodeReview
+    from codeharness.actions.write_code_plan_and_change import WriteCodePlanAndChange
     from codeharness.actions.write_test import WriteTest
     from codeharness.actions.run_code import RunCode
     from codeharness.actions.debug_error import DebugError
@@ -108,8 +109,16 @@ def classic_team(llm):
                             "goal": "break down tasks"}, [WriteTasks(llm=llm)], llm, max_loops=2,
                            watch={RequirementTag.WRITE_DESIGN}),
         "Engineer":  Agent({"name": "Engineer", "profile": "Engineer", "goal": "write code"},
-                           [WriteCode(llm=llm), WriteCodeReview(llm=llm), SummarizeCode(llm=llm)], llm,
-                           react_mode="BY_ORDER", max_loops=5,
+                           [WriteCode(llm=llm), WriteCodeReview(llm=llm), SummarizeCode(llm=llm),
+                            WriteCodePlanAndChange(llm=llm)], llm,
+                           react_mode="BY_ORDER", max_loops=6,
+                           # 源 engineer._new_code_actions(:455-487) 的按因装配浓缩：
+                           # FIX_BUG 工单 → 先产重写计划，WriteCode 据此走 REFINED；其余触发保持
+                           # 写→评审→摘要默认序（PlanAndChange 不在 default_plan，正常线不多烧一次模型）。
+                           plans={RequirementTag.FIX_BUG:
+                                  ["WriteCodePlanAndChange", "WriteCode", "WriteCodeReview",
+                                   "SummarizeCode"]},
+                           default_plan=["WriteCode", "WriteCodeReview", "SummarizeCode"],
                            watch={RequirementTag.WRITE_TASKS,
                                   RequirementTag.WRITE_CODE_PLAN_AND_CHANGE,
                                   RequirementTag.FIX_BUG, RequirementTag.DEBUG_ERROR}),

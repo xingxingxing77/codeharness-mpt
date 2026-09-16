@@ -16,6 +16,7 @@ from codeharness.tools.tool_registry import TOOL_REGISTRY
 # 这里 import 它们就是死代码（t17 闲置检查抓出的 4 处之一批）。
 from codeharness.actions.write_code import WriteCode
 from codeharness.actions.write_code_review import WriteCodeReview
+from codeharness.actions.write_code_plan_and_change import WriteCodePlanAndChange
 from codeharness.actions.summarize_code import SummarizeCode
 from codeharness.actions.write_test import WriteTest
 from codeharness.actions.run_code import RunCode
@@ -90,14 +91,15 @@ def SweAgent(llm, **kw):
 # ============ 经典 Role 族（源 roles/ 的 Role 子类） ============
 
 def _classic(name, profile, goal, actions, llm, watch=None, desc=None, constraints=None,
-             max_loops=3, react_mode="REACT"):
+             max_loops=3, react_mode="REACT", plans=None, default_plan=None):
     profile_dict = {"name": name, "profile": profile, "goal": goal}
     if desc:
         profile_dict["desc"] = desc
     if constraints:
         profile_dict["constraints"] = constraints
     return Agent(profile_dict, actions, llm, watch=watch or {RequirementTag.USER_REQUIREMENT},
-                 max_loops=max_loops, react_mode=react_mode)
+                 max_loops=max_loops, react_mode=react_mode,
+                 plans=plans, default_plan=default_plan)
 
 
 def Engineer(llm, **kw):
@@ -107,9 +109,13 @@ def Engineer(llm, **kw):
     WRITE_CODE/WRITE_CODE_REVIEW 在源 env 有消息可收，本仓 SOP 无此二 key，订了=死订阅
     （s3b t11 双向纪律；接线台账 #2）。"""
     kw.setdefault("react_mode", "BY_ORDER")
-    kw.setdefault("max_loops", 5)
+    kw.setdefault("max_loops", 6)
     return _classic("Alex", "Engineer", "write elegant, readable, extensible, efficient code",
-                    [WriteCode(llm=llm), WriteCodeReview(llm=llm), SummarizeCode(llm=llm)], llm,
+                    [WriteCode(llm=llm), WriteCodeReview(llm=llm), SummarizeCode(llm=llm),
+                     WriteCodePlanAndChange(llm=llm)], llm,
+                    plans={RequirementTag.FIX_BUG:
+                           ["WriteCodePlanAndChange", "WriteCode", "WriteCodeReview", "SummarizeCode"]},
+                    default_plan=["WriteCode", "WriteCodeReview", "SummarizeCode"],
                     watch={RequirementTag.WRITE_TASKS, RequirementTag.FIX_BUG,
                            RequirementTag.WRITE_CODE_PLAN_AND_CHANGE, RequirementTag.DEBUG_ERROR},
                     **kw)

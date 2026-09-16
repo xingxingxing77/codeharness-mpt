@@ -1,6 +1,11 @@
 """WriteCode。改造自 actions/write_code.py：PROMPT_TEMPLATE(:34-85) 逐字保留；
-get_codes(:168) 的"排除自身文件"语义保留；EditorReporter 换 editor_block 报道。"""
+get_codes(:168) 的"排除自身文件/增量场景旧码置顶"语义保留（build_code_context 搬至
+write_code_plan_and_change.py——REFINED_TEMPLATE 的家，本件单向 import，无环）；
+EditorReporter 报道经 ArtifactStore.save 的 EDITOR 块承接。
+重写分支（接线台账 #4）：源 :119-142 的 `config.inc → REFINED_TEMPLATE`——本仓 inc 等价信号是
+**CodingContext 里带了 code_plan_and_change_doc**（FIX_BUG 链的 PlanAndChange 产出），有则 REFINED。"""
 from pathlib import Path
+from codeharness.actions.write_code_plan_and_change import REFINED_TEMPLATE, build_code_context
 from codeharness.base.action import BaseAction
 from codeharness.logs import logger
 from codeharness.schema import Message, Document, CodingContext
@@ -61,19 +66,6 @@ ATTENTION: Use '##' to SPLIT SECTIONS, not '#'. Output format carefully referenc
 """
 
 
-async def build_code_context(store: ArtifactStore, exclude: str) -> str:
-    """源 WriteCode.get_codes(:168)：同项目其他文件作上下文、排除当前文件。
-    生成侧（本件）与评审侧（write_code_review）共用一个实现——源也是 review 调 WriteCode 的这个。"""
-    parts = []
-    for f in store.all_files(RepoName.SRC):
-        if f == exclude:
-            continue
-        d = await store.get(RepoName.SRC, f)
-        if d:
-            parts.append(f"### File Name: `{f}`\n```\n{d.content}\n```\n")
-    return "\n".join(parts)
-
-
 class WriteCode(BaseAction):
     async def run(self, msg: Message) -> Message:
         ctx = CodingContext(**(msg.instruct_content or {}))
@@ -89,9 +81,8 @@ class WriteCode(BaseAction):
         design = (await store.get(RepoName.DOCS, DocName.DESIGN_JSON)
                   or await store.get(RepoName.DOCS, DocName.DESIGN)) or Document(content="")
         tasks = (await store.get(RepoName.DOCS, DocName.TASKS)) or Document(content="")
-        others = await build_code_context(store, ctx.filename)
-        # 源 :52-57：三路上下文——上一轮跑测的 stderr、code_summary 的复盘存档、bugfix 工单。
-        # 本仓 output 命名对齐源 test_{code_filename}.json（RunCode 默认出口同步改，两处必须一致）。
+        # 源 :119-142：三路上下文（上一轮跑测 stderr / code_summary 复盘存档 / bugfix 工单）+
+        # 场景判据。本仓 output 命名对齐源 test_{code_filename}.json（RunCode 出口同步，两处必须一致）。
         logs = ""
         test_out = await store.get(RepoName.TEST_OUTPUTS, f"test_{ctx.filename}.json")
         if test_out:
@@ -103,10 +94,23 @@ class WriteCode(BaseAction):
         if bugfix:
             feedback = bugfix.content
             (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)  # 源 :163「防止冲突」
-        prompt = PROMPT_TEMPLATE.format(design=design.content, task=tasks.content, code=others,
-                                        logs=logs, summary_log=summary_doc.content if summary_doc else "",
-                                        feedback=feedback,
-                                        filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
+        pac = ctx.code_plan_and_change_doc
+        refined = bool(pac and pac.content.strip())          # 本仓的源 config.inc 等价信号（见文件头）
+        # 源 :119-126：增量计划在场或带工单 → use_inc 上下文（目标旧码置顶）；新建只带其他文件
+        others = await build_code_context(store, ctx.filename, use_inc=refined or bool(feedback))
+        if refined:
+            requirement = await store.get(RepoName.DOCS, DocName.REQUIREMENT)
+            prompt = REFINED_TEMPLATE.format(
+                user_requirement=requirement.content if requirement else "",
+                code_plan_and_change=pac.content, design=design.content, task=tasks.content,
+                code=others, logs=logs, summary_log=summary_doc.content if summary_doc else "",
+                feedback=feedback,
+                filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
+        else:
+            prompt = PROMPT_TEMPLATE.format(design=design.content, task=tasks.content, code=others,
+                                            logs=logs, summary_log=summary_doc.content if summary_doc else "",
+                                            feedback=feedback,
+                                            filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
         rsp = await self._aask(prompt)
         code = _parse_code(rsp)                                  # 见文末工具函数
         code_doc = await store.save(RepoName.SRC, Document(filename=ctx.filename, content=code))

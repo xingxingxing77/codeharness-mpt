@@ -378,25 +378,29 @@ def t11_action_prompts_verbatim():
                 out[node.targets[0].id] = node.value.value
         return out
 
-    # 豁免 = 有意的 `推迟` 面（各件 docstring 已写明去向），缺它们不算漂移
+    # 豁免 = 有意的 `推迟` 面（各件 docstring 已写明去向），缺它们不算漂移。
+    # 三元组第三项=源文件名覆盖（本仓 write_code_plan_and_change.py 的逐字常量在源 _an 文件里——
+    # 源把 prompt 放 _an、类放正主，本仓一个文件两面，名字映射必须显式）
     pairs = [
-        ("actions/write_prd.py", set()),
-        ("actions/write_test.py", set()),
-        ("actions/run_code.py", set()),
-        ("actions/design_api.py", set()),
-        ("actions/project_management.py", set()),
-        ("actions/summarize_code.py", set()),
-        ("actions/write_code.py", set()),
-        ("actions/write_code_review.py", set()),
-        ("actions/research.py", set()),
+        ("actions/write_prd.py", set(), None),
+        ("actions/write_test.py", set(), None),
+        ("actions/run_code.py", set(), None),
+        ("actions/design_api.py", set(), None),
+        ("actions/project_management.py", set(), None),
+        ("actions/summarize_code.py", set(), None),
+        ("actions/write_code.py", set(), None),
+        ("actions/write_code_plan_and_change.py", set(),
+         "actions/write_code_plan_and_change_an.py"),
+        ("actions/write_code_review.py", set(), None),
+        ("actions/research.py", set(), None),
         ("actions/search_and_summarize.py", {"SEARCH_AND_SUMMARIZE_SALES_SYSTEM",
-                                             "SEARCH_AND_SUMMARIZE_SALES_PROMPT", "SEARCH_FOOD"}),
+                                             "SEARCH_AND_SUMMARIZE_SALES_PROMPT", "SEARCH_FOOD"}, None),
     ]
     n, absent_src = 0, []
-    for rel, exempt in pairs:
+    for rel, exempt, src_rel in pairs:
         mod_name = "codeharness." + rel.replace("actions/", "actions.").replace(".py", "")
         mod = importlib.import_module(mod_name)
-        sc = source_consts(rel)
+        sc = source_consts(src_rel or rel)
         if not sc:
             absent_src.append(rel)
             continue
@@ -833,6 +837,63 @@ def t21_single_structured_seam():
     print("  t21 actions/ 结构化调用唯一接缝（.llm.structured 直连=0）")
 
 
+def t22_fixbug_rewrite_chain():
+    """接线台账 #4/#5：FIX_BUG 全链——Engineer 按因装配（Agent.plans）先产重写计划，
+    WriteCode 据此走 REFINED 分支：prompt 必须含源逐字段 "Code Plan And Change" 与
+    use_inc 的 "The name of file to rewrite" 旧码置顶，产物覆盖回写，工单消费即删。"""
+    import json
+    import shutil
+    import codeharness.runtime as rt
+    import codeharness.team as T
+    from codeharness.const import BUGFIX_FILENAME, DocName, RepoName, RequirementTag
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message
+
+    CURRENT_PROJECT.set("s6fix")
+    store = ArtifactStore.active()
+    shutil.rmtree(store.root, ignore_errors=True)
+    try:
+        for sub, fn, body in ((RepoName.DOCS, DocName.REQUIREMENT, "做个 tinycli v2"),
+                              (RepoName.DOCS, BUGFIX_FILENAME, "--version 参数直接崩溃"),
+                              (RepoName.DOCS, DocName.DESIGN_JSON, '{"implementation_approach": "argparse"}'),
+                              (RepoName.DOCS, DocName.TASKS,
+                               '{"task_list": [{"filename": "cli.py", "instruction": "修 version"}]}'),
+                              (RepoName.SRC, "cli.py", "print('old')")):
+            asyncio.run(store.save(sub, Document(filename=fn, content=body)))
+        plan = json.dumps({"development_plan": ["修复 cli.py 的 version 分支"],
+                           "incremental_change": ["```diff\n+import sys\n```"]})
+        llm = FakeLLM([plan,                                             # PlanAndChange
+                       "```python\nimport sys\nVERSION = '0.1'\n```",    # WriteCode(REFINED)
+                       "## Code Review Result\nLGTM",                    # WriteCodeReview
+                       "摘要：修复 version 分支"])                        # SummarizeCode
+        eng = T.classic_team(llm)["Engineer"]
+        trig = Message(content="--version 崩溃", role="assistant",
+                       cause_by=RequirementTag.FIX_BUG, sent_from="PM",
+                       instruct_content={"issue_filename": BUGFIX_FILENAME}, instruct_schema="IssueDetail")
+        out = asyncio.run(eng.build().ainvoke(
+            {"name": "Engineer", "inbox": [trig], "memory": [], "action_cursor": -1,
+             "chosen": "", "loops": 0, "output": []}))
+        causes = [m.cause_by for m in out["output"]]
+        assert causes == ["WriteCodePlanAndChange", "WriteCode", "WriteCodeReview", "SummarizeCode"], \
+            f"FIX_BUG 按因装配没通电: {causes}"
+        pac_doc = (store.root / RepoName.DOCS / DocName.CODE_PLAN_AND_CHANGE).read_text(encoding="utf-8")
+        assert "Development Plan" in pac_doc and "修复 cli.py 的 version 分支" in pac_doc
+        wc_prompt = str(llm.calls[1])
+        assert "## Code Plan And Change" in wc_prompt, "REFINED 模板没被使用（源 :128-142 分支断）"
+        assert "The name of file to rewrite: `cli.py`" in wc_prompt, "use_inc 旧码置顶缺失（源 :207）"
+        # 旧码本体也必须在（str() 会把消息里的引号转义，断无引号片段）；REFINED 主指令逐字段
+        assert "print(" in wc_prompt and "to complete incremental development" in wc_prompt
+        assert (store.root / RepoName.SRC / "cli.py").read_text(encoding="utf-8").startswith("import sys"), \
+            "重写产物没回写"
+        assert not (store.root / RepoName.DOCS / BUGFIX_FILENAME).exists(), "工单没有消费即删"
+    finally:
+        shutil.rmtree(rt.session_root("s6fix"), ignore_errors=True)
+        rt.CURRENT_PROJECT.set("")
+    print("  t22 FIX_BUG 全链：按因产计划→REFINED 重写→评审→摘要，旧码置顶进 prompt、工单消费即删")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -843,11 +904,12 @@ def main():
               t14_rebuild_class_view_action, t15_research_three_legs,
               t16_search_and_summarize_history, t17_role_profile_parity,
               t18_strategy_switch, t19_ext_api_acceptance,
-              t20_structured_patch_live, t21_single_structured_seam]
+              t20_structured_patch_live, t21_single_structured_seam,
+              t22_fixbug_rewrite_chain]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"
-          f"+ 批2b 两件 2 组 + 批3-5 对账/策略/扩展点 3 组 + 接线批 R2 生产化 2 组")
+          f"+ 批2b 两件 2 组 + 批3-5 对账/策略/扩展点 3 组 + 接线批 R2 生产化 2 组 + 增量重写链 1 组")
 
 
 if __name__ == "__main__":

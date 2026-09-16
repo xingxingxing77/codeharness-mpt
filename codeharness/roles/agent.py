@@ -18,15 +18,27 @@ class AgentState(TypedDict):
     memory: list           # RoleContext.memory 等价物
     action_cursor: int     # RoleContext.state 等价物（BY_ORDER）
     chosen: str            # REACT 的决策
+    plan: list             # 本次激活按触发源选定的动作序（源 Engineer._new_code_actions 的按因装配）
     loops: int
     output: list
 
 
 class Agent:
     def __init__(self, profile: dict, actions: list, llm, react_mode: str = "REACT",
-                 max_loops: int = 3, watch: set | None = None, env_desc: str = ""):
+                 max_loops: int = 3, watch: set | None = None, env_desc: str = "",
+                 plans: dict | None = None, default_plan: list | None = None):
         self.profile = profile
         self.actions = {a.name: a for a in actions}
+        # 按触发源装配动作序（源 engineer._new_code_actions:328-428 的浓缩：FIX_BUG 先产计划）。
+        # 键=触发消息 cause_by，值=动作名序；default_plan 缺省取全量动作表。
+        # 装配名必须都在 actions 里——构造即校验，两张表漂移在实例化时就炸（三表互洽教训）。
+        self.plans = plans or {}
+        for tag, names in self.plans.items():
+            unknown = [n for n in names if n not in self.actions]
+            assert not unknown, f"plans[{tag}] 引用了未装配的动作: {unknown}"
+        self.default_plan = default_plan or list(self.actions)
+        unknown = [n for n in self.default_plan if n not in self.actions]
+        assert not unknown, f"default_plan 引用了未装配的动作: {unknown}"
         self.llm = llm
         self.react_mode = react_mode
         # N3（施工3 批4）：执行策略是 profile 的一个字段，不是三套类——
@@ -66,12 +78,16 @@ class Agent:
     async def _observe(self, s: AgentState):
         news = [m for m in s["inbox"]
                 if (m.cause_by in self.watch or s["name"] in m.send_to) and m not in s["memory"]]
-        return {"inbox": news, "memory": s["memory"] + news}
+        out = {"inbox": news, "memory": s["memory"] + news}
+        if news:
+            # 有新闻=新激活：按触发源选动作序；无新闻（续跑）保留本轮已定的 plan（游标走的是同一条序）
+            out["plan"] = self.plans.get(news[-1].cause_by) or self.default_plan
+        return out
 
     # ---- 源 _think(:340-379) 两模式（全部包 thought_block，前端每个思考步都有 Thought 块） ----
     async def _think(self, s: AgentState):
         from codeharness.report import thought_block
-        names = list(self.actions)
+        names = s.get("plan") or list(self.actions)   # 本次激活的动作序（按因装配，缺省全量）
         if len(names) == 1 and self.react_mode == "REACT":   # 对齐 :342 单动作直选（仅 REACT；
             async with thought_block(role=self.profile["name"]) as rep:   #  BY_ORDER 必须走 cursor 才能止于 len）
                 await rep.content(f"[单动作] 直接执行 {names[0]}")

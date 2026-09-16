@@ -218,4 +218,7 @@ class DocName:
     DESIGN_JSON = "design.json"      # 源 system_design.json：机器读的真源；design.md 是人读替身
     TASKS = "tasks.json"
     CODE_SUMMARY = "code_summary.md"
-    BUGFIX = "bugfix.md"
+    CODE_PLAN_AND_CHANGE = "code_plan_and_change.md"   # 源 CODE_PLAN_AND_CHANGE_FILE_REPO 的产物面
+    # ⚠ docs 工单名只有 BUGFIX_FILENAME（"bugfix.txt"，生产链 write_prd→WriteCode 都吃它）。
+    # 此处曾有 BUGFIX="bugfix.md" 死孪生——同物两值正是本类 docstring 警告的"静默查不到文件"，
+    # B2b 接线时抓出删除（接线台账附带还的债）。
