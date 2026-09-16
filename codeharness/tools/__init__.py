@@ -1,18 +1,10 @@
 """工具层：@tool 造 LangChain 工具，@register_tool 登记进 TOOL_REGISTRY（R8 剩下的那半件）。
 工具输出统一打 log_tool_output（第 1 步 logs.py 的槽）+ 报道块（report.py）——前端面板数据源。
 文件与命令工具的边界 = runtime.session_root()，按会话隔离（S4 判 `新`）。"""
-from pathlib import Path
 from langchain_core.tools import tool
 from codeharness.logs import ToolLogItem, log_tool_output
-from codeharness.runtime import session_root
+from codeharness.tools._boundary import safe_session_path as _safe   # 边界判据统一放 _boundary（台账 #7）
 from codeharness.tools.tool_registry import TOOL_REGISTRY, register_tool
-
-
-def _safe(path: str) -> Path | None:
-    root = session_root()          # per-session 边界：会话 A 的工具写不进会话 B 的目录
-    target = (root / path).resolve()
-    # 必须用 is_relative_to：str.startswith 会把兄弟目录 ws_probe 当成 ws 之内（前缀命中）而放行
-    return target if target.is_relative_to(root) else None
 
 
 @register_tool(tags=["file"])
@@ -69,10 +61,11 @@ async def search_internet(query: str) -> str:
     return (text or "[搜索无结果]")[:8000]
 
 
-from codeharness.tools.libs import terminal as _terminal  # noqa: F401  副作用：terminal_command 登记进 TOOL_REGISTRY
+from codeharness.tools.libs import terminal as _terminal      # noqa: F401  副作用：terminal_command 登记
+from codeharness.tools.libs import editor_tools as _editor    # noqa: F401  副作用：Editor 11 命令登记（台账 #7）
+from codeharness.tools.libs import git as _git                # noqa: F401  副作用：git 两件登记（台账 #8）
 
 REGISTRY = TOOL_REGISTRY.all()      # 全量视图；按 profile 选子集用 TOOL_REGISTRY.select(name|tag)
-# 待接：git_run / Editor 命令面 按同样方式包 `@register_tool(tags=[...]) + @tool`（各 ~10 行）。
 # 只 import 真已移植的 libs——源项目 libs/__init__.py 全量 eager import，会把 editor.py(1,135) 拖进导入路径。
 # 源 libs/browser.py(211) + web_browser_engine_playwright.py(146) 判「推迟」（docs/施工2 §S4，实测三条）：
 # playwright 未装、它 import 的 utils/a11y_tree.py 本仓没有、且全仓零调用者。要交互浏览就和 per-session 容器同批做。

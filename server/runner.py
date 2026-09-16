@@ -186,6 +186,10 @@ class SessionRunner:
                 task = asyncio.create_task(close_terminal(project))
                 self._closers.add(task)
                 task.add_done_callback(self._closers.discard)
+                # Editor 视图态（current_file/行窗）与会话同生命周期——B3 命令面登记后必收，
+                # 否则字典按会话名只增不减
+                from codeharness.tools.libs.editor_tools import close_editor
+                close_editor(project)
 
     def _fail(self, sid: str, exc: Exception):
         message = f"{type(exc).__name__}: {exc}"

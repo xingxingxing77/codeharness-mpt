@@ -1,131 +1,44 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import annotations
+"""git 工具两件（源 tools/libs/git.py:131 的 `改`）。
+源实现本体依赖未移植的 `metagpt.utils.git_repository`（判弃）与 PyGithub——死复制件带悬空
+import，一接线即 ModuleNotFoundError（接线台账 #8 实锤）。本仓改走 `gh` CLI（子进程，零新
+Python 依赖）：gh 不在场返回降级文案而不抛（工具面给模型的必须是可读结果）；凭据由 gh 自身
+登录态持有，源读 ~/.git-credentials 的取 token 路径不搬（源码里 token 变量还有未命中即
+NameError 的隐患）。返回形态 PullRequest/Issue 对象随 PyGithub 弃，统一 str。
+函数名与参数面照源（app_name/issue 两项在源体内不参与请求，弃并记录）。"""
+from langchain_core.tools import tool
 
-import urllib
-from pathlib import Path
-from typing import Optional
-
-from github.Issue import Issue
-from github.PullRequest import PullRequest
-
-from codeharness.tools.libs._shims import register_tool
-
-
-@register_tool(tags=["software development", "git", "create a git pull request or merge request"])
-async def git_create_pull(
-    base: str,
-    head: str,
-    app_name: str,
-    base_repo_name: str,
-    head_repo_name: str = None,
-    title: Optional[str] = None,
-    body: Optional[str] = None,
-    issue: Optional[Issue] = None,
-) -> PullRequest:
-    """
-    Creates a pull request on a Git repository. Use this tool in priority over Browser to create a pull request.
-
-    Args:
-        base (str): The name of the base branch where the pull request will be merged.
-        head (str): The name of the branch that contains the changes for the pull request.
-        app_name (str): The name of the platform hosting the repository (e.g., "github", "gitlab", "bitbucket").
-        base_repo_name (str): The full name of the target repository (in the format "user/repo") where the pull request will be created.
-        head_repo_name (Optional[str]): The full name of the source repository (in the format "user/repo") from which the changes will be pulled.
-        title (Optional[str]): The title of the pull request. Defaults to None.
-        body (Optional[str]): The description or body content of the pull request. Defaults to None.
-        issue (Optional[Issue]): An optional issue related to the pull request. Defaults to None.
-
-    Example:
-        >>> # create pull request
-        >>> base_repo_name = "geekan/MetaGPT"
-        >>> head_repo_name = "ioris/MetaGPT"
-        >>> base = "master"
-        >>> head = "feature/http"
-        >>> title = "feat: modify http lib",
-        >>> body = "Change HTTP library used to send requests"
-        >>> app_name = "github"
-        >>> pr = await git_create_pull(
-        >>>   base_repo_name=base_repo_name,
-        >>>   head_repo_name=head_repo_name,
-        >>>   base=base,
-        >>>   head=head,
-        >>>   title=title,
-        >>>   body=body,
-        >>>   app_name=app_name,
-        >>> )
-        >>> if isinstance(pr, PullRequest):
-        >>>     print(pr)
-        PullRequest("feat: modify http lib")
-        >>> if isinstance(pr, str):
-        >>>     print(f"Visit this url to create a new pull request: '{pr}'")
-        Visit this url to create a new pull request: 'https://github.com/geekan/MetaGPT/compare/master...iorisa:MetaGPT:feature/http'
-
-    Returns:
-        PullRequest: The created pull request.
-    """
-    from metagpt.utils.git_repository import GitRepository
-
-    git_credentials_path = Path.home() / ".git-credentials"
-    with open(git_credentials_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        parsed_url = urllib.parse.urlparse(line)
-        if app_name in parsed_url.hostname:
-            colon_index = parsed_url.netloc.find(":")
-            at_index = parsed_url.netloc.find("@")
-            access_token = parsed_url.netloc[colon_index + 1 : at_index]
-            break
-    return await GitRepository.create_pull(
-        base=base,
-        head=head,
-        base_repo_name=base_repo_name,
-        head_repo_name=head_repo_name,
-        title=title,
-        body=body,
-        issue=issue,
-        access_token=access_token,
-    )
+from codeharness.logs import logger
+from codeharness.tools.sandbox import run_proc
+from codeharness.tools.tool_registry import register_tool
 
 
-@register_tool(tags=["software development", "create a git issue"])
-async def git_create_issue(
-    repo_name: str,
-    title: str,
-    access_token: str,
-    body: Optional[str] = None,
-) -> Issue:
-    """
-    Creates an issue on a Git repository.
+async def _gh(args: list[str]) -> str:
+    try:
+        r = await run_proc(args, timeout=60)
+    except FileNotFoundError:
+        return "[git 工具不可用：未找到 gh CLI。安装 gh 并 `gh auth login`，或由人工在托管平台操作]"
+    out = (r.stdout + r.stderr).strip()
+    if r.return_code != 0:
+        return f"[gh 失败 rc={r.return_code}] {out[:2000]}"
+    return out[:2000]
 
-    Args:
-        repo_name (str): The name of the repository.
-        title (str): The title of the issue.
-        access_token (str): The access token for authentication. Use `get_env` to get access token.
-        body (Optional[str], optional): The body of the issue. Defaults to None.
 
-    Example:
-        >>> repo_name = "geekan/MetaGPT"
-        >>> title = "This is a new issue"
-        >>> from metagpt.tools.libs import get_env
-        >>> access_token = await get_env(key="access_token", app_name="github")
-        >>> body = "This is the issue body."
-        >>> issue = await git_create_issue(
-        >>>   repo_name=repo_name,
-        >>>   title=title,
-        >>>   access_token=access_token,
-        >>>   body=body,
-        >>> )
-        >>> print(issue)
-        Issue("This is a new issue")
+@register_tool(tags=["git"])
+@tool
+async def git_create_pull(base: str, head: str, base_repo_name: str, head_repo_name: str = "",
+                          title: str = "", body: str = "") -> str:
+    """在托管仓库创建 Pull Request（gh CLI）。base_repo_name 形如 "user/repo"；
+    跨仓 PR 时 head_repo_name 填 fork 的 "user/repo"。返回 PR 链接或降级说明。"""
+    args = ["gh", "pr", "create", "--repo", base_repo_name, "--base", base,
+            "--head", f"{head_repo_name}:{head}" if head_repo_name and head_repo_name != base_repo_name else head,
+            "--title", title or f"{head} -> {base}", "--body", body or "Created by Codeharness"]
+    logger.info(f"git_create_pull {base_repo_name}:{head} -> {base}")
+    return await _gh(args)
 
-    Returns:
-        Issue: The created issue.
-    """
-    from metagpt.utils.git_repository import GitRepository
 
-    return await GitRepository.create_issue(repo_name=repo_name, title=title, body=body, access_token=access_token)
+@register_tool(tags=["git"])
+@tool
+async def git_create_issue(repo_name: str, title: str, body: str = "") -> str:
+    """在托管仓库创建 Issue（gh CLI）。repo_name 形如 "user/repo"。返回 issue 链接或降级说明。
+    （源第三参 access_token 弃：R7 后凭据不进工具签名，gh 用自身登录态。）"""
+    return await _gh(["gh", "issue", "create", "--repo", repo_name, "--title", title, "--body", body or title])

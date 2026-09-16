@@ -1097,35 +1097,8 @@ class Editor(BaseModel):
             path = self.working_dir / path
         return path
 
-    @staticmethod
-    async def similarity_search(query: str, path: Union[str, Path]) -> List[str]:
-        """Given a filename or a pathname, performs a similarity search for a given query across the specified file or path.
-
-        This method searches the index repository for the provided query, classifying the specified
-        files or paths. It performs a search on each cluster of files and handles non-indexed files
-        separately, merging results from structured indices with any direct results from non-indexed files.
-        This function call does not depend on other functions.
-
-        Args:
-            query (str): The search query string to look for in the indexed files.
-            path (Union[str, Path]): A pathname or filename to search within.
-
-        Returns:
-            List[str]: A list of results as strings, containing the text from the merged results
-                        and any direct results from non-indexed files.
-
-        Example:
-            >>> query = "The problem to be analyzed from the document"
-            >>> file_or_path = "The pathname or filename you want to search within"
-            >>> texts: List[str] = await Editor.similarity_search(query=query, path=file_or_path)
-            >>> print(texts)
-        """
-        try:
-            from metagpt.tools.libs.index_repo import IndexRepo
-
-            return await IndexRepo.cross_repo_search(query=query, file_or_path=path)
-        except ImportError:
-            raise ImportError("To use the similarity search, you need to install the RAG module.")
+    # similarity_search 已删（接线台账 #9）：唯一 import 是被判弃的 utils/index_repo，
+    # 留着=悬空依赖的死分支；源侧消费者也只有它自己（editor 工具面无人调 similarity_search）。
 
     @staticmethod
     def is_large_file(content: str, mix_token_count: int = 0) -> bool:

@@ -79,11 +79,13 @@ def Assistant(llm, **kw):
 
 
 def SweAgent(llm, **kw):
-    """源 roles/di/swe_agent.py（Swen / Issue Solver）：终端命令为主的修复型 RoleZero"""
-    terminal_tools = TOOL_REGISTRY.select("terminal", "file")
+    """源 roles/di/swe_agent.py（Swen / Issue Solver）：终端命令为主的修复型 RoleZero。
+    源 tools 含 Bash/Editor/git_create_pull——Bash 子类的 swe_agent_commands 判弃、Browser 判推迟，
+    本仓对应面即 terminal/file/edit/git 四 tag（B3 后 Editor 命令面登记，取法随源补齐）。"""
+    swe_tools = TOOL_REGISTRY.select("terminal", "file", "edit", "git")
     return RoleZero({"name": "Swen", "profile": "Issue Solver",
                      "goal": "Resolve GitHub issue or bug in any existing codebase"},
-                    terminal_tools, llm,
+                    swe_tools, llm,
                     instruction="Work via terminal commands. Locate the bug, patch the file, re-run the failing test.",
                     **kw)
 

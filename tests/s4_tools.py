@@ -40,11 +40,25 @@ ROOT = session_root()          # 工具层的文件/命令都以此为界（per-
 PY = f'"{sys.executable}"'
 
 
+EXPECTED_TOOLS = {          # 注册面全名册：新工具必须写明"是谁、为何在"才准入
+    "write_file", "read_file",                          # S4 文件对（带会话边界）
+    "execute_shell_async", "terminal_command",          # shell 对（沙箱/保态终端）
+    "search_internet",                                  # 联网唯一出口
+    "open_file", "goto_line", "scroll_down", "scroll_up", "create_file",
+    "edit_file_by_replace", "insert_content_at_line", "append_file",
+    "search_dir", "search_file", "find_file",           # Editor 命令面 11 只（接线台账 #7）
+    "git_create_pull", "git_create_issue",              # gh CLI 版 git 对（台账 #8）
+}
+
+
 def t1_registry_items_are_langchain_tools():
     names = [t.name for t in REGISTRY]
-    assert len(names) == len(set(names)) == 5, names
+    assert len(names) == len(set(names)), f"重名登记: {names}"
+    assert set(names) == EXPECTED_TOOLS, \
+        f"注册面漂移\n缺: {EXPECTED_TOOLS - set(names)}\n多: {set(names) - EXPECTED_TOOLS}"
     for t in REGISTRY:
-        assert t.description and t.args, t.name
+        assert t.description, t.name
+        assert t.args is not None, t.name          # scroll_down 这类零参工具 args={}，形态断言不是真值断言
         assert t.func or t.coroutine, f"{t.name} 解析不到 callable"
 
 
@@ -218,9 +232,8 @@ def _capture_warnings():
 
 
 def t15_registry_and_tools_share_one_source():
-    assert {t.name for t in REGISTRY} == set(TOOL_REGISTRY.tools) == {
-        "write_file", "read_file", "execute_shell_async", "search_internet", "terminal_command"}
-    assert sorted(TOOL_REGISTRY.tags()) == ["file", "terminal", "web"]
+    assert {t.name for t in REGISTRY} == set(TOOL_REGISTRY.tools) == EXPECTED_TOOLS
+    assert sorted(TOOL_REGISTRY.tags()) == ["edit", "file", "git", "terminal", "web"]
 
 
 def t16_select_unions_names_and_tags_without_duplicates():
@@ -435,6 +448,102 @@ def t34_additional_python_paths_reach_child():
     assert r.stdout.strip().startswith(str(ROOT / "libs")), r.stdout
 
 
+SOURCE_EDITOR_COMMANDS = [  # 源 roles/di/role_zero.py:147-167 默认装配 `Editor.*` 十四法
+    "append_file", "create_file", "edit_file_by_replace", "find_file", "goto_line",
+    "insert_content_at_line", "open_file", "read", "scroll_down", "scroll_up",
+    "search_dir", "search_file", "similarity_search", "write"]
+
+
+def t35_source_editor_assembly_covered():
+    """台账 #7/#9：源默认装配的每只 Editor 命令在本仓都要有去向——11 只同名登记；
+    read/write 由带边界的 read_file/write_file 覆盖（Editor 版绝对路径直解，多挂=多一条旁路）；
+    similarity_search 随 index_repo 判弃，方法体必须已从 editor.py 摘除。"""
+    reg = TOOL_REGISTRY.tools
+    for cmd in SOURCE_EDITOR_COMMANDS:
+        if cmd in ("read", "write"):
+            assert ("read_file" if cmd == "read" else "write_file") in reg, f"{cmd} 无覆盖落点"
+        elif cmd == "similarity_search":
+            body = (Path(__file__).resolve().parents[1] / "codeharness" / "tools" / "libs" /
+                    "editor.py").read_text(encoding="utf-8")
+            assert "def similarity_search" not in body, "判弃方法没摘除=悬空 import 的定时炸弹（台账 #9）"
+        else:
+            assert cmd in reg, f"源默认装配命令 {cmd} 未登记"
+    assert "edit" in TOOL_REGISTRY.by_tag and "git" in TOOL_REGISTRY.by_tag
+
+
+def t36_editor_tools_roundtrip_and_boundary():
+    """工具面必须真干活：create→append→replace→open/search 闭环 + 每个收路径的入口拒越界。"""
+    from codeharness.tools.libs.editor_tools import close_editor
+    close_editor()
+    reg = TOOL_REGISTRY.tools
+    asyncio.run(reg["create_file"].ainvoke({"filename": "blank.py"}))     # create 只验存在（源件写入起始换行，行号语义交 write_file 铺底）
+    assert (ROOT / "blank.py").exists()
+    asyncio.run(write_file.ainvoke({"path": "mod.py", "content": "a = 1\nb = 2\n"}))
+    reg["edit_file_by_replace"].invoke(
+        {"file_name": "mod.py", "first_replaced_line_number": 1, "first_replaced_line_content": "a = 1",
+         "last_replaced_line_number": 1, "last_replaced_line_content": "a = 1", "new_content": "a = 0"})
+    reg["insert_content_at_line"].invoke({"file_name": "mod.py", "line_number": 3, "insert_content": "c = 3"})
+    reg["append_file"].invoke({"file_name": "mod.py", "content": "d = 4\n"})
+    text = (ROOT / "mod.py").read_text(encoding="utf-8")
+    assert "a = 0" in text and "b = 2" in text and "c = 3" in text and text.rstrip().endswith("d = 4"), \
+        f"编辑命令没全部落盘:\n{text}"
+    assert "a = 0" in reg["open_file"].invoke({"path": "mod.py", "line_number": 1})
+    assert "a = 0" in reg["goto_line"].invoke({"line_number": 1})
+    assert "a = 0" in reg["search_file"].invoke({"search_term": "a = 0", "file_path": "mod.py"})
+    assert "mod.py" in reg["search_dir"].invoke({"search_term": "b = 2"})
+    assert "mod.py" in reg["find_file"].invoke({"file_name": "mod.py"})
+    escapes = {
+        "open_file": {"path": "../../../Windows/win.ini"},
+        "create_file": {"filename": "../s4_escape/x.py"},
+        "append_file": {"file_name": "../s4_escape/x.py", "content": "c"},
+        "insert_content_at_line": {"file_name": "../s4_escape/x.py", "line_number": 1, "insert_content": "c"},
+        "edit_file_by_replace": {"file_name": "../s4_escape/x.py", "first_replaced_line_number": 1,
+                                 "first_replaced_line_content": "x", "last_replaced_line_number": 1,
+                                 "last_replaced_line_content": "x", "new_content": "n"},
+        "search_dir": {"search_term": "t", "dir_path": "../"},
+        "find_file": {"file_name": "passwd", "dir_path": "/"},
+        "search_file": {"search_term": "t", "file_path": str(WS.parent / "outside.py")},
+    }
+    for name, args in escapes.items():
+        out = asyncio.run(reg[name].ainvoke(args))   # create_file 只有协程实现，统一走 ainvoke
+        assert "越界" in str(out), f"{name} 没拦住 {args}: {out!r}"
+    assert not (WS.parent / "s4_escape").exists() and not (WS.parent / "outside.py").exists()
+    close_editor()
+
+
+def t37_git_tools_degrade_without_gh():
+    """git 对已登记且参数面可用；gh 不在场必须返回降级文案而不是抛（工具面给模型的是可读字符串）。"""
+    import codeharness.tools.libs.git as G
+
+    async def missing_exe(*a, **k):
+        raise FileNotFoundError("gh")
+    keep, G.run_proc = G.run_proc, missing_exe
+    try:
+        out = asyncio.run(TOOL_REGISTRY.tools["git_create_pull"].ainvoke(
+            {"base": "main", "head": "feat", "base_repo_name": "u/r"}))
+        assert "gh CLI" in out, out
+        out2 = asyncio.run(TOOL_REGISTRY.tools["git_create_issue"].ainvoke({"repo_name": "u/r", "title": "t"}))
+        assert "gh CLI" in out2, out2
+    finally:
+        G.run_proc = keep
+
+
+def t38_no_dangling_metagpt_imports():
+    """代码里不得残留 `from metagpt`（prompts/ 逐字资产豁免——那是源文本自含的字样，不是 import）。
+    git.py 两函数与 editor.similarity_search 曾是'一接线就 ModuleNotFoundError'的死复制件，
+    本检查保证同类问题不再静默回归（台账 #8/#9 的机器版）。"""
+    import re as _re
+    root = Path(__file__).resolve().parents[1] / "codeharness"
+    hits = []
+    for p in sorted(root.rglob("*.py")):
+        if "prompts" in p.parts:
+            continue
+        for i, ln in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if _re.match(r"\s*(from|import)\s+metagpt\b", ln):
+                hits.append(f"{p.relative_to(root.parent)}:{i}")
+    assert not hits, f"供体包悬空 import: {hits}"
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -464,7 +573,9 @@ def main():
               t31_timeout_keeps_partial_output,
               t32_timeout_kills_whole_process_tree,
               t33_terminal_registry_is_per_session,
-              t34_additional_python_paths_reach_child]
+              t34_additional_python_paths_reach_child,
+              t35_source_editor_assembly_covered, t36_editor_tools_roundtrip_and_boundary,
+              t37_git_tools_degrade_without_gh, t38_no_dangling_metagpt_imports]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -475,7 +586,7 @@ def main():
         time.sleep(0.25)
     leftovers = [str(p.relative_to(BASE)) for p in BASE.rglob("*")] if BASE.exists() else []
     assert not BASE.exists(), f"自测留下了句柄或文件: {leftovers[:8]}"
-    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（五项工具登记/名字与 tag 并集去重/"
+    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（全名册 EXPECTED_TOOLS 18 只登记/名字与 tag 并集去重/"
           f"未知 key 告警跳过/漏 @tool 不登记/SweAgent 取法）+ 越界防护 3 组（兄弟会话目录前缀回归/"
           f"父目录与绝对路径/scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）"
           f"+ shell 2 组 + 搜索 3 组（canned HTML 真解析/配 key 走 serper/失败降级，全程零外网）"
@@ -483,7 +594,8 @@ def main():
           f"死壳报错不空转/禁行命令替换跳过/daemon 输出进队列）+ linter 3 组（Python 报错带行号/"
           f"干净文件放行/非 Python 照源不校验）+ Editor._lint_file 真消费者 1 组 + env 读口签名 1 组"
           f"+ per-session 隔离 5 组（会话目录互不可见+脏名退回/超时留输出/杀整棵进程树/"
-          f"Terminal 按会话登记且可关/additional_python_paths 进 PYTHONPATH）")
+          f"Terminal 按会话登记且可关/additional_python_paths 进 PYTHONPATH）"
+          f"+ 接线批 B3 4 组（源 Editor 装配覆盖/编辑闭环+八入口拒越界/git 无 gh 降级/全仓无 metagpt 悬空 import）")
 
 
 if __name__ == "__main__":

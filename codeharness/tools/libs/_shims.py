@@ -1,6 +1,7 @@
-"""libs 移植垫片：源 metagpt 依赖的最小等价实现（editor/git 复制件用）。
-`Linter` 已换成 `libs/linter.py` 的真实现（原来的假 `Linter` 让 editor 的"改完自动 lint"变成空话）；
-`register_tool` 仍是 no-op——editor 系命令尚未接入 REGISTRY（write_file 覆盖），接的时候换真件。"""
+"""libs 移植垫片：源 metagpt 依赖的最小等价实现（editor 复制件用）。
+`Linter` 已换成 `libs/linter.py` 的真实现（原来的假 `Linter` 让 editor 的"改完自动 lint"变成空话）。
+`register_tool` 保持 no-op：editor.py 是 `复` 件，类级的源装饰器不参与本仓注册面——
+真正的工具面在 `editor_tools.py`（逐方法包 @tool + 真 register_tool，接线台账 #7 已通电）。"""
 import asyncio
 from pathlib import Path
 
