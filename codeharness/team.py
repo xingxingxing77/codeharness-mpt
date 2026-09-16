@@ -83,16 +83,23 @@ def classic_team(llm):
     测试手写了 watch 而生产组队漏写，正是「两套表必须互洽」教训的又一处。"""
     from codeharness.roles.agent import Agent
     from codeharness.actions.write_prd import WritePRD
+    from codeharness.actions.prepare_documents import PrepareDocuments
     from codeharness.actions.design_api import WriteDesign
     from codeharness.actions.project_management import WriteTasks
     from codeharness.actions.write_code import WriteCode
+    from codeharness.actions.write_code_review import WriteCodeReview
     from codeharness.actions.write_test import WriteTest
     from codeharness.actions.run_code import RunCode
     from codeharness.actions.debug_error import DebugError
     from codeharness.actions.summarize_code import SummarizeCode
     return {
+        # PM 前置 PrepareDocuments 照源 product_manager.py:45-46 的固定 SOP（BY_ORDER 表达），
+        # requirements_filename 从此有生产者；Engineer 的 WriteCodeReview 照源 engineer.py:128-137
+        # "每写完一文件即评审"，游标顺序 = 业务顺序（接线台账 #2/#3 收口，e2e 手写装配的同款形态）。
         "PM":        Agent({"name": "PM", "profile": "Product Manager",
-                            "goal": "write a PRD"}, [WritePRD(llm=llm)], llm, max_loops=2),
+                            "goal": "write a PRD"},
+                           [PrepareDocuments(llm=llm), WritePRD(llm=llm)], llm,
+                           react_mode="BY_ORDER", max_loops=3),
         "Architect": Agent({"name": "Architect", "profile": "Architect",
                             "goal": "design a concise, usable, complete software system"},
                            [WriteDesign(llm=llm)], llm, max_loops=2,
@@ -101,8 +108,8 @@ def classic_team(llm):
                             "goal": "break down tasks"}, [WriteTasks(llm=llm)], llm, max_loops=2,
                            watch={RequirementTag.WRITE_DESIGN}),
         "Engineer":  Agent({"name": "Engineer", "profile": "Engineer", "goal": "write code"},
-                           [WriteCode(llm=llm), SummarizeCode(llm=llm)], llm,
-                           react_mode="BY_ORDER", max_loops=4,
+                           [WriteCode(llm=llm), WriteCodeReview(llm=llm), SummarizeCode(llm=llm)], llm,
+                           react_mode="BY_ORDER", max_loops=5,
                            watch={RequirementTag.WRITE_TASKS,
                                   RequirementTag.WRITE_CODE_PLAN_AND_CHANGE,
                                   RequirementTag.FIX_BUG, RequirementTag.DEBUG_ERROR}),

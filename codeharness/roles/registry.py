@@ -15,6 +15,7 @@ from codeharness.tools.tool_registry import TOOL_REGISTRY
 # WritePRD/WriteTasks/PrepareDocuments 不在本表 import——经典线流水线由 team.classic_team 装配，
 # 这里 import 它们就是死代码（t17 闲置检查抓出的 4 处之一批）。
 from codeharness.actions.write_code import WriteCode
+from codeharness.actions.write_code_review import WriteCodeReview
 from codeharness.actions.summarize_code import SummarizeCode
 from codeharness.actions.write_test import WriteTest
 from codeharness.actions.run_code import RunCode
@@ -100,13 +101,17 @@ def _classic(name, profile, goal, actions, llm, watch=None, desc=None, constrain
 
 
 def Engineer(llm, **kw):
-    """源 roles/engineer.py（Alex）+ QaEngineer 修复回路见 QaEngineer"""
+    """源 roles/engineer.py（Alex）+ QaEngineer 修复回路见 QaEngineer。
+    动作表与 team.classic_team 的 Engineer 同形态（写→评审→摘要，BY_ORDER——生产/e2e/注册表
+    三张装配表互洽）；watch 只订 team_graph.SOP 有路由的 tag：源 engineer.py:106 的
+    WRITE_CODE/WRITE_CODE_REVIEW 在源 env 有消息可收，本仓 SOP 无此二 key，订了=死订阅
+    （s3b t11 双向纪律；接线台账 #2）。"""
+    kw.setdefault("react_mode", "BY_ORDER")
+    kw.setdefault("max_loops", 5)
     return _classic("Alex", "Engineer", "write elegant, readable, extensible, efficient code",
-                    [WriteCode(llm=llm), SummarizeCode(llm=llm)], llm,
-                    watch={RequirementTag.WRITE_TASKS, RequirementTag.SUMMARIZE_CODE,
-                           RequirementTag.WRITE_CODE, RequirementTag.FIX_BUG,
-                           RequirementTag.WRITE_CODE_REVIEW,
-                           RequirementTag.WRITE_CODE_PLAN_AND_CHANGE},   # 源 engineer.py:106 订阅集补齐
+                    [WriteCode(llm=llm), WriteCodeReview(llm=llm), SummarizeCode(llm=llm)], llm,
+                    watch={RequirementTag.WRITE_TASKS, RequirementTag.FIX_BUG,
+                           RequirementTag.WRITE_CODE_PLAN_AND_CHANGE, RequirementTag.DEBUG_ERROR},
                     **kw)
 
 

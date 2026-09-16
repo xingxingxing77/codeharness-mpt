@@ -673,7 +673,7 @@ def t18_strategy_switch():
     from codeharness.roles.registry import build_role
 
     llm = FakeLLM(["{}"])
-    assert build_role("Engineer", llm).profile["strategy"] == "react"
+    assert build_role("Engineer", llm).profile["strategy"] == "sop"   # B2a 起默认 BY_ORDER（写→评审→摘要，与生产组队同形态）
     assert build_role("TutorialAssistant", llm).profile["strategy"] == "sop"   # BY_ORDER 注册件
     assert build_role("TeamLeader", llm).profile["strategy"] == "role_zero"
 

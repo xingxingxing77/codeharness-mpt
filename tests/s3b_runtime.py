@@ -337,12 +337,71 @@ def t12_action_exception_feeds_back():
         pass
 
 
+def t13_engineer_cr_wired_in_order():
+    """接线台账 #2/#3 收口：装配顺序=业务顺序——Engineer 一场激活必须 写→评审→摘要 三件全跑；
+    PM 前置 PrepareDocuments（源 product_manager.py:45-46 固定 SOP）。断言打在**生产组队**
+    （classic_team）的动作输出上，并核 registry 同形态——"两套表各长各的"教训的三张表版
+    （team × registry × e2e）互洽钉。"""
+    import json
+    import shutil
+    import codeharness.runtime as rt
+    import codeharness.team as T
+    from codeharness.const import DocName, RepoName, RequirementTag
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.registry import build_role
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Message
+
+    PRD = {"language": "en_us", "programming_language": "python", "original_requirements": "x",
+           "project_name": "p", "product_goals": ["g"], "user_stories": ["u"],
+           "competitive_analysis": ["a"], "competitive_quadrant_chart": "q",
+           "requirement_analysis": "ra", "requirement_pool": [["P0", "c"]],
+           "ui_design_draft": "s", "anything_unclear": ""}
+    llm = FakeLLM([json.dumps(PRD),                                     # PM: WritePRD
+                   "```python\ndef add(a, b):\n    return a + b\n```",  # Eng: WriteCode
+                   "## Code Review Result\nLGTM",                       # Eng: WriteCodeReview 首轮即过
+                   "变更摘要：新增 main.py"])                            # Eng: SummarizeCode
+    CURRENT_PROJECT.set("s3b_cr")
+    store = ArtifactStore.active()
+    shutil.rmtree(store.root, ignore_errors=True)
+
+    def drive(agent, name, msg):
+        return asyncio.run(agent.build().ainvoke(
+            {"name": name, "inbox": [msg], "memory": [], "action_cursor": -1,
+             "chosen": "", "loops": 0, "output": []}))
+    try:
+        agents = T.classic_team(llm)
+        pm_out = drive(agents["PM"], "PM",
+                       Message(content="做个加法库", cause_by=RequirementTag.USER_REQUIREMENT))
+        assert [m.cause_by for m in pm_out["output"]] == ["PrepareDocuments", "WritePRD"], \
+            [m.cause_by for m in pm_out["output"]]
+        assert (store.root / RepoName.DOCS / DocName.REQUIREMENT).exists(), "requirements 无人落盘"
+
+        eng_out = drive(agents["Engineer"], "Engineer",
+                        Message(content="实现 add", role="user", cause_by=RequirementTag.WRITE_TASKS,
+                                instruct_content={"filename": "main.py"}, instruct_schema="CodingContext"))
+        causes = [m.cause_by for m in eng_out["output"]]
+        assert causes == ["WriteCode", "WriteCodeReview", "SummarizeCode"], f"写后评审没通电: {causes}"
+        assert (store.root / RepoName.SRC / "main.py").exists()
+        review = eng_out["output"][1]
+        assert review.instruct_content and review.instruct_content.get("review") == "LGTM", review
+
+        reg_eng = build_role("Engineer", FakeLLM(["{}"]))
+        assert set(reg_eng.actions) == set(agents["Engineer"].actions), "registry 与生产组队动作表分叉"
+        assert reg_eng.react_mode == agents["Engineer"].react_mode == "BY_ORDER"
+    finally:
+        shutil.rmtree(rt.session_root("s3b_cr"), ignore_errors=True)
+        rt.CURRENT_PROJECT.set("")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
-              t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back]
+              t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
+              t13_engineer_cr_wired_in_order]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -352,7 +411,8 @@ def main():
     print(f"\nS3(b) 门禁通过：{len(checks)} 组 —— R3 路由 5 组（BY_ORDER 全跑完/精准激活/显式指名/"
           f"<self> 目标校验/订阅可证伪）+ R4a 持久化 1 组 + R5 interrupt-resume 跨实例 1 组 + "
           f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
-          f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组")
+          f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组 + "
+          f"写→评审→摘要生产装配 1 组")
 
 
 if __name__ == "__main__":
