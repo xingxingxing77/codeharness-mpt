@@ -665,6 +665,36 @@ def t17_role_profile_parity():
     print(f"  t17 角色对账：{len(R.ALL_ROLES)} 角色注册齐、profile 三字段 {checked} 项与源逐字、registry 无闲置 import")
 
 
+def t18_strategy_switch():
+    """N3：三套引擎类收成一个运行时字段。断言 ①注册即自报 strategy；
+    ②build_role 换装经典族 sop↔react 改的是 react_mode 且 profile 同步；③RoleZero 族拒换装、
+    非法值拒绝——换装必须显式报错，不静默降级（静默降级=profile 说的和跑的不一样）。"""
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.registry import build_role
+
+    llm = FakeLLM(["{}"])
+    assert build_role("Engineer", llm).profile["strategy"] == "react"
+    assert build_role("TutorialAssistant", llm).profile["strategy"] == "sop"   # BY_ORDER 注册件
+    assert build_role("TeamLeader", llm).profile["strategy"] == "role_zero"
+
+    eng = build_role("Engineer", llm, strategy="sop")
+    assert eng.react_mode == "BY_ORDER" and eng.profile["strategy"] == "sop"
+    eng2 = build_role("Engineer", llm, strategy="react")
+    assert eng2.react_mode == "REACT" and eng2.profile["strategy"] == "react"
+
+    try:
+        build_role("TeamLeader", llm, strategy="sop")
+        raise AssertionError("role_zero 族换装必须 raise")
+    except ValueError as e:
+        assert "role_zero 引擎" in str(e), e
+    try:
+        build_role("Engineer", llm, strategy="tot")
+        raise AssertionError("非法 strategy 必须 raise")
+    except ValueError as e:
+        assert "只认 sop/react" in str(e), e
+    print("  t18 N3 策略字段：注册自报 / 换装生效 / 两族拒绝路径各一条")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,

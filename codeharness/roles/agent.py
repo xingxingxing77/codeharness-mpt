@@ -29,6 +29,9 @@ class Agent:
         self.actions = {a.name: a for a in actions}
         self.llm = llm
         self.react_mode = react_mode
+        # N3（施工3 批4）：执行策略是 profile 的一个字段，不是三套类——
+        # BY_ORDER=顺序流水线（sop），REACT=按需挑 Action。源三套类收成一个运行时值。
+        profile.setdefault("strategy", "sop" if react_mode == "BY_ORDER" else "react")
         self.max_loops = max_loops
         self.watch = watch or {"UserRequirement"}       # 对齐 _process_role_extra(:177) 默认订阅
         self.env_desc = env_desc

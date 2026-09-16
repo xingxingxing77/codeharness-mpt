@@ -49,6 +49,7 @@ class RoleZero:
                  longterm_memory=None, memory: Memory | None = None,
                  brain: BrainMemory | None = None, redis_key: str = "", memory_k: int = 0):
         self.profile = profile
+        profile.setdefault("strategy", "role_zero")   # N3：RoleZero 引擎的自报策略（见施工3 批4）
         self.tools = {t.name: t for t in tools}
         self.llm = llm
         self.system_prompt = system_prompt

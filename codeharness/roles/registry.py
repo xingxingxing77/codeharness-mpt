@@ -215,8 +215,23 @@ ALL_ROLES = {
 }
 
 
-def build_role(name: str, llm, **kw):
-    """按名构建角色（含软件公司流水线的 PrepareDocuments 前置组合见 team.classic_team）"""
+def build_role(name: str, llm, strategy: str | None = None, **kw):
+    """按名构建角色（含软件公司流水线的 PrepareDocuments 前置组合见 team.classic_team）。
+
+    N3（施工3 批4）：`strategy` 让同一个 profile 换执行方式——
+    经典族接受 "sop"（顺序流水线）/"react"（按需挑 Action）；RoleZero 族的执行体
+    是命令循环（工具集不是 Action 列表），换策略=换角色素材，明确拒绝而不是静默降级。"""
     if name not in ALL_ROLES:
         raise KeyError(f"未知角色 {name}，可选: {sorted(ALL_ROLES)}")
-    return ALL_ROLES[name](llm, **kw)
+    role = ALL_ROLES[name](llm, **kw)
+    if strategy:
+        from codeharness.roles.role_zero import RoleZero
+        if isinstance(role, RoleZero):
+            if strategy != "role_zero":
+                raise ValueError(f"{name} 是 role_zero 引擎（工具集非 Action 列表），不接受 strategy={strategy!r} 换装")
+        elif strategy in ("sop", "react"):
+            role.react_mode = "BY_ORDER" if strategy == "sop" else "REACT"
+            role.profile["strategy"] = strategy
+        else:
+            raise ValueError(f"经典族只认 sop/react，收到 {strategy!r}")
+    return role
