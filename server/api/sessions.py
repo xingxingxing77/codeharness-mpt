@@ -120,3 +120,15 @@ async def events(sid: str, request: Request, after: int = 0):
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "Connection": "keep-alive"})
+
+
+@router.get("/{sid}/events/history")
+def events_history(sid: str, request: Request, after: int = 0):
+    """有界 JSON 回放：`/events` 是给浏览器 EventSource 的无界活流，**任何要读完再走的
+    消费方都必须用这条**——冒烟脚本挂死两场的根因就是拿普通 GET 读无限流（TestClient 的
+    transport 会把应用跑到底才返回，`while True` 永不返回）。事后审计、S9 采集、断线重连
+    补历史，证据都从这里拿。"""
+    bus, store = _get(request, "bus"), _get(request, "store")
+    if not store.get(sid):
+        raise HTTPException(404, f"session {sid} not found")
+    return {"events": [e.model_dump() for e in bus.history(sid, after)]}

@@ -134,12 +134,68 @@ async def t4_ensure_graph_single_ledger():
     _ok("t4", "_ensure_graph 重建路径：单一账本实例传进图，重启后从落盘快照续算")
 
 
+def t5_lifespan_unwires_seams():
+    """停机必须成对拆（冒烟复现实测：TestClient 出 with 后留着 aiosqlite 的
+    `_connection_worker_thread`——checkpoint.close_all 的 docstring 写着「server 应在
+    lifespan 关闭时调用它」却一直没接线；LogBridge 不 remove 则每次重启 lifespan 多挂一个
+    sink，往已死的旧 bus 灌日志）。断言打在真实 lifespan 的进入/退出上。"""
+    import tempfile
+    from pathlib import Path
+    from fastapi.testclient import TestClient
+    from codeharness.environment import checkpoint as ck
+    from codeharness.logs import logger
+
+    import server.app as sa
+    app = sa.create_app()
+    n_sinks = len(logger._core.handlers)
+    db = Path(tempfile.mkdtemp()) / "ck.db"
+    with TestClient(app) as c:
+        assert c.get("/api/health").json()["ok"] is True
+        c.portal.call(ck.make_checkpointer, str(db))       # 模拟 runner 懒建后的缓存状态
+        assert ck._cache, "前置条件不成立：连接缓存根本没建起来"
+        assert len(logger._core.handlers) == n_sinks + 1, "lifespan 启动应恰好装一个 log sink"
+    assert not ck._cache, "lifespan 关闭没调 close_all：worker 线程会被留在退出路上"
+    assert len(logger._core.handlers) == n_sinks, "LogBridge 的 sink 没随 lifespan 拆掉"
+    print("✅ t5: lifespan 停机成对拆（checkpointer 连接清零 + log sink 摘除）")
+
+
+def t6_events_history_bounded():
+    """回放必须走有界口（冒烟两场挂死的根因门禁：对 SSE 无界流做读完型 GET，
+    TestClient 的 transport 会把应用跑到底——`while True` 永不返回）。
+    sessions.json 指到 tmp，自测不污染生产会话表。"""
+    import tempfile
+    from pathlib import Path
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        import server.app as sa
+        app = sa.create_app()
+        with TestClient(app) as c:
+            sid = c.post("/api/sessions", json={"idea": "回放", "project_name": "s8replay"}).json()["id"]
+            app.state.bus.publish(sid, kind="report", block="Thought", value="想", role="PM")
+            app.state.bus.publish(sid, kind="status", value={"status": "running", "cost": {},
+                                                             "message": "run completed"})
+            r = c.get(f"/api/sessions/{sid}/events/history?after=0")
+            assert r.status_code == 200
+            evs = r.json()["events"]
+            assert [e["kind"] for e in evs] == ["status", "report", "status"], evs   # seq1=created
+            tail = c.get(f"/api/sessions/{sid}/events/history?after=2").json()["events"]
+            assert len(tail) == 1 and tail[0]["seq"] == 3, tail   # seq 游标语义（SSE 同款 after）
+            assert c.get("/api/sessions/nope/events/history").status_code == 404
+    finally:
+        ss.SESSIONS_FILE = keep
+    print("✅ t6: /events/history 有界回放 + seq 游标 + 404（SSE 无界流不再是读完型的口）")
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
     asyncio.run(t3_midrun_sync())
     asyncio.run(t4_ensure_graph_single_ledger())
-    print("\ns8_runner_meter: 4/4 全绿")
+    t5_lifespan_unwires_seams()
+    t6_events_history_bounded()
+    print("\ns8_runner_meter: 6/6 全绿")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,12 @@ def create_app() -> FastAPI:
         app.state.bus, app.state.store, app.state.runner = bus, store, runner
         app.state.llm_defaults, app.state.llm_problem = llm_defaults, llm_problem
         yield
+        # 停机成对拆：checkpoint.close_all 的 docstring 早就写了「server 应在 lifespan 关闭时
+        # 调用它」（aiosqlite 的 worker 线程不显式关会留着），LogBridge 的 loguru sink 同理——
+        # 不 remove 则 lifespan 每重启一次多挂一个 sink，往已死的旧 bus 里灌日志。
+        from codeharness.environment.checkpoint import close_all
+        log_bridge.remove()
+        await close_all()
 
     app = FastAPI(title="Codeharness Studio", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173",

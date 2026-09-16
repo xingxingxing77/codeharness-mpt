@@ -37,14 +37,28 @@ with TestClient(app) as c:
         if i % 5 == 4:
             print(f"  ...{s['status']} round={s.get('n_round')} cost={s.get('cost')}")
     print("FINAL status:", s.get("status"), "| cost:", s.get("cost"), "| err:", str(s.get("error"))[:160])
-    ev = c.get(f"/api/sessions/{sid}/events?after=0").json()
-    events = ev.get("events") if isinstance(ev, dict) else ev
+    # ⚠ 回放证据走 /events/history（有界 JSON）；/events 是给浏览器 EventSource 的 SSE 无界流，
+    # 对 TestClient 读它会永远挂在这里（两场冒烟 FINAL 后挂死的根因：starlette testclient
+    # 的 transport 把应用跑到底才返回，`while True` 的流永不到底）。
+    events = c.get(f"/api/sessions/{sid}/events/history?after=0").json()["events"]
     kinds = {}
-    for e in events or []:
-        k = e.get("type") or e.get("block") or "?"
-        kinds[k] = kinds.get(k, 0) + 1
-    print("events:", len(events or []), kinds)
+    for e in events:
+        k = e.get("kind") or "?"
+        b = e.get("block") or ""
+        kinds[f"{k}:{b}" if b else k] = kinds.get(f"{k}:{b}" if b else k, 0) + 1
+    print("events:", len(events), kinds)
     files = c.get(f"/api/sessions/{sid}/workspace/files").json()
     print("tree:", json.dumps(files, ensure_ascii=False)[:300])
-    src = c.get(f"/api/sessions/{sid}/workspace/file?path=main.py")
-    print("main.py:", src.status_code, str(src.json())[:200] if src.status_code == 200 else src.text[:200])
+
+    def first_py(nodes):                        # 树节点带的是绝对 path；file 端点按 resolve 后判越界
+        for n in nodes or []:
+            if n["type"] == "file" and n["name"].endswith(".py") and not n["name"].endswith("_test.py"):
+                return n["path"]
+            got = first_py(n.get("children"))
+            if got:
+                return got
+        return ""
+    py = first_py(files.get("tree")) or "main.py"
+    src = c.get(f"/api/sessions/{sid}/workspace/file", params={"path": py})
+    print(f"{py}:", src.status_code,
+          str(src.json())[:200] if src.status_code == 200 else src.text[:200])
