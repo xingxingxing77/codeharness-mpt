@@ -87,8 +87,9 @@ class Settings(BaseSettings):
     workspace_root: str = "./workspace"
     memory_overflow_size: int = 200
     enable_rag: bool = True
-    # 源 config2.py:CodeValidateConfig.code_validate_k_times——WriteCodeReview 的 评审→重写 轮数
-    code_validate_k_times: int = 1
+    # 源 config2.py:79 CodeValidateConfig.code_validate_k_times——WriteCodeReview 的 评审→重写 轮数，
+    # 源默认 2；初版记成"照源默认 1"（实为抄录错），2026-09-16 对账改回 2
+    code_validate_k_times: int = 2
 
     # 源 config2.py 的 Config 级开关（repair.py 与 gateway 的重试层读它）
     repair_llm_output: bool = True

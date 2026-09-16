@@ -5,8 +5,10 @@
 1. 底座换成 `langchain_openai.ChatOpenAI`（S10 再按 `api_type` 分派其余厂商）
 2. **对外签名照源**，因为 S6 是从源逐字复制 Action/Role，它们只认这套名字
 
-对齐的源公开面（`base_llm.py`）：`aask`:179 / `aask_batch`:215 / `acompletion_text`:256 /
-`with_model`:324 / `format_msg` / `count_tokens` / `get_next_prompt` / `_consistency_check`。
+对齐的源公开面（`base_llm.py`）：`aask` / `aask_batch` / `aask_code` / `acompletion_text` /
+`with_model` / `format_msg` / `count_tokens`。⚠ 两处形态分叉登记在案（判定表 §六 台账）：
+`aask_code` 源经 function-call 返回 dict{language,code}（消费方 ut_writer 已判 `弃`），本仓返回纯代码块 str；
+源 `aask` 的 `format_msgs`/`images` 参数未搬（现源无消费方用到 images 路径的逐字件）。
 
 三件事在这里收口（源分散在 cost_manager / base_llm / report 三处）：
 token 计数、成本累计、流式回调 `log_llm_stream`。

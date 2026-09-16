@@ -7,7 +7,8 @@
 
 ⚠ 三处名字极易写错、且会静默失效的点，已在门禁里锁住：
 1. 源字段是 **`max_token`（单数）**，不是 `max_tokens`
-2. 源 `timeout: int = 600`，配合 `const.USE_CONFIG_TIMEOUT = 0` 表示"用配置值"
+2. 源 `timeout: int = 600`；本仓经 `const.LLM_API_TIMEOUT = 300` 收紧（慢端点尽快失败重连，
+   入判定表 §六 台账的显式偏离，不是漏抄），配合 `const.USE_CONFIG_TIMEOUT = 0` 表示"用配置值"
 3. 源 `api_key` 默认值是 `"sk-"`（当作"未配置"的哨兵），新栈用 `""`，
    `server/settings.load_llm_defaults` 据空串判 `llm_configured=false`
 """

@@ -95,7 +95,7 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 **判 `推迟` 的源面（有理由，不是漏）**：三件的 `_execute_api`（任意路径出口与 per-session 边界冲突，N2 需要时按会话内口径重写）；`RunCode` mode=text 的 in-process exec（沙箱纪律：执行只走子进程）；多 PRD 文件循环与 git changed_files 记账（ProjectRepo 制，本仓单 PRD 会话制无对应物）。
 **批 2a 后六件 ✅（提交 `599e836`）**：
 - `WriteCode`：源 :52-64 的**三路上下文**补齐——上一轮跑测 stderr（按源命名 `test_{code_filename}.json` 从 test_outputs 捞）、`code_summary` 复盘存档、bugfix 工单（**消费即删**，源 :163 防冲突）；此前三路全传空串=修复回路失明。`get_codes` 抽成 `build_code_context` 与评审共用（源本就同源，review 调的就是它）。模板恢复源文本（含源 `quoto` 笔误与 js 示例段——逐字优先于"顺手改对"）。
-- `WriteCodeReview`：重建为源 `run` 的 **k 轮 评审→LBTM 就地重写→复审**（新配置 `code_validate_k_times` 照源默认 1）；四段 prompt 常量由构建脚本自源**逐字节摘取**——第一版手抄漏了 FORMAT_EXAMPLE 整段、REWRITE 少 js 分支，教训入档：**逐字件必须脚本搬不手抄**。解析不出代码保上版不写空；每轮即落盘（源由 Role 收尾存，本件改即存，偏离已注明）。
+- `WriteCodeReview`：重建为源 `run` 的 **k 轮 评审→LBTM 就地重写→复审**（新配置 `code_validate_k_times`，⚠ 初版注"照源默认 1"系抄录错——源 config2.py:79 实为 **2**，2026-09-16 对账已改 settings 默认回 2）；四段 prompt 常量由构建脚本自源**逐字节摘取**——第一版手抄漏了 FORMAT_EXAMPLE 整段、REWRITE 少 js 分支，教训入档：**逐字件必须脚本搬不手抄**。解析不出代码保上版不写空；每轮即落盘（源由 Role 收尾存，本件改即存，偏离已注明）。
 - `PrepareDocuments`：补发 `PrepareDocumentsOutput`（project_path/requirements_filename/prd_filenames，源 :76）；git 初始化与 `config.update_via_cli` 属源 CLI 立项制不搬。
 - `SummarizeCode`：换成源 PROMPT_TEMPLATE/FORMAT_EXAMPLE 逐字，上下文从产物仓取 design.json+tasks.json+全部 src 带围栏（`get_markdown_code_block_type` 复用）；源的 tenacity 重试不在此重复（gateway._acall 统一收口）。
 - `WriteTest`/`DebugError`：逐段比对判定**已在源语义水位**——write_test 的缺口全在源 Role 侧，debug_error 的"Ran N tests OK"死正则判弃不复活、复盘摘要已由 RunCode 承接。加厚按业务分支计，不为行数凑代码。
@@ -117,7 +117,7 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 **批 3 ✅ 角色对账（同日，提交 `74cb8e8`，s6 门禁 17 组）**：
 - t17 三合一机器检查：源 19 角色类↔registry 名集互洽、name/profile/goal 三字段与源 AST 逐字（40 项过，模板占位/源缺席/两个声明过的功能等价件豁免）、registry 死 import 检查。
 - **首跑抓出 8 处账实不符并全部修正**：TeamLeader.goal 双处抄错（registry+team.py，源是 "Manage a team to assist users"）、ProjectManager.goal 整句自造→源逐字、ProductManager/Architect 缺尾句号×2、registry 四处死 import 清除、Engineer watch 补齐源 engineer.py:106 的两 tag。这正是门禁该有的样子——**"字段逐字抄自源"从注释声明变成机器断言**。
-- 2d/2f 收口结论（判定表 §一 新增两行）：write_plan/execute_nb_code/skill_action 三只已被本仓等价件（Planner/RunPythonCode/skills.loader）覆盖不再单搬；ask_review/prepare_interview 源全仓零调用者判 `弃`。**批 2 无遗留缺口，唯一在途=rebuild_sequence_view**。
+- 2d/2f 收口结论（判定表 §一 新增两行）：write_plan/execute_nb_code/skill_action 三只已被本仓等价件（Planner/RunPythonCode/skills.loader）覆盖不再单搬；prepare_interview 源零调用者判 `弃`。**⚠ 同批原记"ask_review 源全仓零调用者"不实（2026-09-16 对账收回）——源 `strategy/planner.py:8/:134` 真实消费它（:96 计划确认 / :104 task 确认两闸门），评审环改由接线台账 #12（B4：plan_and_act interrupt 闸门）等价吸收**。批 2 遗留缺口重开一格（DI 人在环），在途件=rebuild_sequence_view。
 
 **批 4 ✅ N3 执行策略（同日，提交 `dc4a5ed`，s6 门禁 18 组）**：strategy 进 profile（Agent 按 react_mode 自报 sop/react、RoleZero 自报 role_zero）；`build_role(strategy=)` 换装只救经典族 sop↔react，RoleZero 族与非法值显式拒绝（静默降级=profile 说的和跑的不一样，t18 四段断言）。
 

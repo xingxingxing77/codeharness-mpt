@@ -190,8 +190,8 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 - **S6 批1 ✅**：16 件 prompt 逐字复制 + s6 门禁（AST 顶层字符串常量与源比对）；mermaid 拍板方案 C。
 - **批 2a ✅ 十件**：WritePRD 三情形 / WriteDesign 源五字段+REFINED / RunCode 复盘段 / WriteTasks requirements 聚合 / WriteCode 三路上下文 / WriteCodeReview k 轮循环等，每件一 fixture。
-- **批 2c 类图半边 ✅**：repo_parser 63→1086 行照源 + **Windows 路径校准三坑**（反斜杠折叠、盘符键空间、package_root 还原）；graph_repository 三件套；RebuildClassView 落地——全仓最大真实缺口收口。`rebuild_sequence_view`(605) 待类图被真实消费后接；`import_repo` 并入 N2；`extract_readme` 已在 `edge_actions.py`（批3 对账定性：能力库，源角色同样不挂）。
-- **批 3 ✅ 角色对账**：t17 三合一机器检查（19 类名集 / profile 三字段与源 AST 逐字 / registry 死 import）——**首跑抓出 8 处账实不符**（TeamLeader.goal 双处抄错、ProjectManager.goal 整句自造、缺尾句号×2、死 import×4），全修。2d/2f 收口：write_plan/execute_nb_code/skill_action 已有等价件（Planner/RunPythonCode/skills.loader），ask_review/prepare_interview 源自身孤儿判 `弃`——**批 2 无遗留缺口**。
+- **批 2c 类图半边 ✅**：repo_parser 63→1086 行照源 + **Windows 路径校准三坑**（反斜杠折叠、盘符键空间、package_root 还原）；graph_repository 三件套；RebuildClassView 落地——全仓最大真实缺口收口。`rebuild_sequence_view`(605) 待类图被真实消费后接；`import_repo` 并入 N2；`extract_readme` 已在 `edge_actions.py`（批3 定性"能力库不删不挂"——2026-09-16 复查改判：仅 ExtractReadMe 有源消费，五只孤儿归接线台账 #13 处置）。
+- **批 3 ✅ 角色对账**：t17 三合一机器检查（19 类名集 / profile 三字段与源 AST 逐字 / registry 死 import）——**首跑抓出 8 处账实不符**（TeamLeader.goal 双处抄错、ProjectManager.goal 整句自造、缺尾句号×2、死 import×4），全修。2d/2f 收口：write_plan/execute_nb_code/skill_action 已有等价件（Planner/RunPythonCode/skills.loader），prepare_interview 源自身孤儿判 `弃`。⚠ 两处原记 2026-09-16 复查收回：①"ask_review 源零调用者"不实——源 planner.py:8/:134 真实消费，DI 人在环入接线台账 #12；②"extract_readme=能力库"仅对一只成立——六只里只有它有源消费者（import_repo.py:20），其余五只判孤儿待处置（台账 #13，B5）。
 - **批 2b ✅**：Research 三腿管线 + SearchAndSummarize 源逐字——联网只走 `search_internet` 工具接缝，t15 钉七次调用序；三只源自身孤儿/浏览器包装件按自查纪律登记不搬（判定表 §一 追加行 + 「`改` 之前也要 grep」新纪律）。
 - **批 4 ✅ N3**：strategy 进 profile（sop/react/role_zero），build_role 换装、两族拒绝路径显式报错（t18）。
 - **批 5 ✅ N2+N7=平台验收线**：ext_api 三件套 + sop 模板；t19 不改内核注册新角色/Action/Tool 跑通整场会话——施工3 原话"这条能过才叫平台"过关。**S6 五批全收口。**
