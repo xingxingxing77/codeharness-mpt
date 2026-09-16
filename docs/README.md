@@ -145,7 +145,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 - **计量链残尾收掉**（上面「仍未闭合 #1」的详情）。附带修掉一处同族坑：`utils/redis.py` 的 async client 绑死在建它的 event loop 上，换 loop 后读写静默变 None（降级语义吞掉 `Event loop is closed`）——`_connect` 现在认 `get_running_loop()` 变化重建。
 - **S5 三片就此全闭**：`exp_pool/` schema/serializers/manager/decorator 四件落地 + `@exp_cache` 真接线 `RoleZero.llm_cached_think`（命中=零模型调用，池默认关，`EXP_POOL__*` 开）。源 990 行的 chroma/bm25 与 LLM judge/ranker 按判定不复制，排序换成 Redis 命中计数（键=点 id=uuid5(tag,req)，三处同一派生式）。详见 `施工2` 的 S5.3 落地状态。
-- 门禁基线更新：**十个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / **s3b(11)** / s4(35) / **s5_memory_rag(24)** / **s8_runner_meter(4)** + test_p1 / test_roles_registry / test_e2e_classic_line。
+- 门禁基线更新：**十个不花钱脚本全 exit 0** —— s1(12) / **s2(14)** / s3a(13) / **s3b(11)** / s4(35) / **s5_memory_rag(24)** / **s8_runner_meter(6)** + test_p1 / test_roles_registry / test_e2e_classic_line。
 - hit-rate 表复测会漂（HNSW 近似检索 + IDF 实时统计，4/4→3/4）：方向性结论仍成立，但 S9 要可复现数字得钉 ef/exact——口径记在 `施工2` S5.2 末。
 
 ### 2026-09-15 深夜三段 · 真模型首次完整跑通（第十一处闭合，提交 `5f6225f`）
@@ -156,10 +156,10 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - 门禁：**s3b t11** 双向钉——SOP 每个 cause_by 必须 ∈ 目标角色 watch、watch 不许订阅 SOP 外孤儿 tag、`Engineer._observe` 行为级收到 `WriteTasks`、WriteCode 空上下文 FakeLLM 零调用。
 - 🏁 **首战完整跑通**（`real_e2e_e`，21:51–21:58）：PRD→Design→Tasks→Engineer 写出 `src/tinycli/main.py`（argparse，`--version` 真打 `0.1.0`，按真需求只此一文件）→QA WriteTest→END，`finished` 无错。产物内容跟着需求走（不再编 node_modules），watch 接线生效的直接证据。
 - 计量合流实战实证：跑动中 cost 逐笔涨（0→471/6002→1764/13388→终 2823/31856），失败/完成快照都在 sessions.json。
-- ⚠ 新现形（都有当场证据，未修）：
-  1. **`manual_real_e2e` 打完 FINAL 后挂住不退出**（两场都这样，events/tree 两行没打出来）——嫌疑在 app shutdown 没关 `AsyncSqliteSaver`（s3b 早有 `close_all()` 的同类先例注释）。归 S7 平台服务一并修。
-  2. **产物混头**：`main.py` 首行是 `## tinycli/main.py`——`_parse_code` 取了围栏体但把 markdown 小节头也带进文件（WriteCode 输出格式是 `## file name\n```python…```），纯外观但会让 `python main.py` 直接 SyntaxError，S6 的 fixture 该钉"产物必须可执行"。
-  3. **真模型的 `prompt_tokens` 报得极小**（本场终值 2823，对五角色的完整 system+context 不合理）：qwen MaaS 大概率按**缓存口径**报（隐式前缀缓存命中不计），token 账与计费口径要在 S9 双跑前对齐清楚。
+- ⚠ 新现形（当场证据）：
+  1. ~~**`manual_real_e2e` 打完 FINAL 后挂住不退出**~~ —— **当晚闭合**（提交 `8eded33`）。根因**不在 app shutdown**：`/api/sessions/{sid}/events` 是给浏览器 EventSource 的 **SSE 无界流**（history 之后 `while True` 转 live + keepalive），冒烟脚本拿普通 GET 读它=等一个永不结束的响应；且 starlette TestClient 的 transport 用 `portal.call` **把应用跑到底才返回响应**，对无限流连"读到一半断开"都做不到（探针实测：3 条 data 全 yield 后 `iter_lines()` 一条都收不到，纯挂）。修法：新增有界回放口 **`GET /events/history?after=`**（返回 JSON，事后审计/S9 采集/断线补历史都走这条，SSE 只留给付费浏览器连接）——脚本消费它。复现验证：修复后 events 56 条回放、tree 正常、进程秒退。顺带补上早该接的第二处不对称：lifespan 停机调 `checkpoint.close_all()` + `LogBridge.remove()`（`close_all` 的 docstring 原文就写着"server 应在 lifespan 关闭时调用它"，一直没接线；复现实测 lifespan 退出后留着一条 aiosqlite worker 线程）。门禁 s8 t5/t6 各钉一头。
+  2. **产物混头**（未修）：`main.py` 首行是 `## tinycli/main.py`——`_parse_code` 取了围栏体但把 markdown 小节头也带进文件（WriteCode 输出格式是 `## file name\n```python…```），纯外观但会让 `python main.py` 直接 SyntaxError，S6 的 fixture 该钉"产物必须可执行"。
+  3. **真模型的 `prompt_tokens` 报得极小**（本场终值 2823，对五角色的完整 system+context 不合理，未修）：qwen MaaS 大概率按**缓存口径**报（隐式前缀缓存命中不计），token 账与计费口径要在 S9 双跑前对齐清楚。
 
 ### 本次审查缺陷清单（标「实测」的都已当场复现，非推测）
 
@@ -179,6 +179,12 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 | P1 | `rag/knowledge.py:53` | reranker 抛错即 `return texts[:top_n]`，无日志 | 精排长期缺席也不会被发现 |
 | P2 | `codeharness/actions/action.py` | **0 字节空文件已随 `9a765ba` 入库**，真正基类在 `base/action.py` | 残留占位；谁按包名惯例 import 它就 ImportError |
 | P2 | `roles/registry.py` 等处 | 约 141 行注释仍是「来源 metagpt/xxx:NN」「判 `复`」式历史引用 | 历史账本该留在 docs，代码注释只写工程事实 |
+
+### 2026-09-16 · 挂死收口实证 + 真模型第十二处（提交 `8eded33` + `a6cb4b6`）
+
+- 挂死修复过真机：冒烟第四场 `SMOKE_EXIT=0`，FINAL 后 events 有界回放 286 条（status 7 / Thought 256 / Docs 18 / log 4 / error 1）、文件树打印、进程秒退——上一段「当晚闭合」里"复现验证"那句现在有了真模型证据。
+- **第十二处现形并闭合**（`a6cb4b6`）：这场的会话本体 `failed` 在一个新漂移上——真模型这回给的是 `filename='/main.py'`（带前导斜杠的绝对路径）。产物仓 `_checked` 按契约**写拒是对的**（e005884 的判决没变），错的是那个 `ValueError` 一路吹穿 team graph，把已完成角色与花掉的 1512/7322 token 全部陪葬——**经典线 `Agent._act` 缺 RoleZero 早已立规的 self-heal 收口**。修法：Action 抛异常 → `[错误]` 消息回喂记忆走下一轮；`GraphInterrupt` 是唯一必须照抛的（interrupt/resume 靠它）。门禁 s3b t12 双条钉死（普通异常回喂进记忆 / GraphInterrupt 穿透）。
+- 门禁基线：**十个不花钱脚本全 exit 0**，s3b 升至 12 组、s8_runner_meter 升至 6 组。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
