@@ -99,4 +99,10 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 - `SummarizeCode`：换成源 PROMPT_TEMPLATE/FORMAT_EXAMPLE 逐字，上下文从产物仓取 design.json+tasks.json+全部 src 带围栏（`get_markdown_code_block_type` 复用）；源的 tenacity 重试不在此重复（gateway._acall 统一收口）。
 - `WriteTest`/`DebugError`：逐段比对判定**已在源语义水位**——write_test 的缺口全在源 Role 侧，debug_error 的"Ran N tests OK"死正则判弃不复活、复盘摘要已由 RunCode 承接。加厚按业务分支计，不为行数凑代码。
 - 门禁 t8–t11：PrepareDocuments 三键、WriteCode 三路上下文+工单消费即删+排除自身、Review k 轮行为、**批 2a 全部 prompt 常量与源逐字节同段存在（14 段）**。
-**未动**：2b–2f、批 3–5。**下一刀**：2c 硬前置 `repo_parser`（63 vs 源 1,023）+ graph_repository 三件套——import_repo/rebuild_class_view/rebuild_sequence_view 四件全压在它身上，也是前端 N6 与 RAG 的共同数据源。
+**批 2c 类图半边 ✅（同日，提交 `001d586`+`e04947d`，s6 门禁 14 组）**：
+- `repo_parser.py` 整件照源搬（1086 行；CodeChunk 面保留，两面一文件——消费方不同，拆文件才是混职责），`schema.py` UML 三件套**逐字节从源摘取**。
+- **Windows 路径校准是这片的真风险**（判 `改` 的核心）：源 `_repair_namespaces`/`_create_path_mapping` 假设 POSIX 正斜杠路径——Windows 反斜杠不折叠时 pyreverse 的包名全被误裁成空串（t13 实测 pkg=''），盘符前导 `/` 补进键空间后 mapping 键与前导点根又差一字符（切片错位），两处都必须在同一函数里对齐、返回给 `_diff_path` 的 package_root 还要剥回平台形态。三次踩坑全部当场复现当场修，t13/t14 双向钉住。
+- `graph_repository`(394)/`di_graph_repository`(168)/`visual_graph_repo`(162) 三件套照源落地（判 `改`=只改 import 前缀），networkx 3.4.2 在场；t12 钉 SPO 三条件过滤 + JSON 往返相等。
+- `RebuildClassView` Action：pyreverse 类面 + AST 文件面（`_diff_path`/`_align_root` 对齐同一根）→ SPO 图 → `resources/data_api_design/class_view.class_diagram.mmd`（方案 C 的 .mmd 真源）+ `docs/graph_repo/class_view.json`；aiofiles 直写换 asyncio.to_thread（本仓零 aiofiles 依赖）。
+**剩余三件判词（2c 内自洽收口，不是烂尾）**：`rebuild_sequence_view`(605) 等类图数据被 RAG/前端真实消费过再搬（全仓最大单件，源侧测试也最薄，先验证数据形状再动）；`import_repo`(226) **并入 N2 批 5**（它耦合 git_clone/GitRepository/archive——全是判"被 ArtifactStore 覆盖"的件，平台的外部仓库导入该是扩展点工具不是会话 Action）；`extract_readme`(123) 归 2b 搜索研究批。三件去向已在判定表"三个判定必须自洽"的约束下显式登记。
+**未动**：2b–2f 其余、批 3–5。
