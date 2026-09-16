@@ -77,10 +77,10 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 2b. N3 策略字段 ✅(t18：注册自报/换装/拒绝三路径，批4)
 3. 经典线端到端:需求→PRD→设计→任务→代码→测试→沙箱真跑 pytest(**你现有 `test_e2e_classic_line.py` 就是这条,保持绿**) ✅全程绿
 4. prompt 逐字 diff 为空 ✅(t1/t4,AST 顶层字符串常量比对)
-5. **N2 演示脚本**:外部注册一个新角色并跑通 —— 未落(批5)
+5. **N2 演示脚本**:外部注册一个新角色并跑通 ✅(t19，`ada3313`：新角色+Action+Tool+模板整场会话+三守卫+回滚)
 6. **度量**:2a 加厚前后,同一 idea 的 SOP 完成率与 **token** 对比(FakeLLM 下看结构完整性即可,真模型对比留 S9；成本只记录不作判据)
 
-## S6 落地状态（2026-09-16，门禁 `tests/s6_sop.py` 11 组，提交 `89283e9`+`02cfc04`+`599e836`）
+## S6 落地状态（2026-09-16，门禁 `tests/s6_sop.py` 19 组，提交 `89283e9`…`ada3313`，五批全收）
 
 **批 1 ✅ 全量**：16 件 prompt 按源目录结构复制（`prompts/` + `prompts/di/`）。**重写只允许打在 import 语句的物理行上**（AST 定位）——第一版按行首正则误伤过 prompt 正文的示例代码、全局 replace 又改坏 `generate_skill.md` 与 `REFLECTION_SYSTEM_MSG`，两处都被门禁当场抓出。t1 的口径因此不是"文件文本 diff"而是**每个模块级字符串常量与源的 AST 相等**（比中 54 项；import 前缀本来必须变，逐字性的对象是字符串）。依赖件：`strategy/task_type.py` 逐字复制；`tools/libs/data_preprocess.py` 只带 prompt 需要的 `get_column_info`（源全件拖 sklearn+tool_registry，工具注册面在 S4 的 REGISTRY）。运行时改件 `prompts/role_zero.py`（S3 期本地化）**保留不动**——逐字资产在 `prompts/di/role_zero.py`，是否并回归批 3。
 
@@ -120,3 +120,13 @@ SopTemplate(name, roles=[profile_ref...], edges=[(cause_by_tag, to_role)...], in
 - 2d/2f 收口结论（判定表 §一 新增两行）：write_plan/execute_nb_code/skill_action 三只已被本仓等价件（Planner/RunPythonCode/skills.loader）覆盖不再单搬；ask_review/prepare_interview 源全仓零调用者判 `弃`。**批 2 无遗留缺口，唯一在途=rebuild_sequence_view**。
 
 **批 4 ✅ N3 执行策略（同日，提交 `dc4a5ed`，s6 门禁 18 组）**：strategy 进 profile（Agent 按 react_mode 自报 sop/react、RoleZero 自报 role_zero）；`build_role(strategy=)` 换装只救经典族 sop↔react，RoleZero 族与非法值显式拒绝（静默降级=profile 说的和跑的不一样，t18 四段断言）。
+
+**批 5 ✅ N2+N7 平台面（同日，提交 `ada3313`，s6 门禁 19 组）——S6 全批收口**：
+- `ext_api/{roles,actions,tools}.py`：register_role（注入 ALL_ROLES，返回 unregister；内置同名拒绝）/
+  register_action（BaseAction 准入闸，注册=校验）/ register_tool（TOOL_REGISTRY + REGISTRY 同列表 append，
+  RoleZero 命令面即时可见）。
+- `sop/{templates,builder}.py`：SopTemplate(assemble+edges)；classic_sop 直接引 classic_team+SOP（不复制组队）；
+  build_team_from_template 出口与 prepare_project 同构（interrupt/resume 一致）。
+- t19=施工3 第 5 条验收线的机器化：外部脚本注册新角色+Action+Tool+模板跑通整场会话，
+  三条守卫各一断言 + 完全回滚。**"这条能过才叫平台"过关。**
+- 2e 垂直 SOP（write_trd/evaluate_trd…）从此有了落位形式：**新模板，不加角色类**。
