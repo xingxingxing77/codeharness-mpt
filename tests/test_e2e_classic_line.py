@@ -82,7 +82,14 @@ async def main():
     causes = [m.cause_by for m in out["output"]]
     assert "WriteTest" in causes and "RunCode" in causes, causes
     run_msg = next(m for m in out["output"] if m.cause_by == "RunCode")
-    assert run_msg.instruct_content["ok"] is True, run_msg
+    # B2c 分诊后 instruct 只含 RunCodeContext 的键（extra=forbid 契约）；ok 真值按存档 return_code 查
+    import json as _json
+    assert set(run_msg.instruct_content) <= {"mode", "code", "code_filename", "test_code", "test_filename",
+                                             "command", "working_directory", "additional_python_paths",
+                                             "output_filename", "output"}
+    saved = _json.loads(next((root / "test_outputs").glob("*.json")).read_text(encoding="utf-8"))
+    assert saved["return_code"] == 0, saved
+    assert run_msg.send_to == {"<self>"}, run_msg.send_to   # 通过：自环收场，不广播
     assert (root / "tests" / "test_main.py").exists()
     assert any((root / "test_outputs").iterdir())
     print("e2e ②：QA 写测试→沙箱真跑 pytest→通过→<self> 自环 ✅")

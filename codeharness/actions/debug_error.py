@@ -1,9 +1,13 @@
-"""DebugError：修复回路核心。prompt 逐字搬运源 :22-47；通过判定 = 源 :60 的 "Ran N tests ... OK" 正则。"""
+"""DebugError：QA 侧修复回路。prompt 逐字搬运源 :22-47；通过判定 = return_code（源 :60 的
+"Ran N tests ... OK" 正则对 pytest 恒不匹配，判弃不复活）。
+写回目录照源 qa_engineer.py:155：**修复产物进 tests/ctx.test_filename**——本件是 QA 修测试；
+开发码的问题不归这里，由 RunCode 按复盘 Send To 分诊具名投给 Engineer（run_code.py 的源 :124-148 段）。
+回流消息 instruct 用 RunCodeContext 形态（消费方 RunCode 同 schema；extra=forbid 下多一键即炸回路）。"""
 import re
 
 from codeharness.base.action import BaseAction
 from codeharness.schema import Document, Message, RunCodeContext
-from codeharness.const import RepoName
+from codeharness.const import MESSAGE_ROUTE_TO_SELF, RepoName
 from codeharness.document_store.artifact_store import ArtifactStore
 
 PROMPT_TEMPLATE = """
@@ -49,17 +53,17 @@ class DebugError(BaseAction):
             return Message(content="已通过，无需修复", role="assistant", cause_by=self.name)
         rsp = await self._aask(PROMPT_TEMPLATE.format(code=code_doc.content,
                                                       test_code=test_doc.content,
-                                                      logs=(detail.stderr + "\n" + detail.stdout)[:4000]))
+                                              logs=(detail.stderr + "\n" + detail.stdout)[:4000]))
         from codeharness.actions.write_code import _parse_code
         fixed = _parse_code(rsp)
-        await store.save(RepoName.SRC, Document(filename=ctx.code_filename, content=fixed))
-        return Message(content=f"已修复 {ctx.code_filename}，请重跑测试", role="assistant",
-                       cause_by=self.name, sent_from="Engineer",
-                       instruct_content={"code_filename": ctx.code_filename,
+        # 源 :155：QA 的修复产物写回 **tests/**（此前无条件进 SRC/——修测试的用例把测试码污染进源码目录）
+        await store.save(RepoName.TESTS, Document(filename=ctx.test_filename, content=fixed))
+        # 回流只带消费方（RunCode 重跑）schema 的键；<self> 环数上限在 team_graph 的 debug_rounds 计
+        return Message(content=f"已修复测试 {ctx.test_filename}，请重跑", role="assistant",
+                       cause_by=self.name, sent_from="QA",
+                       send_to={MESSAGE_ROUTE_TO_SELF},
+                       instruct_content={"command": ctx.command, "code_filename": ctx.code_filename,
                                          "test_filename": ctx.test_filename,
                                          "output_filename": ctx.output_filename,
-                                         # SOP 把 DebugError 路由回 Engineer，而 Engineer 的动作吃
-                                         # CodingContext.filename——只带 code_filename 等于回流空转
-                                         # （WriteCode 会走「缺上下文」软失败）。同一条修复回路两个键名对齐消费方。
-                                         "filename": ctx.code_filename},
-                       instruct_schema="DebugOutput")
+                                         "working_directory": ctx.working_directory},
+                       instruct_schema="RunCodeContext")

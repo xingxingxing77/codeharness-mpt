@@ -905,11 +905,78 @@ def main():
               t16_search_and_summarize_history, t17_role_profile_parity,
               t18_strategy_switch, t19_ext_api_acceptance,
               t20_structured_patch_live, t21_single_structured_seam,
-              t22_fixbug_rewrite_chain]
+              t22_fixbug_rewrite_chain, t23_runcode_triage]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"
-          f"+ 批2b 两件 2 组 + 批3-5 对账/策略/扩展点 3 组 + 接线批 R2 生产化 2 组 + 增量重写链 1 组")
+          f"+ 批2b 两件 2 组 + 批3-5 对账/策略/扩展点 3 组 + 接线批 R2 生产化 2 组 + 增量重写链 1 组 + 分诊 1 组")
+
+
+def t23_runcode_triage():
+    """接线台账 #6：RunCode 按复盘 Send To 分诊（源 qa_engineer.py:124-148）——
+    Engineer → 具名投递且 instruct 恰好是 CodingContext 形态；QaEngineer → <self> 且
+    instruct 恰好是 RunCodeContext 形态（extra=forbid：多一键=回路静默断，十二处教训的续集）；
+    DebugError 修复产物进 **tests/**（源 :155），不再污染 SRC/。"""
+    import shutil
+    from codeharness.actions.debug_error import DebugError
+    from codeharness.actions.run_code import RunCode
+    from codeharness.const import MESSAGE_ROUTE_TO_SELF, RepoName
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message, RunCodeContext
+
+    def ctx_msg(store, code_fn="app.py"):
+        (store.root / RepoName.SRC).mkdir(parents=True, exist_ok=True)
+        (store.root / RepoName.SRC / code_fn).write_text("def f():\n    return 1 + 1\n", encoding="utf-8")
+        (store.root / RepoName.TESTS).mkdir(parents=True, exist_ok=True)
+        (store.root / RepoName.TESTS / f"test_{code_fn.split('.')[0]}.py").write_text(
+            "def t():\n    assert False\n", encoding="utf-8")
+        c = RunCodeContext(code_filename=code_fn, test_filename=f"test_{code_fn.split('.')[0]}.py")
+        # command 留空 → RunCode 默认 pytest tests -x（真跑必败的 fixture，零 mock）
+        return Message(content="跑", instruct_content=c.model_dump(), instruct_schema="RunCodeContext")
+
+    store = _fixture_store("s6tri")
+    try:
+        # (a) Send To: Engineer → 具名投给开发，instruct=CodingContext 形态
+        rc = RunCode(llm=FakeLLM(["## instruction:\n实现有误\n## File To Rewrite:\napp.py\n"
+                                  "## Status:\nFAIL\n## Send To:\nEngineer"]))
+        out = asyncio.run(rc.run(ctx_msg(store)))
+        assert out.send_to == {"Engineer"}, out.send_to
+        assert out.instruct_schema == "CodingContext" and set(out.instruct_content) == {"filename"}, \
+            out.instruct_content
+        from codeharness.schema import CodingContext
+        CodingContext(**out.instruct_content)            # 消费方形态验证：不 ValidationError 才算通
+        assert "Send To:" in out.content and "Engineer" in out.content
+
+        # (b) Send To: QaEngineer → <self> 自环，instruct=RunCodeContext 形态
+        rc2 = RunCode(llm=FakeLLM(["## instruction:\n断言写错\n## File To Rewrite:\ntest_app.py\n"
+                                   "## Status:\nFAIL\n## Send To:\nQaEngineer"]))
+        out2 = asyncio.run(rc2.run(ctx_msg(store)))
+        assert out2.send_to == {MESSAGE_ROUTE_TO_SELF}, out2.send_to
+        assert out2.instruct_schema == "RunCodeContext"
+        RunCodeContext(**out2.instruct_content)
+
+        # (c) DebugError 修测试：产物进 tests/、SRC 不动、回流 <self>（(b) 已把失败输出存成 test_app.py.json）
+        dbg_src_before = (store.root / RepoName.SRC / "app.py").read_text(encoding="utf-8")
+        fix_llm = FakeLLM(["## file name of the code to rewrite: test_app.py\n"
+                           "```python\ndef t():\n    assert 1 == 1\n```"])
+        ctx = RunCodeContext(code_filename="app.py", test_filename="test_app.py",
+                             output_filename="test_app.py.json",
+                             working_directory=str(store.root))
+        dbg = asyncio.run(DebugError(llm=fix_llm).run(
+            Message(content="修", instruct_content=ctx.model_dump(), instruct_schema="RunCodeContext")))
+        assert (store.root / RepoName.TESTS / "test_app.py").read_text(encoding="utf-8").strip() \
+            .startswith("def t():"), "修复产物没进 tests/"
+        assert (store.root / RepoName.SRC / "app.py").read_text(encoding="utf-8") == dbg_src_before, \
+            "修测试不该动 SRC"
+        assert dbg.send_to == {MESSAGE_ROUTE_TO_SELF} and dbg.instruct_schema == "RunCodeContext"
+        RunCodeContext(**dbg.instruct_content)
+        assert dbg.instruct_content["test_filename"] == "test_app.py"
+    finally:
+        shutil.rmtree(_ws("s6tri"), ignore_errors=True)
+        CURRENT_PROJECT.set("")
+    print("  t23 RunCode 分诊两分支 + instruct 契约形态 + DebugError 写回 tests/（源 qa_engineer 语义）")
 
 
 if __name__ == "__main__":

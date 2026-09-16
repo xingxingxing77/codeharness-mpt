@@ -6,6 +6,7 @@ import sys
 
 from codeharness.base.action import BaseAction
 from codeharness.const import MESSAGE_ROUTE_TO_SELF, RepoName
+from codeharness.utils.common import parse_recipient
 from codeharness.document_store.artifact_store import ArtifactStore
 from codeharness.logs import logger
 from codeharness.schema import Document, Message, RunCodeContext, RunCodeResult
@@ -87,11 +88,22 @@ class RunCode(BaseAction):
         out_name = ctx.output_filename or f"test_{ctx.code_filename or ctx.test_filename or 'run'}.json"
         await store.save(RepoName.TEST_OUTPUTS, Document(filename=out_name, content=combined.model_dump_json()))
         ok = combined.return_code == 0
+        # 源 qa_engineer.py:124-148 分诊：复盘摘要的 "Send To" 决定去向（parse_recipient 逐字件），
+        # Engineer 修开发码、其余（含 QaEngineer/解析不出）QA 自环修测试。
+        # instruct 键必须**恰好**是消费方 schema 的字段——BaseSerialization extra=forbid：
+        # 塞 ok/recipient 这类附加键，会让 Engineer 的 CodingContext(**instruct) 当场 ValidationError
+        # 被 self-heal 吞成回喂轮（十二处回流即断在此）。ok/去向信息走 content 与 send_to，不塞 instruct。
+        recipient = "" if ok else parse_recipient(combined.summary or "")
+        if ok or recipient != "Engineer":
+            send_to, instruct = {MESSAGE_ROUTE_TO_SELF}, {          # QA 自环：DebugError/重跑都吃 RunCodeContext
+                "command": ctx.command, "code_filename": ctx.code_filename,
+                "test_filename": ctx.test_filename, "output_filename": out_name,
+                "working_directory": ctx.working_directory}
+            schema = "RunCodeContext"
+        else:
+            send_to = {"Engineer"}                                  # 源 mappings：具名投给开发角色
+            instruct, schema = {"filename": ctx.code_filename}, "CodingContext"
         return Message(content=(f"测试通过\n{combined.summary}" if ok
                                 else f"测试失败:\n{combined.stderr[:3000]}\n{combined.summary}"),
                        role="assistant", cause_by=self.name, sent_from="QA",
-                       send_to={MESSAGE_ROUTE_TO_SELF} if ok else set(),
-                       instruct_content={"output_filename": out_name, "ok": ok,     # DebugError 修复回路透传
-                                         "code_filename": ctx.code_filename,
-                                         "test_filename": ctx.test_filename},
-                       instruct_schema="RunCodeOutput")
+                       send_to=send_to, instruct_content=instruct, instruct_schema=schema)

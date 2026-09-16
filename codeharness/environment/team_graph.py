@@ -95,6 +95,12 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
         # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播）
         if MESSAGE_ROUTE_TO_SELF in last.send_to:
             if last.sent_from in agents:
+                if last.cause_by in (RequirementTag.DEBUG_ERROR, RequirementTag.RUN_CODE):
+                    # 测试修复自环也计数（源 qa_engineer test_round 上限语义）：
+                    # RunCode失败→DebugError→RunCode… 不设闸就是 QA↔沙箱 的活循环
+                    state["debug_rounds"] = state.get("debug_rounds", 0) + 1
+                    if state["debug_rounds"] >= 3:
+                        return END
                 return [Send(last.sent_from, {"_inbox": [last]})]
             # 目标节点不存在时绝不能发 Send——LangGraph 会直接抛 Unknown node
 
