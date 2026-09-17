@@ -114,7 +114,7 @@ async def t4_ensure_graph_single_ledger():
                  cost={"total_prompt_tokens": 490, "total_completion_tokens": 21, "total_cost": 0.05})
     captured = {}
 
-    def fake_prepare(idea, project, checkpointer=None, cost_manager=None):
+    def fake_prepare(idea, project, agents=None, checkpointer=None, cost_manager=None, sop=None):
         captured["cost_manager"] = cost_manager
         return object(), {"configurable": {"thread_id": project}}, None
 

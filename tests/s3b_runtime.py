@@ -395,13 +395,55 @@ def t13_engineer_cr_wired_in_order():
         rt.CURRENT_PROJECT.set("")
 
 
+def t14_dynamic_paradigm_assembly():
+    """S9.1 同范式对照的接线（台账 #19①）：dynamic_assembly 两张表（组队 × 路由）自洽 +
+    runner._prepare 按 paradigm 分流。本仓动态形态=单 RoleZero 工具循环（无委派路由），
+    需求只喂 TeamLeader——t10 的教训在这同样成立：路由表目标与组队名对不上就是零调用。"""
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.team import dynamic_assembly
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.const import TEAMLEADER_NAME
+    agents, sop = dynamic_assembly(FakeLLM([]))
+    assert set(agents) == {TEAMLEADER_NAME, "Alice", "Bob"}, sorted(agents)
+    assert all(isinstance(a, RoleZero) for a in agents.values())
+    for tag, targets in sop.items():
+        assert all(t in agents for t in targets), f"{tag} 路由到组队外的名字——零调用洞复发"
+    assert sop[RequirementTag.USER_REQUIREMENT] == [TEAMLEADER_NAME]
+
+    import codeharness.team as team
+    from server.runner import SessionRunner
+    import server.sessions as ss
+    captured = {}
+
+    def fake_prepare(idea, project, agents=None, checkpointer=None, cost_manager=None, sop=None):
+        captured["agents"], captured["sop"] = agents, sop
+        return object(), {}, None
+
+    async def _none_saver():
+        return None
+    saved = team.prepare_project
+    team.prepare_project = fake_prepare
+    try:
+        r = SessionRunner(None, None)
+        r._saver = _none_saver
+        dyn = ss.Session(id="d1", idea="x", project_name="p", paradigm="dynamic")
+        asyncio.run(r._prepare(dyn, "p", None))
+        assert captured["agents"] and TEAMLEADER_NAME in captured["agents"], captured
+        assert captured["sop"] is not None, "dynamic 没带路由表"
+        cls = ss.Session(id="c1", idea="x", project_name="p")
+        asyncio.run(r._prepare(cls, "p", None))
+        assert captured["agents"] is None and captured["sop"] is None, "classic 不该带装配"
+    finally:
+        team.prepare_project = saved
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
-              t13_engineer_cr_wired_in_order]
+              t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

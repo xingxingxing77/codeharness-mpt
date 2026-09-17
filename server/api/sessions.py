@@ -13,7 +13,15 @@ class CreateSessionReq(BaseModel):
     idea: str = Field(min_length=1)
     project_name: str = ""
     n_round: int = 5
+    paradigm: str = "classic"       # classic|dynamic（S9.1 对照）；其余值 422——别让拼错静默走默认线
     llm: dict = Field(default_factory=dict)
+
+    @field_validator("paradigm")
+    @classmethod
+    def _paradigm(cls, v: str) -> str:
+        if v not in ("classic", "dynamic"):
+            raise ValueError("paradigm 只能是 classic 或 dynamic")
+        return v
 
     @field_validator("project_name")
     @classmethod
@@ -52,7 +60,8 @@ async def create_session(req: CreateSessionReq, request: Request):
         if not q.allow("create", settings.platform.create_per_min, settings.platform.rate_window_sec):
             raise HTTPException(429, "建会话过于频繁，稍后再试")
     s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
-                                      project_name=req.project_name.strip(), llm_override=req.llm)
+                                      project_name=req.project_name.strip(), llm_override=req.llm,
+                                      paradigm=req.paradigm)
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
     return s.model_dump()
 

@@ -122,14 +122,23 @@ class SessionRunner:
         session = self.store.get(sid)
         if not session:
             return None
-        from codeharness.team import prepare_project
         project = self.projects[sid] = session.project_name or sid
         self.costs.setdefault(sid, _seeded_ledger(session.cost or {}))
-        team, config, _init = prepare_project(session.idea, project, checkpointer=await self._saver(),
-                                              cost_manager=self.costs[sid])
+        team, config, _init = await self._prepare(session, project, self.costs[sid])
         # 重建出来的图只用于 resume：init 不能再喂一遍，否则等于重开一个线程
         self.graphs[sid] = (team, config)
         return self.graphs[sid]
+
+    async def _prepare(self, session, project: str, cost_manager):
+        """按会话 paradigm 装配三件套：classic=默认经典线；dynamic=S9.1 对照的 RoleZero 线。
+        resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的（第十一处教训）。"""
+        from codeharness.team import prepare_project
+        agents = sop = None
+        if getattr(session, "paradigm", "classic") == "dynamic":
+            from codeharness.team import _make_llm, dynamic_assembly
+            agents, sop = dynamic_assembly(_make_llm(cost_manager))
+        return prepare_project(session.idea, project, agents=agents,
+                               checkpointer=await self._saver(), cost_manager=cost_manager, sop=sop)
 
     def answer_human(self, sid: str, content: str) -> bool:
         if not self.store.get(sid):
@@ -260,10 +269,8 @@ class SessionRunner:
         cost_manager = self.costs[sid] = CostManager()
         project = self.projects[sid] = session.project_name or sid
         try:
-            from codeharness.team import prepare_project
-            # 账本必须由 runner 建、传进图：图内各角色共用它，runner 上报时读的就是这同一个实例
-            team, config, init = prepare_project(
-                session.idea, project, checkpointer=await self._saver(), cost_manager=cost_manager)
+            # 账本必须由 runner 建、传进图：图内各角色的 LLM 共用这一个实例，runner 上报时读的就是这同一个
+            team, config, init = await self._prepare(session, project, cost_manager)
             self.graphs[sid] = (team, config)        # 快路径；丢了也能从 checkpointer 重建
 
             with self._session_ctx(sid):

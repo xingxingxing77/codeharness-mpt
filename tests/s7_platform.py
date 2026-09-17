@@ -340,7 +340,7 @@ async def t13_dual_runner_fakellm_line():
         # 语义等同 HTTP 请求打到 B worker 后 B 写 redis。目标 Ghost 不在 agents：drain 后静默丢，
         # 但 LIST 被清空本身就是「A 的 route 从 redis 消费了 B 的投递」的证据。
         factory(s.id).enqueue("另一worker的插话", "Ghost")
-        def fake_prepare(idea, project, checkpointer=None, cost_manager=None):
+        def fake_prepare(idea, project, agents=None, checkpointer=None, cost_manager=None, sop=None):
             # FakeLLM 各带独立账本——必须接到 runner 传进来的那一个，否则合流读到的恒 0
             # （正是 s8 t4 双账本门禁钉的同一件事，这条是它的端到端版）
             def mk(script):

@@ -45,20 +45,30 @@ async def run_project(idea: str, project_id: str, agents: dict | None = None,
 
 
 def prepare_project(idea: str, project_id: str, agents: dict | None = None,
-                    checkpointer=None, cost_manager=None):
+                    checkpointer=None, cost_manager=None, sop: dict | None = None):
     """runner 专用（第 10 步 §3.5）：返回 (graph, config, init) 三件套，由 runner 自己驱动 astream——
     interrupt resume 必须持有同一 graph 实例与 thread_id。
 
     ⚠ `cost_manager` 必须由调用方建好传进来：图内部各角色的 LLM 共用这一个实例，
-    调用方手上的另一个实例只会记到 0（这个断链曾让前端用量恒为 0）。"""
+    调用方手上的另一个实例只会记到 0（这个断链曾让前端用量恒为 0）。
+    `sop` 传 None 用经典线路由表；动态线（S9.1 对照）传 `dynamic_assembly` 的表。"""
     from codeharness.environment.team_graph import build_team
     if agents is None:
         agents = _default_agents(cost_manager)
-    team = build_team(agents, checkpointer=checkpointer)
+    team = build_team(agents, checkpointer=checkpointer, sop=sop)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
             "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
     return team, config, init
+
+
+def dynamic_assembly(llm):
+    """S9.1 同范式对照·本仓侧装配（台账 #19①）：default_team 三角色 + 动态路由表。
+    本仓动态形态=单 RoleZero 工具循环（Command.assignee 只是展示字段，无委派路由），
+    需求只喂队长（TEAMLEADER_NAME=源逐字 "Mike"）、Alice/Bob 空转——与源 MGX 的多角色委派
+    差在这里，对照表如实记。"""
+    from codeharness.const import RequirementTag, TEAMLEADER_NAME
+    return default_team(llm), {RequirementTag.USER_REQUIREMENT: [TEAMLEADER_NAME]}
 
 
 def _make_llm(cost_manager=None):
