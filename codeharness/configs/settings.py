@@ -77,7 +77,8 @@ class PlatformConfig(BaseModel):
     """S7 平台层开关（施工4 目标结构）。默认全关=进程内实现，feature flag 双跑、全绿才切默认。
     限流是 N5 拆分后保留的那一半：做请求数/并发，**不是金额预算**（§零）。"""
 
-    use_redis: bool = False           # PLATFORM__USE_REDIS：会话态/事件流/插话/控制通道走 Redis
+    use_redis: bool = True            # PLATFORM__USE_REDIS：会话态/事件流/插话/控制通道走 Redis
+    # （S7 双实现全绿后切默认，2026-09-17；显式置 0 仍走进程内旧路——双配置门禁常驻钉两头）
     create_per_min: int = 30          # 建会话固定窗限流（HTTP 入口 429，不进图）
     max_concurrent: int = 16          # 同时 running 会话数上限
     rate_window_sec: int = 60

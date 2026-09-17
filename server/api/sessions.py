@@ -91,7 +91,9 @@ async def start_session(sid: str, request: Request):
     s = store.get(sid)
     if not s:
         raise HTTPException(404, f"session {sid} not found")
-    if runner.is_running(sid):
+    # is_running 是 worker 本地视角；多进程部署下「已在跑」的真源是 store 状态
+    # （启动残态由 heal_running 自愈，running/awaiting_human 必有人在跑）。
+    if runner.is_running(sid) or s.status in (SessionStatus.running, SessionStatus.awaiting_human):
         raise HTTPException(409, "session already running")
     if not (_get(request, "llm_defaults") or {}).get("api_key"):
         raise HTTPException(400, f"LLM 未配置：{_get(request, 'llm_problem') or '缺少 api_key'}")

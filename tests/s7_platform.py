@@ -19,6 +19,13 @@ from codeharness.schema import Document, Message
 TEST_DB = RedisConfig(host=settings.redis.host, port=settings.redis.port, db=15)
 REDIS_UP = False
 
+# 与 test_e2e_classic_line 同一份剧本（t13 的 FakeLLM 线复用）
+PRD = {"language": "en_us", "programming_language": "python", "original_requirements": "双runner",
+       "project_name": "s7e2e", "product_goals": ["g"], "user_stories": ["u"],
+       "competitive_analysis": ["a"], "competitive_quadrant_chart": "q",
+       "requirement_analysis": "ra", "requirement_pool": [["P0", "core"]],
+       "ui_design_draft": "s", "anything_unclear": ""}
+
 
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
@@ -88,6 +95,30 @@ def t10_checkpoint_msgpack_whitelist():
         _ok("t10", "checkpointer msgpack 白名单：未配必警、配了静默（Message/Document 原样回读）")
     finally:
         lg.removeHandler(h)
+
+
+# ---------------- t11 start 的 409 store 化（永远跑） ----------------
+def t11_start_409_store_view():
+    """多 worker 下 is_running 是本地视角——别的 worker 在跑的会话，本 worker 必须也 409。
+    真源=store 状态（running/awaiting_human 必有人在跑：残态由启动期 heal_running 自愈）。"""
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        import server.app as sa
+        with TestClient(sa.create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "双开", "project_name": "s7dual"}).json()["id"]
+            c.app.state.store.update(sid, status="running")     # 模拟：另一 worker 已接手
+            assert c.post(f"/api/sessions/{sid}/start").status_code == 409, \
+                "store 说在跑还放行 = 双开，两 worker 同 thread_id 抢一张图"
+            c.app.state.store.update(sid, status="stopped")
+            started = []
+            c.app.state.runner.start = lambda s: started.append(s.id)   # 打桩：守卫放行与否看这里，不真起会话
+            assert c.post(f"/api/sessions/{sid}/start").status_code == 200 and started == [sid], \
+                "非 running 状态不该再被 store 拦"
+        _ok("t11", "start 409 过 store 判定：跨 worker 已运行的会话不再双开")
+    finally:
+        ss.SESSIONS_FILE = keep
 
 
 # ---------------- redis 部分 ----------------
@@ -249,30 +280,130 @@ async def t9_app_wires_redis_mode():
         ss.SESSIONS_FILE, settings.platform.use_redis, settings.redis.db = keep
 
 
+async def t12_sse_reconnect_continuity():
+    """断线重连的 after=seq 语义在 redis 总线上不重不漏（SSE 活链路的等价覆盖：
+    历史段走 XRANGE 补、续推段从流尾 XREAD BLOCK，两段的接缝由 seq 游标钉住）。"""
+    from platforms.event_store import RedisEventBus
+    bus = RedisEventBus(TEST_DB)
+    bus.start()
+    try:
+        for i in range(5):
+            bus.publish("sR", kind="report", block="Thought", value=f"r{i}")
+        await bus.flush_now()
+        hist = bus.history("sR")
+        assert len(hist) == 5
+        last = hist[-1].seq
+        bus.publish("sR", kind="report", block="Thought", value="gap")   # 「断线窗口」里产生的事件
+        await bus.flush_now()
+        catchup = bus.history("sR", after_seq=last)                     # 重连补历史
+        assert [e.value for e in catchup] == ["gap"], catchup
+        q = bus.subscribe("sR")                                          # 补完后从流尾续推
+        bus.publish("sR", kind="report", block="Thought", value="live")
+        await bus.flush_now()
+        ev = await asyncio.wait_for(q.get(), timeout=3)
+        assert ev.value == "live" and ev.seq > catchup[-1].seq, ev
+        _ok("t12", "SSE 断线重连：XRANGE 补洞 + 流尾续推，seq 游标不重不漏")
+    finally:
+        await bus.aclose()
+
+
+async def t13_dual_runner_fakellm_line():
+    """双 runner 共享 redis 跑一条 FakeLLM 线（切默认前的「真进程部署」等价物）：
+    A 走 runner 真实路径（_run→astream_events→sink→bus→store→cost），B 全程只靠 redis
+    看到状态/账本/事件，并在 A 消费前从自己这边注入插话——route drain 读的是 LIST。"""
+    import codeharness.team as team
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.actions.prepare_documents import PrepareDocuments
+    from codeharness.actions.write_prd import WritePRD
+    from codeharness.const import RequirementTag
+    from codeharness.schema import Message
+    from codeharness.environment.team_graph import build_team
+    from platforms.session_store import RedisSessionStore
+    from platforms.event_store import RedisEventBus
+    from platforms.chat_queue import RedisChatQueue
+    from server.runner import SessionRunner
+    import server.sessions as ss
+    import shutil
+    from server.settings import WORKSPACE_ROOT
+    shutil.rmtree(WORKSPACE_ROOT / "s7e2e", ignore_errors=True)   # 旧产物会让 WritePRD 走更新路径（_is_related 还要一次剧本响应）
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    bus = RedisEventBus(TEST_DB)
+    bus.start()
+    try:
+        factory = lambda sid: RedisChatQueue(sid, TEST_DB)
+        # 两个 worker 各持**自己的** store 实例（生产形态），共享的只有 redis——B 读到的都是 A 写的
+        a = SessionRunner(RedisSessionStore(TEST_DB), bus, chat_factory=factory)
+        b = SessionRunner(RedisSessionStore(TEST_DB), bus, chat_factory=factory)
+        s = a.store.create("双runner线", project_name="s7e2e")
+        # B 不经 runner.enqueue_chat（它手上没有这个会话的队列）——直接投递到共享 LIST，
+        # 语义等同 HTTP 请求打到 B worker 后 B 写 redis。目标 Ghost 不在 agents：drain 后静默丢，
+        # 但 LIST 被清空本身就是「A 的 route 从 redis 消费了 B 的投递」的证据。
+        factory(s.id).enqueue("另一worker的插话", "Ghost")
+        def fake_prepare(idea, project, checkpointer=None, cost_manager=None):
+            # FakeLLM 各带独立账本——必须接到 runner 传进来的那一个，否则合流读到的恒 0
+            # （正是 s8 t4 双账本门禁钉的同一件事，这条是它的端到端版）
+            def mk(script):
+                f = FakeLLM(script)
+                f.cost_manager = cost_manager
+                return f
+            pm2 = Agent({"name": "PM", "profile": "Product Manager", "goal": "PRD"},
+                        [PrepareDocuments(llm=mk([])), WritePRD(llm=mk([json.dumps(PRD)]))],
+                        mk([]), react_mode="BY_ORDER", max_loops=3, watch={"UserRequirement"})
+            g = build_team({"PM": pm2}, checkpointer=checkpointer,
+                           sop={RequirementTag.USER_REQUIREMENT: ["PM"]})
+            cfg = {"configurable": {"thread_id": project}}
+            init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
+                    "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
+            return g, cfg, init
+        saved = team.prepare_project
+        team.prepare_project = fake_prepare
+        try:
+            await a._run(s)
+        finally:
+            team.prepare_project = saved
+        await bus.flush_now()
+        assert b.store.get(s.id).status.value == "finished", b.store.get(s.id).status   # B 跨实例读状态
+        assert RedisChatQueue(s.id, TEST_DB).drain() == []          # B 的投递被 A 消费掉了
+        evs = b.bus.history(s.id)                                   # B 视角的事件流（同一个 redis，不是 A 的内存）
+        assert {e.kind for e in evs} >= {"report", "status"}, sorted({e.kind for e in evs})
+        cost = b.store.get(s.id).cost
+        assert cost["total_prompt_tokens"] > 0, cost                # FakeLLM 记账非零 + 合流走 redis store
+        _ok("t13", "双 runner 端到端：A 跑线、B 靠 redis 看状态/账本/事件，插话跨进程投递被 A 的 route 消费")
+    finally:
+        await bus.aclose()
+        from codeharness.environment.checkpoint import close_all
+        await close_all()       # t13 经 runner._saver 懒建了 AsyncSqliteSaver——不关，aiosqlite 线程吊住退出（s8 t5 同款教训）
+        ss.SESSIONS_FILE = keep
+
+
 async def _redis_suite():
     _flush_test_db()
-    await t2_dual_worker_replay()
-    await t3_cross_worker_stop()
-    await t4_cross_worker_chat()
-    await t5_quota_no_oversell()
-    await t6_metering_over_redis_bus()
-    await t7_trace_spans()
-    await t8_field_level_concurrency()
-    await t9_app_wires_redis_mode()
+    for fn in (t2_dual_worker_replay, t3_cross_worker_stop, t4_cross_worker_chat,
+               t5_quota_no_oversell, t6_metering_over_redis_bus, t7_trace_spans,
+               t8_field_level_concurrency, t9_app_wires_redis_mode,
+               t12_sse_reconnect_continuity, t13_dual_runner_fakellm_line):
+        print(f"  … {fn.__name__}", flush=True)
+        try:
+            # 看门狗：redis 路的任何一条卡死 60s 直接点名——挂住的门禁比失败的门禁更难查
+            await asyncio.wait_for(fn(), timeout=60)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"{fn.__name__} 卡死（60s watchdog 到点）")
 
 
 def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
+    t11_start_409_store_view()
     global REDIS_UP
     REDIS_UP = _redis_up()
     if not REDIS_UP:
-        print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 2/2 过（进程内路 t1+t10），redis 路待环境")
+        print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
+        print("\ns7_platform: 3/3 过（进程内路 t1+t10+t11），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 10/10 全绿（双配置）")
+    print("\ns7_platform: 13/13 全绿（双配置）")
 
 
 if __name__ == "__main__":

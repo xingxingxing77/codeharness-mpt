@@ -41,6 +41,9 @@ def create_app() -> FastAPI:
             from platforms.event_store import RedisEventBus
             st = RedisSessionStore()
             if st.ping():
+                import server.sessions as _ss
+                st.import_legacy(_ss.SESSIONS_FILE)     # 切默认一次性迁移：redis 空索引时搬 sessions.json
+                                                        # （读 server.sessions 的模块属性而非 settings——自测把这份表指到 tmp，别把开发库搬进测试 db）
                 st.heal_running()                       # 残态自愈（与进程内同语义），多 worker 各自启动时都跑一遍，幂等
                 bus = RedisEventBus()
                 bus.start()                             # sync→async 桥的 flusher（必须在运行中的 loop 里建）

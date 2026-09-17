@@ -42,6 +42,12 @@ class FakeLLM:
         class _Structured:
             async def ainvoke(self, prompt, **kw):
                 outer.calls.append(prompt)
-                return schema.model_validate_json(outer._next())
+                m = schema.model_validate_json(outer._next())
+                # structured 也走记账出口——真网关同款洞（「动态范式每轮思考不进账」）当年只修了
+                # LLMGateway，FakeLLM 这半边一直静默记 0；t13 端到端门禁现形（S8 第十六处）。
+                resp = AIMessage(content="")
+                resp.response_metadata = {"token_usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+                outer.cost_manager.add_usage(resp, model="gpt-4o", tag=kw.get("tag", "structured"))
+                return m
 
         return _Structured()

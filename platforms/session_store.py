@@ -10,6 +10,7 @@ runner/API 零改动即可换装（feature flag 双跑）。
 import json
 import time
 import uuid
+from pathlib import Path
 
 import redis
 
@@ -100,3 +101,19 @@ class RedisSessionStore:
             st = self.r.hget(KEY.format(sid), "status")
             if st in (SessionStatus.running.value, SessionStatus.awaiting_human.value):
                 self.r.hset(KEY.format(sid), "status", SessionStatus.stopped.value)
+
+    def import_legacy(self, json_path: Path) -> int:
+        """切默认一次性迁移：redis 索引还空、sessions.json 有货 → 原样搬进来。
+        不搬的话前端会话列表在切换当天凭空清零——历史账本（含 cost 快照）是 S9 双跑的对照底料。"""
+        if self.r.zcard(INDEX) or not json_path.exists():
+            return 0
+        n = 0
+        for item in json.loads(json_path.read_text(encoding="utf-8")):
+            sid = item["id"]
+            s = Session(**item)
+            pipe = self.r.pipeline()
+            pipe.hset(KEY.format(sid), mapping=_dump(s))
+            pipe.zadd(INDEX, {sid: n})          # 保序即可，list() 反正按 created_at 重排
+            pipe.execute()
+            n += 1
+        return n
