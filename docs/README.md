@@ -205,6 +205,16 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **接线批 B2a ✅（同日，台账 #2/#3 收口）**：`classic_team` 与 registry 的 Engineer 装成 **写→评审→摘要** BY_ORDER（e2e 手写装配早就是这个形态——这次是三张表互洽教训的落地版），PM 前置 PrepareDocuments（requirements.md 有了生产者）；摘除 Engineer 死 watch 三只（WRITE_CODE/WRITE_CODE_REVIEW/SUMMARIZE_CODE——源 env 有对应消息流，本仓 SOP 无此 key）；s3b t13 行为级钉"一文件写完 CR 必跑"。s6 t18 当场抓到 Engineer strategy 默认漂移——改装配被门禁拦下、按新语义改账，正是这两组的本职。
 - **接线批 B0-B1 ✅（同日，判定表 §六 台账开表 + R2 生产化）**：B0 改账三处不实（ask_review 源消费、k_times 抄录错→settings 改回源值 2、edge_actions"能力库"改判）；B1 把 `_structured()` 接进 9 处主线调用点（actions/ 直连归零 t21 钉死），拆掉 write_prd 对基类 `_ask` 的遮蔽、基类 `_merge` 撞名改 `_merge_patch`、`patch_exempt` 豁免合法空答字段——**"写好了没通电"的三颗雷都是通电瞬间炸出来的**；edge_actions 五孤儿随刀删除（台账 #13 半收口）。
 
+### 2026-09-17 · S8-A 前端接线收口（提交 `4b1ad58` + `a198d87` + 本日续口）
+
+- **三处核对从人眼核过升级为机器门禁**：新 `tests/s8_frontend_contract.py`（5 组）——九值 BlockType↔Timeline 分发、事件信封字段 server==WEvent+kind 词汇表、前端消费 11 条 /api 路由全在册、/graph 画的就是装的、/workspace/file 响应形状。**前端设计一律按四个 skill 执行**（ui-ux-pro-max / frontend-design / emil-design-eng / frontend-design-review，已入记忆）。
+- **N6 编排可视化第一刀**：`GET /api/sessions/{sid}/graph` 节点与订阅边取自 `_default_agents()×watch` 真装配——LangGraph 静态图只有 `__start__→router→__end__`（角色路由是运行期 Send，图对象自己照不出来），订阅表才是这条架构的真实接线。右侧面板第五卡「编排」→ mermaid 渲染，图形/源码切换 + 导出 SVG。
+- **方案 C 前端半边落地**：mermaid 动态 import 独立 chunk（无图不下载）；markdown ```mermaid 围栏换成占位 div 后水合（Docs 块**关闭后渲一次**，流式不重渲）；`.mmd` 文件预览直接成图；主题跟随暖调 token。**N1 用量页**替掉随预算作废删除的假计费页（数据源=会话表真值、行点击直达会话）；`$→¥` 两处（qwen 价目为人民币，跨币种换算归 S9）。
+- **第十五处（真浏览器现形，已修+钉门禁 t5）**：`/workspace/file` 响应一直没有 `ext`/`type` 字段，前端 `ToolsPanel.onSelect` 的 markdown/image/.mmd 三类预览分支**从未命中过**——`.md` 一直显示成高亮代码。FakeLLM 门禁与路由核对都查不出「路由在但形状错」，浏览器点开才炸（陷阱 #2 第四次应验）。
+- 验收方式：真浏览器（应用内）逐屏 DOM 验收——编排图 7 节点+8 SOP 边全标签、象限图（s9_dualrun3 产物 `competitive_analysis.mmd`）title/四象限/7 坐标全渲染、围栏水合 1 图 0 残留、用量页 22 会话与顶栏 ¥2.103/299.5k/690k 互洽、行点击跳转、币种。**视觉判据全部打在 DOM 几何与文本上**（本会话模型不收图）。
+- **S8 未闭合项**：五项终验的活链路半边（真模型跑动中的 Thought/Editor/Docs 专用块上屏、插话、人工回答、stop）；N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）。
+- 门禁基线：**十二个不花钱脚本全 exit 0**（十一件套 + s8_frontend_contract 5 组）。
+
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
 1. **`.gitignore` 最后一行 `docs/` 仍未删**（2026-09-14 复测：`git ls-files docs` 为空）。全套文档至今**零版本控制**——本轮全部改判只存在于工作区，一次误 `clean` 就蒸发。**开工第一件事仍是删这行并提交 docs/。**
