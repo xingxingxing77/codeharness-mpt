@@ -57,6 +57,7 @@ import McpPage from './settings/McpPage.vue'
 import PersonalizePage from './settings/PersonalizePage.vue'
 import ProfilePage from './settings/ProfilePage.vue'
 import ShortcutsPage from './settings/ShortcutsPage.vue'
+import UsagePage from './settings/UsagePage.vue'
 import WorktreesPage from './settings/WorktreesPage.vue'
 
 const ui = useUiStore()
@@ -65,6 +66,7 @@ const message = useMessage()
 
 const NAV = [
   { key: 'general', icon: 'gear', label: '常规' },
+  { key: 'usage', icon: 'coins', label: '用量' },
   { key: 'profile', icon: 'user', label: '个人资料' },
   { key: 'appearance', icon: 'sun', label: '外观' },
   { key: 'config', icon: 'sliders', label: '配置' },
@@ -83,6 +85,7 @@ const NAV = [
 
 const PAGES: Record<string, any> = {
   general: GeneralPage,
+  usage: UsagePage,
   profile: ProfilePage,
   appearance: AppearancePage,
   config: ConfigPage,

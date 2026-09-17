@@ -48,9 +48,9 @@
       <span class="grow" />
     </template>
 
-    <!-- 右侧公共区 -->
+    <!-- 右侧公共区：币种=价目表口径（当前模型 qwen 行为人民币；跨币种换算归 S9 计费对齐） -->
     <span v-if="!home" class="cost" :title="costTip">
-      ${{ (cost.total_cost ?? 0).toFixed(3) }}
+      ¥{{ (cost.total_cost ?? 0).toFixed(3) }}
     </span>
     <button v-if="!home" class="icon-btn" title="审查代码变更" @click="openReview">
       <Icon name="sliders" :size="18" />

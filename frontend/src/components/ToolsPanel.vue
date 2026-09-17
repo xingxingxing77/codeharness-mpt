@@ -47,6 +47,11 @@
             <div class="t-sub">启动交互式 shell</div>
             <span class="kbd">Ctrl+`</span>
           </div>
+          <div class="tcard" @click="openGraph">
+            <Icon name="branch" :size="22" />
+            <div class="t-title">编排</div>
+            <div class="t-sub">查看智能体拓扑</div>
+          </div>
         </div>
       </div>
 
@@ -80,7 +85,10 @@
               <n-image :src="preview.url" style="max-width: 100%" />
             </template>
             <template v-else-if="preview.type === 'markdown'">
-              <div class="markdown-body" v-html="preview.html" />
+              <div ref="mdEl" class="markdown-body" v-html="preview.html" />
+            </template>
+            <template v-else-if="preview.type === 'mermaid'">
+              <MermaidView :src="preview.content" :name="preview.name" />
             </template>
             <template v-else-if="preview.type === 'code'">
               <pre class="code-view" v-html="preview.html" />
@@ -90,6 +98,25 @@
             </template>
             <div v-else class="none">点击左侧文件预览</div>
           </div>
+        </div>
+      </div>
+
+      <!-- N6 编排视图：节点与边取自服务端真实装配（/graph），mermaid 前端渲染 -->
+      <div v-else-if="ui.rightView === 'graph'" class="graph">
+        <div class="files-bar">
+          <button class="back" @click="ui.rightView = 'cards'">
+            <Icon name="chevron-down" :size="14" style="transform: rotate(90deg)" />
+            工具
+          </button>
+          <span class="proj">编排图 · {{ store.current?.project_name }}</span>
+          <button class="back" @click="loadGraph">
+            <Icon name="refresh" :size="13" />
+            刷新
+          </button>
+        </div>
+        <div class="graph-body">
+          <MermaidView v-if="graphSrc" :src="graphSrc" name="orchestration" />
+          <div v-else class="none">{{ graphMsg }}</div>
         </div>
       </div>
 
@@ -116,16 +143,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { NImage, NTree, useMessage } from 'naive-ui'
 import type { TreeOption } from 'naive-ui'
 import { api } from '../api/client'
 import { useSessionStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 import { highlightCode, langOfFilename, renderMarkdown } from '../utils/render'
+import { hydrateMermaid } from '../utils/mermaid'
 import type { FileNode } from '../types'
 import EditorBlock from './blocks/EditorBlock.vue'
 import Icon from './Icon.vue'
+import MermaidView from './MermaidView.vue'
 
 const store = useSessionStore()
 const ui = useUiStore()
@@ -182,6 +211,9 @@ async function onSelect(keys: (string | number)[]) {
       preview.value = { type: 'image', url: store.workspaceUrl(path) }
     } else if (MD_EXTS.has(rsp.ext || '')) {
       preview.value = { type: 'markdown', html: renderMarkdown(rsp.content) }
+    } else if (rsp.ext === '.mmd') {
+      // 方案 C：.mmd 是落盘真源，预览直接渲染成图（源码/导出走图上的工具条）
+      preview.value = { type: 'mermaid', content: rsp.content, name: path.split(/[\\/]/).pop() }
     } else {
       preview.value = {
         type: 'code',
@@ -231,6 +263,36 @@ watch(
     if (['finished', 'stopped', 'failed'].includes(v) && ui.rightView === 'files') loadTree()
   }
 )
+
+/* markdown 预览里的 ```mermaid 围栏 → 水合成图 */
+const mdEl = ref<HTMLElement>()
+watch(
+  () => preview.value.html,
+  async () => {
+    await nextTick()
+    hydrateMermaid(mdEl.value)
+  }
+)
+
+/* N6 编排视图 */
+const graphSrc = ref('')
+const graphMsg = ref('')
+
+async function loadGraph() {
+  if (!store.currentId) return
+  graphSrc.value = ''
+  graphMsg.value = '编排图加载中…'
+  try {
+    graphSrc.value = (await api.sessionGraph(store.currentId)).mermaid
+  } catch (e: any) {
+    graphMsg.value = `编排图加载失败：${e.message}`
+  }
+}
+
+function openGraph() {
+  ui.rightView = 'graph'
+  loadGraph()
+}
 </script>
 
 <style scoped>

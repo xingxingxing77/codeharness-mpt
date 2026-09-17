@@ -804,3 +804,170 @@ body {
   border-radius: 6px;
   padding: 1px 7px;
 }
+
+/* ---- mermaid 图（方案 C：.mmd 为落盘真源，渲染与导出都在前端） ---- */
+.mmd-src {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--text-2);
+  padding: 10px 12px;
+  background: var(--tool-card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.mmd-mount {
+  min-height: 24px;
+}
+
+.markdown-body .mmd-mount {
+  margin: 10px 0;
+}
+
+.mmd-load,
+.mmd-empty {
+  font-size: 12.5px;
+  color: var(--text-3);
+  padding: 10px 2px;
+}
+
+.mmd-fig {
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  background: var(--card);
+  overflow: hidden;
+}
+
+.mmd-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfaf7;
+}
+
+.mmd-name {
+  font-size: 12px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
+}
+
+.mmd-grow {
+  flex: 1;
+}
+
+.mmd-seg {
+  display: inline-flex;
+  background: var(--chip-bg);
+  border-radius: 7px;
+  padding: 2px;
+}
+
+.mmd-seg button,
+.mmd-exp {
+  font-size: 12px;
+  color: var(--text-2);
+  background: none;
+  border: 0;
+  padding: 3px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: color 160ms ease-out, background-color 160ms ease-out, transform 160ms ease-out;
+}
+
+.mmd-seg button.on {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(80, 66, 30, 0.08);
+}
+
+.mmd-exp {
+  border: 1px solid var(--line);
+  background: var(--card);
+}
+
+.mmd-exp:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mmd-seg button:active,
+.mmd-exp:active {
+  transform: scale(0.97);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mmd-seg button:hover,
+  .mmd-exp:not(:disabled):hover {
+    color: var(--text);
+  }
+}
+
+.mmd-seg button:focus-visible,
+.mmd-exp:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.mmd-body {
+  margin: 0;
+  padding: 14px;
+}
+
+.mmd-figview {
+  overflow-x: auto;
+}
+
+.mmd-figview svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mmd-srcview {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+  white-space: pre;
+  overflow-x: auto;
+  background: #fbfaf7;
+  border-top: 1px solid var(--line);
+}
+
+.mmd-err {
+  padding: 8px 14px 12px;
+  font-size: 12.5px;
+  color: #a1402e;
+  border-top: 1px solid var(--line);
+}
+
+/* 编排视图（N6） */
+.graph {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.graph-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mmd-seg button,
+  .mmd-exp {
+    transition: none;
+  }
+  .mmd-seg button:active,
+  .mmd-exp:active {
+    transform: none;
+  }
+}

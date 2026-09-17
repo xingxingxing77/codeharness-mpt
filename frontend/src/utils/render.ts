@@ -22,6 +22,16 @@ export function renderMarkdown(text: string): string {
   return md.render(text || '')
 }
 
+// mermaid 围栏不走代码高亮：换成占位 div，挂载后由 utils/mermaid 水合成图（方案 C 渲染半边）
+const defaultFence = md.renderer.rules.fence!.bind(md.renderer)
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const token = tokens[idx]
+  if (token.info.trim().split(/\s+/)[0] === 'mermaid') {
+    return `<div class="mmd-src">${md.utils.escapeHtml(token.content)}</div>\n`
+  }
+  return defaultFence!(tokens, idx, options, env, self)
+}
+
 const EXT_LANG: Record<string, string> = {
   '.py': 'python',
   '.js': 'javascript',

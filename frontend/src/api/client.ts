@@ -35,5 +35,6 @@ export const api = {
   fileTree: (sid: string) =>
     req<{ exists: boolean; tree: any[] }>('GET', `/api/sessions/${sid}/workspace/files`),
   fileContent: (sid: string, path: string) =>
-    req('GET', `/api/sessions/${sid}/workspace/file?path=${encodeURIComponent(path)}`)
+    req('GET', `/api/sessions/${sid}/workspace/file?path=${encodeURIComponent(path)}`),
+  sessionGraph: (sid: string) => req<{ mermaid: string }>('GET', `/api/sessions/${sid}/graph`)
 }
