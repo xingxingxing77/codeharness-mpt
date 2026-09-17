@@ -1,10 +1,12 @@
-"""P1 批次自测：repo_parser / plan_and_act / reflection / llm_repair_json / 边缘 Action / skills。"""
+"""P1 批次自测：plan_and_act / reflection / llm_repair_json / 边缘 Action / skills。
+
+（原 ① repo_parser CodeChunk 切分冒烟随接线台账 #18 终判删除——2026-09-18：预留面至 S9 无生产
+消费者，按预登记规则"届时不接随删"整面摘除；RAG 检索质量门禁走 s9_benchmark，不走代码切分。）"""
 import asyncio, json
 from pathlib import Path
 from codeharness.provider.fake import FakeLLM
 from codeharness.provider.repair import llm_repair_json, repair_llm_raw_output
 from codeharness.reflection import detect_repeated_error
-from codeharness.repo_parser import parse_file
 from codeharness.schema import Message
 from codeharness.runtime import CURRENT_PROJECT
 from pydantic import BaseModel
@@ -12,14 +14,6 @@ from pydantic import BaseModel
 
 async def main():
     CURRENT_PROJECT.set("p1_test")
-
-    # ① repo_parser
-    sample = Path("workspace/p1_test/sample.py")
-    sample.parent.mkdir(parents=True, exist_ok=True)
-    sample.write_text("class Foo:\n    def bar(self):\n        return 1\n\ndef top():\n    return 2\n",
-                      encoding="utf-8")
-    chunks = parse_file(str(sample))
-    assert {c.type for c in chunks} == {"class", "function"} and len(chunks) == 2, chunks
 
     # ② plan_and_act：计划 → 写代码 → 沙箱执行 → 汇总
     from codeharness.roles.registry import build_role
