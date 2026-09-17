@@ -232,13 +232,21 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **`paradigm=dynamic` 接线**：Session/CreateSessionReq 加 paradigm（错值 422）；`team.dynamic_assembly()`=default_team 三角色+动态路由表（需求只喂队长 Mike）；runner `_prepare` 按 paradigm 分流、`_ensure_graph` 重建走同一函数；s3b t14 钉装配自洽+行为级「任务文本必须进模型请求」。
 - **对照数字（真模型同 idea 同端点）**：本仓 RoleZero 线 **finished/~7min/≈21 调/123.8K token/≈¥0.14**，产物 tinycli.py+test_tinycli.py 与源 MGX 同结构、9 测试真跑全过——同范式下 token 48%、成本 41%（口径注脚与差异如实记在 `storage/benchmark/s9_dualrun.md` 新段）。
 - **对照首跑现形三处（第十七~十九处，全修全钉）**：①RoleZero `as_node` 只设 `_plan_goal` 不入 memory——模型上下文里没有需求，真模型「先问用户」零产物"假收口"；②`act→think` 无条件回跳：end 后多烧一次模型+收尾 KeyError；③qdrant 不在时 `_check_compatibility` 非 daemon 线程吊死进程退出（门禁不许挂在外部服务上）。**教训：FakeLLM 门禁测不到"上下文里有没有任务"这种语义洞——端到端真跑是唯一照得出它的镜子**（陷阱 #2 第五次应验）。
-- **S9 剩余**：#19② 大 idea 全链收口（真模型，¥2 级）、~~#19③ PRD prompt 校准（第十四处）~~（2026-09-18 收口，见下）、9.2 三件（benchmark 门禁/perfect_judges/strategy 曲线）、9.3 UI 版扩展点验收、双跑 3 次取中位。
+- **S9 剩余**：#19② 大 idea 全链收口（真模型，¥2 级）、~~#19③ PRD prompt 校准（第十四处）~~（2026-09-18 收口，见下）、~~9.2 benchmark 门禁~~（2026-09-18 收口，见下）、9.2 余两件（perfect_judges/strategy 曲线）、9.3 UI 版扩展点验收、双跑 3 次取中位。
 
 ### 2026-09-18 · S9 #19③ 第十四处校准收口（提交 `d879d61`）
 
 - **处置=加法拼接，不动逐字资产**：S9.1 双跑实证的根因段——`PRD_SYSTEM_PROMPT` 的"缺省 Vite/React"措辞对需求已自明技术栈的输入有反向牵引（CLI idea 也被牵去幻觉 web 文件；`eb5e98f` 只修了下游文件名症状）。措辞是 prompt 资产（与 `prompts/product_manager.py` 同源），按纪律不动：新增 `PRD_STACK_CALIBRATION` 常量拼接进新建/增量两处 `system=`（`PRD_SYSTEM_CALIBRATED`），资产原句字节不动，显式偏离在册。
 - **门禁（s6 t3 扩）三态钉**：资产原句在场（防"改资产凑校准"）、校准段不污染 `PRD_SYSTEM_PROMPT`、真进两处 system。顺带入册一个测试陷阱：`str(llm.calls)` 是消息列表的 repr，多行常量的 `\n` 在 repr 里被转义成 `\\n`，子串断言假阴性——断言必须打在 `calls[i][0].content`（真 System 段）上。
 - 门禁基线：13 脚本全绿（s6 23 组）。接线台账 #19 状态：①③收口、②在途。
+
+### 2026-09-18 · S9 批 9.2a：N8 检索质量门禁 + 台账 #18 预登记兑现（提交 `547dfc7`）
+
+- **N8 = `tests/s9_benchmark.py`（门禁矩阵 13→14 脚本）**：把源 `rag/benchmark/base.py` 的评测**意图**变成离线 CI 门禁——数据集用源 `examples/data/rag_bm`（simplified_CRUD + simplified_RGB，15 问 196 块；RGB_En 的 gt_reference 是答案参照不是原文摘录、与 documents.txt 零重叠，检索 gold 不可推导，如实剔除入表），指标 hybrid vs dense-only 的 hit@1/3/5 + MRR，实测 **hit@1 0.35→0.50 / mrr 0.42→0.66，hybrid 逐 dataset 全优于 dense-only**；表存 `storage/benchmark/s9_retrieval_gate.json`。
+- **复现性收口（S5.2 复测口径的欠账）**：门禁跑在 **Qdrant 本地模式**（`path=`，进程内暴力精确检索，warning 原文自证）——HNSW 近似漂移与 IDF 集合漂移不存在，**零外部服务、零 docker**；t 级断言"同一 collection 两轮检索 id 序列逐条一致"钉死。server 模式要同性质需 `SearchParams(exact=True)`（client 1.19 的 Prefetch 不收该参数，留待真需要）。
+- **源 benchmark 件不搬的三个理由**：绑 llama_index evaluator + jieba/evaluate（新依赖）；`mean_reciprocal_rank` 自带 NameError（:119 引用未定义的 `text`，从未跑通）；`node.text in doc` 逐字包含口径对手工整理的 gt_reference 恒假。两处偏差显式入册：定长 1024 字符切块=源 SentenceSplitter(1024,0) 等价物；gold 判定=20 字符 shingle 重叠率 ≥0.1。
+- **台账 #18 预登记兑现**：CodeChunk 扩展面（repo_parser 尾部 63 行 + test_p1 ①冒烟）至 S9 无生产消费者，按"届时不接随删"整面摘除——预登记规则存在的意义就是让僵尸代码没有第二个 S9。
+- 门禁基线：**14 个不花钱脚本全 exit 0**。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
