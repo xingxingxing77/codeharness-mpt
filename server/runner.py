@@ -256,6 +256,10 @@ class SessionRunner:
         kind = ev.get("event", "")
         if kind == "on_chat_model_end":
             self._sync_cost(sid)
+            # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）
+            node = ev.get("metadata", {}).get("langgraph_node", "")
+            self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
+                             name="end_marker", value=None, role=node)
         elif kind == "on_chat_model_stream":
             # structured 输出不进这里做打字机（内核 Thought 块整段上屏）；这里只兜底裸文本流
             chunk = ev["data"]["chunk"]

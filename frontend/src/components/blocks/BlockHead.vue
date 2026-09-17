@@ -4,7 +4,7 @@
       <n-tag size="small" :bordered="false" type="info">{{ block.role || 'system' }}</n-tag>
       <n-tag size="small" :bordered="false">{{ label }}</n-tag>
       <slot name="extra" />
-      <span v-if="!block.closed" class="stream-cursor" title="生成中" />
+      <span v-if="!block.closed && store.isRunning" class="stream-cursor" title="生成中" />
       <span class="spacer" />
       <slot name="actions" />
     </div>
@@ -15,9 +15,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NTag } from 'naive-ui'
+import { useSessionStore } from '../../stores/sessions'
 import type { Block } from '../../types'
 
 const props = defineProps<{ block: Block; label?: string }>()
+const store = useSessionStore()
 const label = computed(() => props.label || props.block.type)
 </script>
 

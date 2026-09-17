@@ -149,6 +149,8 @@ export const useSessionStore = defineStore('sessions', {
       this.lastSeq = ev.seq
 
       if (ev.kind === 'report') {
+        // 孤立收口标记（uuid 从未开过块）直接丢：否则下面会凭空创建一个空块
+        if (ev.name === 'end_marker' && ev.uuid && !(ev.uuid in this.blocks)) return
         const key = ev.uuid || `e${ev.seq}`
         let b = this.blocks[key]
         if (!b) {

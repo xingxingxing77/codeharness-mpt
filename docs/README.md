@@ -212,7 +212,8 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **方案 C 前端半边落地**：mermaid 动态 import 独立 chunk（无图不下载）；markdown ```mermaid 围栏换成占位 div 后水合（Docs 块**关闭后渲一次**，流式不重渲）；`.mmd` 文件预览直接成图；主题跟随暖调 token。**N1 用量页**替掉随预算作废删除的假计费页（数据源=会话表真值、行点击直达会话）；`$→¥` 两处（qwen 价目为人民币，跨币种换算归 S9）。
 - **第十五处（真浏览器现形，已修+钉门禁 t5）**：`/workspace/file` 响应一直没有 `ext`/`type` 字段，前端 `ToolsPanel.onSelect` 的 markdown/image/.mmd 三类预览分支**从未命中过**——`.md` 一直显示成高亮代码。FakeLLM 门禁与路由核对都查不出「路由在但形状错」，浏览器点开才炸（陷阱 #2 第四次应验）。
 - 验收方式：真浏览器（应用内）逐屏 DOM 验收——编排图 7 节点+8 SOP 边全标签、象限图（s9_dualrun3 产物 `competitive_analysis.mmd`）title/四象限/7 坐标全渲染、围栏水合 1 图 0 残留、用量页 22 会话与顶栏 ¥2.103/299.5k/690k 互洽、行点击跳转、币种。**视觉判据全部打在 DOM 几何与文本上**（本会话模型不收图）。
-- **S8 未闭合项**：五项终验的活链路半边（真模型跑动中的 Thought/Editor/Docs 专用块上屏、插话、人工回答、stop）；N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）。
+- **S8-B 终验当日过（真模型+真浏览器）**：专用块上屏（一场收口 29 块）/插话/stop/文件树+下载 全过；块事件序列快照存 `storage/benchmark/s8_events_snapshot.json`（295 events，Thought/Docs/Editor 三族）。**人工回答**一项经典线无 interrupt 点，UI 接线在位、图级门禁已钉，活体验收挂 S9 的 DI 策略会话。顺带修两处收口观感：stream 块 end_marker 收口（s8 t3 钉）+ 光标仅运行态。真模型两笔实测费：¥0.133（收口场）+ ~¥0.03（stop 场）。
+- **S8 未闭合项**：N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）；登录/多租户 UI（等 N1 服务端）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
 - 门禁基线：**十二个不花钱脚本全 exit 0**（十一件套 + s8_frontend_contract 5 组）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
