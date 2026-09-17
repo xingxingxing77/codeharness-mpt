@@ -58,6 +58,26 @@ def get_session(sid: str, request: Request):
     return s.model_dump()
 
 
+@router.get("/{sid}/graph")
+def session_graph(sid: str, request: Request):
+    """N6 编排可视化：节点与订阅边取自真实装配对象，不是手绘示意图。
+
+    ⚠ LangGraph 静态图只有 `__start__→router→__end__` 两条边——角色路由是运行期 Send，
+    图对象自己照不出来。这条架构的真实接线在每个角色的 watch 订阅表里（黑板-路由-订阅），
+    所以边从 `_default_agents()` 实例的 `.watch` 现采——runner 默认装配走同一函数，
+    画的就是跑的。门禁 s8 t4 钉「节点集与 watch 边必须出自真装配」。"""
+    if not _get(request, "store").get(sid):
+        raise HTTPException(404, f"session {sid} not found")
+    from codeharness.team import _default_agents
+    lines = ["flowchart LR", "  start_([需求])", '  router{{"route · 黑板"}}', "  stop_([结束])",
+             "  start_ --> router", "  router --> stop_"]
+    for i, (name, ag) in enumerate(_default_agents().items()):
+        lines.append(f'  a{i}["{name}"]')
+        for tag in sorted(ag.watch):
+            lines.append(f"  router -.->|{tag}| a{i}")
+    return {"mermaid": "\n".join(lines)}
+
+
 @router.post("/{sid}/start")
 async def start_session(sid: str, request: Request):
     store, runner = _get(request, "store"), _get(request, "runner")
