@@ -196,7 +196,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **批 4 ✅ N3**：strategy 进 profile（sop/react/role_zero），build_role 换装、两族拒绝路径显式报错（t18）。
 - **批 5 ✅ N2+N7=平台验收线**：ext_api 三件套 + sop 模板；t19 不改内核注册新角色/Action/Tool 跑通整场会话——施工3 原话"这条能过才叫平台"过关。**S6 五批全收口。**
 - 门禁基线：**十一个不花钱脚本全 exit 0** —— s1(12)/s2(14)/s3a(13)/s3b(13)/s4(39)/s5(28)/**s6(23)**/s8(6) + test_p1/test_roles_registry/test_e2e_classic_line。t11 比对法升级为 AST 值比对（文件子串法对 `\` 续行常量假阳性）。
-- **接线批 B6 = S9.1 双跑首测 ✅落表（同日，`storage/benchmark/s9_dualrun.md`）**：同一 idea 两侧真模型——源现行正典（MGX 动态线，经典五角色在源已注释废弃：裸装实测 All roles idle 两次复现）**finished/18 调/257K token/≈¥0.34**；本仓经典 SOP 线 **未收口@28min/56 调/964K+ token/≈¥2.05**，产物链齐但卡在 QA 前烧穿窗口。三笔实测收获：①源侧无 stream_usage 修复 → 流式 token 恒 0 实锤（stream:false 才有真值——R 系现代化的对照证据）；②本仓成本主体=模型过度拆解+thinking 顶格 16K+k=2 评审全轮烧满；③**第十三处现形并已修（`eb5e98f`）**：任务文件名带 `src/` 前缀落进 `src/src/` 断 import（TaskItem 一处归一，源对拍 TASK_LIST 示例即裸名）；**第十四处入册未修**：PRD prompt 的 Vite/React 缺省措辞反向牵引 CLI 需求→任务表幻觉文件——prompt 资产校准项，按纪律记 S9 不动逐字件。同范式对照（本仓动态线对源 MGX 线）与本仓大 idea 收口验证记表末三笔欠账。
+- **接线批 B6 = S9.1 双跑首测 ✅落表（同日，`storage/benchmark/s9_dualrun.md`）**：同一 idea 两侧真模型——源现行正典（MGX 动态线，经典五角色在源已注释废弃：裸装实测 All roles idle 两次复现）**finished/18 调/257K token/≈¥0.34**；本仓经典 SOP 线 **未收口@28min/56 调/964K+ token/≈¥2.05**，产物链齐但卡在 QA 前烧穿窗口。三笔实测收获：①源侧无 stream_usage 修复 → 流式 token 恒 0 实锤（stream:false 才有真值——R 系现代化的对照证据）；②本仓成本主体=模型过度拆解+thinking 顶格 16K+k=2 评审全轮烧满；③**第十三处现形并已修（`eb5e98f`）**：任务文件名带 `src/` 前缀落进 `src/src/` 断 import（TaskItem 一处归一，源对拍 TASK_LIST 示例即裸名）；~~**第十四处入册未修**~~（2026-09-18 校准收口 `d879d61`，见下方 S9 段）：PRD prompt 的 Vite/React 缺省措辞反向牵引 CLI 需求→任务表幻觉文件——prompt 资产校准项，按纪律记 S9 不动逐字件。同范式对照（本仓动态线对源 MGX 线）与本仓大 idea 收口验证记表末三笔欠账。
 - **接线批 B5 ✅（同日，台账 #13 全收口——**接线台账至此零空白**）**：ExtractReadMe 补上源入库腿：四段 aask 的 system 消息逐字自源 extract_readme.py:60-108（放弃自造 structured 一跳——那四段 prompt 是资产），四要素以 HAS_SUMMARY/HAS_INSTALL/HAS_CONFIG/HAS_USAGE 谓词入 DiGraphRepository SPO 图、存 `docs/graph_repo/readme.json`，已存在则 load_from 增量合并再 save（源 import_repo 消费语义）。去向定死为 N2 扩展点示例件（外部仓库导入是工具面不是会话 SOP），装配在 ext_api、不进角色表。
 - **接线批 B4 ✅（同日，台账 #10/#11/#12 收口，#18 入册）**：RoleZero 的 Plan.* 四命令真驱动 schema.Plan（拓扑/游标/级联 reset 从死码变运行时读者，s5 t26）；`rag/knowledge.py` 吸收删除——精排接缝进 `LongTermMemory._recall`（离线降级留痕不变，t28），"KnowledgeBase 在用"的两处虚指注释改实；DI 人在环两闸（源 planner:96/:104 的 ask_review 环，CONTINUE_WORDS 逐字照源）落成 plan_review/accept 独立节点——**interrupt 恢复重放所在节点，闸内不得有模型调用**（图形态教训入档）；auto_run 缺省 True=源自动模式，既有装配零扰动。
 - **接线批 B3 ✅（同日，台账 #7/#8/#9 收口）**：RoleZero 工具面从"整文件 write_file"升级为源装配——`editor_tools.py` 登记源 `Editor.*` 默认 11 法（每入口过统一会话边界 `_boundary.safe_session_path`；read/write 不另挂第二写路）、git 对改 `gh` CLI 子进程（死复制件的悬空 import 清零）、`editor.similarity_search` 随判弃摘除。注册表 5→18 只，t1 改**全名册准入**（新工具必须写明去向）、t36 八入口拒越界、t38 钉"代码零 `from metagpt`"。RZ 族白名单裁定：源 tool_list 去掉推迟件=本仓全量（登记在案），SweAgent 补 select 至 terminal/file/edit/git。
@@ -232,7 +232,13 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **`paradigm=dynamic` 接线**：Session/CreateSessionReq 加 paradigm（错值 422）；`team.dynamic_assembly()`=default_team 三角色+动态路由表（需求只喂队长 Mike）；runner `_prepare` 按 paradigm 分流、`_ensure_graph` 重建走同一函数；s3b t14 钉装配自洽+行为级「任务文本必须进模型请求」。
 - **对照数字（真模型同 idea 同端点）**：本仓 RoleZero 线 **finished/~7min/≈21 调/123.8K token/≈¥0.14**，产物 tinycli.py+test_tinycli.py 与源 MGX 同结构、9 测试真跑全过——同范式下 token 48%、成本 41%（口径注脚与差异如实记在 `storage/benchmark/s9_dualrun.md` 新段）。
 - **对照首跑现形三处（第十七~十九处，全修全钉）**：①RoleZero `as_node` 只设 `_plan_goal` 不入 memory——模型上下文里没有需求，真模型「先问用户」零产物"假收口"；②`act→think` 无条件回跳：end 后多烧一次模型+收尾 KeyError；③qdrant 不在时 `_check_compatibility` 非 daemon 线程吊死进程退出（门禁不许挂在外部服务上）。**教训：FakeLLM 门禁测不到"上下文里有没有任务"这种语义洞——端到端真跑是唯一照得出它的镜子**（陷阱 #2 第五次应验）。
-- **S9 剩余**：#19② 大 idea 全链收口（真模型，¥2 级）、#19③ PRD prompt 校准（第十四处）、9.2 三件（benchmark 门禁/perfect_judges/strategy 曲线）、9.3 UI 版扩展点验收、双跑 3 次取中位。
+- **S9 剩余**：#19② 大 idea 全链收口（真模型，¥2 级）、~~#19③ PRD prompt 校准（第十四处）~~（2026-09-18 收口，见下）、9.2 三件（benchmark 门禁/perfect_judges/strategy 曲线）、9.3 UI 版扩展点验收、双跑 3 次取中位。
+
+### 2026-09-18 · S9 #19③ 第十四处校准收口（提交 `d879d61`）
+
+- **处置=加法拼接，不动逐字资产**：S9.1 双跑实证的根因段——`PRD_SYSTEM_PROMPT` 的"缺省 Vite/React"措辞对需求已自明技术栈的输入有反向牵引（CLI idea 也被牵去幻觉 web 文件；`eb5e98f` 只修了下游文件名症状）。措辞是 prompt 资产（与 `prompts/product_manager.py` 同源），按纪律不动：新增 `PRD_STACK_CALIBRATION` 常量拼接进新建/增量两处 `system=`（`PRD_SYSTEM_CALIBRATED`），资产原句字节不动，显式偏离在册。
+- **门禁（s6 t3 扩）三态钉**：资产原句在场（防"改资产凑校准"）、校准段不污染 `PRD_SYSTEM_PROMPT`、真进两处 system。顺带入册一个测试陷阱：`str(llm.calls)` 是消息列表的 repr，多行常量的 `\n` 在 repr 里被转义成 `\\n`，子串断言假阴性——断言必须打在 `calls[i][0].content`（真 System 段）上。
+- 门禁基线：13 脚本全绿（s6 23 组）。接线台账 #19 状态：①③收口、②在途。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
