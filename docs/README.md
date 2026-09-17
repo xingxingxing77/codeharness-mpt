@@ -223,8 +223,9 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **lifespan feature flag**（`PLATFORM__USE_REDIS`，默认关）：redis 在场换装三接缝+trace+quota+控制通道，ping 不通退回进程内并留话——t9 钉「换装通电」本身（写好了没接线的教训族）。
 - **checkpointer msgpack 白名单**（未闭合 #4 闭合）：三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)`，t10 双向断言。
 - **两处有意偏离施工4，登记在案**：① 包名 `platform/`→`platforms/`——仓根在 PYTHONPATH 上，原名遮蔽标准库 platform，实测 openai/httpx/qdrant_client 当场炸；② checkpointer 保留 sqlite 文件型，**不引 `langgraph-checkpoint-redis`**（未装且 sqlite 已跨重启+跨 worker 共享验证过；redis 化是升级路径不是缺口）。runtime 第 5 个 ContextVar `REDIS` 未加——接缝就是注入的对象（chat_factory/trace/_ctl），加一个零读者的 ContextVar 正是「写好了没通电」的下一颗雷。
-- 双配置回归：**13 个不花钱脚本在 默认 与 `PLATFORM__USE_REDIS=1 REDIS__DB=15` 两种配置下全 exit 0**（含新 s7_platform 10 组）。顺带修两处测试的 redis 模式适配（s5 同步读回客户端漏传 db、s8 t6 游标断言写死进程内小整数 seq——都是「断言打在实现细节而非语义」的债）。
-- **S7 未闭合项（切默认前）**：多 worker 真进程部署冒烟（uvicorn --workers 2 起一次，跑完一条 FakeLLM 线）；SSE 断线重连在 redis 总线上的活体验收；前端 N4 trace 面板（S8 剩余）。
+- 双配置回归：**13 个不花钱脚本在 默认 与 `PLATFORM__USE_REDIS=1 REDIS__DB=15` 两种配置下全 exit 0**（含新 s7_platform，后扩至 13 组）。顺带修两处测试的 redis 模式适配（s5 同步读回客户端漏传 db、s8 t6 游标断言写死进程内小整数 seq——都是「断言打在实现细节而非语义」的债）。
+- **当日切默认完成（S8 终验已过，按「S9 前切换」执行）**：`use_redis` 默认 True，显式 `PLATFORM__USE_REDIS=0` 保留进程内旧路；切默认三余项全收——409 过 store 判定（t11）、SSE 断线重连连续性（t12）、双 runner FakeLLM 端到端（t13）。**第十六处现形并修**：`FakeLLM.structured()` 不记账（真网关当年修过的同款洞，FakeLLM 半边静默 0 到端到端才照出）；t13 顺带补 `close_all()` 收尾（孤儿 aiosqlite 连接吊退出，s8 t5 教训三度应验）。**一次性迁移** `import_legacy`：redis 空索引时搬 sessions.json，开发服务实测 24 场会话不断档。门禁基线：**13 脚本 × 两路（新默认/显式 0）26 跑全绿**。
+- **S7 未闭合项（不阻塞）**：前端 N4 trace 面板（S8 剩余）；真进程 FakeLLM 端到端（注不进真进程，t13 双实例为等价覆盖）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
