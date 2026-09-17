@@ -885,6 +885,40 @@ def t28_ltm_rerank_absorbed_and_degrades():
     print("  t28 精排接缝随吸收进 ltm：离线降级粗排原序 + warning 留痕")
 
 
+def t29_scorer_template_verbatim():
+    """S9.2「perfect_judges 接真实 LLM」第一钉：SimpleScorer 模板与源**值逐字**（t11 同法 AST 比对）。
+    打分模板是 prompt 资产，转抄漂移=评分口径漂移。"""
+    import ast
+    src = Path(__file__).resolve().parents[2] / "MetaGPT" / "metagpt" / "exp_pool" / "scorers" / "simple.py"
+    if not src.exists():
+        print("  t29 跳过（供体不在）")
+        return
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    sc = {}
+    for node in tree.body:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign) and isinstance(sub.targets[0], ast.Name) \
+                    and isinstance(sub.value, ast.Constant) and isinstance(sub.value.value, str):
+                sc[sub.targets[0].id] = sub.value.value
+    from codeharness.exp_pool.scorers import SIMPLE_SCORER_TEMPLATE
+    assert SIMPLE_SCORER_TEMPLATE == sc["SIMPLE_SCORER_TEMPLATE"], "打分模板与源不逐字（评分口径漂移）"
+    print("  t29 SimpleScorer 模板与源值逐字相等")
+
+
+def t30_simple_scorer_fake_llm_path():
+    """打分路径本身：aask 出题带 req/resp、```json 围栏解析回 Score（惰性 llm 注入为门禁半边，
+    真网关半边由 manual_judge_quality 真钱通道消费）。⚠ 必须用 provider 的 FakeLLM——
+    本文件顶部的同名桩是给 BrainMemory 用的，aask 恒回 summary、吞剧本。"""
+    from codeharness.exp_pool.scorers import SimpleScorer
+    from codeharness.provider.fake import FakeLLM as ProviderFake
+    llm = ProviderFake(['```json\n{"val": 9, "reason": "满足需求，结构清晰"}\n```'])
+    s = asyncio.run(SimpleScorer(llm=llm).evaluate("做个2048", '{"original_requirements":"做个2048"}'))
+    assert s.val == 9 and s.reason == "满足需求，结构清晰", s
+    asked = llm.calls[0][0].content          # str(list) 是 repr，多行段转义假阴性——打在真 content 上
+    assert "做个2048" in asked and "score, int from 1 to 10" in asked, "模板没带 req 进题"
+    print("  t30 SimpleScorer 打分路径：模板带 req 真进题、围栏 JSON 解析回 Score")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -902,7 +936,8 @@ def main():
               t21_hit_count_reorders, t22_exp_cache_semantics,
               t23_exp_store_replay_on_qdrant, t24_rolezero_think_wired,
               t25_real_bge_semantic_path, t26_plan_state_machine_wired,
-              t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades]
+              t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades,
+              t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
@@ -926,6 +961,7 @@ def main():
     print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.3 经验池与真语义 7 组（Experience 逐字段 roundtrip/"
           f"think 载荷无损往返与裁剪键/命中计数改变排序/@exp_cache 开关矩阵/"
           f"真 Qdrant+Redis 存取回放/RoleZero 接线命中零模型调用）"
+          f"+ S9.2 scorer 2 组（打分模板逐字/FakeLLM 打分路径）"
           f"+ S5.1 记忆 11 组（Redis 真往返与死端口降级/"
           f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/RoleZero 结果回喂、"
           f"截窗、摘要可恢复、key 按会话+角色隔离、去重容错）"
