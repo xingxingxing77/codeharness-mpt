@@ -8,6 +8,8 @@
      （前端 404 这种"只有点开才炸"的洞归零）。
   t4 /graph 端点：节点与边取自真装配（_default_agents × watch），不是手绘——
      断言每个角色名成节点、每个 watch tag 成边；不存在的会话 404。
+  t5 /workspace/file 响应形状：预览分发靠 ext 键（真浏览器第十五处——字段一直没回，
+     markdown/image/.mmd 三类预览从未命中，路由门禁 t3 查不出"路由在但形状错"）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_frontend_contract.py
@@ -95,6 +97,35 @@ def t4_graph_endpoint():
         ss.SESSIONS_FILE = keep
 
 
+def t5_workspace_file_response_shape():
+    """预览分发的判据必须真的在响应里（真浏览器第十五处：ToolsPanel 读 rsp.ext 选
+    markdown/image/.mmd 渲染器，而 /workspace/file 从来没回过 ext——三类预览从未命中）。
+    断言打在**响应键**上，不给"路由在但形状错"留活路。"""
+    import tempfile
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            s = c.post("/api/sessions", json={"idea": "形状", "project_name": "s8shape"}).json()
+            ws = Path(s["workspace"])
+            (ws / "docs").mkdir(parents=True, exist_ok=True)
+            (ws / "docs" / "design.md").write_text("# t\n```mermaid\ngraph TD;a-->b\n```\n", encoding="utf-8")
+            (ws / "diagram.mmd").write_text("quadrantChart\n  x-axis low --> high\n", encoding="utf-8")
+            (ws / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+            for name, want in (("docs/design.md", ".md"), ("diagram.mmd", ".mmd"), ("pic.png", ".png")):
+                r = c.get(f"/api/sessions/{s['id']}/workspace/file", params={"path": str(ws / name)})
+                assert r.status_code == 200, r.text
+                body = r.json()
+                assert body.get("ext") == want, f"{name} 响应缺正确的 ext 键：{sorted(body)}"
+            assert "content" not in c.get(f"/api/sessions/{s['id']}/workspace/file",
+                                          params={"path": str(ws / "pic.png")}).json(), "图片不该回文本内容"
+        _ok("t5", "/workspace/file 三类预览的判据键（ext）齐，image 免二进制乱码")
+    finally:
+        ss.SESSIONS_FILE = keep
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -104,7 +135,8 @@ def main():
     t2_envelope_and_kinds()
     t3_routes_exist()
     t4_graph_endpoint()
-    print("\ns8_frontend_contract: 4/4 全绿")
+    t5_workspace_file_response_shape()
+    print("\ns8_frontend_contract: 5/5 全绿")
 
 
 if __name__ == "__main__":

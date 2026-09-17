@@ -39,5 +39,10 @@ def file(sid: str, path: str, request: Request):
         raise HTTPException(404, "file not found")
     mime = mimetypes.guess_type(str(target))[0] or ("text/plain" if target.suffix in
                                                     {".md", ".py", ".txt", ".json"} else "application/octet-stream")
+    # ext 是前端预览分发的判据（ToolsPanel.onSelect 按 md/image/.mmd 分支选渲染器）。
+    # 此前响应没有这个字段，三类预览分支从未命中过——真浏览器第十五处（门禁 s8 t5 钉住）。
+    ext = target.suffix.lower()
+    if mime.startswith("image/"):
+        return {"path": str(target), "ext": ext, "mime": mime}   # 二进制不回文本，前端走 /workspace 静态 URL
     return {"path": str(target), "content": target.read_text(encoding="utf-8", errors="replace"),
-            "mime": mime}
+            "mime": mime, "ext": ext}
