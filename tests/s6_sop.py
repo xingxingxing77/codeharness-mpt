@@ -102,7 +102,8 @@ def t3_write_prd_three_branches():
     带旧 PRD 正文（NEW_REQ_TEMPLATE 的 Legacy Content 段）；新建落三件产物。"""
     import shutil
     import codeharness.runtime as rt
-    from codeharness.actions.write_prd import WritePRD
+    from codeharness.actions.write_prd import (PRD_STACK_CALIBRATION, PRD_SYSTEM_CALIBRATED,
+                                               PRD_SYSTEM_PROMPT, WritePRD)
     from codeharness.const import BUGFIX_FILENAME, DocName, RepoName, RequirementTag
     from codeharness.document_store.artifact_store import ArtifactStore
     from codeharness.provider.fake import FakeLLM
@@ -124,6 +125,12 @@ def t3_write_prd_three_branches():
         assert (store.root / RepoName.RESOURCES / "competitive_analysis.mmd").exists(), "方案C的.mmd没落盘"
         assert out.cause_by == "WritePRD" and set(out.instruct_content) >= {"project_name"}
         assert "PRD is completed" in out.content
+        # 第十四处门禁：措辞资产逐字不动（Vite/React 缺省句原样在场）、校准只走加法拼接且真进 system
+        assert "use Vite, React, MUI, Tailwind CSS." in PRD_SYSTEM_PROMPT
+        assert PRD_STACK_CALIBRATION not in PRD_SYSTEM_PROMPT
+        assert PRD_SYSTEM_CALIBRATED == PRD_SYSTEM_PROMPT + PRD_STACK_CALIBRATION
+        # 取真 System 段断（str(list) 是 repr、多行段被转义，子串会假阴性）
+        assert PRD_STACK_CALIBRATION in llm.calls[0][0].content, "第十四处校准段没进新建 PRD 的 system"
 
         store = fresh("s6prd_upd")
         asyncio.run(store.save(RepoName.PRD, Document(filename=DocName.PRD,
@@ -133,6 +140,7 @@ def t3_write_prd_three_branches():
         assert len(llm.calls) == 2, f"相关性判定 + REFINED 两次调用: {len(llm.calls)}"
         asked = str(llm.calls[0])
         assert "Legacy Content" in asked and "加个 web UI" in asked, "NEW_REQ_TEMPLATE 没逐字进判定 prompt"
+        assert PRD_STACK_CALIBRATION in llm.calls[1][0].content, "第十四处校准段没进增量 PRD 的 system"
 
         store = fresh("s6prd_bug")
         (store.root / RepoName.SRC).mkdir(parents=True, exist_ok=True)
@@ -146,7 +154,7 @@ def t3_write_prd_three_branches():
         for d in ("s6prd_new", "s6prd_upd", "s6prd_bug"):
             shutil.rmtree(rt.session_root(d), ignore_errors=True)
         rt.CURRENT_PROJECT.set("")
-    print("  t3 WritePRD 三分支（新建落三产物/增量带 Legacy Content 两段调用/bugfix 单调用转 FixBug）")
+    print("  t3 WritePRD 三分支（新建落三产物/增量带 Legacy Content 两段调用/bugfix 单调用转 FixBug/第十四处校准进 system）")
 
 
 def t4_action_templates_verbatim():

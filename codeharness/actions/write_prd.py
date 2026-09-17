@@ -55,6 +55,15 @@ Fields and requirements (follow EXACTLY):
 - anything_unclear: "Mention any aspects of the project that are unclear and try to clarify them."
 """
 
+# 第十四处（S9.1 双跑实证，eb5e98f 只修了下游文件名症状）：上行"缺省 Vite/React"措辞对
+# 需求已自明技术栈的输入有反向牵引——CLI idea 也被牵去幻觉 web 文件。措辞是 prompt 资产
+# （与 prompts/product_manager.py 同源），按纪律不动资产、加法拼接此校准段（显式偏离在册）。
+PRD_STACK_CALIBRATION = """
+NOTE: The default stack above applies ONLY when the requirements do not specify a technology stack.
+If the requirements indicate a stack, or the project form is clearly not a web app (e.g. a CLI tool, a library, a script), follow the requirements and do NOT introduce web-frontend files."""
+
+PRD_SYSTEM_CALIBRATED = PRD_SYSTEM_PROMPT + PRD_STACK_CALIBRATION
+
 
 class PRDOutput(BaseModel):
     """= write_prd_an.py NODES/REFINED_NODES 的 12 字段（REFINED_* 与 WRITE_PRD_* 字段同构，共用本 schema）"""
@@ -142,7 +151,7 @@ class WritePRD(BaseAction):
         async with docs_block("prd", role="PM") as rep:
             prd: PRDOutput = await self._structured(
                 f"{self.prefix}\n{CONTEXT_TEMPLATE.format(project_name='', requirements=msg.content)}",
-                schema=PRDOutput, system=PRD_SYSTEM_PROMPT)
+                schema=PRDOutput, system=PRD_SYSTEM_CALIBRATED)
             await rep.content(prd.model_dump_json())
         await self._save(store, prd)
         return prd
@@ -153,7 +162,7 @@ class WritePRD(BaseAction):
         async with docs_block("prd-update", role="PM") as rep:
             refined: PRDOutput = await self._structured(
                 f"{self.prefix}\n{NEW_REQ_TEMPLATE.format(old_prd=old.content, requirements=msg.content)}",
-                schema=PRDOutput, system=PRD_SYSTEM_PROMPT)
+                schema=PRDOutput, system=PRD_SYSTEM_CALIBRATED)
             await rep.content(refined.model_dump_json())
         await self._save(store, refined)
         return refined
