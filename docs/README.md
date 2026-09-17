@@ -137,7 +137,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 1. ~~**runner 的用量快照不合流**~~ —— **当晚闭合**（提交 `ed8e6e8` + `242d6a8`）：`on_chat_model_end` 每笔合流 store/落盘/SSE 三头；重启 resume 从落盘快照**续算**不覆盖；零用量漏账从"静默记 0"变成 `add_usage` warning（有 warning 才有可 grep 的账差）。新门禁 `tests/s8_runner_meter.py`（4 组）把"传给图的账本必须就是 runner 手上那个实例"钉成双向断言。冒烟复跑实证：跑动中 sessions.json 里的 cost 已在落且非零。那复跑当场又炸出**第十处**：`APIError: Model output became abnormal while generating a JSON response for response_format`——qwen MaaS **服务端**abort 掉 JSON 模式生成（这段错误文本不在任何本地包里），同一请求重发即成；`_acall` 原本只重 Timeout/ConnectionError/OSError，瞬态错直接吹掉整场会话。修法有个继承链坑：openai 的 `APIStatusError`（4xx/5xx，重了烧钱）是 **`APIError` 的子类**，判据必须 `isinstance(APIError) and not isinstance(APIStatusError)`（s2 t14 用真 SDK 异常类族两头钉）。
 2. ~~**embedding 端点没配**~~ —— **2026-09-16 闭合**（`0a62e4c`）：本机 ollama 的 bge-m3（`:11434/v1`，实测 1024 维）已写进 `.env`；`gateway.embeddings()` 必须 `check_embedding_ctx_length=False`（langchain 默认发 tiktoken token-id 数组，ollama 只收字符串，直接 400）。真语义路径由 s5 t25 门禁常驻验（探活式，不在线就跳）。**reranker 仍离线**（`bge-reranker-v2-m3` 未部署，精排照旧降级 + warning）。
 3. ~~**`qwen3.8-flash` 不在 `TOKEN_COSTS`**~~ —— **2026-09-16 闭合**（用户报价：输入 0.8 / 输出 2.7 元/百万 token）：表内注明该行是**人民币口径**（其余行美元，前端 "$" 符号是展示层遗留，不跨币种换算——归 S8 一并清）。缓存命中价（输入 0.1）未入账：MaaS 不回传 `cache_read` 字段，归 S9 计费口径对齐。
-4. **LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"——checkpointer 的 msgpack 白名单要显式配（S7）。
+4. ~~**LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"~~ —— **2026-09-17 闭合**（S7）：`checkpoint.py` 三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)` 白名单；门禁 s7 t10 双向钉（未配必警=断言不空转，配了静默+Message/Document 原样回读）。
 5. `structured` 的 `include_raw` 路径每次调用会打一条 pydantic 序列化 `UserWarning`（噪声，未影响结果）。
 
 
@@ -215,6 +215,16 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **S8-B 终验当日过（真模型+真浏览器）**：专用块上屏（一场收口 29 块）/插话/stop/文件树+下载 全过；块事件序列快照存 `storage/benchmark/s8_events_snapshot.json`（295 events，Thought/Docs/Editor 三族）。**人工回答**一项经典线无 interrupt 点，UI 接线在位、图级门禁已钉，活体验收挂 S9 的 DI 策略会话。顺带修两处收口观感：stream 块 end_marker 收口（s8 t3 钉）+ 光标仅运行态。真模型两笔实测费：¥0.133（收口场）+ ~¥0.03（stop 场）。
 - **S8 未闭合项**：N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）；登录/多租户 UI（等 N1 服务端）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
 - 门禁基线：**十二个不花钱脚本全 exit 0**（十一件套 + s8_frontend_contract 5 组）。
+
+### 2026-09-17 · S7 双实现落地（feature flag 默认关，未切默认）
+
+- **`platforms/` 五件**（施工4 目标结构逐行对号）：`session_store.py`（`HASH ch:sess:{sid}` 字段级 HSET + `ZSET ch:index`——sessions.py:54 全量重写的根治，t8 钉并发改不同字段互不覆盖）、`event_store.py`（**Streams 不用 Pub/Sub**；本步唯一硬工程点 sync→async 桥：publish 只入有界 ring，后台 flusher 批量 XADD，**seq 由服务端承接**（stream id 编码 int），内核 report.py 零改动；t2 双 worker `after=seq` 逐条一致）、`chat_queue.py`（`LIST` 逐条 LPOP，t4 投递/消费跨进程不重不漏）、`quota.py`（INCR+EXPIRE 固定窗，t5 并发 100/limit 50 精确放行 50——**限流不是金额预算**，超限 HTTP 入口 429）、`trace.py`（`ZSET ch:trace:{sid}` 每笔 span，N4 数据层就位；runner 在 `on_chat_model_end` 记节点/token 增量，`GET /{sid}/trace` 可读）。
+- **跨 worker stop**：`PUBLISH ch:ctl` + 每 worker 监听自取消（t3）；跨 worker resume 本就已成立（`_ensure_graph` 按会话重建 + 文件型 checkpointer 共享）。
+- **lifespan feature flag**（`PLATFORM__USE_REDIS`，默认关）：redis 在场换装三接缝+trace+quota+控制通道，ping 不通退回进程内并留话——t9 钉「换装通电」本身（写好了没接线的教训族）。
+- **checkpointer msgpack 白名单**（未闭合 #4 闭合）：三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)`，t10 双向断言。
+- **两处有意偏离施工4，登记在案**：① 包名 `platform/`→`platforms/`——仓根在 PYTHONPATH 上，原名遮蔽标准库 platform，实测 openai/httpx/qdrant_client 当场炸；② checkpointer 保留 sqlite 文件型，**不引 `langgraph-checkpoint-redis`**（未装且 sqlite 已跨重启+跨 worker 共享验证过；redis 化是升级路径不是缺口）。runtime 第 5 个 ContextVar `REDIS` 未加——接缝就是注入的对象（chat_factory/trace/_ctl），加一个零读者的 ContextVar 正是「写好了没通电」的下一颗雷。
+- 双配置回归：**13 个不花钱脚本在 默认 与 `PLATFORM__USE_REDIS=1 REDIS__DB=15` 两种配置下全 exit 0**（含新 s7_platform 10 组）。顺带修两处测试的 redis 模式适配（s5 同步读回客户端漏传 db、s8 t6 游标断言写死进程内小整数 seq——都是「断言打在实现细节而非语义」的债）。
+- **S7 未闭合项（切默认前）**：多 worker 真进程部署冒烟（uvicorn --workers 2 起一次，跑完一条 FakeLLM 线）；SSE 断线重连在 redis 总线上的活体验收；前端 N4 trace 面板（S8 剩余）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
