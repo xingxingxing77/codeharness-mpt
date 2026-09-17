@@ -31,10 +31,36 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
-        bus = SessionEventBus()
-        store = SessionStore()
+        # S7 三接缝 feature flag 双跑（施工4 边界纪律）：默认进程内；PLATFORM__USE_REDIS
+        # 且 ping 得通才换 Redis 实现，换不动就退回旧路并留话——**没有 Redis 也能起服务**。
+        from codeharness.configs.settings import settings
+        store = bus = None
+        chat_factory = quota = None
+        if settings.platform.use_redis:
+            from platforms.session_store import RedisSessionStore
+            from platforms.event_store import RedisEventBus
+            st = RedisSessionStore()
+            if st.ping():
+                st.heal_running()                       # 残态自愈（与进程内同语义），多 worker 各自启动时都跑一遍，幂等
+                bus = RedisEventBus()
+                bus.start()                             # sync→async 桥的 flusher（必须在运行中的 loop 里建）
+                from platforms.chat_queue import RedisChatQueue
+                from platforms.quota import Quota
+                from platforms.trace import TraceStore
+                store, chat_factory, quota = st, RedisChatQueue, Quota()
+                runner_extra = (TraceStore(), True)
+            else:
+                from codeharness.logs import logger
+                logger.warning("PLATFORM__USE_REDIS 已置位但 Redis 不可达——退回进程内实现")
+        if store is None:
+            bus = SessionEventBus()
+            store = SessionStore()
+            runner_extra = (None, False)
         log_bridge = LogBridge(bus)
-        runner = SessionRunner(store, bus, llm_defaults or {})
+        runner = SessionRunner(store, bus, llm_defaults or {}, chat_factory=chat_factory)
+        runner.trace, redis_mode = runner_extra
+        if redis_mode:
+            runner.enable_redis_control()               # 跨 worker stop：PUBLISH ch:ctl + 本 worker 监听
 
         def _active():
             return [s.id for s in store.list()
@@ -42,6 +68,7 @@ def create_app() -> FastAPI:
 
         log_bridge.install(_active)
         app.state.bus, app.state.store, app.state.runner = bus, store, runner
+        app.state.quota = quota
         app.state.llm_defaults, app.state.llm_problem = llm_defaults, llm_problem
         yield
         # 停机成对拆：checkpoint.close_all 的 docstring 早就写了「server 应在 lifespan 关闭时
@@ -50,6 +77,10 @@ def create_app() -> FastAPI:
         from codeharness.environment.checkpoint import close_all
         log_bridge.remove()
         await close_all()
+        if redis_mode:
+            runner._ctl_task.cancel()                   # 先停监听再关连接（顺序反了就是 ConnectionError 栈）
+            await bus.aclose()
+            await runner._ctl.aclose()
 
     app = FastAPI(title="Codeharness Studio", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173",

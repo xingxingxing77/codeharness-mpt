@@ -44,6 +44,13 @@ def list_sessions(request: Request):
 
 @router.post("")
 async def create_session(req: CreateSessionReq, request: Request):
+    # N5 保留的一半：请求数限流在 HTTP 入口判（429），不进图、不在内核判；
+    # quota 未装配（进程内默认）=直通。⚠ 这是限流不是金额预算（§零）。
+    q = getattr(request.app.state, "quota", None)
+    if q is not None:
+        from codeharness.configs.settings import settings
+        if not q.allow("create", settings.platform.create_per_min, settings.platform.rate_window_sec):
+            raise HTTPException(429, "建会话过于频繁，稍后再试")
     s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
                                       project_name=req.project_name.strip(), llm_override=req.llm)
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
@@ -88,6 +95,13 @@ async def start_session(sid: str, request: Request):
         raise HTTPException(409, "session already running")
     if not (_get(request, "llm_defaults") or {}).get("api_key"):
         raise HTTPException(400, f"LLM 未配置：{_get(request, 'llm_problem') or '缺少 api_key'}")
+    q = getattr(request.app.state, "quota", None)
+    if q is not None:
+        # 并发会话数配额（多 worker 共享计数，进程内计数器失效的老问题）
+        from codeharness.configs.settings import settings
+        running = sum(1 for x in store.list() if str(x.status.value) == "running")
+        if running >= settings.platform.max_concurrent:
+            raise HTTPException(429, f"并发会话已达上限 {settings.platform.max_concurrent}")
     runner.start(s)
     return {"ok": True}
 
@@ -140,6 +154,16 @@ async def events(sid: str, request: Request, after: int = 0):
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "Connection": "keep-alive"})
+
+
+@router.get("/{sid}/trace")
+def session_trace(sid: str, request: Request):
+    """N4 数据层：每笔 LLM 调用的节点/token 增量/时刻（ch:trace:{sid}）。
+    trace 未装配（进程内默认）回空表——前端 N4 面板是 S8 剩余项，先攒数据。"""
+    if not _get(request, "store").get(sid):
+        raise HTTPException(404, f"session {sid} not found")
+    tr = _get(request, "runner").trace
+    return {"spans": tr.spans(sid) if tr else []}
 
 
 @router.get("/{sid}/events/history")

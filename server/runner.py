@@ -5,6 +5,7 @@
    其余块事件全部来自内核报道槽（report.py），此处只做 sink→bus 转发；
 3) 人工回答 = 同 graph 实例 + 同 thread_id 的 Command(resume)，且必须重装同一套 ContextVar。"""
 import asyncio
+import json
 import time
 import traceback
 from contextlib import contextmanager
@@ -29,7 +30,7 @@ def _seeded_ledger(saved: dict):
 
 
 class SessionRunner:
-    def __init__(self, store, bus, llm_defaults: dict | None = None):
+    def __init__(self, store, bus, llm_defaults: dict | None = None, chat_factory=None):
         self.store, self.bus = store, bus
         self.tasks: dict[str, asyncio.Task] = {}
         self.graphs: dict[str, tuple] = {}        # sid -> (graph, config)——resume 用
@@ -38,6 +39,12 @@ class SessionRunner:
         self.projects: dict[str, str] = {}        # sid -> 产物目录名
         self._closers: set = set()                # 散会收壳的后台任务，握住引用防被 GC 半路回收
         self._ck = None                            # 进程级 checkpointer（懒建）
+        # S7 双实现注入点（默认全 None=进程内旧路，feature flag 在 lifespan 装配）：
+        self.chat_factory = chat_factory           # (sid) -> ChatQueue 同接口对象（Redis LIST 版）
+        self.trace = None                          # platforms.trace.TraceStore；on_chat_model_end 记 span
+        self._ctl = None                           # 跨 worker stop 的发布端（redis 模式才有）
+        self._ctl_task = None
+        self._last_span: dict[str, tuple] = {}     # sid -> (pt, ct, cost) 上次累计值，span 取增量
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def start(self, session: Session):
@@ -51,11 +58,46 @@ class SessionRunner:
 
     async def stop(self, sid: str) -> bool:
         t = self.tasks.get(sid)
-        if not t or t.done():
-            return False
-        self.store.update(sid, status=SessionStatus.stopping)
-        t.cancel()
-        return True
+        if t and not t.done():
+            self.store.update(sid, status=SessionStatus.stopping)
+            t.cancel()
+            return True
+        # 本 worker 没有这个 task：会话跑在别的 worker 上（多进程部署）。
+        # 控制通道 PUBLISH ch:ctl，持任务的那个 worker 收到自己 cancel（施工4 目标结构第 7 行）。
+        if self._ctl is not None:
+            self.store.update(sid, status=SessionStatus.stopping)
+            await self._ctl.publish("ch:ctl", json.dumps({"cmd": "stop", "sid": sid}))
+            return True
+        return False
+
+    def enable_redis_control(self):
+        """redis 模式 lifespan 调一次：订阅 ch:ctl，替别的 worker 取消它手上的任务。"""
+        import redis.asyncio as aioredis
+        from codeharness.configs.settings import settings
+
+        self._ctl = aioredis.from_url(settings.redis.to_url(), decode_responses=True)
+
+        async def _listen():
+            pubsub = self._ctl.pubsub()
+            await pubsub.subscribe("ch:ctl")
+            try:
+                async for msg in pubsub.listen():
+                    if msg.get("type") != "message":
+                        continue
+                    try:
+                        cmd = json.loads(msg["data"])
+                    except Exception:
+                        continue
+                    if cmd.get("cmd") == "stop":
+                        t = self.tasks.get(cmd.get("sid"))
+                        if t and not t.done():
+                            t.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return      # 停机时连接被关是预期路径，不留孤儿任务栈
+
+        self._ctl_task = asyncio.get_running_loop().create_task(_listen())
 
     # ---- 插话（恢复被删除的 /chat 功能） ------------------------------------
     def enqueue_chat(self, sid: str, content: str, send_to: str = "") -> bool:
@@ -108,14 +150,13 @@ class SessionRunner:
     async def _resume(self, sid, content):
         """必须重装同一套 ContextVar：create_task 复制的是 HTTP 请求的 context，
         不重装则内核 report.py 拿不到 sink，人工回答之后的产物块会被静默丢弃。"""
-        from codeharness.runtime import ChatQueue
         packed = await self._ensure_graph(sid)
         if not packed:
             return
         graph, config = packed
         if not await self._pending(graph, config):
             return                                   # 没停在待恢复点，别把会话误标成 finished
-        chat = self.chats.get(sid) or ChatQueue()
+        chat = self.chats.get(sid) or self._make_chat(sid)
         self.chats[sid] = chat
         self.store.update(sid, status=SessionStatus.running)
         try:
@@ -177,6 +218,7 @@ class SessionRunner:
         """散会才清 graphs（断点已落 checkpointer 才安全）；awaiting_human 时必须留着供 resume。"""
         self.chats.pop(sid, None)
         self.costs.pop(sid, None)
+        self._last_span.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
             project = self.projects.pop(sid, None)
@@ -199,12 +241,18 @@ class SessionRunner:
         self._forget(sid, terminal=True)
 
     # ---- 主流程 -------------------------------------------------------------
+    def _make_chat(self, sid: str):
+        """插话队列的装配出口：进程内 ChatQueue（默认）或 RedisChatQueue（S7 flag 开时注入工厂）。"""
+        if self.chat_factory:
+            return self.chat_factory(sid)
+        from codeharness.runtime import ChatQueue
+        return ChatQueue()
+
     async def _run(self, session: Session):
         sid = session.id
-        from codeharness.runtime import ChatQueue
         from codeharness.provider.cost import CostManager
 
-        chat = self.chats[sid] = ChatQueue()
+        chat = self.chats[sid] = self._make_chat(sid)
         cost_manager = self.costs[sid] = CostManager()
         project = self.projects[sid] = session.project_name or sid
         try:
@@ -251,6 +299,20 @@ class SessionRunner:
                          value={"status": status, "error": session.error,
                                 "cost": cost, "message": ""})
 
+    def _trace_span(self, sid: str, node: str):
+        """N4 数据层：每笔 LLM 调用记一条 span（节点/token 增量/时刻）→ ch:trace:{sid}。
+        trace 未注入（进程内默认）= 零开销直通。"""
+        if self.trace is None:
+            return
+        cm = self.costs.get(sid)
+        if cm is None:
+            return
+        cur = (cm.total_prompt_tokens, cm.total_completion_tokens, round(cm.total_cost, 6))
+        prev = self._last_span.get(sid, (0, 0, 0.0))
+        self._last_span[sid] = cur
+        self.trace.record(sid, {"node": node, "pt": cur[0] - prev[0], "ct": cur[1] - prev[1],
+                                "cost": round(cur[2] - prev[2], 6), "ts": time.time()})
+
     # ---- astream_events 翻译（LLM 用量合流与打字机、interrupt，其余块走报道槽） ----
     def _translate(self, sid: str, ev: dict):
         kind = ev.get("event", "")
@@ -260,6 +322,7 @@ class SessionRunner:
             node = ev.get("metadata", {}).get("langgraph_node", "")
             self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
                              name="end_marker", value=None, role=node)
+            self._trace_span(sid, node)
         elif kind == "on_chat_model_stream":
             # structured 输出不进这里做打字机（内核 Thought 块整段上屏）；这里只兜底裸文本流
             chunk = ev["data"]["chunk"]

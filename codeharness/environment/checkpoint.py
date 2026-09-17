@@ -16,10 +16,22 @@ from langgraph.checkpoint.memory import InMemorySaver
 _lock = threading.Lock()
 _cache: dict[str, object] = {}
 
+# checkpointer 的 msgpack 白名单（README 未闭合 #4：不显式配，每读一次断点都打
+# "Deserializing unregistered type codeharness.schema.Message"，官方声明未来版本将拦截）。
+# 进过 TeamState 的自定义类型只有这些：messages/memories 装 Message，docs 装 Document；
+# instruct_content 是纯 dict（schema.py:173），不需要逐个登记。
+_ALLOWED = [("codeharness.schema", n) for n in
+            ("Message", "UserMessage", "SystemMessage", "AIMessage", "Document", "Documents")]
+
+
+def _serde():
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    return JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED)
+
 
 def memory_saver():
     """内存 saver：自测与"存储后端不可用"时的兜底。"""
-    return InMemorySaver()
+    return InMemorySaver(serde=_serde())
 
 
 async def async_sqlite_saver(path: Path | str):
@@ -45,7 +57,7 @@ async def async_sqlite_saver(path: Path | str):
         except ImportError:
             return None
         Path(key).parent.mkdir(parents=True, exist_ok=True)
-        saver = AsyncSqliteSaver(aiosqlite.connect(key))
+        saver = AsyncSqliteSaver(aiosqlite.connect(key), serde=_serde())
         _cache[key] = saver
         return saver
 
@@ -60,7 +72,7 @@ def sqlite_saver(path: Path | str):
     # check_same_thread=False：图跑在事件循环线程，saver 读写可能来自 executor 线程
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
-    saver = SqliteSaver(conn)
+    saver = SqliteSaver(conn, serde=_serde())
     saver.setup()
     return saver
 

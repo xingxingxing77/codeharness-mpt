@@ -147,7 +147,8 @@ def t5_summarize_rolls_history_into_summary_and_persists():
     # 超一个窗口(1500) → 分两窗各摘一次再合并，收敛后拿到的是合并串（源同款行为）
     assert got.count(fake.summary) == 2, got
     assert b.history == [] and b.historical_summary == got
-    raw = sync_redis.Redis(host=settings.redis.host, port=settings.redis.port).get(k)
+    raw = sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                           db=settings.redis.db).get(k)   # db 跟 settings 走：写侧（utils/redis）用的就是它
     assert json.loads(raw)["historical_summary"] == got      # 存的是整体 JSON，按字段回读
     # 单窗路径：文本装得进一个窗口(1500)但超 max_words → 一次直摘，返回值即模型原文
     short = BrainMemory()
@@ -913,7 +914,8 @@ def main():
     for fn in checks:
         fn()
     try:
-        sync_redis.Redis(host=settings.redis.host, port=settings.redis.port).delete(*KEYS)
+        sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                         db=settings.redis.db).delete(*KEYS)
     except Exception as e:
         print(f"  （清理 Redis key 失败，不影响结论：{type(e).__name__}）")
     if live_qdrant():

@@ -88,7 +88,11 @@ async def t3_midrun_sync():
     runner.costs[s.id] = cm
     runner.projects[s.id] = "meter_proj"
     cm.update_cost(3000, 150, "gpt-4o")
-    runner._translate(s.id, {"event": "on_chat_model_end"})          # 模拟网关完成一笔
+    runner._translate(s.id, {"event": "on_chat_model_end",
+                             "metadata": {"langgraph_node": "PM"}})   # 模拟网关完成一笔
+    mk = [e for e in bus.history(s.id)
+          if e.kind == "report" and e.name == "end_marker" and e.uuid == "stream-PM"]
+    assert mk, "on_chat_model_end 不收口 stream-{node} 块——跑完打字机光标永远闪（S8 终验现形）"
     got = store.get(s.id).cost
     assert got["total_prompt_tokens"] == 3000 and got["total_completion_tokens"] == 150, got
     disk = json.loads((tmp / "sessions.json").read_text(encoding="utf-8"))
@@ -176,12 +180,17 @@ def t6_events_history_bounded():
             app.state.bus.publish(sid, kind="report", block="Thought", value="想", role="PM")
             app.state.bus.publish(sid, kind="status", value={"status": "running", "cost": {},
                                                              "message": "run completed"})
+            # 双配置：redis 总线 publish 走 ring→flusher（异步落库），有 flush_now 就先刷干净再读
+            if hasattr(app.state.bus, "flush_now"):
+                c.portal.call(app.state.bus.flush_now)
             r = c.get(f"/api/sessions/{sid}/events/history?after=0")
             assert r.status_code == 200
             evs = r.json()["events"]
             assert [e["kind"] for e in evs] == ["status", "report", "status"], evs   # seq1=created
-            tail = c.get(f"/api/sessions/{sid}/events/history?after=2").json()["events"]
-            assert len(tail) == 1 and tail[0]["seq"] == 3, tail   # seq 游标语义（SSE 同款 after）
+            # 游标取**真实事件 seq**（redis 模式 seq 是 stream-id 编码的大整数，进程内是 1..N——
+            # 断言只钉「after=第2条seq ⇒ 只剩第3条」这条 SSE 同款游标语义，不钉字面值）
+            tail = c.get(f"/api/sessions/{sid}/events/history?after={evs[1]['seq']}").json()["events"]
+            assert len(tail) == 1 and tail[0]["seq"] == evs[2]["seq"] > evs[1]["seq"], tail
             assert c.get("/api/sessions/nope/events/history").status_code == 404
     finally:
         ss.SESSIONS_FILE = keep
