@@ -227,6 +227,13 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **当日切默认完成（S8 终验已过，按「S9 前切换」执行）**：`use_redis` 默认 True，显式 `PLATFORM__USE_REDIS=0` 保留进程内旧路；切默认三余项全收——409 过 store 判定（t11）、SSE 断线重连连续性（t12）、双 runner FakeLLM 端到端（t13）。**第十六处现形并修**：`FakeLLM.structured()` 不记账（真网关当年修过的同款洞，FakeLLM 半边静默 0 到端到端才照出）；t13 顺带补 `close_all()` 收尾（孤儿 aiosqlite 连接吊退出，s8 t5 教训三度应验）。**一次性迁移** `import_legacy`：redis 空索引时搬 sessions.json，开发服务实测 24 场会话不断档。门禁基线：**13 脚本 × 两路（新默认/显式 0）26 跑全绿**。
 - **S7 未闭合项（不阻塞）**：前端 N4 trace 面板（S8 剩余）；真进程 FakeLLM 端到端（注不进真进程，t13 双实例为等价覆盖）。
 
+### 2026-09-17 晚 · S9.1 同范式对照收口（#19①，提交 `3f99b36` + `f6ac083`）
+
+- **`paradigm=dynamic` 接线**：Session/CreateSessionReq 加 paradigm（错值 422）；`team.dynamic_assembly()`=default_team 三角色+动态路由表（需求只喂队长 Mike）；runner `_prepare` 按 paradigm 分流、`_ensure_graph` 重建走同一函数；s3b t14 钉装配自洽+行为级「任务文本必须进模型请求」。
+- **对照数字（真模型同 idea 同端点）**：本仓 RoleZero 线 **finished/~7min/≈21 调/123.8K token/≈¥0.14**，产物 tinycli.py+test_tinycli.py 与源 MGX 同结构、9 测试真跑全过——同范式下 token 48%、成本 41%（口径注脚与差异如实记在 `storage/benchmark/s9_dualrun.md` 新段）。
+- **对照首跑现形三处（第十七~十九处，全修全钉）**：①RoleZero `as_node` 只设 `_plan_goal` 不入 memory——模型上下文里没有需求，真模型「先问用户」零产物"假收口"；②`act→think` 无条件回跳：end 后多烧一次模型+收尾 KeyError；③qdrant 不在时 `_check_compatibility` 非 daemon 线程吊死进程退出（门禁不许挂在外部服务上）。**教训：FakeLLM 门禁测不到"上下文里有没有任务"这种语义洞——端到端真跑是唯一照得出它的镜子**（陷阱 #2 第五次应验）。
+- **S9 剩余**：#19② 大 idea 全链收口（真模型，¥2 级）、#19③ PRD prompt 校准（第十四处）、9.2 三件（benchmark 门禁/perfect_judges/strategy 曲线）、9.3 UI 版扩展点验收、双跑 3 次取中位。
+
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
 1. **`.gitignore` 最后一行 `docs/` 仍未删**（2026-09-14 复测：`git ls-files docs` 为空）。全套文档至今**零版本控制**——本轮全部改判只存在于工作区，一次误 `clean` 就蒸发。**开工第一件事仍是删这行并提交 docs/。**
