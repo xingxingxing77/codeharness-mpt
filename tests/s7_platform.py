@@ -134,7 +134,9 @@ async def t3_cross_worker_stop():
                 stopped.set()
                 raise
         b.tasks[s.id] = asyncio.create_task(_job())          # 会话跑在 B 上
+        store.update(s.id, status="running")                  # 真跑起来 store 就是 running（stop 转发守卫读它）
         assert await a.stop(s.id) is True                     # A 手上没有 → 控制通道
+        assert await a.stop(s.id) is False                    # 已 stopping：不再对没在跑的会话谎报停成功
         await asyncio.wait_for(stopped.wait(), timeout=3)     # B 收到并取消
         assert store.get(s.id).status.value == "stopping"
         _ok("t3", "跨 worker stop：PUBLISH ch:ctl，持任务的 worker 自己取消（t.cancel 只及本地）")
@@ -210,7 +212,10 @@ async def t8_field_level_concurrency():
     b.update(s.id, status="running")
     got = a.get(s.id)
     assert got.error == "E1" and got.status.value == "running", got.model_dump()
-    _ok("t8", "会话态字段级 HSET：并发改不同字段互不覆盖（sessions.py:54 全量重写的根治）")
+    lst = a.list()                              # list 走 zrevrange——同步客户端缺参会当场炸（多 worker 冒烟实测）
+    mine = [x for x in lst if x.id == s.id]
+    assert len(mine) == 1 and mine[0].error == "E1" and mine[0].status.value == "running", lst
+    _ok("t8", "会话态字段级 HSET：并发改不同字段互不覆盖；get/list 读回一致")
 
 
 async def t9_app_wires_redis_mode():

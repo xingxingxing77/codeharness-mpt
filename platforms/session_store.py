@@ -65,7 +65,7 @@ class RedisSessionStore:
         return _load(sid, h) if h else None
 
     def list(self) -> list:
-        sids = self.r.zrevrange(INDEX)
+        sids = self.r.zrevrange(INDEX, 0, -1)   # 同步客户端的 zrange/zrevrange 必须给区间（异步版有默认值，别拿它类推）
         if not sids:
             return []
         pipe = self.r.pipeline()

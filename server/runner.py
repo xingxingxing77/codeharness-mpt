@@ -62,9 +62,13 @@ class SessionRunner:
             self.store.update(sid, status=SessionStatus.stopping)
             t.cancel()
             return True
-        # 本 worker 没有这个 task：会话跑在别的 worker 上（多进程部署）。
+        # 本 worker 没有这个 task：会话可能跑在别的 worker 上（多进程部署）。
         # 控制通道 PUBLISH ch:ctl，持任务的那个 worker 收到自己 cancel（施工4 目标结构第 7 行）。
-        if self._ctl is not None:
+        # ⚠ 只在 store 说「可能在跑」时才转发——否则对 created/finished 会话点停止会把它
+        # 误标 stopping 卡死（多 worker 冒烟实测：stopped:true 但没人会来收尾）。
+        s = self.store.get(sid)
+        if self._ctl is not None and s is not None and s.status in (
+                SessionStatus.running, SessionStatus.awaiting_human):
             self.store.update(sid, status=SessionStatus.stopping)
             await self._ctl.publish("ch:ctl", json.dumps({"cmd": "stop", "sid": sid}))
             return True
