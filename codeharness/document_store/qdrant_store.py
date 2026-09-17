@@ -69,7 +69,10 @@ class QdrantStore:
     def __init__(self, collection: str = "", url: str = "", client=None):
         # 单 collection：名字取 QDRANT__COLLECTION_PREFIX（该字段此前零读者，现在是这里的唯一出口）
         self.collection = collection or settings.qdrant.collection_prefix or "codeharness"
-        self.client = client or AsyncQdrantClient(url=url or settings.qdrant.url)
+        # check_compatibility=False：qdrant 不在时其版本探测线程（_check_compatibility，非 daemon）
+        # 会无限重试吊住进程退出——门禁「不挂在外部服务上」的硬要求（s3b t14 卡退实测现形）。
+        self.client = client or AsyncQdrantClient(url=url or settings.qdrant.url,
+                                                  check_compatibility=False)
         self._ready = False
 
     async def ensure(self, dim: int) -> None:

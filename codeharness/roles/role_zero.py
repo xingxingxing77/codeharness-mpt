@@ -175,7 +175,9 @@ class RoleZero:
         g.add_node("act", self._act)
         g.set_entry_point("think")
         g.add_conditional_edges("think", lambda s: END if s["finished"] else "act")
-        g.add_edge("act", "think")
+        # act 若已 finished（end 命令）直接收口：旧写法 act→think 无条件回跳，
+        # 多烧一次模型不说，think 追加的无 results 条目还会让 as_node 收尾读 results 当场 KeyError。
+        g.add_conditional_edges("act", lambda s: END if s["finished"] else "think")
         return g.compile(checkpointer=checkpointer or InMemorySaver())
 
     # ---- 源 llm_cached_aask(:267) 的对应件：带经验池缓存的单次 think ----
@@ -282,9 +284,14 @@ class RoleZero:
             inbox = state.get("_inbox") or []
             task = inbox[-1].content if inbox else "continue"
             if task != "continue":
-                # 新任务→旧计划作废（源：每任务 planner 重立）；"continue" 保计划续跑
+                # 新任务→旧计划作废（源：每任务 planner 重立）；"continue" 保计划续跑。
+                # ⚠ 任务必须进 self.memory：_context_messages 只从记忆取材，think 的 prompt 里没有
+                # 任务文本——不装则模型上下文根本没有需求（S9.1 对照首跑实测：真模型第一条思考
+                # 就是「没有具体用户需求，先问用户」，零产物收口=第十七处）。
                 self.plan = None
                 self._plan_goal = task
+                self.memory.add(Message(content=task, role="user", sent_from="user",
+                                        cause_by=RequirementTag.USER_REQUIREMENT))
             sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
                                        "respond_language": "中文", "finished": False})
             results = sub["history"][-1]["results"] if sub["history"] else []

@@ -436,6 +436,24 @@ def t14_dynamic_paradigm_assembly():
     finally:
         team.prepare_project = saved
 
+    # 行为级（第十七处常驻门禁）：任务文本必须出现在模型请求里——as_node 曾只设 _plan_goal
+    # 不入 memory，think 的上下文里根本没有需求，真模型第一条思考=「没有具体用户需求」。
+    import json as _json
+    script = _json.dumps({"thought": "完成", "commands": [{"command_name": "end", "args": {}}]})
+    leader_llm = FakeLLM([script])
+    agents2, sop2 = dynamic_assembly(leader_llm)
+    agents2[TEAMLEADER_NAME].ltm = None     # 行为检查只钉 inbox→memory→请求这一跳；ltm 召回打 qdrant（本机可无）
+    # 走真路径（外层 build_team + thread_id）：内层图带 checkpointer，直调 as_node 没有父级 config 可继承
+    gdyn = build_team(agents2, sop=sop2)
+    idea = "实现一个命令行工具 tinycli"
+    asyncio.run(gdyn.ainvoke(
+        {"messages": [Message(content=idea, role="user", cause_by=RequirementTag.USER_REQUIREMENT)],
+         "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False},
+        {"configurable": {"thread_id": "t14dyn"}}))
+    flat = [m for call in leader_llm.calls for m in (call if isinstance(call, list) else [call])]
+    assert any(idea in getattr(m, "content", str(m)) for m in flat), \
+        "任务文本没进模型请求——第十七处复发（inbox→memory 断链）"
+
 
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
