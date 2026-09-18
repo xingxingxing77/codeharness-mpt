@@ -232,7 +232,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **`paradigm=dynamic` 接线**：Session/CreateSessionReq 加 paradigm（错值 422）；`team.dynamic_assembly()`=default_team 三角色+动态路由表（需求只喂队长 Mike）；runner `_prepare` 按 paradigm 分流、`_ensure_graph` 重建走同一函数；s3b t14 钉装配自洽+行为级「任务文本必须进模型请求」。
 - **对照数字（真模型同 idea 同端点）**：本仓 RoleZero 线 **finished/~7min/≈21 调/123.8K token/≈¥0.14**，产物 tinycli.py+test_tinycli.py 与源 MGX 同结构、9 测试真跑全过——同范式下 token 48%、成本 41%（口径注脚与差异如实记在 `storage/benchmark/s9_dualrun.md` 新段）。
 - **对照首跑现形三处（第十七~十九处，全修全钉）**：①RoleZero `as_node` 只设 `_plan_goal` 不入 memory——模型上下文里没有需求，真模型「先问用户」零产物"假收口"；②`act→think` 无条件回跳：end 后多烧一次模型+收尾 KeyError；③qdrant 不在时 `_check_compatibility` 非 daemon 线程吊死进程退出（门禁不许挂在外部服务上）。**教训：FakeLLM 门禁测不到"上下文里有没有任务"这种语义洞——端到端真跑是唯一照得出它的镜子**（陷阱 #2 第五次应验）。
-- **S9 剩余**：#19② 大 idea 全链收口（真模型，¥2 级）、~~#19③ PRD prompt 校准（第十四处）~~（2026-09-18 收口，见下）、~~9.2 benchmark 门禁~~（2026-09-18 收口，见下）、9.2 余两件（perfect_judges/strategy 曲线）、9.3 UI 版扩展点验收、双跑 3 次取中位。
+- **S9 剩余**：~~#19② 大 idea 全链收口~~（真钱）、~~#19③ PRD prompt 校准~~、~~9.2 benchmark 门禁~~、~~9.2 perfect_judges~~、~~9.3 UI 版扩展点验收~~（2026-09-18 全收口）——**剩真钱批**：#19② 大 idea 全链收口（¥2 级）、9.2 strategy 三档曲线、双跑 3 次取中位、manual_judge_quality 真跑评分。
 
 ### 2026-09-18 · S9 #19③ 第十四处校准收口（提交 `d879d61`）
 
@@ -247,6 +247,14 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **源 benchmark 件不搬的三个理由**：绑 llama_index evaluator + jieba/evaluate（新依赖）；`mean_reciprocal_rank` 自带 NameError（:119 引用未定义的 `text`，从未跑通）；`node.text in doc` 逐字包含口径对手工整理的 gt_reference 恒假。两处偏差显式入册：定长 1024 字符切块=源 SentenceSplitter(1024,0) 等价物；gold 判定=20 字符 shingle 重叠率 ≥0.1。
 - **台账 #18 预登记兑现**：CodeChunk 扩展面（repo_parser 尾部 63 行 + test_p1 ①冒烟）至 S9 无生产消费者，按"届时不接随删"整面摘除——预登记规则存在的意义就是让僵尸代码没有第二个 S9。
 - 门禁基线：**14 个不花钱脚本全 exit 0**。
+
+### 2026-09-18 · S9 批 9.3：UI 版扩展点验收（提交 `67e6920` + 本日续口）
+
+- **N7 模板注册面补全**：`sop/templates.register_template`（重名含内置 / 非 SopTemplate 当场 raise），`ext_api` 四件套出口（角色/动作/工具/**模板**）；`Session.sop` 字段 + `CreateSessionReq.sop` create 即 422 校验（未知模板不拖到 start 才炸）+ redis store 同步；`runner._prepare` 三态分流（sop=模板线，`thread_id` 带会话唯一值防 checkpointer 串台；`build_team_from_template` 补 `idea`/`thread_id` 参数——空 Content 的 UserRequirement 谁也没得干）。
+- **/graph 收口账实不符三处**（9.3 接线瞬间抓的「写好了没通电」族）：dynamic/sop 会话此前画的也是 classic 表——「画的就是跑的」只对默认线成立；现三态各画各的装配，RoleZero 无 `watch` 从路由表兜底（s8 t4 扩三态诚实性断言：dynamic 会话图里出现 PM 即谎报、sop 会话必须来自模板装配、未知模板 create 即 422）。
+- **真钱活体验收 PASS**（`tests/manual_ext_ui.py`，qwen3.8-flash，¥0.0037/41 事件）：不改任何内核，经 ext_api 注册 Poet 角色 + Haiku Action + ext_count_chars 工具 + ext_demo 模板 → 真模型跑通完整会话 → UI 可见——Timeline 上 **`Poet 文档` 块**带打油诗真文「举杯邀月敲终端 / 一行命令动九天 / 莫笑书生多醉笔 / 代码万里亦成仙」；右侧「编排」卡 SVG 里**唯一角色节点 Poet + UserRequirement 订阅边**，无 PM/Architect 等经典线节点。
+- s6 t19 +模板注册守卫（重名/非模板件拒绝，四条守卫），s8 t4 +三态诚实性断言；`frontend/types.ts` 补 paradigm/sop 字段（3f99b36 加后端字段时前端漏同步）。
+- 门禁基线：**15 个不花钱脚本全 exit 0**（+s9_langfuse）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
