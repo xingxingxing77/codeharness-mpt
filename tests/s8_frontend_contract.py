@@ -92,7 +92,42 @@ def t4_graph_endpoint():
                 for tag in ag.watch:
                     assert f"|{tag}|" in mm, f"{tag} 订阅边缺失"
             assert c.get("/api/sessions/nope/graph").status_code == 404
-        _ok("t4", f"/graph 节点×{len(agents)}、边取自真 watch 订阅表（画的就是跑的）")
+
+            # 三态「画的就是跑的」（9.3 收口）：此前 dynamic/sop 会话画的也是 classic 表——
+            # dynamic 会话的图里出现 PM 就是谎报；sop 会话的图必须来自模板装配。
+            did = c.post("/api/sessions", json={"idea": "动态图", "paradigm": "dynamic"}).json()["id"]
+            dmm = c.get(f"/api/sessions/{did}/graph").json()["mermaid"]
+            from codeharness.const import TEAMLEADER_NAME
+            assert f'["{TEAMLEADER_NAME}"]' in dmm, "dynamic 会话的图里没有队长"
+            assert '["PM"]' not in dmm, "dynamic 会话画成了 classic 表"
+
+            from codeharness.base.action import BaseAction
+            from codeharness.const import RequirementTag
+            from codeharness.roles.agent import Agent
+            from codeharness.schema import Message
+            from codeharness.sop.builder import get_template
+            from codeharness.sop.templates import _EXT_TEMPLATES, SopTemplate, register_template
+
+            class _Noop(BaseAction):
+                async def run(self, msg: Message) -> Message:
+                    return msg
+
+            register_template(SopTemplate(
+                name="s8graph_sop", desc="graph 门禁件",
+                assemble=lambda llm: {"Solo": Agent(
+                    {"name": "Solo", "profile": "p", "goal": "g"}, [_Noop(llm=llm)], llm,
+                    watch={RequirementTag.USER_REQUIREMENT})},
+                edges={RequirementTag.USER_REQUIREMENT: ["Solo"]}))
+            try:
+                xid = c.post("/api/sessions", json={"idea": "扩展图", "sop": "s8graph_sop"}).json()["id"]
+                xmm = c.get(f"/api/sessions/{xid}/graph").json()["mermaid"]
+                assert '["Solo"]' in xmm and '["PM"]' not in xmm, "sop 会话画成了 classic 表"
+                assert f"|{RequirementTag.USER_REQUIREMENT}|" in xmm, "订阅边缺失"
+                unknown = c.post("/api/sessions", json={"idea": "x", "sop": "nope"})
+                assert unknown.status_code == 422, f"未知模板必须 create 即 422：{unknown.status_code}"
+            finally:
+                _EXT_TEMPLATES.pop("s8graph_sop", None)
+        _ok("t4", f"/graph 三态各画各的装配（classic×{len(agents)} + dynamic + sop）、未知模板 create 即 422")
     finally:
         ss.SESSIONS_FILE = keep
 

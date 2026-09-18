@@ -130,16 +130,23 @@ class SessionRunner:
         return self.graphs[sid]
 
     async def _prepare(self, session, project: str, cost_manager):
-        """按会话 paradigm 装配三件套：classic=默认经典线；dynamic=S9.1 对照的 RoleZero 线。
-        resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的（第十一处教训）。"""
-        from codeharness.team import prepare_project
-        agents = sop = None
-        if getattr(session, "paradigm", "classic") == "dynamic":
-            from codeharness.team import _make_llm, dynamic_assembly
-            agents, sop = dynamic_assembly(_make_llm(cost_manager))
-        team, config, init = prepare_project(session.idea, project, agents=agents,
-                                             checkpointer=await self._saver(),
-                                             cost_manager=cost_manager, sop=sop)
+        """按会话三态装配三件套：sop=N7 模板线（9.3 扩展入口）；dynamic=S9.1 对照的 RoleZero 线；
+        classic=默认经典线。resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的
+        （第十一处教训）。thread_id 必须带会话唯一值：多会话共用模板不能在 checkpointer 里串台。"""
+        from codeharness.team import prepare_project, _make_llm
+        if getattr(session, "sop", ""):
+            from codeharness.sop.builder import build_team_from_template
+            team, config, init = build_team_from_template(session.sop, _make_llm(cost_manager),
+                                                          checkpointer=await self._saver(),
+                                                          idea=session.idea, thread_id=project)
+        else:
+            agents = sop = None
+            if getattr(session, "paradigm", "classic") == "dynamic":
+                from codeharness.team import dynamic_assembly
+                agents, sop = dynamic_assembly(_make_llm(cost_manager))
+            team, config, init = prepare_project(session.idea, project, agents=agents,
+                                                 checkpointer=await self._saver(),
+                                                 cost_manager=cost_manager, sop=sop)
         # N9：全链路 trace 的唯一注入点（_run 与 _resume 都从这里拿 config）。
         # 节点内裸 model.ainvoke()/tool.ainvoke() 靠 langchain-core 的 var_child_runnable_config
         # 继承，网关与节点里**不得**再传一次——同一 handler 既显式又继承会双 span。

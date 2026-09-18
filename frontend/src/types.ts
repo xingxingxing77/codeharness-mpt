@@ -3,6 +3,8 @@ export interface Session {
   idea: string
   project_name: string
   n_round: number
+  paradigm: string // classic | dynamic（S9.1 对照）
+  sop: string // 非空=按 N7 模板装配（扩展线）
   status: string // created | running | awaiting_human | stopping | finished | stopped | failed
   llm_override: Record<string, any>
   workspace: string

@@ -14,6 +14,7 @@ class CreateSessionReq(BaseModel):
     project_name: str = ""
     n_round: int = 5
     paradigm: str = "classic"       # classic|dynamic（S9.1 对照）；其余值 422——别让拼错静默走默认线
+    sop: str = ""                   # N7 模板名（9.3 扩展线入口）；非空时 create 即校验，别让拼错拖到 start 才炸
     llm: dict = Field(default_factory=dict)
 
     @field_validator("paradigm")
@@ -21,6 +22,17 @@ class CreateSessionReq(BaseModel):
     def _paradigm(cls, v: str) -> str:
         if v not in ("classic", "dynamic"):
             raise ValueError("paradigm 只能是 classic 或 dynamic")
+        return v
+
+    @field_validator("sop")
+    @classmethod
+    def _sop_exists(cls, v: str) -> str:
+        if v:
+            from codeharness.sop.builder import get_template
+            try:
+                get_template(v)
+            except KeyError as e:
+                raise ValueError(str(e))
         return v
 
     @field_validator("project_name")
@@ -61,7 +73,7 @@ async def create_session(req: CreateSessionReq, request: Request):
             raise HTTPException(429, "建会话过于频繁，稍后再试")
     s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
                                       project_name=req.project_name.strip(), llm_override=req.llm,
-                                      paradigm=req.paradigm)
+                                      paradigm=req.paradigm, sop=req.sop)
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
     return s.model_dump()
 
@@ -79,17 +91,35 @@ def session_graph(sid: str, request: Request):
     """N6 编排可视化：节点与订阅边取自真实装配对象，不是手绘示意图。
 
     ⚠ LangGraph 静态图只有 `__start__→router→__end__` 两条边——角色路由是运行期 Send，
-    图对象自己照不出来。这条架构的真实接线在每个角色的 watch 订阅表里（黑板-路由-订阅），
-    所以边从 `_default_agents()` 实例的 `.watch` 现采——runner 默认装配走同一函数，
-    画的就是跑的。门禁 s8 t4 钉「节点集与 watch 边必须出自真装配」。"""
-    if not _get(request, "store").get(sid):
+    图对象自己照不出来。这条架构的真实接线在每个角色的 watch 订阅表里（黑板-路由-订阅）。
+    三种范式各按**自己的装配**现采（9.3 收口：此前 dynamic/sop 会话画的也是 classic 表——
+    「画的就是跑的」只对默认线成立，扩展线在这里是不可见的）：
+      sop 非空 → N7 模板装配（ext_api.register_template 的扩展线从这里可见）；
+      dynamic  → dynamic_assembly（RoleZero 三角色）；否则 → classic 兜底。
+    门禁 s8 t4 钉「节点集与 watch 边必须出自真装配」。"""
+    s = _get(request, "store").get(sid)
+    if not s:
         raise HTTPException(404, f"session {sid} not found")
-    from codeharness.team import _default_agents
+    from codeharness.team import _default_agents, _make_llm
+    rtable: dict = {}                     # 装配路由表（RoleZero 无 watch，动态/模板线从这里兜底）
+    if getattr(s, "sop", ""):
+        from codeharness.sop.builder import get_template
+        tpl = get_template(s.sop)
+        agents = tpl.build_agents(_make_llm())
+        rtable = {k: list(v) for k, v in tpl.edges.items()}
+    elif getattr(s, "paradigm", "classic") == "dynamic":
+        from codeharness.team import dynamic_assembly
+        agents, dyn = dynamic_assembly(_make_llm())
+        rtable = {k: list(v) for k, v in dyn.items()}
+    else:
+        agents = _default_agents()
     lines = ["flowchart LR", "  start_([需求])", '  router{{"route · 黑板"}}', "  stop_([结束])",
              "  start_ --> router", "  router --> stop_"]
-    for i, (name, ag) in enumerate(_default_agents().items()):
+    for i, (name, ag) in enumerate(agents.items()):
         lines.append(f'  a{i}["{name}"]')
-        for tag in sorted(ag.watch):
+        tags = sorted(getattr(ag, "watch", None)
+                      or (t for t, roles in rtable.items() if name in roles))
+        for tag in tags:
             lines.append(f"  router -.->|{tag}| a{i}")
     return {"mermaid": "\n".join(lines)}
 

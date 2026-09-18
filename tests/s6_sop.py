@@ -768,6 +768,24 @@ def t19_ext_api_acceptance():
         except ValueError as e:
             assert "已存在" in str(e)
 
+        from codeharness.sop.templates import _EXT_TEMPLATES, SopTemplate, register_template
+        register_template(SopTemplate(              # ⑥ N7 对外面：扩展 SOP 模板（9.3 扩展线的队形件）
+            name="ext_sop", desc="t19 扩展模板",
+            assemble=lambda llm: {"Poet": build_role("Poet", llm)},
+            edges={RequirementTag.USER_REQUIREMENT: ["Poet"]}))
+        from codeharness.sop.builder import get_template
+        assert get_template("ext_sop").name == "ext_sop", "注册后 get_template 必须可见"
+        try:
+            register_template(SopTemplate(name="ext_sop", assemble=lambda llm: {}))
+            raise AssertionError("同名模板必须拒绝")
+        except ValueError as e:
+            assert "已存在" in str(e)
+        try:
+            register_template(object())
+            raise AssertionError("非 SopTemplate 必须拒绝")
+        except TypeError as e:
+            assert "SopTemplate" in str(e)
+
         team = build_team({"Poet": build_role("Poet", FakeLLM(["-"]))},   # ④ 新订阅表+整场会话
                           sop={RequirementTag.USER_REQUIREMENT: ["Poet"]})
         init = {"messages": [Message(content="春眠不觉晓", cause_by=RequirementTag.USER_REQUIREMENT)],
@@ -782,11 +800,13 @@ def t19_ext_api_acceptance():
         assert t2 is not None
     finally:
         un()
+        from codeharness.sop.templates import _EXT_TEMPLATES
+        _EXT_TEMPLATES.pop("ext_sop", None)
         TOOL_REGISTRY.tools.pop("ext_count_chars", None)
         TOOL_REGISTRY.by_tag.get("ext", {}).pop("ext_count_chars", None)
         REGISTRY[:] = [t for t in REGISTRY if t.name != "ext_count_chars"]
         assert "Poet" not in ALL_ROLES and all(t.name != "ext_count_chars" for t in REGISTRY)
-    print("  t19 验收线：不改内核跑通新角色+Action+Tool+模板整场会话，三条守卫 + 完全回滚")
+    print("  t19 验收线：不改内核跑通新角色+Action+Tool+SOP模板整场会话，四条守卫 + 完全回滚")
 
 
 def t20_structured_patch_live():
