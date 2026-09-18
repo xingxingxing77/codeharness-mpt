@@ -141,9 +141,13 @@ class SessionRunner:
                                                           idea=session.idea, thread_id=project)
         else:
             agents = sop = None
-            if getattr(session, "paradigm", "classic") == "dynamic":
+            paradigm = getattr(session, "paradigm", "classic")
+            if paradigm == "dynamic":
                 from codeharness.team import dynamic_assembly
                 agents, sop = dynamic_assembly(_make_llm(cost_manager))
+            elif paradigm == "react":                     # 9.2 策略曲线第三腿：经典队形×REACT 循环
+                from codeharness.team import react_assembly
+                agents = react_assembly(_make_llm(cost_manager))
             team, config, init = prepare_project(session.idea, project, agents=agents,
                                                  checkpointer=await self._saver(),
                                                  cost_manager=cost_manager, sop=sop)

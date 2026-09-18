@@ -71,6 +71,16 @@ def dynamic_assembly(llm):
     return default_team(llm), {RequirementTag.USER_REQUIREMENT: [TEAMLEADER_NAME]}
 
 
+def react_assembly(llm):
+    """9.2 策略曲线第三腿（N3）：经典队形全员 REACT 执行循环——build_role(strategy="react")
+    的组队版（roles/registry.py:246 同款换装语义，集中到装配面）。路由表仍用经典 SOP：
+    换的是执行方式，不是编排。"""
+    agents = classic_team(llm)
+    for r in agents.values():
+        r.react_mode = "REACT"
+    return agents
+
+
 def _make_llm(cost_manager=None):
     from codeharness.provider.gateway import LLMGateway
     from codeharness.provider.cost import CostManager

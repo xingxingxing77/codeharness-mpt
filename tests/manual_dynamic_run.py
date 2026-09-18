@@ -1,7 +1,9 @@
 """S9.1 同范式对照·本仓 RoleZero 线（真钱冒烟，不进门禁——台账 #19①）。
 idea 与 source_classic_run.py / manual_dualrun_harness.py 逐字同一份；模型同端点同 max_token。
 差异如实记：本仓动态形态=单 RoleZero 工具循环（assignee 无委派路由），源 MGX 线是多角色委派。
-采集：status / token 两径 / LLM 调用数 / 事件块统计 / 产物树 → 抄进 storage/benchmark/s9_dualrun.md。"""
+采集：status / token 两径 / LLM 调用数 / 事件块统计 / 产物树 → 抄进 storage/benchmark/s9_dualrun.md。
+--tag 换产物目录名（双跑 3 次取中位时第 2/3 次用它，别覆盖首跑现场）。"""
+import argparse
 import json
 import time
 
@@ -12,11 +14,15 @@ from server.app import app
 IDEA = ("实现一个命令行工具 tinycli：接收一个目录路径参数，递归列出该目录下所有 .py 文件的路径；"
         "再实现统计每个文件行数的子命令；不用第三方依赖，带 --help 与用法示例；附单元测试。")
 
+ap = argparse.ArgumentParser()
+ap.add_argument("--tag", default="s9_dynamic")
+args = ap.parse_args()
+
 with TestClient(app) as c:
     h = c.get("/api/health").json()
     print("health:", {k: h[k] for k in ("ok", "llm_configured", "model")})
     sid = c.post("/api/sessions", json={
-        "idea": IDEA, "project_name": "s9_dynamic", "n_round": 5,
+        "idea": IDEA, "project_name": args.tag, "n_round": 5,
         "paradigm": "dynamic"}).json()["id"]
     print("session:", sid, "paradigm=dynamic", "start:", c.post(f"/api/sessions/{sid}/start").status_code)
     s = {}

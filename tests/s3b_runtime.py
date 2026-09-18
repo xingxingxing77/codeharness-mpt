@@ -433,6 +433,37 @@ def t14_dynamic_paradigm_assembly():
         cls = ss.Session(id="c1", idea="x", project_name="p")
         asyncio.run(r._prepare(cls, "p", None))
         assert captured["agents"] is None and captured["sop"] is None, "classic 不该带装配"
+        # 9.2 策略曲线第三腿：react=经典队形全员 REACT（路由表仍是经典 SOP，sop 传 None）
+        from codeharness.roles.agent import Agent
+        rct = ss.Session(id="r1", idea="x", project_name="p", paradigm="react")
+        asyncio.run(r._prepare(rct, "p", None))
+        assert captured["agents"] and all(
+            isinstance(a, Agent) and a.react_mode == "REACT" for a in captured["agents"].values()), \
+            "react 腿必须是经典队形×REACT 循环"
+        assert captured["sop"] is None, "react 腿不改编排"
+        # 9.3 扩展线：sop 非空走模板装配，不再经 prepare_project（captured 不动）
+        from codeharness.base.action import BaseAction
+        from codeharness.roles.agent import Agent
+        from codeharness.sop.templates import _EXT_TEMPLATES, SopTemplate, register_template
+
+        class _Noop(BaseAction):
+            async def run(self, msg):
+                return msg
+
+        register_template(SopTemplate(
+            name="s3b_t14_sop", desc="门禁件",
+            assemble=lambda llm: {"Solo": Agent({"name": "Solo", "profile": "p", "goal": "g"},
+                                                [_Noop(llm=llm)], llm)},
+            edges={RequirementTag.USER_REQUIREMENT: ["Solo"]}))
+        try:
+            captured.clear()
+            sp = ss.Session(id="s1", idea="x", project_name="p", sop="s3b_t14_sop")
+            team3, cfg3, init3 = asyncio.run(r._prepare(sp, "p", None))
+            assert captured == {}, "sop 会话不该再走 prepare_project"
+            assert team3 is not None and init3 is not None
+            assert cfg3["configurable"]["thread_id"] == "p", "thread_id 必须取会话项目名（防串台）"
+        finally:
+            _EXT_TEMPLATES.pop("s3b_t14_sop", None)
     finally:
         team.prepare_project = saved
 

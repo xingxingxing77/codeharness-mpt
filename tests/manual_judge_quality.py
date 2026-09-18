@@ -25,17 +25,30 @@ async def go(sid: str, idea: str, scorer) -> dict:
     rt.CURRENT_PROJECT.set(sid)
     store = ArtifactStore.active()
     prd = await store.get(RepoName.PRD, DocName.PRD)
-    if prd is None:
-        raise SystemExit(f"会话 {sid} 没有 prd.json（会话未跑或 tag 不对）")
-    if not idea:
-        idea = json.loads(prd.content).get("original_requirements", "")
-
-    arts = {"prd": prd.content}
-    for name, doc in (("design", DocName.DESIGN_JSON), ("tasks", DocName.TASKS),
-                      ("summary", DocName.CODE_SUMMARY)):
-        d = await store.get(RepoName.DOCS, doc)
-        if d is not None:
-            arts[name] = d.content
+    arts = {}
+    if prd is not None:
+        if not idea:
+            idea = json.loads(prd.content).get("original_requirements", "")
+        arts["prd"] = prd.content
+        for name, doc in (("design", DocName.DESIGN_JSON), ("tasks", DocName.TASKS),
+                          ("summary", DocName.CODE_SUMMARY)):
+            d = await store.get(RepoName.DOCS, doc)
+            if d is not None:
+                arts[name] = d.content
+    else:
+        # RoleZero/动态线没有 SOP 文档产物：评代码件（src+tests 仓；空则退会话根目录 *.py，
+        # RoleZero 经 editor 写的文件不进 SRC 仓——各取前 2，按文件名序确定性截断）
+        if not idea:
+            raise SystemExit(f"会话 {sid} 无 prd.json（RoleZero 线），必须显式给 idea 参数")
+        for tag, repo in (("src", RepoName.SRC), ("tests", RepoName.TESTS)):
+            for name in sorted(store.all_files(repo))[:2]:
+                d = await store.get(repo, name)
+                if d is not None:
+                    arts[f"{tag}:{name}"] = d.content
+        if not arts:
+            from pathlib import Path
+            for p in sorted(Path(store.root).glob("*.py"))[:4]:
+                arts[f"file:{p.name}"] = p.read_text(encoding="utf-8", errors="replace")
 
     rows = []
     for name, content in arts.items():

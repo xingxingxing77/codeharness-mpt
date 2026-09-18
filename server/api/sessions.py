@@ -13,15 +13,15 @@ class CreateSessionReq(BaseModel):
     idea: str = Field(min_length=1)
     project_name: str = ""
     n_round: int = 5
-    paradigm: str = "classic"       # classic|dynamic（S9.1 对照）；其余值 422——别让拼错静默走默认线
+    paradigm: str = "classic"       # classic|dynamic（S9.1 对照）|react（9.2 策略曲线）；其余值 422
     sop: str = ""                   # N7 模板名（9.3 扩展线入口）；非空时 create 即校验，别让拼错拖到 start 才炸
     llm: dict = Field(default_factory=dict)
 
     @field_validator("paradigm")
     @classmethod
     def _paradigm(cls, v: str) -> str:
-        if v not in ("classic", "dynamic"):
-            raise ValueError("paradigm 只能是 classic 或 dynamic")
+        if v not in ("classic", "dynamic", "react"):
+            raise ValueError("paradigm 只能是 classic、dynamic 或 react")
         return v
 
     @field_validator("sop")
