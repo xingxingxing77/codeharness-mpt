@@ -4,6 +4,8 @@
 重复入库是覆盖而不是堆积；这个派生 id 同时就是 Redis 命中计数的键（见 exp_pool/manager）。
 S5.3 起 search 返回**候选列表**而不是单条最优——命中计数要按经验 id 逐个查，
 且判定阈值要的是 [0,1] 的 dense 余弦：RRF 融合分是名次分不是相似度，不能拿来跟 0.9 比。
+
+P0-3: 租户隔离——从 CURRENT_USER ContextVar 取 user_id，避免"default"恒值。
 """
 import uuid
 
@@ -17,10 +19,13 @@ def exp_point_id(action_tag: str, input_sig: str) -> str:
 
 
 class ExpStore:
-    def __init__(self, embeddings=None, user_id: str = "default", store: QdrantStore | None = None):
+    def __init__(self, embeddings=None, user_id: str | None = None, store: QdrantStore | None = None):
+        from codeharness.runtime import CURRENT_USER
+        
         self.store = store or QdrantStore()
         self.embeddings = embeddings or LLMGateway.embeddings()
-        self.user_id = user_id
+        # P0-3: 从 CURRENT_USER 取 user_id，未设置时 fallback 到 "default"
+        self.user_id = user_id or CURRENT_USER.get("default")
 
     async def save(self, action_tag: str, input_sig: str, output: str, score: float = 0.0):
         dense = await self.embeddings.aembed_query(input_sig)
