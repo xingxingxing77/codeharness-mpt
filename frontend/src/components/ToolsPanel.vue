@@ -52,6 +52,11 @@
             <div class="t-title">编排</div>
             <div class="t-sub">查看智能体拓扑</div>
           </div>
+          <div class="tcard" @click="openTrace">
+            <Icon name="coins" :size="22" />
+            <div class="t-title">用量</div>
+            <div class="t-sub">LLM 调用与 token</div>
+          </div>
         </div>
       </div>
 
@@ -117,6 +122,36 @@
         <div class="graph-body">
           <MermaidView v-if="graphSrc" :src="graphSrc" name="orchestration" />
           <div v-else class="none">{{ graphMsg }}</div>
+        </div>
+      </div>
+
+      <!-- N4 用量视图：每笔 LLM 调用 span（/trace，S7 trace 存储的前端半边） -->
+      <div v-else-if="ui.rightView === 'trace'" class="review">
+        <div class="files-bar">
+          <button class="back" @click="ui.rightView = 'cards'">
+            <Icon name="chevron-down" :size="14" style="transform: rotate(90deg)" />
+            工具
+          </button>
+          <span class="proj">LLM 用量 · {{ store.current?.project_name }}</span>
+          <button class="back" @click="loadTrace">
+            <Icon name="refresh" :size="13" />
+            刷新
+          </button>
+        </div>
+        <div class="review-body">
+          <div v-if="spans.length" class="trace-sum">
+            {{ spans.length }} 次调用 · prompt {{ sumPt }} tok · completion {{ sumCt }} tok ·
+            ¥{{ sumCost }}
+          </div>
+          <template v-if="spans.length">
+            <div v-for="(s, i) in spans" :key="i" class="trace-row">
+              <span class="t-time">{{ fmtTs(s.ts) }}</span>
+              <span class="t-node">{{ s.node }}</span>
+              <span class="t-tok">↑{{ s.pt }} ↓{{ s.ct }}</span>
+              <span class="t-cost">¥{{ s.cost.toFixed(6) }}</span>
+            </div>
+          </template>
+          <div v-else class="none">{{ traceMsg || '暂无调用记录' }}</div>
         </div>
       </div>
 
@@ -261,6 +296,7 @@ watch(
   () => store.status,
   (v) => {
     if (['finished', 'stopped', 'failed'].includes(v) && ui.rightView === 'files') loadTree()
+    if (['finished', 'stopped', 'failed'].includes(v) && ui.rightView === 'trace') loadTrace()
   }
 )
 
@@ -292,6 +328,34 @@ async function loadGraph() {
 function openGraph() {
   ui.rightView = 'graph'
   loadGraph()
+}
+
+/* N4 用量视图 */
+const spans = ref<any[]>([])
+const traceMsg = ref('')
+
+async function loadTrace() {
+  if (!store.currentId) return
+  traceMsg.value = ''
+  try {
+    spans.value = (await api.sessionTrace(store.currentId)).spans || []
+  } catch (e: any) {
+    spans.value = []
+    traceMsg.value = `加载失败：${e.message}`
+  }
+}
+
+function openTrace() {
+  ui.rightView = 'trace'
+  loadTrace()
+}
+
+const sumPt = computed(() => spans.value.reduce((a, s) => a + s.pt, 0))
+const sumCt = computed(() => spans.value.reduce((a, s) => a + s.ct, 0))
+const sumCost = computed(() => spans.value.reduce((a, s) => a + s.cost, 0).toFixed(4))
+
+function fmtTs(ts: number) {
+  return new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })
 }
 </script>
 
@@ -485,6 +549,48 @@ function openGraph() {
 
 .review-item {
   margin: 0 12px 10px;
+}
+
+/* N4 用量视图 */
+.trace-sum {
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.trace-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-family: var(--mono);
+  border-bottom: 1px solid var(--line);
+}
+
+.t-time {
+  flex: none;
+  color: var(--text-3);
+}
+
+.t-node {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.t-tok {
+  flex: none;
+  color: var(--text-2);
+}
+
+.t-cost {
+  flex: none;
+  color: var(--text-3);
 }
 
 .none {

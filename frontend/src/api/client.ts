@@ -55,5 +55,10 @@ export const api = {
     req<{ exists: boolean; tree: any[] }>('GET', `/api/sessions/${sid}/workspace/files`),
   fileContent: (sid: string, path: string) =>
     req('GET', `/api/sessions/${sid}/workspace/file?path=${encodeURIComponent(path)}`),
-  sessionGraph: (sid: string) => req<{ mermaid: string }>('GET', `/api/sessions/${sid}/graph`)
+  sessionGraph: (sid: string) => req<{ mermaid: string }>('GET', `/api/sessions/${sid}/graph`),
+  sessionTrace: (sid: string) =>
+    req<{ spans: { node: string; pt: number; ct: number; cost: number; ts: number }[] }>(
+      'GET',
+      `/api/sessions/${sid}/trace`
+    )
 }

@@ -163,6 +163,31 @@ def t5_workspace_file_response_shape():
         ss.SESSIONS_FILE = keep
 
 
+def t6_trace_span_vocabulary():
+    """N4 面板判据（第十六处预防）：/trace 必须回 spans 键；runner 记的 span 字段 ==
+    前端 sessionTrace 消费的字段集——「路由在但形状错」t3 查不出（真浏览器第十五处同族洞）。"""
+    import tempfile
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            s = c.post("/api/sessions", json={"idea": "形状", "project_name": "s8trace"}).json()
+            body = c.get(f"/api/sessions/{s['id']}/trace").json()
+            assert isinstance(body.get("spans"), list), sorted(body)
+        rec = re.search(r"trace\.record\(sid, \{([^}]*)\}",
+                        (ROOT / "server" / "runner.py").read_text(encoding="utf-8")).group(1)
+        be_keys = set(re.findall(r'"(\w+)":', rec))
+        fe = re.search(r"sessionTrace[\s\S]*?spans: \{([^}]*)\}",
+                       (FE / "api" / "client.ts").read_text(encoding="utf-8")).group(1)
+        fe_keys = set(re.findall(r"(\w+):", fe))
+        assert be_keys == fe_keys, f"span 字段漂移 runner={sorted(be_keys)} fe={sorted(fe_keys)}"
+        _ok("t6", f"/trace 形状（spans 键）+ span 词汇表 runner==frontend（{len(be_keys)} 字段）")
+    finally:
+        ss.SESSIONS_FILE = keep
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -173,7 +198,8 @@ def main():
     t3_routes_exist()
     t4_graph_endpoint()
     t5_workspace_file_response_shape()
-    print("\ns8_frontend_contract: 5/5 全绿")
+    t6_trace_span_vocabulary()
+    print("\ns8_frontend_contract: 6/6 全绿")
 
 
 if __name__ == "__main__":

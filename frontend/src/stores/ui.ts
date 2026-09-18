@@ -8,7 +8,7 @@ export const useUiStore = defineStore('ui', {
     createIdea: '',
     /* 右侧工具面板 */
     rightPanel: false,
-    rightView: 'cards' as 'cards' | 'files' | 'review' | 'graph',
+    rightView: 'cards' as 'cards' | 'files' | 'review' | 'graph' | 'trace',
     /* 底部终端面板 */
     terminalOpen: false,
     /* 侧栏底部"设置"弹出小菜单 */
