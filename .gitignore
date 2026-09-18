@@ -14,6 +14,8 @@ dist/
 # 运行时产物
 workspace/
 storage/
+# N1 用户表（pbkdf2 哈希与 token 凭据，运行时生成不入库）
+server/data/users.json
 
 # 代码图索引（CodeGraph 本地产物，随机器重建）
 .codegraph/

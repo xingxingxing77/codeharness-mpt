@@ -213,7 +213,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **第十五处（真浏览器现形，已修+钉门禁 t5）**：`/workspace/file` 响应一直没有 `ext`/`type` 字段，前端 `ToolsPanel.onSelect` 的 markdown/image/.mmd 三类预览分支**从未命中过**——`.md` 一直显示成高亮代码。FakeLLM 门禁与路由核对都查不出「路由在但形状错」，浏览器点开才炸（陷阱 #2 第四次应验）。
 - 验收方式：真浏览器（应用内）逐屏 DOM 验收——编排图 7 节点+8 SOP 边全标签、象限图（s9_dualrun3 产物 `competitive_analysis.mmd`）title/四象限/7 坐标全渲染、围栏水合 1 图 0 残留、用量页 22 会话与顶栏 ¥2.103/299.5k/690k 互洽、行点击跳转、币种。**视觉判据全部打在 DOM 几何与文本上**（本会话模型不收图）。
 - **S8-B 终验当日过（真模型+真浏览器）**：专用块上屏（一场收口 29 块）/插话/stop/文件树+下载 全过；块事件序列快照存 `storage/benchmark/s8_events_snapshot.json`（295 events，Thought/Docs/Editor 三族）。**人工回答**一项经典线无 interrupt 点，UI 接线在位、图级门禁已钉，活体验收挂 S9 的 DI 策略会话。顺带修两处收口观感：stream 块 end_marker 收口（s8 t3 钉）+ 光标仅运行态。真模型两笔实测费：¥0.133（收口场）+ ~¥0.03（stop 场）。
-- **S8 未闭合项**：N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）；登录/多租户 UI（等 N1 服务端）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
+- **S8 未闭合项**：N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）；~~登录/多租户 UI（等 N1 服务端）~~（2026-09-18 N1 全栈落地，见当日 N1 段）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
 - 门禁基线：**十二个不花钱脚本全 exit 0**（十一件套 + s8_frontend_contract 5 组）。
 
 ### 2026-09-17 · S7 双实现落地（feature flag 默认关，未切默认）
@@ -264,6 +264,15 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **#19② 大 idea 策略曲线**（同 todo CLI idea 三档，`manual_strategy_curve.py` → `s9_strategy_curve.json` + 表入 s9_dualrun.md）：**role_zero finished/747s/¥0.16/109K（todo.py+test 齐全）**；sop 未收口@20min 窗/¥1.50/710K（链路到 QA 起步，比首跑走得更远——第十四处校准+文件名归一生效）；react finished@128s/¥0.018 但**代码件为空**（快而不做活，选型必须配产物校验）。第三腿 react 接线=`team.react_assembly`（经典队形×REACT，组队版 build_role 换装）+ paradigm 第三值（s3b t14 扩两态断言）。
 - **双跑 3 次取中位**（同范式对照 ×3，表入 s9_dualrun.md）：源 MGX 3/3 finished、中位 15 调/191.4K token（≈¥0.25 折算）；本仓 RoleZero 2/3 finished（r3 连接错误停场，tinycli.py 已产出，如实记）、中位 64.9K token/¥0.115——**本仓 token = 源的 34%**，与首跑单次 48% 同向更优。源侧 runner 补 sparkai/tree_sitter_languages 桩（上游 spark_api/linter 是 requirements 外死件，py3.13 装不上、MaaS 线零调用）。
 - **台账 #19 三笔全收口（①②③）**；接线台账 19 行无一处"在途"。S9 未竟项只剩：N4 trace 前端面板（S8 遗留）、S8 时间旅行回放、跨币种计费对齐（第十处注 3）——均为非阻塞遗留，见施工4 各段。
+
+### 2026-09-18 晚 · N1 账号边界全栈落地（提交 `27614f0`，"源没有的能力"清单最后一项大项兑现）
+
+- **服务端 `server/auth.py`（N1 核心）**：`PLATFORM__AUTH_ENABLED` 开关**默认关**=单机现状，15 个既有门禁零破坏即过；开则 pbkdf2_hmac(120k) 用户表 `server/data/users.json` + 进程内 token（7d TTL）。**ceiling 在册**：token 表不跨进程，多 worker 部署时登录须粘滞会话或换 redis token 表——单机/单 worker 现状够用。SSE 走 `access_token` 查询参数变通（EventSource 发不了自定义 header，同款 ceiling 在册）。
+- **user_id 贯穿四层**：Session 字段 → list 按用户过滤 + `_owned` 越权 404（**不泄露存在性**）→ 配额 scope 按 user 分桶 → 记忆 LTM 经 `CURRENT_USER` ContextVar 兜底（auth 关恒 "default"，qdrant payload 与既有行为**逐字节兼容**）。跨用户同名项目 create 即 409（产物目录冲突前置）。
+- **前端**：client 带票 + 401 清票（auth 路由豁免防循环）、auth store（`needLogin` 三条件：enabled && ready && !hasToken——票状态进 store 因 localStorage 非响应式）、LoginPage 接管 App、侧栏底部用户行+登出。`App.onMounted` 先 `auth.init()` 再拉会话——顺序反了 401 一片。
+- **门禁 `tests/s10_auth.py` 6 组**：auth 双态现状 / 注册登录流 / 跨用户隔离 404 + SSE 查询参数通道 / 跨用户同名 409 / 配额分桶 / 前端契约 grep。t3 当场撞 README 已登记的 **SSE 无限流陷阱第二次应验**（TestClient 直接 GET /events 永不返回——改在流开始前验证 404 语义）。s8 t3 路由核对相应豁免 `startsWith('/api/auth')` 前缀守卫串。
+- **活体验收 PASS（真浏览器）**：auth 开→登录页接管→注册 n1tester 直进主界面（侧栏显示用户行）→登出回登录页→重登回主界面，全链通。`server/data/users.json` 是运行时凭据，已入 `.gitignore` 不进版本库。
+- 门禁基线：**16 个不花钱脚本全 exit 0**（+s10_auth）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
