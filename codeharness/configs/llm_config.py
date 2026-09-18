@@ -97,6 +97,7 @@ class LLMConfig(BaseModel):
     top_logprobs: Optional[int] = None
     timeout: int = LLM_API_TIMEOUT
     context_length: Optional[int] = None  # Max input tokens
+    compress_threshold: float = 0.8  # 压缩阈值：保留最近 messages 的比例（0~1）
 
     proxy: Optional[str] = None
     calc_usage: bool = True

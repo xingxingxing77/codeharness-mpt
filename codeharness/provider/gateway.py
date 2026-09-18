@@ -131,6 +131,16 @@ class LLMGateway:
                       stream: bool = False, timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> BaseMessage:
         """唯一的出口：所有计数/trace 都在这里，**别在别处再算一遍**。"""
         msgs = self.format_msg(msgs or [])
+        
+        # B6: token 压缩——按 context_length × threshold 裁断（保留最近的消息）
+        if self.cfg.context_length and self.cfg.compress_threshold < 1.0:
+            max_tokens = int(self.cfg.context_length * self.cfg.compress_threshold)
+            # 简单策略：保留最近 N 条消息（假设每条平均 token 数相近）
+            # 更精确的实现需要结合 count_tokens() 逐条累加
+            if len(msgs) > max_tokens:
+                keep_count = max(1, int(len(msgs) * self.cfg.compress_threshold))
+                msgs = msgs[-keep_count:]
+        
         model = self._model.bind(**kwargs) if kwargs else self._model
         deadline = timeout or self.cfg.timeout
 
