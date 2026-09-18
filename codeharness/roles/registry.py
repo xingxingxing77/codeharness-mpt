@@ -240,8 +240,18 @@ def build_role(name: str, llm, strategy: str | None = None, **kw):
     if strategy:
         from codeharness.roles.role_zero import RoleZero
         if isinstance(role, RoleZero):
-            if strategy != "role_zero":
-                raise ValueError(f"{name} 是 role_zero 引擎（工具集非 Action 列表），不接受 strategy={strategy!r} 换装")
+            if strategy == "role_zero":
+                pass  # 默认引擎
+            elif strategy == "tot":
+                # B5: ToT 引擎——替换 _plan 为 TotAgent.think（树搜索 + 择优）
+                async def tot_plan(goal: str) -> str:
+                    from codeharness.strategy.tot import TotAgent
+                    tot = TotAgent(llm=llm, goal=goal, num_paths=3, max_depth=3)
+                    return await tot.think()
+                role._plan = tot_plan
+                role.profile["strategy"] = "tot"
+            else:
+                raise ValueError(f"{name} 是 role_zero 引擎，只认 role_zero/tot，收到 {strategy!r}")
         elif strategy in ("sop", "react"):
             role.react_mode = "BY_ORDER" if strategy == "sop" else "REACT"
             role.profile["strategy"] = strategy
