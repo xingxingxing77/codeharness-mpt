@@ -25,6 +25,7 @@ class Session(BaseModel):
     n_round: int = 5
     paradigm: str = "classic"       # classic=经典 SOP 线（默认）；dynamic=RoleZero 线（S9.1 对照，runner._prepare 分流）
     sop: str = ""                   # 非空=按 N7 模板装配（9.3 扩展线入口，ext_api.register_template 登记）
+    user_id: str = "default"        # N1 账号边界：auth 关恒 default；开=创建者，list/get 按它隔离
     status: SessionStatus = SessionStatus.created
     llm_override: dict = Field(default_factory=dict)
     workspace: str = ""
@@ -60,11 +61,11 @@ class SessionStore:
 
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: Optional[dict] = None,
-               paradigm: str = "classic", sop: str = "") -> Session:
+               paradigm: str = "classic", sop: str = "", user_id: str = "default") -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
         s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
-                    paradigm=paradigm, sop=sop,
+                    paradigm=paradigm, sop=sop, user_id=user_id,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name),      # 产物目录=会话目录（前端文件树读这里）
                     created_at=_now())

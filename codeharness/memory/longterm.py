@@ -26,13 +26,22 @@ def _pid(scope: str, content: str) -> str:
 
 
 class LongTermMemory:
-    def __init__(self, project_id: str = "", embeddings=None, user_id: str = "default",
+    def __init__(self, project_id: str = "", embeddings=None, user_id: str = "",
                  session_id: str = "", store: QdrantStore | None = None):
         self.store = store or QdrantStore()
         self.embeddings = embeddings
         self._project = project_id
-        self.user_id = user_id
+        self._user = user_id
         self.session_id = session_id
+
+    @property
+    def user_id(self) -> str:
+        """N1：调用方没显式给就从 CURRENT_USER 兜底——auth 关恒 "default"，
+        qdrant payload 与既有行为逐字节兼容。"""
+        if self._user:
+            return self._user
+        from codeharness.runtime import CURRENT_USER
+        return CURRENT_USER.get() or "default"
 
     @property
     def project_id(self) -> str:

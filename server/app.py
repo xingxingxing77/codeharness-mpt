@@ -93,13 +93,17 @@ def create_app() -> FastAPI:
                        allow_methods=["*"], allow_headers=["*"])
     app.include_router(sessions_api.router)
     app.include_router(workspace_api.router)
+    from server.auth import router as auth_router
+    app.include_router(auth_router)
 
     @app.get("/api/health")
     def health():
         d = llm_defaults or {}
+        from codeharness.configs.settings import settings
         return {"ok": True, "llm_configured": llm_defaults is not None,
                 "llm_problem": llm_problem, "model": d.get("model", ""),
                 "base_url": d.get("base_url", ""), "api_key_masked": _mask(str(d.get("api_key", ""))),
+                "auth_enabled": settings.platform.auth_enabled,
                 "workspace_root": str(WORKSPACE_ROOT)}
 
     app.mount("/workspace", StaticFiles(directory=str(WORKSPACE_ROOT)), name="workspace")

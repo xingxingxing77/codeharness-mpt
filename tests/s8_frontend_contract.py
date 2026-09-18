@@ -67,7 +67,9 @@ def t3_routes_exist():
         for raw in re.findall(r"[`'\"](\/api\/[^`'\"\s?]*)", txt):
             consumed.add(re.sub(r"\$\{[^}]*\}", "{sid}", raw))
     assert consumed, "client.ts/sessions.ts 里没解析出任何 /api 路径——正则失效，本门禁空转"
-    missing = {p for p in consumed if p not in declared}
+    # N1：client.ts 的 startsWith('/api/auth') 守卫串会进捕获——不是端点，是真前缀，豁免
+    missing = {p for p in consumed
+               if p not in declared and not any(d.startswith(p + "/") for d in declared)}
     assert not missing, f"前端消费的接口后端没注册：{sorted(missing)}"
     _ok("t3", f"前端消费的 {len(consumed)} 条 /api 路径全部在 FastAPI 路由表")
 

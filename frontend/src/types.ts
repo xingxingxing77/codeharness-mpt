@@ -3,8 +3,9 @@ export interface Session {
   idea: string
   project_name: string
   n_round: number
-  paradigm: string // classic | dynamic（S9.1 对照）
+  paradigm: string // classic | dynamic | react（9.2 策略曲线）
   sop: string // 非空=按 N7 模板装配（扩展线）
+  user_id: string // N1：创建者（auth 关恒 "default"）
   status: string // created | running | awaiting_human | stopping | finished | stopped | failed
   llm_override: Record<string, any>
   workspace: string
@@ -61,5 +62,6 @@ export interface Health {
   model: string
   base_url: string
   api_key_masked: string
+  auth_enabled: boolean // N1：PLATFORM__AUTH 开时登录页接管
   workspace_root: string
 }

@@ -63,6 +63,11 @@
 
     <!-- 底部：设置 + 升级 -->
     <div class="bottom">
+      <div v-if="auth.enabled && auth.user" class="nav-item" @click.stop="doLogout" title="退出登录">
+        <Icon name="user" :size="16" />
+        <span class="grow">{{ auth.user }}</span>
+        <span class="sub">退出</span>
+      </div>
       <div class="nav-item" @click.stop="ui.settingsMenuOpen = !ui.settingsMenuOpen">
         <Icon name="gear" :size="16" />
         <span>设置</span>
@@ -116,12 +121,20 @@ import { computed, reactive, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useSessionStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
+import { useAuthStore } from '../stores/auth'
 import type { Session } from '../types'
 import Icon from './Icon.vue'
 
 const store = useSessionStore()
 const ui = useUiStore()
+const auth = useAuthStore()
 const message = useMessage()
+
+async function doLogout() {
+  await auth.logout()
+  store.goHome()
+  message.success('已退出登录')
+}
 const health = computed(() => store.health)
 
 const openSet = reactive(new Set<string>())

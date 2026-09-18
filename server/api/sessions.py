@@ -1,9 +1,11 @@
-"""Session REST + SSE（端点集=client.ts 全集）。"""
+"""Session REST + SSE（端点集=client.ts 全集）。N1：全部路由过 `current_user` 依赖——
+auth 关恒 "default"（现状行为），开时校验 Bearer 并按 user 隔离（越权一律 404 不泄露存在性）。"""
 import asyncio
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
+from server.auth import current_user
 from server.sessions import SessionStatus
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -58,36 +60,58 @@ def _get(request: Request, name: str):
 
 
 @router.get("")
-def list_sessions(request: Request):
-    return [s.model_dump() for s in _get(request, "store").list()]
+def list_sessions(request: Request, user: str = Depends(current_user)):
+    from codeharness.configs.settings import settings
+    items = _get(request, "store").list()
+    if settings.platform.auth_enabled:
+        items = [s for s in items if s.user_id == user]
+    return [s.model_dump() for s in items]
 
 
 @router.post("")
-async def create_session(req: CreateSessionReq, request: Request):
+async def create_session(req: CreateSessionReq, request: Request, user: str = Depends(current_user)):
     # N5 保留的一半：请求数限流在 HTTP 入口判（429），不进图、不在内核判；
-    # quota 未装配（进程内默认）=直通。⚠ 这是限流不是金额预算（§零）。
+    # quota 未装配（进程内默认）=直通。⚠ 这是限流不是金额预算（§零）。N1：配额按 user 分桶。
     q = getattr(request.app.state, "quota", None)
     if q is not None:
         from codeharness.configs.settings import settings
-        if not q.allow("create", settings.platform.create_per_min, settings.platform.rate_window_sec):
+        if not q.allow(f"create:{user}", settings.platform.create_per_min,
+                       settings.platform.rate_window_sec):
             raise HTTPException(429, "建会话过于频繁，稍后再试")
+    name = req.project_name.strip()
+    # N1：同 project_name 跨用户 = 产物目录冲突（workspace/{name} 平铺），create 即 409——
+    # 别让两家的文件树互相覆盖才在浏览器里现形。同用户重名沿用现状（多场同名合法）。
+    from codeharness.configs.settings import settings
+    if name and settings.platform.auth_enabled:
+        for s in _get(request, "store").list():
+            if s.project_name == name and s.user_id != user:
+                raise HTTPException(409, f"项目名 {name!r} 已被其他用户占用")
     s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
-                                      project_name=req.project_name.strip(), llm_override=req.llm,
-                                      paradigm=req.paradigm, sop=req.sop)
+                                      project_name=name, llm_override=req.llm,
+                                      paradigm=req.paradigm, sop=req.sop, user_id=user)
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
     return s.model_dump()
 
 
 @router.get("/{sid}")
-def get_session(sid: str, request: Request):
-    s = _get(request, "store").get(sid)
-    if not s:
-        raise HTTPException(404, f"session {sid} not found")
+def get_session(sid: str, request: Request, user: str = Depends(current_user)):
+    s = _owned(request, sid, user)
     return s.model_dump()
 
 
+def _owned(request: Request, sid: str, user: str):
+    """N1：取会话 + 归属校验（越权 404）。auth 关时 user 恒 "default"、不比对。"""
+    from codeharness.configs.settings import settings
+    s = _get(request, "store").get(sid)
+    if not s:
+        raise HTTPException(404, f"session {sid} not found")
+    if settings.platform.auth_enabled and s.user_id != user:
+        raise HTTPException(404, f"session {sid} not found")
+    return s
+
+
 @router.get("/{sid}/graph")
-def session_graph(sid: str, request: Request):
+def session_graph(sid: str, request: Request, user: str = Depends(current_user)):
     """N6 编排可视化：节点与订阅边取自真实装配对象，不是手绘示意图。
 
     ⚠ LangGraph 静态图只有 `__start__→router→__end__` 两条边——角色路由是运行期 Send，
@@ -97,9 +121,7 @@ def session_graph(sid: str, request: Request):
       sop 非空 → N7 模板装配（ext_api.register_template 的扩展线从这里可见）；
       dynamic  → dynamic_assembly（RoleZero 三角色）；否则 → classic 兜底。
     门禁 s8 t4 钉「节点集与 watch 边必须出自真装配」。"""
-    s = _get(request, "store").get(sid)
-    if not s:
-        raise HTTPException(404, f"session {sid} not found")
+    s = _owned(request, sid, user)
     from codeharness.team import _default_agents, _make_llm
     rtable: dict = {}                     # 装配路由表（RoleZero 无 watch，动态/模板线从这里兜底）
     if getattr(s, "sop", ""):
@@ -125,11 +147,9 @@ def session_graph(sid: str, request: Request):
 
 
 @router.post("/{sid}/start")
-async def start_session(sid: str, request: Request):
+async def start_session(sid: str, request: Request, user: str = Depends(current_user)):
     store, runner = _get(request, "store"), _get(request, "runner")
-    s = store.get(sid)
-    if not s:
-        raise HTTPException(404, f"session {sid} not found")
+    s = _owned(request, sid, user)
     # is_running 是 worker 本地视角；多进程部署下「已在跑」的真源是 store 状态
     # （启动残态由 heal_running 自愈，running/awaiting_human 必有人在跑）。
     if runner.is_running(sid) or s.status in (SessionStatus.running, SessionStatus.awaiting_human):
@@ -148,15 +168,15 @@ async def start_session(sid: str, request: Request):
 
 
 @router.post("/{sid}/stop")
-async def stop_session(sid: str, request: Request):
-    if not _get(request, "store").get(sid):
-        raise HTTPException(404, f"session {sid} not found")
+async def stop_session(sid: str, request: Request, user: str = Depends(current_user)):
+    _owned(request, sid, user)
     stopped = await _get(request, "runner").stop(sid)
     return {"ok": True, "stopped": stopped}
 
 
 @router.post("/{sid}/chat")
-async def chat(sid: str, req: ChatReq, request: Request):
+async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(current_user)):
+    _owned(request, sid, user)
     runner = _get(request, "runner")
     if not runner.is_running(sid):
         raise HTTPException(409, "session is not running")
@@ -166,15 +186,15 @@ async def chat(sid: str, req: ChatReq, request: Request):
 
 
 @router.post("/{sid}/human-input")
-async def human_input(sid: str, req: HumanInputReq, request: Request):
+async def human_input(sid: str, req: HumanInputReq, request: Request, user: str = Depends(current_user)):
+    _owned(request, sid, user)
     return {"ok": _get(request, "runner").answer_human(sid, req.content)}
 
 
 @router.get("/{sid}/events")
-async def events(sid: str, request: Request, after: int = 0):
+async def events(sid: str, request: Request, after: int = 0, user: str = Depends(current_user)):
     bus, store = _get(request, "bus"), _get(request, "store")
-    if not store.get(sid):
-        raise HTTPException(404, f"session {sid} not found")
+    _owned(request, sid, user)
 
     async def gen():
         q = bus.subscribe(sid)
@@ -198,22 +218,20 @@ async def events(sid: str, request: Request, after: int = 0):
 
 
 @router.get("/{sid}/trace")
-def session_trace(sid: str, request: Request):
+def session_trace(sid: str, request: Request, user: str = Depends(current_user)):
     """N4 数据层：每笔 LLM 调用的节点/token 增量/时刻（ch:trace:{sid}）。
     trace 未装配（进程内默认）回空表——前端 N4 面板是 S8 剩余项，先攒数据。"""
-    if not _get(request, "store").get(sid):
-        raise HTTPException(404, f"session {sid} not found")
+    _owned(request, sid, user)
     tr = _get(request, "runner").trace
     return {"spans": tr.spans(sid) if tr else []}
 
 
 @router.get("/{sid}/events/history")
-def events_history(sid: str, request: Request, after: int = 0):
+def events_history(sid: str, request: Request, after: int = 0, user: str = Depends(current_user)):
     """有界 JSON 回放：`/events` 是给浏览器 EventSource 的无界活流，**任何要读完再走的
     消费方都必须用这条**——冒烟脚本挂死两场的根因就是拿普通 GET 读无限流（TestClient 的
     transport 会把应用跑到底才返回，`while True` 永不返回）。事后审计、S9 采集、断线重连
     补历史，证据都从这里拿。"""
     bus, store = _get(request, "bus"), _get(request, "store")
-    if not store.get(sid):
-        raise HTTPException(404, f"session {sid} not found")
+    _owned(request, sid, user)
     return {"events": [e.model_dump() for e in bus.history(sid, after)]}

@@ -236,13 +236,16 @@ class SessionRunner:
         N9：同时套一层 Langfuse 的会话属性（session_id/user/tags）——两个 astream 循环共用的
         唯一上下文口，OTel 上下文按 asyncio task 隔离，并发会话不串；未开启时是 nullcontext。"""
         from contextlib import ExitStack
-        from codeharness.runtime import CURRENT_PROJECT, REPORT_SINK, CHAT_SINK
+        from codeharness.runtime import CURRENT_PROJECT, REPORT_SINK, CHAT_SINK, CURRENT_USER
         from codeharness.observability import session_attributes
         pairs = (
             (SESSION_ID, SESSION_ID.set(sid)),
             (CURRENT_PROJECT, CURRENT_PROJECT.set(self.projects.get(sid, sid))),
             (REPORT_SINK, REPORT_SINK.set(self._make_sink(sid))),
             (CHAT_SINK, CHAT_SINK.set(self.chats.get(sid))),
+            # N1：user_id 贯穿进内核（记忆/经验池的切片键从这里兜底），auth 关恒 "default"
+            (CURRENT_USER, CURRENT_USER.set(getattr(self.store.get(sid), "user_id", "default")
+                                            if self.store.get(sid) else "default")),
         )
         with ExitStack() as stack:
             stack.enter_context(session_attributes(self.store.get(sid), self.projects.get(sid, sid)))

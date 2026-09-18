@@ -82,6 +82,8 @@ class PlatformConfig(BaseModel):
     create_per_min: int = 30          # 建会话固定窗限流（HTTP 入口 429，不进图）
     max_concurrent: int = 16          # 同时 running 会话数上限
     rate_window_sec: int = 60
+    auth_enabled: bool = False        # N1 账号边界：默认关=单机开发态（15 门禁零破坏）；置 1 强制登录，
+                                      # session/记忆/配额按 user_id 隔离。生产多租户部署显式开启。
 
 
 class LangfuseConfig(BaseModel):

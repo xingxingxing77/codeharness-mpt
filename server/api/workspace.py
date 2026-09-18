@@ -1,24 +1,26 @@
 """工作区文件树/读取。路径基准 = session.workspace = runtime.session_root()——
-工具层（write_file / 终端 cwd / 沙箱 scratch）与产物仓都落这里，agent 写的文件树里才看得见。"""
+工具层（write_file / 终端 cwd / 沙箱 scratch）与产物仓都落这里，agent 写的文件树里才看得见。
+N1：全部路由过 current_user（auth 开时按会话归属隔离，越权 404）。"""
 import mimetypes
 from pathlib import Path
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from server.auth import current_user
 
 router = APIRouter(prefix="/api/sessions", tags=["workspace"])
 
 
-def _ws(request: Request, sid: str) -> Path:
-    s = request.app.state.store.get(sid)
-    if not s:
-        raise HTTPException(404, "session not found")
+def _ws(request: Request, sid: str, user: str) -> Path:
+    from server.api.sessions import _owned
+    s = _owned(request, sid, user)
     root = Path(s.workspace)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 @router.get("/{sid}/workspace/files")
-def files(sid: str, request: Request):
-    root = _ws(request, sid)
+def files(sid: str, request: Request, user: str = Depends(current_user)):
+    root = _ws(request, sid, user)
 
     def node(p: Path) -> dict:
         if p.is_dir():
@@ -30,8 +32,8 @@ def files(sid: str, request: Request):
 
 
 @router.get("/{sid}/workspace/file")
-def file(sid: str, path: str, request: Request):
-    root = _ws(request, sid).resolve()
+def file(sid: str, path: str, request: Request, user: str = Depends(current_user)):
+    root = _ws(request, sid, user).resolve()
     target = Path(path).resolve()
     if not target.is_relative_to(root):        # startswith 会放行兄弟目录（"ws" 是 "ws_probe" 的前缀）
         raise HTTPException(400, "path out of workspace")

@@ -1,12 +1,26 @@
 import type { Health, Session } from '../types'
 
+/* N1：token 存 localStorage；带 Authorization 出请求；401 即清票（App 层据 needLogin 切登录页）。
+   auth 关闭（PLATFORM__AUTH=0）时服务端不校验，这里带不带都行——header 只在有票时附加。 */
+const TOKEN_KEY = 'ch_token'
+
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || ''
+}
+
+export function setToken(t: string) {
+  if (t) localStorage.setItem(TOKEN_KEY, t)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
 async function req<T = any>(method: string, url: string, body?: any): Promise<T> {
-  const rsp = await fetch(url, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined
-  })
+  const headers: Record<string, string> = {}
+  if (body) headers['Content-Type'] = 'application/json'
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const rsp = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
   if (!rsp.ok) {
+    if (rsp.status === 401 && !url.startsWith('/api/auth')) setToken('')
     let detail = rsp.statusText
     try {
       detail = (await rsp.json()).detail || detail
@@ -18,6 +32,11 @@ async function req<T = any>(method: string, url: string, body?: any): Promise<T>
 
 export const api = {
   health: () => req<Health>('GET', '/api/health'),
+  login: (username: string, password: string) =>
+    req<{ ok: boolean; token: string }>('POST', '/api/auth/login', { username, password }),
+  register: (username: string, password: string) =>
+    req<{ ok: boolean; token: string }>('POST', '/api/auth/register', { username, password }),
+  logout: () => req('POST', '/api/auth/logout'),
   listSessions: () => req<Session[]>('GET', '/api/sessions'),
   getSession: (sid: string) => req<Session>('GET', `/api/sessions/${sid}`),
   createSession: (payload: {

@@ -2,7 +2,8 @@
   <n-config-provider :theme="naiveTheme" :locale="zhCN" :date-locale="dateZhCN" style="height: 100%">
     <n-message-provider>
       <n-dialog-provider>
-        <SettingsView v-if="ui.settingsFull" />
+        <LoginPage v-if="auth.needLogin" />
+        <SettingsView v-else-if="ui.settingsFull" />
         <div v-else class="shell">
           <aside class="sb">
             <SessionSidebar />
@@ -34,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import {
   NConfigProvider,
   NDialogProvider,
@@ -45,10 +46,12 @@ import {
 } from 'naive-ui'
 import { useSessionStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
+import { useAuthStore } from './stores/auth'
 import ChatInput from './components/ChatInput.vue'
 import CreateSessionModal from './components/CreateSessionModal.vue'
 import HomeComposer from './components/HomeComposer.vue'
 import HumanInputDialog from './components/HumanInputDialog.vue'
+import LoginPage from './components/LoginPage.vue'
 import OutputsCard from './components/OutputsCard.vue'
 import SessionSidebar from './components/SessionSidebar.vue'
 import SessionTopBar from './components/SessionTopBar.vue'
@@ -60,9 +63,23 @@ import './style.css'
 
 const store = useSessionStore()
 const ui = useUiStore()
+const auth = useAuthStore()
 const naiveTheme = computed(() => (ui.theme === 'dark' ? darkTheme : null))
 
-onMounted(() => store.init())
+// N1：先探 auth（enabled=0 直接进主界面），登录态成立才拉会话——顺序反了会 401 一片
+onMounted(async () => {
+  try {
+    await auth.init()
+  } catch { /* health 挂了也照旧进主界面，后续请求自行报错 */ }
+  if (!auth.needLogin) store.init()
+})
+// 登录成功（needLogin 翻假）后补拉会话列表
+watch(
+  () => auth.needLogin,
+  (v, old) => {
+    if (old && !v) store.init()
+  }
+)
 </script>
 
 <style scoped>

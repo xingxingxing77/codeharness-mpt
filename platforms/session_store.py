@@ -50,11 +50,11 @@ class RedisSessionStore:
 
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: dict | None = None,
-               paradigm: str = "classic", sop: str = "") -> Session:
+               paradigm: str = "classic", sop: str = "", user_id: str = "default") -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
         s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
-                    paradigm=paradigm, sop=sop,
+                    paradigm=paradigm, sop=sop, user_id=user_id,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name), created_at=_now())
         pipe = self.r.pipeline()

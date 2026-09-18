@@ -16,6 +16,10 @@ REPORT_SINK: ContextVar[object] = ContextVar("report_sink", default=None)
 CHAT_SINK: ContextVar[object] = ContextVar("chat_sink", default=None)
 """插话槽：实现 drain() 的对象。team_graph.route 每轮 drain，把用户插话变成额外 Send（=源 MGXEnv 直聊语义）"""
 
+CURRENT_USER: ContextVar[str] = ContextVar("current_user", default="default")
+"""N1 账号边界：当前会话的创建者。server 在 _session_ctx 装载；记忆/经验池的 user_id 切片键
+在调用方没显式给时从这里兜底——auth 关恒 "default"，qdrant payload 与既有行为逐字节兼容"""
+
 
 def session_root(project: str | None = None) -> Path:
     """本会话工作目录 = `workspace_root/{project 或 CURRENT_PROJECT}`，与 server 的 `session.workspace`、

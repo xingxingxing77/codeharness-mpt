@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { api } from '../api/client'
+import { api, getToken } from '../api/client'
 import type { Block, Health, Session, WEvent } from '../types'
 
 const MAX_LOGS = 800
@@ -122,7 +122,10 @@ export const useSessionStore = defineStore('sessions', {
       this.evtSource?.close()
       if (!this.currentId) return
       const sid = this.currentId
-      const src = new EventSource(`/api/sessions/${sid}/events?after=${this.lastSeq}`)
+      // N1：EventSource 发不了 Authorization header，auth 开时走 access_token 查询参数（client.ts 的 Bearer 只管 fetch）
+      const tok = getToken()
+      const authQ = tok ? `&access_token=${encodeURIComponent(tok)}` : ''
+      const src = new EventSource(`/api/sessions/${sid}/events?after=${this.lastSeq}${authQ}`)
       src.onopen = () => {
         this.connected = true
       }
