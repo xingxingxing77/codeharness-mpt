@@ -78,8 +78,10 @@ def create_app() -> FastAPI:
         # 调用它」（aiosqlite 的 worker 线程不显式关会留着），LogBridge 的 loguru sink 同理——
         # 不 remove 则 lifespan 每重启一次多挂一个 sink，往已死的旧 bus 里灌日志。
         from codeharness.environment.checkpoint import close_all
+        from codeharness.observability import shutdown as tracing_shutdown
         log_bridge.remove()
         await close_all()
+        tracing_shutdown()                          # N9：把队列里没发完的 span 冲干净再退
         if redis_mode:
             runner._ctl_task.cancel()                   # 先停监听再关连接（顺序反了就是 ConnectionError 栈）
             await bus.aclose()

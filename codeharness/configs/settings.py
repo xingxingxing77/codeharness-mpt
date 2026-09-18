@@ -84,6 +84,18 @@ class PlatformConfig(BaseModel):
     rate_window_sec: int = 60
 
 
+class LangfuseConfig(BaseModel):
+    """N9 外部可观测（本机自托管 Langfuse v4）。字段不叫 `LANGFUSE_PUBLIC_KEY` 那套——
+    本仓的 `.env` 走 pydantic-settings（`LANGFUSE__*`），SDK 自读的 os.environ 拿不到，
+    接线处显式构造客户端（codeharness/observability.py）。默认关：显式开 + 双 key 齐才生效。"""
+
+    enabled: bool = False
+    host: str = "http://localhost:3000"
+    public_key: str = ""
+    secret_key: str = ""
+    timeout: int = 5
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
 
@@ -95,6 +107,7 @@ class Settings(BaseSettings):
     search: SearchConfig = SearchConfig()
     exp_pool: ExpPoolConfig = ExpPoolConfig()
     platform: PlatformConfig = PlatformConfig()
+    langfuse: LangfuseConfig = LangfuseConfig()
 
     workspace_root: str = "./workspace"
     memory_overflow_size: int = 200

@@ -22,6 +22,9 @@ dependencies = [
 [project.optional-dependencies]
 server = ["fastapi>=0.110", "uvicorn[standard]", "sse-starlette"]
 dev = ["pytest", "pytest-asyncio", "ruff"]
+# N9 外部可观测（自托管 Langfuse v4）：不进主依赖——未装时 codeharness/observability.py
+# 整模块降级为 no-op。>=4.7 是 session/user/tags 能落到 observation 的最低版；SDK v4 要 Python>=3.11
+observability = ["langfuse>=4.7,<5"]
 
 [build-system]
 requires = ["setuptools>=68"]

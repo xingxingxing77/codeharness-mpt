@@ -15,6 +15,7 @@ import httpx
 from codeharness.configs.settings import settings
 from codeharness.document_store.qdrant_store import Point, QdrantStore
 from codeharness.logs import logger
+from codeharness.observability import span
 from codeharness.schema import Message
 
 
@@ -41,6 +42,7 @@ class LongTermMemory:
         from codeharness.runtime import CURRENT_PROJECT
         return CURRENT_PROJECT.get()
 
+    @span("memory.overflow", as_type="embedding")
     async def overflow(self, msgs: list[Message]) -> int:
         """工作记忆溢出时批量入库（调用方：RoleZero._compress）。入库前按 content 去重。"""
         seen, uniq = set(), []
@@ -77,9 +79,12 @@ class LongTermMemory:
                            f"{type(e).__name__}: {e}")
             return hits[:k]
 
+    @span("memory.recall", as_type="retriever")
     async def recall(self, query: str, k: int = 5) -> list[Message]:
         """新任务开始时检索回填（调用方：RoleZero._think 里 `_retrieve_experience` 的位置）。
-        hybrid 粗排 → reranker 在场则精排重排（台账 #11 的吸收点）。"""
+        hybrid 粗排 → reranker 在场则精排重排（台账 #11 的吸收点）。
+        N9：整条检索链（embedding → Qdrant hybrid → rerank）不在 LangChain callback 面内，
+        由 span 装饰器手工成 span——S9「hit-rate@5」的证据来源。"""
         dense = await self.embeddings.aembed_query(query)
         hits = await self.store.search(query, list(dense), k=k, doc_type="memory",
                                       user_id=self.user_id, project=self.project_id)

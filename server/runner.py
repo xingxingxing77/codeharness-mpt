@@ -137,8 +137,15 @@ class SessionRunner:
         if getattr(session, "paradigm", "classic") == "dynamic":
             from codeharness.team import _make_llm, dynamic_assembly
             agents, sop = dynamic_assembly(_make_llm(cost_manager))
-        return prepare_project(session.idea, project, agents=agents,
-                               checkpointer=await self._saver(), cost_manager=cost_manager, sop=sop)
+        team, config, init = prepare_project(session.idea, project, agents=agents,
+                                             checkpointer=await self._saver(),
+                                             cost_manager=cost_manager, sop=sop)
+        # N9：全链路 trace 的唯一注入点（_run 与 _resume 都从这里拿 config）。
+        # 节点内裸 model.ainvoke()/tool.ainvoke() 靠 langchain-core 的 var_child_runnable_config
+        # 继承，网关与节点里**不得**再传一次——同一 handler 既显式又继承会双 span。
+        from codeharness.observability import callbacks
+        config["callbacks"] = callbacks()
+        return team, config, init
 
     def answer_human(self, sid: str, content: str) -> bool:
         if not self.store.get(sid):
@@ -213,19 +220,26 @@ class SessionRunner:
     @contextmanager
     def _session_ctx(self, sid: str):
         """装/卸四个 ContextVar。token 只能是局部变量——挂在 self 上会被并发会话互相覆盖，
-        随后 reset 到别人 context 里创建的 token 直接 ValueError。"""
+        随后 reset 到别人 context 里创建的 token 直接 ValueError。
+
+        N9：同时套一层 Langfuse 的会话属性（session_id/user/tags）——两个 astream 循环共用的
+        唯一上下文口，OTel 上下文按 asyncio task 隔离，并发会话不串；未开启时是 nullcontext。"""
+        from contextlib import ExitStack
         from codeharness.runtime import CURRENT_PROJECT, REPORT_SINK, CHAT_SINK
+        from codeharness.observability import session_attributes
         pairs = (
             (SESSION_ID, SESSION_ID.set(sid)),
             (CURRENT_PROJECT, CURRENT_PROJECT.set(self.projects.get(sid, sid))),
             (REPORT_SINK, REPORT_SINK.set(self._make_sink(sid))),
             (CHAT_SINK, CHAT_SINK.set(self.chats.get(sid))),
         )
-        try:
-            yield
-        finally:
-            for var, tok in reversed(pairs):
-                var.reset(tok)
+        with ExitStack() as stack:
+            stack.enter_context(session_attributes(self.store.get(sid), self.projects.get(sid, sid)))
+            try:
+                yield
+            finally:
+                for var, tok in reversed(pairs):
+                    var.reset(tok)
 
     def _forget(self, sid: str, terminal: bool):
         """散会才清 graphs（断点已落 checkpointer 才安全）；awaiting_human 时必须留着供 resume。"""
