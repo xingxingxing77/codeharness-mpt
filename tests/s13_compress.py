@@ -64,7 +64,7 @@ async def t2_compress_enabled():
     cfg = LLMConfig(
         api_key="test",
         model="fake",
-        context_length=10,  # 最大 10 条消息
+        context_length=5,  # 最大 5 tokens → 20 条约 400tokens，必压缩
         compress_threshold=0.5  # 保留 50%
     )
     
@@ -137,6 +137,47 @@ async def t3_compress_minimum():
         # 断言：至少保留 1 条消息
         assert len(captured_msgs) == 1, "应只调用一次"
         assert len(captured_msgs[0]) >= 1, f"应至少保留 1 条消息，实际{len(captured_msgs[0])}"
+    
+    print("✅")
+
+
+async def t4_token_level_compress():
+    """t4: token 级精确压缩——按实际 token 数截断。"""
+    print("t4: token level compress...", end=" ", flush=True)
+    
+    cfg = LLMConfig(
+        api_key="test",
+        model="fake",
+        context_length=50,  # 最大 50 tokens
+        compress_threshold=1.0  # 不压缩，直接用 context_length
+    )
+    
+    fake_llm = FakeLLM(responses=["test"])
+    
+    with patch.object(LLMGateway, '_build', return_value=fake_llm):
+        gateway = LLMGateway(cfg=cfg, cost_manager=None)
+        
+        # 构造长消息（假设每条约 20 tokens）
+        long_msgs = [f"message {i} " * 5 for i in range(10)]  # 约 50 tokens/条
+        
+        captured_msgs = []
+        
+        async def mock_ainvoke(msgs, **kw):
+            captured_msgs.append(msgs)
+            from langchain_core.messages import AIMessage
+            return AIMessage(content="test response")
+        
+        fake_llm.ainvoke = mock_ainvoke
+        
+        # 调用
+        await gateway.ainvoke(long_msgs, tag="test")
+        
+        # 验证 count_tokens（使用新方法名）
+        tokens = gateway._count_tokens_direct(long_msgs)
+        assert tokens > 0, "应计数到 tokens"
+        
+        # 验证压缩后不超过阈值（约 50tokens/条，max=50 → 应保留 1-2 条）
+        assert len(captured_msgs[0]) <= 2, f"应压缩到≤2 条（50tokens/50tokens≈1），实际{len(captured_msgs[0])}"
     
     print("✅")
 

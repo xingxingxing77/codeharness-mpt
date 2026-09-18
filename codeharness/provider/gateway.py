@@ -84,6 +84,49 @@ class LLMGateway:
             kwargs["model_kwargs"] = {"api_version": cfg.api_version}
         return ChatOpenAI(**kwargs)
 
+    def _count_tokens_direct(self, messages: Union[str, list, None]) -> int:
+        """直接计数消息的 token 数（tiktoken，不查模型表）。"""
+        from tiktoken import get_encoding
+        
+        tokens = 0
+        try:
+            encoding = get_encoding("cl100k_base")  # gpt-4o 同款
+            for msg in (messages if isinstance(messages, list) else [messages]):
+                content = msg.content if hasattr(msg, "content") else str(msg)
+                tokens += len(encoding.encode(content))
+        except Exception:
+            # 降级：按字符数/4 估算
+            content = messages if isinstance(messages, str) else "\n".join(
+                str(m.content if hasattr(m, "content") else m) for m in (messages or [])
+            )
+            tokens = len(content) // 4
+        return tokens
+    
+    async def _compress_messages(self, msgs: list, max_tokens: int) -> list:
+        """B6: 精确压缩——逐条累加直到超过阈值。
+
+        ponytail: ceiling 是「仅支持 post_cut_by_token 策略」，其他三策略（by_msg/pre_cut）留待未来。
+        """
+        from codeharness.configs.compress_msg_config import CompressType
+        
+        compress_type = self.cfg.compress_type
+        if compress_type == CompressType.NO_COMPRESS:
+            return msgs
+        
+        # 当前实现：post_cut_by_token（保留最近的消息，直到总 token ≤ max_tokens）
+        compressed = []
+        current_tokens = 0
+        
+        # 从后往前累加（保留最近的）
+        for msg in reversed(msgs):
+            msg_tokens = self._count_tokens_direct([msg])
+            if current_tokens + msg_tokens > max_tokens and compressed:
+                break
+            current_tokens += msg_tokens
+            compressed.insert(0, msg)  # 保持顺序
+        
+        return compressed if compressed else [msgs[-1]]  # 至少保留最后一条
+    
     @staticmethod
     def embeddings():
         """bge-m3 embedding 工厂（1024 维，OpenAI 兼容端点）。向量模型不走 gateway。
@@ -135,11 +178,14 @@ class LLMGateway:
         # B6: token 压缩——按 context_length × threshold 裁断（保留最近的消息）
         if self.cfg.context_length and self.cfg.compress_threshold < 1.0:
             max_tokens = int(self.cfg.context_length * self.cfg.compress_threshold)
-            # 简单策略：保留最近 N 条消息（假设每条平均 token 数相近）
-            # 更精确的实现需要结合 count_tokens() 逐条累加
-            if len(msgs) > max_tokens:
-                keep_count = max(1, int(len(msgs) * self.cfg.compress_threshold))
-                msgs = msgs[-keep_count:]
+            
+            # 直接计算 tokens（不调用 count_message_tokens 避免模型查表）
+            current_tokens = self._count_tokens_direct(msgs)
+            
+            if current_tokens > max_tokens:
+                # 精确压缩：逐条累加直到超过阈值
+                compressed = await self._compress_messages(msgs, max_tokens)
+                msgs = compressed
         
         model = self._model.bind(**kwargs) if kwargs else self._model
         deadline = timeout or self.cfg.timeout
