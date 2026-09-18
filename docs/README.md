@@ -232,7 +232,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **`paradigm=dynamic` 接线**：Session/CreateSessionReq 加 paradigm（错值 422）；`team.dynamic_assembly()`=default_team 三角色+动态路由表（需求只喂队长 Mike）；runner `_prepare` 按 paradigm 分流、`_ensure_graph` 重建走同一函数；s3b t14 钉装配自洽+行为级「任务文本必须进模型请求」。
 - **对照数字（真模型同 idea 同端点）**：本仓 RoleZero 线 **finished/~7min/≈21 调/123.8K token/≈¥0.14**，产物 tinycli.py+test_tinycli.py 与源 MGX 同结构、9 测试真跑全过——同范式下 token 48%、成本 41%（口径注脚与差异如实记在 `storage/benchmark/s9_dualrun.md` 新段）。
 - **对照首跑现形三处（第十七~十九处，全修全钉）**：①RoleZero `as_node` 只设 `_plan_goal` 不入 memory——模型上下文里没有需求，真模型「先问用户」零产物"假收口"；②`act→think` 无条件回跳：end 后多烧一次模型+收尾 KeyError；③qdrant 不在时 `_check_compatibility` 非 daemon 线程吊死进程退出（门禁不许挂在外部服务上）。**教训：FakeLLM 门禁测不到"上下文里有没有任务"这种语义洞——端到端真跑是唯一照得出它的镜子**（陷阱 #2 第五次应验）。
-- **S9 剩余**：~~#19② 大 idea 全链收口~~（真钱）、~~#19③ PRD prompt 校准~~、~~9.2 benchmark 门禁~~、~~9.2 perfect_judges~~、~~9.3 UI 版扩展点验收~~（2026-09-18 全收口）——**剩真钱批**：#19② 大 idea 全链收口（¥2 级）、9.2 strategy 三档曲线、双跑 3 次取中位、manual_judge_quality 真跑评分。
+- **S9 剩余**：~~#19② 大 idea 全链收口~~、~~#19③ PRD prompt 校准~~、~~9.2 benchmark 门禁~~、~~9.2 perfect_judges~~、~~9.3 UI 版扩展点验收~~、~~双跑 3 次取中位~~（2026-09-18 全收口，见下方当日三段）——S9 未竟项仅剩非阻塞遗留：N4 trace 前端面板、N6 时间旅行回放、跨币种计费对齐（第十处注 3）。
 
 ### 2026-09-18 · S9 #19③ 第十四处校准收口（提交 `d879d61`）
 
@@ -255,6 +255,15 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **真钱活体验收 PASS**（`tests/manual_ext_ui.py`，qwen3.8-flash，¥0.0037/41 事件）：不改任何内核，经 ext_api 注册 Poet 角色 + Haiku Action + ext_count_chars 工具 + ext_demo 模板 → 真模型跑通完整会话 → UI 可见——Timeline 上 **`Poet 文档` 块**带打油诗真文「举杯邀月敲终端 / 一行命令动九天 / 莫笑书生多醉笔 / 代码万里亦成仙」；右侧「编排」卡 SVG 里**唯一角色节点 Poet + UserRequirement 订阅边**，无 PM/Architect 等经典线节点。
 - s6 t19 +模板注册守卫（重名/非模板件拒绝，四条守卫），s8 t4 +三态诚实性断言；`frontend/types.ts` 补 paradigm/sop 字段（3f99b36 加后端字段时前端漏同步）。
 - 门禁基线：**15 个不花钱脚本全 exit 0**（+s9_langfuse）。
+
+### 2026-09-18 晚 · S9 真钱批全收口（#19② + 9.2 曲线/评分/中位）
+
+用户批 ¥3-4 预算，四件全跑完（qwen3.8-flash，实测合计 ≈¥2.6）：
+
+- **perfect_judges 真跑评分**（`manual_judge_quality.py` → `s9_judged_quality.json`）：经典线首跑烂摊 **1.3/10**（第十四处幻觉产物被真模型判"答非所问"——评分器方向正确）；动态线 finished 场 **3.0/10**。口径注脚：SimpleScorer 逐件评，测试文件被评"没实现工具"是口径粗非产物差；跨会话可比、单件绝对值仅供参考。harness 补 RoleZero 线回退（代码件不进 SRC 仓则评会话根目录 *.py）。
+- **#19② 大 idea 策略曲线**（同 todo CLI idea 三档，`manual_strategy_curve.py` → `s9_strategy_curve.json` + 表入 s9_dualrun.md）：**role_zero finished/747s/¥0.16/109K（todo.py+test 齐全）**；sop 未收口@20min 窗/¥1.50/710K（链路到 QA 起步，比首跑走得更远——第十四处校准+文件名归一生效）；react finished@128s/¥0.018 但**代码件为空**（快而不做活，选型必须配产物校验）。第三腿 react 接线=`team.react_assembly`（经典队形×REACT，组队版 build_role 换装）+ paradigm 第三值（s3b t14 扩两态断言）。
+- **双跑 3 次取中位**（同范式对照 ×3，表入 s9_dualrun.md）：源 MGX 3/3 finished、中位 15 调/191.4K token（≈¥0.25 折算）；本仓 RoleZero 2/3 finished（r3 连接错误停场，tinycli.py 已产出，如实记）、中位 64.9K token/¥0.115——**本仓 token = 源的 34%**，与首跑单次 48% 同向更优。源侧 runner 补 sparkai/tree_sitter_languages 桩（上游 spark_api/linter 是 requirements 外死件，py3.13 装不上、MaaS 线零调用）。
+- **台账 #19 三笔全收口（①②③）**；接线台账 19 行无一处"在途"。S9 未竟项只剩：N4 trace 前端面板（S8 遗留）、S8 时间旅行回放、跨币种计费对齐（第十处注 3）——均为非阻塞遗留，见施工4 各段。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
