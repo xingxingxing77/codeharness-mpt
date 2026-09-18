@@ -213,7 +213,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **第十五处（真浏览器现形，已修+钉门禁 t5）**：`/workspace/file` 响应一直没有 `ext`/`type` 字段，前端 `ToolsPanel.onSelect` 的 markdown/image/.mmd 三类预览分支**从未命中过**——`.md` 一直显示成高亮代码。FakeLLM 门禁与路由核对都查不出「路由在但形状错」，浏览器点开才炸（陷阱 #2 第四次应验）。
 - 验收方式：真浏览器（应用内）逐屏 DOM 验收——编排图 7 节点+8 SOP 边全标签、象限图（s9_dualrun3 产物 `competitive_analysis.mmd`）title/四象限/7 坐标全渲染、围栏水合 1 图 0 残留、用量页 22 会话与顶栏 ¥2.103/299.5k/690k 互洽、行点击跳转、币种。**视觉判据全部打在 DOM 几何与文本上**（本会话模型不收图）。
 - **S8-B 终验当日过（真模型+真浏览器）**：专用块上屏（一场收口 29 块）/插话/stop/文件树+下载 全过；块事件序列快照存 `storage/benchmark/s8_events_snapshot.json`（295 events，Thought/Docs/Editor 三族）。**人工回答**一项经典线无 interrupt 点，UI 接线在位、图级门禁已钉，活体验收挂 S9 的 DI 策略会话。顺带修两处收口观感：stream 块 end_marker 收口（s8 t3 钉）+ 光标仅运行态。真模型两笔实测费：¥0.133（收口场）+ ~¥0.03（stop 场）。
-- **S8 未闭合项**：N6 时间旅行回放（等 S7 checkpointer 快照采集）；N4 trace 面板（等 S7 trace 存储）；~~登录/多租户 UI（等 N1 服务端）~~（2026-09-18 N1 全栈落地，见当日 N1 段）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
+- **S8 未闭合项**：N6 时间旅行回放（等 S7 checkpointer 快照采集）；~~N4 trace 面板（等 S7 trace 存储）~~（2026-09-18 前端面板落地，见当日 N4 段）；~~登录/多租户 UI（等 N1 服务端）~~（2026-09-18 N1 全栈落地，见当日 N1 段）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
 - 门禁基线：**十二个不花钱脚本全 exit 0**（十一件套 + s8_frontend_contract 5 组）。
 
 ### 2026-09-17 · S7 双实现落地（feature flag 默认关，未切默认）
@@ -273,6 +273,13 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **门禁 `tests/s10_auth.py` 6 组**：auth 双态现状 / 注册登录流 / 跨用户隔离 404 + SSE 查询参数通道 / 跨用户同名 409 / 配额分桶 / 前端契约 grep。t3 当场撞 README 已登记的 **SSE 无限流陷阱第二次应验**（TestClient 直接 GET /events 永不返回——改在流开始前验证 404 语义）。s8 t3 路由核对相应豁免 `startsWith('/api/auth')` 前缀守卫串。
 - **活体验收 PASS（真浏览器）**：auth 开→登录页接管→注册 n1tester 直进主界面（侧栏显示用户行）→登出回登录页→重登回主界面，全链通。`server/data/users.json` 是运行时凭据，已入 `.gitignore` 不进版本库。
 - 门禁基线：**16 个不花钱脚本全 exit 0**（+s10_auth）。
+
+### 2026-09-18 晚 · N4 trace 前端面板收口（提交 `cfe4026`，S7 数据层早已就位的前端最后一公里）
+
+- **事实**：`platforms/trace.py`（ZSET `ch:trace:{sid}`）与 `GET /{sid}/trace` 端点 S7 就落地；S7 切 redis 默认后 runner 在 `on_chat_model_end` 已在记真 span（node/pt/ct/cost/ts 五键增量）——**数据一直在攒，只欠前端**。
+- **前端**：ToolsPanel 第六卡「用量」→ trace 视图：汇总行（调用数/prompt/completion/成本）+ 每笔调用一行（时刻 · 节点 · ↑pt ↓ct · ¥增量）；status 到 finished/stopped/failed 自动刷新；`api.sessionTrace` + `ui.rightView` 扩 'trace' 态，样式复用 review 骨架。
+- **门禁 t6（s8 5→6 组）**：/trace 回 spans 键（进程内/redis 两态都成立）+ **span 词汇表核对**——runner `trace.record({...})` 键字面量 == client.ts 消费字段集（5 字段）。「路由在但形状错」t3 查不出（真浏览器第十五处同族洞），词汇表核对同 t1/t2 法。基线 16 脚本全绿。
+- **ceiling 在册**：面板拉取式（进视图/跑完/手动刷新），不做流式增量——span 每调用才一条，频度低，拉取够用；P95 聚合未做（数据可查即可出）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
