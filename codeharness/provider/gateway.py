@@ -103,29 +103,33 @@ class LLMGateway:
         return tokens
     
     async def _compress_messages(self, msgs: list, max_tokens: int) -> list:
-        """B6: 精确压缩——逐条累加直到超过阈值。
+        """B6: 精确压缩——保留最近的消息直到总 token ≤ max_tokens（post_cut_by_token）。
 
-        ponytail: ceiling 是「仅支持 post_cut_by_token 策略」，其他三策略（by_msg/pre_cut）留待未来。
+        是否触发压缩由调用点 ainvoke 按 `context_length × compress_threshold` 决定；
+        本函数被调用即执行裁剪（不再二次判 compress_type，否则与调用点两套门互搏）。
+        策略按 compress_type 分派（源 base_llm.py 四策略）在批次 5 引入。
+        ponytail: ceiling = 目前只有 post_cut_by_token 一种，by_msg/pre_cut 留待批次 5。
+
+        system 恒留（照源 base_llm.py：先摘 system 再裁非 system，最后 system 插回队首）。
         """
-        from codeharness.configs.compress_msg_config import CompressType
-        
-        compress_type = self.cfg.compress_type
-        if compress_type == CompressType.NO_COMPRESS:
-            return msgs
-        
-        # 当前实现：post_cut_by_token（保留最近的消息，直到总 token ≤ max_tokens）
+        system_msgs = [m for m in msgs if getattr(m, "type", getattr(m, "role", "")) in ("system", "developer")]
+        rest = [m for m in msgs if m not in system_msgs]
+        budget = max_tokens - self._count_tokens_direct(system_msgs)
+
         compressed = []
         current_tokens = 0
-        
+
         # 从后往前累加（保留最近的）
-        for msg in reversed(msgs):
+        for msg in reversed(rest):
             msg_tokens = self._count_tokens_direct([msg])
-            if current_tokens + msg_tokens > max_tokens and compressed:
+            if current_tokens + msg_tokens > budget and compressed:
                 break
             current_tokens += msg_tokens
             compressed.insert(0, msg)  # 保持顺序
-        
-        return compressed if compressed else [msgs[-1]]  # 至少保留最后一条
+
+        if not compressed and rest:
+            compressed = [rest[-1]]    # 至少保留最后一条非 system
+        return system_msgs + compressed  # system 恒在队首
     
     @staticmethod
     def embeddings():

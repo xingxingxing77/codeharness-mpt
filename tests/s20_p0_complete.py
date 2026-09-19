@@ -15,14 +15,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 async def t1_agent_memory_feed():
     """t1: Agent._act 从 Memory 取历史进 prompt。"""
-    print("t1: agent memory feed...", end=" ", flush=True)
-    
-    # 验证代码已修改（grep 检查）
+    print("t1: agent content-no-pollution guard...", end=" ", flush=True)
+
+    # 回归守卫：content 是下一动作的工作载荷（RunPythonCode 直接 run_python_code(content)），
+    # 不得把「## 历史对话」散文前缀塞进去（曾致 DataAnalyst 沙箱 SyntaxError）。跨动作上下文走 instruct_content 透传。
     with open("codeharness/roles/agent.py", "r", encoding="utf-8") as f:
         content = f.read()
-        assert "recent_history" in content, "Agent._act 应引入 recent_history"
-        assert "history_str" in content, "应拼接历史上下文"
-    
+        assert "## 历史对话" not in content, "_act 不得往 msg.content 前缀历史对话（会污染代码型 Action）"
+        assert "instruct_content=trig.instruct_content" in content, "跨动作上下文应经 instruct_content 透传"
+
     print("✅")
 
 

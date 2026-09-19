@@ -121,27 +121,16 @@ class Agent:
     # ---- 源 _act(:381-397) 逐行翻译 + self-heal 收口 ----
     async def _act(self, s: AgentState):
         from langgraph.errors import GraphInterrupt
-        
         action = self.actions[s["chosen"]]
-        
-        # P0-2: 经典线历史回喂——从短期记忆取最近消息进 prompt
-        memory_k = getattr(self, "memory_k", 10)  # 默认最近 10 条
-        recent_history = []
-        if hasattr(self, "memory") and self.memory:
-            recent_history = self.memory.get(k=memory_k)[-10:]  # 从 Memory 取
-        
         if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
             prompt = self._format_inbox(s["inbox"])
             trig = s["inbox"][-1]
         else:                                                # BY_ORDER 第 2+ 动作：收件箱已清，退化为最近记忆
             trig = s["memory"][-1] if s["memory"] else Message(content="")
             prompt = trig.content
-        
-        # 拼接历史上下文（如果有的话）
-        if recent_history:
-            history_str = "\n".join(f"[{h.role}]: {h.content[:500]}" for h in recent_history)
-            prompt = f"## 历史对话\n{history_str}\n\n## 当前任务\n{prompt}"
-        
+        # 注：跨动作上下文走 trig.instruct_content 透传（下面 run(...)），不改 msg.content——
+        # content 是下一动作的工作载荷（如 RunPythonCode 直接把它当代码执行），前缀散文会污染。
+        # 「经典线记忆回喂进 prompt」是 _think 侧 system 上下文的事（对照1 §五-8），不在 _act 做。
         try:
             result = await action.run(Message(
                 content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,

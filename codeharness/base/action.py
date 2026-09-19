@@ -37,7 +37,8 @@ def _is_empty(v: Any) -> bool:
     return False
 
 
-class BaseAction(BaseModel):
+class Action(BaseModel):
+    """动作基类（别名，保持向后兼容）。"""
     name: str = ""
     desc: str = ""
     prefix: str = ""                                        # system prompt（Agent.build_prefix 灌入）
@@ -139,3 +140,8 @@ class BaseAction(BaseModel):
 
     async def run(self, *args, **kwargs):
         raise NotImplementedError("子类必须实现 run")
+
+
+# 向后兼容别名：本类历史上名为 BaseAction，全仓 36 处 `from ...base.action import BaseAction`
+# 依赖该名字（tests/ext_api/skills/actions 皆有）。改名 Action 后保留此别名，不逐个改 import。
+BaseAction = Action

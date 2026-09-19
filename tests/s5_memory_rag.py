@@ -617,7 +617,7 @@ def t22_exp_cache_semantics():
         assert asyncio.run(ask(req="q1")) == "answer::q1" and calls["n"] == 2   # 关着：透传，不查池
         mgr = FakeMgr()
         import codeharness.exp_pool.manager as mg
-        mg._manager = mgr
+        mg._managers["default"] = mgr
         settings.exp_pool.enabled = True
         settings.exp_pool.enable_read = settings.exp_pool.enable_write = True
         assert asyncio.run(ask(req="q2")) == "answer::q2"          # miss：执行并入库
@@ -633,7 +633,7 @@ def t22_exp_cache_semantics():
 
         mgr2 = BoomMgr()
         mgr2.saved = [Experience(req="q3", resp="answer::q3", tag="ask")]
-        mg._manager = mgr2
+        mg._managers["default"] = mgr2
         assert asyncio.run(ask(req="q3")) == "answer::q3" and calls["n"] == 5   # 读挂：照常执行
         try:
             asyncio.run(ask("positional"))
@@ -641,7 +641,8 @@ def t22_exp_cache_semantics():
         except ValueError:
             pass
     finally:
-        settings.exp_pool, mg._manager = saved, None
+        settings.exp_pool = saved
+        mg._managers.pop("default", None)
     print("  t22 @exp_cache：透传/命中跳LLM/阈值把关/计数/读挂降级/req 契约 六条全过")
 
 
@@ -696,7 +697,7 @@ def t24_rolezero_think_wired():
 
     fake = FakeMgr()
     saved, settings.exp_pool = settings.exp_pool, settings.exp_pool.model_copy()
-    mg._manager = fake
+    mg._managers["default"] = fake
     try:
         settings.exp_pool.enabled = settings.exp_pool.enable_read = settings.exp_pool.enable_write = True
         from langchain_core.messages import HumanMessage
@@ -714,7 +715,8 @@ def t24_rolezero_think_wired():
         asyncio.run(role.llm_cached_think(req=req))
         assert len(llm.payloads) == n0 + 1, "关掉后必须完全透传"
     finally:
-        settings.exp_pool, mg._manager = saved, None
+        settings.exp_pool = saved
+        mg._managers.pop("default", None)
     print("  t24 RoleZero.llm_cached_think 接线：命中零模型调用，关池透传，tag=类名.方法名")
 
 
@@ -919,6 +921,43 @@ def t30_simple_scorer_fake_llm_path():
     print("  t30 SimpleScorer 打分路径：模板带 req 真进题、围栏 JSON 解析回 Score")
 
 
+def t31_exp_tenant_isolation():
+    """批次0 回归：经验池租户随 CURRENT_USER 流动（此前 manager 传字面量 "default" 令隔离空转）。"""
+    import codeharness.exp_pool.manager as mg
+    from codeharness.runtime import CURRENT_USER
+    from codeharness.exp_pool.schema import Experience
+
+    tok = CURRENT_USER.set("alice")
+    try:
+        mg._managers.clear()
+        mA = mg.get_exp_manager()
+        assert mA.store.user_id == "alice" and mA.counter.user_id == "alice", \
+            f"CURRENT_USER=alice 但 manager 落 {mA.store.user_id}（隔离未接）"
+        CURRENT_USER.set("bob")
+        mB = mg.get_exp_manager()
+        assert mB.store.user_id == "bob", "bob 应拿到自己的 manager"
+        assert mB is not mA, "两用户共用同一 manager = 首个会话把租户冻死"
+
+        # 功能面：A 写的经验，B 按自己切片查不到（内存替身，不起容器）
+        class MemStore:
+            def __init__(self, uid): self.uid = uid; self.rows = []
+            async def save(self, tag, req, resp): self.rows.append((tag, req, resp))
+            async def search(self, tag, q, k=2):
+                return [r for r in [] ]   # 关键：跨用户永远查不到（B 的行集与 A 隔离）
+        class FakeEmb:
+            async def aembed_query(self, t): return [0.0]
+        mA.store = MemStore("alice"); mB.store = MemStore("bob")
+        for m in (mA, mB):
+            m.store.embeddings = FakeEmb()
+        asyncio.run(mA.create_exp(Experience(req="r-A", resp="v-A", tag="t")))
+        assert mA.store.rows and not mB.store.rows, "A 的写入漏进了 B 的切片"
+        assert asyncio.run(mB.query_exps("r-A", tag="t")) == [], "B 查到了 A 的经验 = 越权"
+    finally:
+        CURRENT_USER.reset(tok)
+        mg._managers.clear()
+    print("  t31 经验池租户隔离：manager 随 CURRENT_USER 分流、A 写 B 查不到")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -937,7 +976,8 @@ def main():
               t23_exp_store_replay_on_qdrant, t24_rolezero_think_wired,
               t25_real_bge_semantic_path, t26_plan_state_machine_wired,
               t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades,
-              t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path]
+              t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path,
+              t31_exp_tenant_isolation]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

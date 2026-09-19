@@ -16,12 +16,21 @@ from codeharness.utils.redis import Redis
 HIT_KEY = "exp_hits"          # key = exp_hits:{user_id}:{point_id}，point id 由 (tag, req) 派生
 
 
+def _resolve_user(user_id: str | None) -> str:
+    """user_id=None 时读 CURRENT_USER（N1 多租户），auth 关时该 ContextVar 恒 "default"。
+    此前默认值是字面量 "default"，令 ExpStore 的 `user_id or CURRENT_USER.get(...)` 短路、租户隔离空转。"""
+    if user_id:
+        return user_id
+    from codeharness.runtime import CURRENT_USER
+    return CURRENT_USER.get("default")
+
+
 class HitCounter:
     """Redis 命中计数。`get` 失败返回 0、`bump` 失败静默——降级语义与 utils/redis.py 同源。"""
 
-    def __init__(self, redis: Redis | None = None, user_id: str = "default"):
+    def __init__(self, redis: Redis | None = None, user_id: str | None = None):
         self.redis = redis or Redis()
-        self.user_id = user_id
+        self.user_id = _resolve_user(user_id)
 
     def _key(self, exp_id: str) -> str:
         return f"{HIT_KEY}:{self.user_id}:{exp_id}"
@@ -38,11 +47,11 @@ class HitCounter:
 
 
 class ExperienceManager:
-    def __init__(self, store=None, counter: HitCounter | None = None, user_id: str = "default"):
+    def __init__(self, store=None, counter: HitCounter | None = None, user_id: str | None = None):
+        user_id = _resolve_user(user_id)
         if store is None:
             from codeharness.document_store.exp_store import ExpStore
             store = ExpStore(user_id=user_id)
-            user_id = store.user_id        # 自建时租户跟存储一致；显式传入 store 则 user_id 由调用方负责
         self.store = store
         self.counter = counter or HitCounter(user_id=user_id)
 
@@ -77,11 +86,13 @@ class ExperienceManager:
             logger.debug("ExpStore 无 clear：集合级清理由自测的 drop() 负责")
 
 
-_manager: ExperienceManager | None = None
+_managers: dict[str, ExperienceManager] = {}
 
 
 def get_exp_manager() -> ExperienceManager:
-    global _manager
-    if _manager is None:
-        _manager = ExperienceManager()
-    return _manager
+    """按用户缓存：单例若不分租户，首个会话会把 user_id 冻死，后续跨用户命中（越权）。"""
+    uid = _resolve_user(None)
+    mgr = _managers.get(uid)
+    if mgr is None:
+        mgr = _managers[uid] = ExperienceManager(user_id=uid)
+    return mgr
