@@ -486,13 +486,43 @@ def t14_dynamic_paradigm_assembly():
         "任务文本没进模型请求——第十七处复发（inbox→memory 断链）"
 
 
+def t16_run_code_named_delivery():
+    """批次4：全仓唯一生产级具名投递（run_code.py:97-109 QA 分诊）两分支的行为断言。
+    ok→<self> 自环；fail 且复盘 'Send To: Engineer'→具名 Engineer。此前裸奔（s3b t3 用合成 QA）。"""
+    import sys
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.actions.run_code import RunCode
+    from codeharness.schema import Message, RunCodeContext
+
+    CURRENT_PROJECT.set("s3b_delivery")
+    # 分支①：命令成功（rc=0）→ <self>
+    ok_ctx = RunCodeContext(command=[sys.executable, "-c", "pass"], code_filename="a", test_filename="t")
+    msg_ok = Message(content="run", role="user", instruct_content=ok_ctx.model_dump(),
+                     instruct_schema="RunCodeContext")
+    r_ok = asyncio.run(RunCode(llm=FakeLLM(["## Send To:\nQaEngineer"])).run(msg_ok))
+    assert MESSAGE_ROUTE_TO_SELF in r_ok.send_to, f"成功应自环 <self>，实际{r_ok.send_to}"
+    assert r_ok.instruct_schema == "RunCodeContext", f"自环应带 RunCodeContext，实际{r_ok.instruct_schema}"
+
+    # 分支②：命令失败（rc≠0）+ 复盘 'Send To: Engineer' → 具名投 Engineer
+    fail_ctx = RunCodeContext(command=[sys.executable, "-c", "raise SystemExit(3)"],
+                              code_filename="a", test_filename="t")
+    msg_fail = Message(content="run", role="user", instruct_content=fail_ctx.model_dump(),
+                       instruct_schema="RunCodeContext")
+    r_fail = asyncio.run(RunCode(llm=FakeLLM(["## Send To: Engineer"])).run(msg_fail))
+    assert r_fail.send_to == {"Engineer"}, f"失败+分诊 Engineer 应具名投 Engineer，实际{r_fail.send_to}"
+    assert r_fail.instruct_schema == "CodingContext", f"具名投递应带 CodingContext，实际{r_fail.instruct_schema}"
+    assert "filename" in (r_fail.instruct_content or {}), "CodingContext 必须有 filename（extra=forbid 校验）"
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
-              t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly]
+              t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
+              t16_run_code_named_delivery]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
