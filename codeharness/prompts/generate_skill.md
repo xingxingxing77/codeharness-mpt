@@ -9,10 +9,10 @@ For instance, if the context is:
 ```python
 from typing import Optional
 from abc import ABC
-from metagpt.llm import LLM # Large language model, similar to GPT
+from codeharness.provider.gateway import LLMGateway # Large language model gateway, similar to GPT
 
 class Action(ABC):
-    def __init__(self, name='', context=None, llm: LLM = LLM()):
+    def __init__(self, name='', context=None, llm: LLMGateway = LLMGateway()):
         self.name = name
         self.llm = llm
         self.context = context

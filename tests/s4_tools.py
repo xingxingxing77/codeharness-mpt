@@ -529,9 +529,10 @@ def t37_git_tools_degrade_without_gh():
 
 
 def t38_no_dangling_metagpt_imports():
-    """代码里不得残留 `from metagpt`（prompts/ 逐字资产豁免——那是源文本自含的字样，不是 import）。
-    git.py 两函数与 editor.similarity_search 曾是'一接线就 ModuleNotFoundError'的死复制件，
-    本检查保证同类问题不再静默回归（台账 #8/#9 的机器版）。"""
+    """① 代码不得残留 `from metagpt`（git.py/editor.similarity_search 曾是"一接线就 ModuleNotFoundError"
+    的死复制件，台账 #8/#9 机器版）。② 且 prompts/ 里不得出现 `metagpt.` 点号引用——本仓无 metagpt 包，
+    prompt 让模型 `from metagpt.tools.libs... import` 生成的代码必 ModuleNotFoundError（对照3 §结论-2；
+    旧版这里豁免 prompts/，正是那道 bug 逃过门禁的原因，批次2 已改净并收紧）。"""
     import re as _re
     root = Path(__file__).resolve().parents[1] / "codeharness"
     hits = []
@@ -541,7 +542,13 @@ def t38_no_dangling_metagpt_imports():
         for i, ln in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             if _re.match(r"\s*(from|import)\s+metagpt\b", ln):
                 hits.append(f"{p.relative_to(root.parent)}:{i}")
-    assert not hits, f"供体包悬空 import: {hits}"
+    # prompts 收紧：任何 metagpt. 点号引用（会诱导模型产出悬空 import）一律算回归
+    for p in sorted((root / "prompts").rglob("*")):
+        if p.is_file() and p.suffix in {".py", ".md"}:
+            for i, ln in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                if "metagpt." in ln:
+                    hits.append(f"{p.relative_to(root.parent)}:{i}")
+    assert not hits, f"metagpt 悬空引用（代码 import 或 prompt 诱导串）: {hits}"
 
 
 def main():

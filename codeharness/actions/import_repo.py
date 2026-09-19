@@ -82,8 +82,8 @@ class ImportRepo(Action):
                 await repo.insert(subject=str(parent), predicate="contains", object_=node)
             
             # 文件类型关系
-            if item.is_file():
-                suffix = item.suffix.lower()
+            if node_path.is_file():
+                suffix = node_path.suffix.lower()
                 await repo.insert(
                     subject=node,
                     predicate="has_type",

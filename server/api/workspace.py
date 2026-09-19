@@ -48,3 +48,31 @@ def file(sid: str, path: str, request: Request, user: str = Depends(current_user
         return {"path": str(target), "ext": ext, "mime": mime}   # 二进制不回文本，前端走 /workspace 静态 URL
     return {"path": str(target), "content": target.read_text(encoding="utf-8", errors="replace"),
             "mime": mime, "ext": ext}
+
+
+@router.post("/{sid}/workspace/import_repo")
+async def import_repo(sid: str, request: Request, user: str = Depends(current_user)):
+    """把仓库导入成 SPO 图 + .mmd（批次2：ImportRepo 从死件接成有唯一调用者）。
+
+    repo_path 取自 body，必须落在 workspace_root 内（防任意路径读取）；产物写进本会话工作区。
+    """
+    from codeharness.runtime import CURRENT_PROJECT, session_root
+    body = await request.json()
+    repo_path = Path(str(body.get("repo_path", ""))).resolve()
+    ws_root = Path(session_root()).resolve().parent        # workspace_root（各会话目录的父）
+    if not repo_path.is_dir():
+        raise HTTPException(400, "repo_path 必须是已存在的目录")
+    if not repo_path.is_relative_to(ws_root):
+        raise HTTPException(400, "repo_path 必须在 workspace_root 内")
+
+    workspace = _ws(request, sid, user)                    # 顺带越权校验（404）
+    tok = CURRENT_PROJECT.set(workspace.name)              # 让 ImportRepo 内 ArtifactStore 落到本会话
+    try:
+        from codeharness.actions.import_repo import ImportRepo
+        return await ImportRepo(llm=None)._call({
+            "repo_path": str(repo_path),
+            "save_name": str(body.get("save_name", "repo")),
+            "include_files": bool(body.get("include_files", True)),
+        })
+    finally:
+        CURRENT_PROJECT.reset(tok)
