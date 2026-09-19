@@ -237,7 +237,7 @@ class RoleZero:
                 # structured 失败 → 纯文本重问 + repair 管线 + LLM 自修（源 parse_commands + JSON_REPAIR 链）
                 from codeharness.provider.repair import llm_repair_json
                 raw = await self.llm.aask([*context, HumanMessage(content=prompt)], tag="rz_fallback")
-                thought = llm_repair_json(raw, ZeroThought, self.llm) or ZeroThought(
+                thought = await llm_repair_json(raw, ZeroThought, self.llm) or ZeroThought(
                     thought=f"[解析失败，已按 end 处理] {raw[:200]}",
                     commands=[{"command_name": "end", "args": {}}])
             await rep.content(thought.thought)
