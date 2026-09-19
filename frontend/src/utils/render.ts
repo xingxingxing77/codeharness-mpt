@@ -26,10 +26,17 @@ export function renderMarkdown(text: string): string {
 const defaultFence = md.renderer.rules.fence!.bind(md.renderer)
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const token = tokens[idx]
-  if (token.info.trim().split(/\s+/)[0] === 'mermaid') {
+  const info = token.info.trim().split(/\s+/)[0]
+  if (info === 'mermaid') {
     return `<div class="mmd-src">${md.utils.escapeHtml(token.content)}</div>\n`
   }
-  return defaultFence!(tokens, idx, options, env, self)
+  // 复制按钮不存源码副本：点击时从同容器的 code.textContent 取，省一次转义
+  return (
+    `<div class="md-code-block"><div class="md-code-banner">` +
+    `<span class="md-code-lang">${md.utils.escapeHtml(info || 'text')}</span>` +
+    `<button type="button" class="md-code-copy" data-action="copy-code">复制</button>` +
+    `</div>${defaultFence!(tokens, idx, options, env, self)}</div>\n`
+  )
 }
 
 const EXT_LANG: Record<string, string> = {

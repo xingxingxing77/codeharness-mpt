@@ -11,12 +11,12 @@
 
           <main class="center">
             <template v-if="store.current">
-              <SessionTopBar />
-              <div class="chat-col">
-                <Timeline />
-                <OutputsCard v-if="!ui.rightPanel" />
-                <ChatInput />
-              </div>
+              <ConversationRoot>
+                <template #composer>
+                  <ChatInput />
+                </template>
+              </ConversationRoot>
+              <!-- 日志暂时只有这一个去处；F7 把它并进右栏 detailsCol 后一起删 -->
               <TerminalPanel v-if="ui.terminalOpen" />
             </template>
             <template v-else>
@@ -53,15 +53,13 @@ import { useThemeStore } from './stores/theme'
 import BoltHero from './components/BoltHero.vue'
 import AppFrame from './components/frame/AppFrame.vue'
 import ChatInput from './components/ChatInput.vue'
+import ConversationRoot from './components/conversation/ConversationRoot.vue'
 import CreateSessionModal from './components/CreateSessionModal.vue'
 import HumanInputDialog from './components/HumanInputDialog.vue'
 import LoginPage from './components/LoginPage.vue'
-import OutputsCard from './components/OutputsCard.vue'
 import SidebarRoot from './components/sidebar/SidebarRoot.vue'
-import SessionTopBar from './components/SessionTopBar.vue'
 import SettingsView from './components/SettingsView.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
-import Timeline from './components/Timeline.vue'
 import ToastLayer from './components/ui/ToastLayer.vue'
 import ToolsPanel from './components/ToolsPanel.vue'
 
@@ -88,20 +86,15 @@ watch(
 </script>
 
 <style scoped>
-/* 中栏自己只是一根竖直列；三栏几何在 AppFrame + stores/layout 里 */
+/* 中栏自己只是一根竖直列；三栏几何在 AppFrame + stores/layout 里。
+   必须显式 flex:1，否则它在纵向 flex 父容器里按内容收缩，
+   ConversationRoot 的 flex:1 与 sticky composer 都失去参照。 */
 .center {
+  flex: 1;
+  min-height: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.chat-col {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  position: relative;
 }
 </style>

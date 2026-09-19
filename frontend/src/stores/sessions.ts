@@ -41,6 +41,9 @@ export const useSessionStore = defineStore('sessions', {
     /** 退化路径：后端未带 cursor 时才用 seq。Redis 总线的 seq≈1.79e18 过 JSON.parse
      *  会舍入到 ulp=256，同毫秒内上千事件塌缩成几个值，拿它去重会吞事件。 */
     lastSeq: 0,
+    /** 合帧缓冲：SSE 事件先到这里，一帧结算一批（见 scheduleFlush） */
+    pending: [] as WEvent[],
+    flushHandle: undefined as { raf?: number; timer?: unknown } | undefined,
     busy: false
   }),
 
@@ -121,6 +124,9 @@ export const useSessionStore = defineStore('sessions', {
       this.humanQuestion = null
       this.lastSeq = 0
       this.lastCursor = ''
+      // 缓冲里可能还压着上一个会话的事件
+      if (this.flushHandle !== undefined) this.flushHandle = undefined
+      this.pending = []
       this.connected = false
     },
 
@@ -146,12 +152,40 @@ export const useSessionStore = defineStore('sessions', {
           return
         }
         try {
-          this.applyEvent(JSON.parse(e.data))
+          this.pending.push(JSON.parse(e.data))
         } catch {
           /* ignore malformed line */
+          return
         }
+        this.scheduleFlush()
       }
       this.evtSource = src
+    },
+
+    /** 一帧只结算一次：token 增量到达速率远高于帧率，逐条改状态会让 Vue
+     *  每个 token 打一次补丁。rAF 在不可见页里不触发，所以再挂一个 32ms 定时器，
+     *  谁先到谁结算并取消对方——后台标签页也能收流。 */
+    scheduleFlush() {
+      if (this.flushHandle !== undefined) return
+      const raf =
+        typeof requestAnimationFrame === 'function'
+          ? requestAnimationFrame(() => this.flushEvents())
+          : undefined
+      const timer = setTimeout(() => this.flushEvents(), 32)
+      this.flushHandle = { raf, timer }
+    },
+
+    flushEvents() {
+      const h = this.flushHandle as { raf?: number; timer?: ReturnType<typeof setTimeout> } | undefined
+      if (h) {
+        if (h.raf !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(h.raf)
+        clearTimeout(h.timer)
+      }
+      this.flushHandle = undefined
+      const batch = this.pending
+      if (!batch.length) return
+      this.pending = []
+      for (const ev of batch) this.applyEvent(ev)
     },
 
     applyEvent(ev: WEvent) {
