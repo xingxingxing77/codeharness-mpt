@@ -6,6 +6,8 @@ export const useUiStore = defineStore('ui', {
     rightView: 'cards' as 'cards' | 'files' | 'review' | 'graph' | 'trace' | 'inspect',
     /** 被检视的块 key：对话流的 inspect 钮写、右栏读，两边不各持一份。 */
     selectedKey: '',
+    /** 中栏视图：对话流 / Trajectory 台账。参考项目把它放在会话 store 的 view 字段。 */
+    centerView: 'chat' as 'chat' | 'trajectory',
     /* 设置弹窗开关 */
     settingsFull: false,
     settingsPage: 'general' as string,

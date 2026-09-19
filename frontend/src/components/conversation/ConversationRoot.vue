@@ -23,8 +23,23 @@
       </button>
     </div>
 
+    <div class="tabs" role="tablist">
+      <button
+        v-for="v in VIEWS"
+        :key="v.key"
+        type="button"
+        role="tab"
+        class="tab"
+        :class="{ tabActive: ui.centerView === v.key }"
+        :aria-selected="ui.centerView === v.key"
+        @click="ui.centerView = v.key"
+      >
+        {{ v.label }}
+      </button>
+    </div>
+
     <div ref="scrollEl" class="scroller" data-conversation-scroll @scroll="onScroll">
-      <div ref="flowEl" class="column" data-chat-flow>
+      <div v-show="ui.centerView === 'chat'" ref="flowEl" class="column" data-chat-flow>
         <div v-if="!store.blockList.length" class="placeholder">
           {{ store.isRunning ? '等待智能体输出…' : '暂无事件' }}
         </div>
@@ -45,7 +60,9 @@
         </div>
       </div>
 
-      <div class="toBottomSlot">
+      <TrajectoryTable v-if="ui.centerView === 'trajectory'" :rows="trajRows" @jump="jumpToBlock" />
+
+      <div v-if="ui.centerView === 'chat'" class="toBottomSlot">
         <button v-if="!follow.atBottom.value" class="toBottom" aria-label="回到底部" @click="follow.scrollToBottom(true)">
           <DsIcon name="chevron-down" :size="14" />
         </button>
@@ -62,18 +79,36 @@
 <script setup lang="ts">
 /** 中栏：748px 单列 + 唯一滚动容器 + sticky composer 座位。
  *  顶栏并入这里（参考项目没有独立顶栏，只有会话头）。 */
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ChatNode from './ChatNode.vue'
 import TurnTail from './TurnTail.vue'
+import TrajectoryTable from './TrajectoryTable.vue'
 import QuestionCard from '../composer/QuestionCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
 import { useFollowScroll } from '../../composables/useFollowScroll'
 import { buildRows } from '../../utils/turns'
+import { buildTrajectory } from '../../utils/trajectory'
 
 const store = useSessionStore()
 const ui = useUiStore()
+
+/** 页签条：参考项目由 conversation.view 的贡献数决定（>1 才显示），我们固定两个视图。 */
+const VIEWS = [
+  { key: 'chat', label: 'Chat' },
+  { key: 'trajectory', label: 'Trajectory' }
+] as const
+
+const trajRows = computed(() => buildTrajectory(store.spans, store.blockList))
+
+/** 台账行点击跳回对话流里它产出的那一块：切视图与滚动要等一次 DOM 更新。 */
+async function jumpToBlock(key: string) {
+  ui.centerView = 'chat'
+  await nextTick()
+  const el = scrollEl.value?.querySelector<HTMLElement>(`[data-chat-anchor-key="${CSS.escape(key)}"]`)
+  el?.scrollIntoView({ block: 'center' })
+}
 
 const scrollEl = ref<HTMLElement>()
 const flowEl = ref<HTMLElement>()
@@ -261,6 +296,49 @@ onBeforeUnmount(() => clearInterval(tick))
 
 .iconBtn.on {
   color: var(--dsw-alias-state-business-primary);
+}
+
+/* 页签条，几何照抄参考项目 ConversationRoot.module.css 的 .tabs/.tab/.tabActive */
+.tabs {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: 36px;
+  margin-top: 4px;
+  padding-left: 8px;
+}
+
+.tab {
+  position: relative;
+  padding: 0 0 11px;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.tab::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 1px;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: transparent;
+}
+
+/* 选中态走业务蓝而不是墨色：brand-primary 在这张令牌表里落成中性黑，
+   业务蓝是两套主题下都保持蓝的最近语义令牌。 */
+.tabActive {
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.tabActive::after {
+  background: var(--dsw-alias-state-business-primary);
 }
 
 .scroller {
