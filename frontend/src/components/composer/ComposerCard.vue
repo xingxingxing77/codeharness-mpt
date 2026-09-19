@@ -17,7 +17,6 @@
         <VMenu v-if="showTarget" :items="targetItems" align="start" compact @select="pickTarget">
           <template #default="{ open, toggle }">
             <button class="chip" :aria-expanded="open" @mousedown.prevent="toggle()">
-              <DsIcon name="settings" :size="14" />
               <span>{{ targetLabel }}</span>
               <DsIcon name="chevron-down" :size="12" />
             </button>
@@ -26,33 +25,32 @@
         <span v-if="store.current?.paradigm === 'dynamic'" class="chip plain">计划模式</span>
       </div>
 
-      <span class="grow" />
-
-      <span v-if="model" class="modelPill">{{ model }}</span>
-
-      <button
-        v-if="store.isRunning && !editable"
-        class="primary"
-        aria-label="停止生成"
-        title="停止生成"
-        @mousedown.prevent
-        @click="$emit('stop')"
-      >
-        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-          <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" />
-        </svg>
-      </button>
-      <button
-        v-else
-        class="primary"
-        :disabled="!canSend || sending"
-        aria-label="发送"
-        title="发送"
-        @mousedown.prevent
-        @click="submit"
-      >
-        <DsIcon name="send" :size="16" />
-      </button>
+      <span class="trailing">
+        <span v-if="model" class="modelChip" :title="model">{{ model }}</span>
+        <button
+          v-if="store.isRunning && !editable"
+          class="primary"
+          aria-label="停止生成"
+          title="停止生成"
+          @mousedown.prevent
+          @click="$emit('stop')"
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" />
+          </svg>
+        </button>
+        <button
+          v-else
+          class="primary"
+          :disabled="!canSend || sending"
+          aria-label="发送"
+          title="发送"
+          @mousedown.prevent
+          @click="submit"
+        >
+          <DsIcon name="send" :size="16" />
+        </button>
+      </span>
     </div>
   </div>
 </template>
@@ -184,9 +182,11 @@ defineExpose({ focus: () => ta.value?.focus() })
   line-height: 24px;
 }
 
-.hero {
-  box-shadow: var(--dsw-shadow-lv3);
-  padding-top: 12px;
+/* hero 与 docked 只差一处：文字栈保留 2 行下限（figma min-h 52 = 2×24 + 4pt）。
+   卡壳（内距、阴影）与非 hero 一致——参考项目 InputBar.module.css 里
+   `.hero` 只作用于 `.mirror`。 */
+.hero textarea {
+  min-height: 52px;
 }
 
 textarea {
@@ -218,18 +218,25 @@ textarea:disabled {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 8px;
+  padding: 2px 8px 6px;
 }
 
 .tools {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   min-width: 0;
 }
 
-.grow {
-  flex: 1;
+/* 参考项目 .trailing：右控件成组，行宽不够时整组换到下一行，
+   而不是把左边的模式 chip 压到与模型名重叠 */
+.trailing {
+  display: flex;
+  align-items: center;
+  flex: none;
+  margin-left: auto;
+  gap: 12px;
+  min-width: 0;
 }
 
 .chip {
@@ -259,16 +266,22 @@ textarea:disabled {
   color: var(--dsw-alias-label-tertiary);
 }
 
-.modelPill {
-  display: inline-flex;
-  align-items: center;
+/* 模型名：与 .chip/.select 同一质感（透明底、r8、13/20 二级字）。
+   不画下箭头——模型目录还没接（llm_override 存了但 _make_llm 从不读），
+   画一个没有菜单的箭头就是假 affordance。 */
+.modelChip {
+  display: block;
   height: 28px;
-  padding: 0 10px;
-  border-radius: 14px;
-  background: var(--dsw-alias-bg-module-platform);
-  font-size: 12px;
+  line-height: 28px;
+  max-width: 220px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--dsw-alias-label-secondary);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .primary {
