@@ -55,18 +55,18 @@
 </template>
 
 <script setup lang="ts">
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import { useSettingsStore } from '../../stores/settings'
 import Row from './Row.vue'
 import Toggle from './Toggle.vue'
 
 const store = useSettingsStore()
 const p = store.prefs
-const message = useMessage()
+const message = useToastStore()
 
 function save(name: string) {
   store.persist()
-  message.success(`已保存${name}`)
+  message.push(`已保存${name}`, 'success')
 }
 </script>
 

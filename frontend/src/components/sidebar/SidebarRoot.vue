@@ -34,6 +34,14 @@
     </div>
 
     <div class="footArea">
+      <!-- 参考项目这里是一个空的 footer.action 位；本项目 auth 开着就必须有退出入口 -->
+      <div v-if="auth.enabled && auth.user" class="footerActions">
+        <button class="userRow" @click="doLogout">
+          <DsIcon name="user" :size="16" />
+          <span v-if="wide" class="uName">{{ auth.user }}</span>
+          <span v-if="wide" class="uOut">退出</span>
+        </button>
+      </div>
       <div class="settingsArea">
         <button
           class="settingsTrigger"
@@ -57,6 +65,9 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLayoutStore } from '../../stores/layout'
 import { useUiStore } from '../../stores/ui'
+import { useAuthStore } from '../../stores/auth'
+import { useSessionStore } from '../../stores/sessions'
+import { useToastStore } from '../../stores/toast'
 import DsIcon from '../ui/DsIcon.vue'
 import VTooltip from '../ui/VTooltip.vue'
 import WorkspaceBrowser from './WorkspaceBrowser.vue'
@@ -68,6 +79,15 @@ const SCROLLBAR_LINGER_MS = 2000
 
 const panels = useLayoutStore()
 const ui = useUiStore()
+const auth = useAuthStore()
+const store = useSessionStore()
+const toast = useToastStore()
+
+async function doLogout() {
+  await auth.logout()
+  store.goHome()
+  toast.push('已退出登录', 'success')
+}
 
 const collapsed = computed(() => panels.sidebarCollapsed)
 const pointerInside = ref(true)
@@ -363,6 +383,62 @@ onBeforeUnmount(() => {
 
 .collapsed .footArea {
   align-items: center;
+}
+
+.footerActions {
+  flex: none;
+  display: flex;
+  min-width: 0;
+  width: 100%;
+}
+
+.userRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% + 4px);
+  height: 42px;
+  margin: 0 -2px;
+  padding: 0 10px 0 8px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.userRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.userRow svg {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.uName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.uOut {
+  flex: none;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.collapsed .footerActions {
+  justify-content: center;
+  width: auto;
 }
 
 .settingsArea {

@@ -13,10 +13,10 @@
 </template>
 
 <script setup lang="ts">
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import Row from './Row.vue'
 
-const message = useMessage()
+const message = useToastStore()
 
 const keys = [
   { title: '打开命令面板', desc: '快速执行任意命令' },
@@ -27,6 +27,6 @@ const keys = [
 ]
 
 function record(title: string) {
-  message.info(`演示环境：「${title}」快捷键录制未开放`)
+  message.push(`演示环境：「${title}」快捷键录制未开放`)
 }
 </script>

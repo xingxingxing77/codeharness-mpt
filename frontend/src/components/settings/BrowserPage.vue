@@ -57,21 +57,21 @@
 </template>
 
 <script setup lang="ts">
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import { useSettingsStore } from '../../stores/settings'
 import Icon from '../Icon.vue'
 import Row from './Row.vue'
 import SelectBox from './SelectBox.vue'
 
 const p = useSettingsStore().prefs
-const message = useMessage()
+const message = useToastStore()
 
 function clearData() {
-  message.success('已清除应用内浏览数据')
+  message.push('已清除应用内浏览数据', 'success')
 }
 
 function addDomain(kind: 'blocked' | 'allowed') {
-  message.info('演示环境：域名管理未开放')
+  message.push('演示环境：域名管理未开放')
   void kind
 }
 </script>

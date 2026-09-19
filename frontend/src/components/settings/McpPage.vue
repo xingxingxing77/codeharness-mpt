@@ -26,17 +26,17 @@
 </template>
 
 <script setup lang="ts">
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import { useSettingsStore } from '../../stores/settings'
 import Icon from '../Icon.vue'
 import Row from './Row.vue'
 import Toggle from './Toggle.vue'
 
 const p = useSettingsStore().prefs
-const message = useMessage()
+const message = useToastStore()
 
 function add() {
-  message.info('演示环境：MCP 服务器添加未开放')
+  message.push('演示环境：MCP 服务器添加未开放')
 }
 </script>
 

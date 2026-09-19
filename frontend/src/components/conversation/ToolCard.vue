@@ -13,8 +13,8 @@
     </div>
   </div>
 
-  <!-- Editor：后端整份下发新内容（没有 hunk），所以是带行号的读视图而不是假 diff -->
-  <div v-else-if="b.type === 'Editor'" class="card">
+  <!-- Editor / Notebook：后端整份下发内容（没有 hunk），所以是读视图而不是假 diff -->
+  <div v-else-if="b.type === 'Editor' || b.type === 'Notebook'" class="card">
     <div class="filePath">
       <DsIcon name="file" :size="14" />
       <span>{{ fileName }}</span>

@@ -24,12 +24,12 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import { useSessionStore } from '../../stores/sessions'
 import Icon from '../Icon.vue'
 
 const store = useSessionStore()
-const message = useMessage()
+const message = useToastStore()
 
 /* 参考图格式：项目名 + 所属组织（灰字），此处用真实项目 + 占位组织名 */
 const ORGS: Record<string, string> = { MetaGPT: 'geekan', OpenHarness: 'HKUDS' }
@@ -42,11 +42,11 @@ const projects = computed(() => {
 })
 
 function addProject() {
-  message.info('演示环境：项目添加未开放')
+  message.push('演示环境：项目添加未开放')
 }
 
 function addEnv(name: string) {
-  message.info(`演示环境：为「${name}」添加环境的入口未接线`)
+  message.push(`演示环境：为「${name}」添加环境的入口未接线`)
 }
 </script>
 

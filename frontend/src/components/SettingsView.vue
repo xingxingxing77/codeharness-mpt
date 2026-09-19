@@ -1,48 +1,45 @@
 <template>
-  <div class="set-shell">
-    <!-- 左侧：设置导航（米色，与主侧栏同风格） -->
-    <aside class="set-side">
-      <div class="set-back" @click="back">
-        <Icon name="arrow-left" :size="16" />
-        <span>返回应用</span>
-      </div>
-      <div class="set-nav">
-        <div
+  <VModal :open="ui.settingsFull" title="设置" @close="ui.settingsFull = false">
+    <nav class="side">
+      <div class="navTitle">设置</div>
+      <div class="navList">
+        <button
           v-for="item in NAV"
           :key="item.key"
-          class="set-nav-item"
+          class="navCell"
           :class="{ active: ui.settingsPage === item.key }"
+          :aria-current="ui.settingsPage === item.key ? 'page' : undefined"
           @click="ui.settingsPage = item.key"
         >
           <Icon :name="item.icon" :size="16" />
-          <span>{{ item.label }}</span>
-        </div>
+          <span class="navLabel">{{ item.label }}</span>
+        </button>
       </div>
-    </aside>
+    </nav>
 
-    <!-- 右侧：内容区（顶部留空条 + 分隔线，与参考图一致） -->
-    <main class="set-main">
-      <div class="set-header">
-        <template v-if="ui.settingsPage === 'profile'">
-          <span>个人资料</span>
-          <span class="grow" />
-          <span class="hact"><Icon name="lock" :size="13" /> 私有</span>
-          <span class="hact" style="margin-left: 18px" @click="editProfile"><Icon name="pencil" :size="13" /> Edit</span>
-        </template>
+    <main class="content">
+      <div class="header">
+        <span />
+        <button class="close" data-autofocus aria-label="关闭" @click="ui.settingsFull = false">
+          <Icon name="x" :size="14" />
+          <span class="hiddenLabel">关闭</span>
+        </button>
       </div>
-      <div class="set-scroll">
+      <div class="options">
         <component :is="pageComp" />
       </div>
     </main>
-  </div>
+  </VModal>
 </template>
 
 <script setup lang="ts">
+/** 设置：从「整页接管」改成参考项目那样的居中弹窗（800 宽、左 188 nav、面板高度
+ *  对所有分节恒定，切分节时不会在小指针底下伸缩）。 */
 import { computed, onMounted } from 'vue'
-import { useMessage } from 'naive-ui'
+import VModal from './ui/VModal.vue'
+import Icon from './Icon.vue'
 import { useSettingsStore } from '../stores/settings'
 import { useUiStore } from '../stores/ui'
-import Icon from './Icon.vue'
 import ArchivedPage from './settings/ArchivedPage.vue'
 import AppearancePage from './settings/AppearancePage.vue'
 import BrowserPage from './settings/BrowserPage.vue'
@@ -62,7 +59,6 @@ import WorktreesPage from './settings/WorktreesPage.vue'
 
 const ui = useUiStore()
 const settings = useSettingsStore()
-const message = useMessage()
 
 const NAV = [
   { key: 'general', icon: 'gear', label: '常规' },
@@ -83,34 +79,14 @@ const NAV = [
   { key: 'archived', icon: 'archive', label: '已归档对话' }
 ]
 
-const PAGES: Record<string, any> = {
-  general: GeneralPage,
-  usage: UsagePage,
-  profile: ProfilePage,
-  appearance: AppearancePage,
-  config: ConfigPage,
-  personalize: PersonalizePage,
-  shortcuts: ShortcutsPage,
-  mcp: McpPage,
-  hooks: HooksPage,
-  connections: ConnectionsPage,
-  git: GitPage,
-  env: EnvPage,
-  worktrees: WorktreesPage,
-  browser: BrowserPage,
-  computer: ComputerPage,
-  archived: ArchivedPage
+const PAGES: Record<string, unknown> = {
+  general: GeneralPage, usage: UsagePage, profile: ProfilePage, appearance: AppearancePage,
+  config: ConfigPage, personalize: PersonalizePage, shortcuts: ShortcutsPage, mcp: McpPage,
+  hooks: HooksPage, connections: ConnectionsPage, git: GitPage, env: EnvPage,
+  worktrees: WorktreesPage, browser: BrowserPage, computer: ComputerPage, archived: ArchivedPage
 }
 
 const pageComp = computed(() => PAGES[ui.settingsPage] || GeneralPage)
-
-function back() {
-  ui.settingsFull = false
-}
-
-function editProfile() {
-  message.info('演示环境：资料编辑未开放')
-}
 
 // 设置项持久化到 localStorage
 onMounted(() =>
@@ -119,3 +95,117 @@ onMounted(() =>
   })
 )
 </script>
+
+<style scoped>
+.side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 188px;
+  padding: 22px 12px 0;
+  box-sizing: border-box;
+}
+
+.navTitle {
+  padding: 0 12px;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.navList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.navCell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 9px 16px 9px 12px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.navCell:hover {
+  background: var(--dsw-specific-sidebar-nav-item-hover);
+}
+
+.navCell.active {
+  background: var(--dsw-specific-sidebar-nav-item-active);
+}
+
+.navCell svg {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.navLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  height: 54px;
+  padding: 20px 14px 8px 10px;
+  box-sizing: border-box;
+}
+
+.close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 28px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.options {
+  flex: 1;
+  min-height: 0;
+  padding: 0 24px 24px;
+  overflow-y: auto;
+}
+
+.hiddenLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+</style>

@@ -14,13 +14,13 @@
 </template>
 
 <script setup lang="ts">
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import Icon from '../Icon.vue'
 
-const message = useMessage()
+const message = useToastStore()
 
 function refresh() {
-  message.info('暂无工作树可刷新')
+  message.push('暂无工作树可刷新')
 }
 </script>
 

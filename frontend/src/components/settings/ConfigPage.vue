@@ -44,7 +44,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import { useSettingsStore } from '../../stores/settings'
 import Icon from '../Icon.vue'
 import Row from './Row.vue'
@@ -52,19 +52,19 @@ import SelectBox from './SelectBox.vue'
 import Toggle from './Toggle.vue'
 
 const p = useSettingsStore().prefs
-const message = useMessage()
+const message = useToastStore()
 const profile = ref('用户配置')
 
 function openToml() {
-  message.info('演示环境：config.toml 打开入口未接线')
+  message.push('演示环境：config.toml 打开入口未接线')
 }
 
 function diagnose() {
-  message.success('诊断完成：未发现问题')
+  message.push('诊断完成：未发现问题', 'success')
 }
 
 function reinstall() {
-  message.info('演示环境：重新安装未执行')
+  message.push('演示环境：重新安装未执行')
 }
 </script>
 

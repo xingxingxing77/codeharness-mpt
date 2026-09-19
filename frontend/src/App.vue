@@ -1,71 +1,47 @@
 <template>
-  <n-config-provider :theme="naiveTheme" :locale="zhCN" :date-locale="dateZhCN" style="height: 100%">
-    <n-message-provider>
-      <n-dialog-provider>
-        <LoginPage v-if="auth.needLogin" />
-        <SettingsView v-else-if="ui.settingsFull" />
-        <AppFrame v-else>
-          <template #sidebar>
-            <SidebarRoot @new-session="store.goHome()" />
-          </template>
+  <LoginPage v-if="auth.needLogin" />
+  <AppFrame v-else>
+    <template #sidebar>
+      <SidebarRoot @new-session="store.goHome()" />
+    </template>
 
-          <main class="center">
-            <template v-if="store.current">
-              <ConversationRoot>
-                <template #composer>
-                  <ComposerCard @stop="store.stop()" />
-                </template>
-              </ConversationRoot>
-              <!-- 日志暂时只有这一个去处；F7 把它并进右栏 detailsCol 后一起删 -->
-              <TerminalPanel v-if="ui.terminalOpen" />
-            </template>
-            <template v-else>
-              <EmptyHero />
-            </template>
-          </main>
+    <main class="center">
+      <ConversationRoot v-if="store.current">
+        <template #composer>
+          <ComposerCard @stop="store.stop()" />
+        </template>
+      </ConversationRoot>
+      <EmptyHero v-else />
+    </main>
 
-          <template #details>
-            <ToolsPanel v-if="ui.rightPanel" />
-          </template>
-        </AppFrame>
-        <CreateSessionModal />
-        <ToastLayer />
-      </n-dialog-provider>
-    </n-message-provider>
-  </n-config-provider>
+    <!-- 关闭时列宽为 0，但组件仍挂载会白拉接口，所以显式不渲染 -->
+    <template #details>
+      <DetailsPanel v-if="ui.rightPanel" />
+    </template>
+  </AppFrame>
+
+  <SettingsView />
+  <ToastLayer />
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
-import {
-  NConfigProvider,
-  NDialogProvider,
-  NMessageProvider,
-  darkTheme,
-  dateZhCN,
-  zhCN
-} from 'naive-ui'
+import { onMounted, watch } from 'vue'
 import { useSessionStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
 import { useAuthStore } from './stores/auth'
-import { useThemeStore } from './stores/theme'
 import AppFrame from './components/frame/AppFrame.vue'
 import ComposerCard from './components/composer/ComposerCard.vue'
 import ConversationRoot from './components/conversation/ConversationRoot.vue'
+import DetailsPanel from './components/DetailsPanel.vue'
 import EmptyHero from './components/composer/EmptyHero.vue'
-import CreateSessionModal from './components/CreateSessionModal.vue'
 import LoginPage from './components/LoginPage.vue'
-import SidebarRoot from './components/sidebar/SidebarRoot.vue'
 import SettingsView from './components/SettingsView.vue'
-import TerminalPanel from './components/TerminalPanel.vue'
+import SidebarRoot from './components/sidebar/SidebarRoot.vue'
 import ToastLayer from './components/ui/ToastLayer.vue'
-import ToolsPanel from './components/ToolsPanel.vue'
 
 const store = useSessionStore()
 const ui = useUiStore()
 const auth = useAuthStore()
-const theme = useThemeStore()
-const naiveTheme = computed(() => (theme.dark ? darkTheme : null))
 
 // N1：先探 auth（enabled=0 直接进主界面），登录态成立才拉会话——顺序反了会 401 一片
 onMounted(async () => {

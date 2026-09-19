@@ -33,7 +33,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { useMessage } from 'naive-ui'
+import { useToastStore } from '../../stores/toast'
 import { useSettingsStore } from '../../stores/settings'
 import Row from './Row.vue'
 import SelectBox from './SelectBox.vue'
@@ -41,17 +41,17 @@ import Toggle from './Toggle.vue'
 
 const store = useSettingsStore()
 const p = store.prefs
-const message = useMessage()
+const message = useToastStore()
 
 const dirty = computed(() => !!p.instructions.trim())
 
 function save() {
   store.persist()
-  message.success('已保存自定义指令')
+  message.push('已保存自定义指令', 'success')
 }
 
 function resetMemory() {
-  message.info('演示环境：记忆重置未执行')
+  message.push('演示环境：记忆重置未执行')
 }
 </script>
 

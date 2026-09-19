@@ -11,10 +11,10 @@
       <span class="cost">¥{{ (store.cost?.total_cost ?? 0).toFixed(3) }}</span>
       <button
         class="iconBtn"
-        :class="{ on: ui.terminalOpen }"
+        :class="{ on: ui.rightPanel && ui.rightView === 'cards' }"
         title="会话日志"
         aria-label="会话日志"
-        @click="ui.terminalOpen = !ui.terminalOpen"
+        @click="openLogs"
       >
         <DsIcon name="code" :size="16" />
       </button>
@@ -78,6 +78,15 @@ const expanded = reactive<Record<string, boolean>>({})
 
 function setOpen(key: string, v: boolean) {
   expanded[key] = v
+}
+
+/** 日志钮：已在日志页就收起右栏，否则开右栏并切过去 */
+function openLogs() {
+  if (ui.rightPanel && ui.rightView === 'cards') ui.closeRight()
+  else {
+    ui.openRight()
+    ui.rightView = 'cards'
+  }
 }
 
 const paradigmLabel = computed(
