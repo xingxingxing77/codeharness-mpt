@@ -13,14 +13,14 @@
             <template v-if="store.current">
               <ConversationRoot>
                 <template #composer>
-                  <ChatInput />
+                  <ComposerCard @stop="store.stop()" />
                 </template>
               </ConversationRoot>
               <!-- 日志暂时只有这一个去处；F7 把它并进右栏 detailsCol 后一起删 -->
               <TerminalPanel v-if="ui.terminalOpen" />
             </template>
             <template v-else>
-              <BoltHero />
+              <EmptyHero />
             </template>
           </main>
 
@@ -50,10 +50,10 @@ import { useSessionStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
 import { useAuthStore } from './stores/auth'
 import { useThemeStore } from './stores/theme'
-import BoltHero from './components/BoltHero.vue'
 import AppFrame from './components/frame/AppFrame.vue'
-import ChatInput from './components/ChatInput.vue'
+import ComposerCard from './components/composer/ComposerCard.vue'
 import ConversationRoot from './components/conversation/ConversationRoot.vue'
+import EmptyHero from './components/composer/EmptyHero.vue'
 import CreateSessionModal from './components/CreateSessionModal.vue'
 import HumanInputDialog from './components/HumanInputDialog.vue'
 import LoginPage from './components/LoginPage.vue'

@@ -17,7 +17,8 @@ export const useUiStore = defineStore('ui', {
     /* 落地页会话参数 */
     composer: {
       project: 'MetaGPT',
-      rounds: 5
+      rounds: 5,
+      paradigm: 'classic'
     }
   }),
 
