@@ -6,7 +6,7 @@
         <SettingsView v-else-if="ui.settingsFull" />
         <AppFrame v-else>
           <template #sidebar>
-            <SessionSidebar />
+            <SidebarRoot @new-session="store.goHome()" />
           </template>
 
           <main class="center">
@@ -57,7 +57,7 @@ import CreateSessionModal from './components/CreateSessionModal.vue'
 import HumanInputDialog from './components/HumanInputDialog.vue'
 import LoginPage from './components/LoginPage.vue'
 import OutputsCard from './components/OutputsCard.vue'
-import SessionSidebar from './components/SessionSidebar.vue'
+import SidebarRoot from './components/sidebar/SidebarRoot.vue'
 import SessionTopBar from './components/SessionTopBar.vue'
 import SettingsView from './components/SettingsView.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
