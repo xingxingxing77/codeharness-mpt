@@ -2,10 +2,9 @@
   <div
     ref="frameEl"
     class="frame"
-    :class="{ 'no-details': !hasDetails }"
     :style="gridStyle"
     :data-sidebar-collapsed="panels.sidebarCollapsed ? 'true' : undefined"
-    :data-details-collapsed="panels.details > 0 ? undefined : 'true'"
+    :data-details-collapsed="cols.details > 0 ? undefined : 'true'"
     :data-dragging="dragging || undefined"
   >
     <div class="col sidebarCol"><slot name="sidebar" /></div>
@@ -42,13 +41,12 @@ import {
   DETAILS_MAX,
   DETAILS_MIN,
   SIDEBAR_AUTO_COLLAPSE,
+  SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
   SIDEBAR_MIN,
   clampWidth,
   computeColumns
 } from '../../stores/layout'
-
-withDefaults(defineProps<{ hasDetails?: boolean }>(), { hasDetails: true })
 
 const panels = useLayoutStore()
 const store = useSessionStore()
@@ -60,9 +58,13 @@ const dragging = ref(false)
  *  占位值取「中心下限 + 侧栏下限」，让这一瞬的布局已经接近真值。 */
 const PRE_MEASURE_VIEWPORT = CENTER_MIN + SIDEBAR_MIN
 
-const cols = computed(() =>
-  computeColumns(viewport.value || PRE_MEASURE_VIEWPORT, panels.sidebar, panels.details)
-)
+const cols = computed(() => {
+  // 求解器吃的是「有效收起态投影出的偏好」：0 是收起哨兵，由求解器映射成 56px 轨。
+  // 直接喂 panels.sidebar 会让窄视口的自动收起只翻属性、轨道仍停在 280px。
+  const sb = panels.sidebarCollapsed ? 0 : panels.sidebar === 0 ? SIDEBAR_DEFAULT : panels.sidebar
+  const dt = panels.detailsCollapsed ? 0 : panels.details
+  return computeColumns(viewport.value || PRE_MEASURE_VIEWPORT, sb, dt)
+})
 
 const gridStyle = computed(() => ({
   gridTemplateColumns: `${cols.value.sidebar}px minmax(0, 1fr) ${cols.value.details}px`
