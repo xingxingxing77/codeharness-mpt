@@ -1,16 +1,16 @@
 <template>
   <!-- 用户：右对齐气泡，文本按字面呈现（不解析 markdown） -->
-  <div v-if="b.type === 'User'" class="userRow" :data-chat-anchor-key="'user:' + b.key">
+  <div v-if="b.type === 'User'" class="userRow" :data-chat-anchor-key="'user:' + b.key" data-time-hover-root>
     <div class="userStack">
       <div class="bubble">{{ text }}</div>
-      <div class="acts">
-        <span class="clock">{{ clock }}</span>
-        <button class="act" aria-label="复制" @click="copy(text)"><DsIcon name="copy" :size="16" /></button>
-      </div>
+      <MessageIconActions class="acts" :text="text" :time="timeMs" clock="start" />
     </div>
   </div>
 
-  <!-- Thought / Docs：全宽正文，不再是卡片 -->
+  <!-- Thought：Think 折叠披露行（参考项目里它从来不是正文） -->
+  <ReasoningRow v-else-if="b.type === 'Thought'" :b="b" :is-open="isOpen" @toggle="(k, v) => $emit('toggle', k, v)" />
+
+  <!-- Docs：全宽正文 + 产物链接 -->
   <div v-else-if="isProse" class="prose" :data-chat-anchor-key="b.key" :data-streaming="open ? 'true' : undefined">
     <MarkdownText :src="text" :streaming="open" />
     <a v-if="artifactUrl" class="artifact" :href="artifactUrl" target="_blank" rel="noopener noreferrer">
@@ -36,28 +36,29 @@
 </template>
 
 <script setup lang="ts">
-/** 一个节点 = 后端一个 block。分派规则：User→气泡、Thought/Docs→正文、其余→折叠行。 */
+/** 一个节点 = 后端一个 block。分派：User→气泡、Thought→Think 披露行、
+ *  Docs→全宽正文、其余→折叠行。每个 BlockType 必须有显式分支（s8 t1 守这条）。 */
 import { computed } from 'vue'
 import MarkdownText from './MarkdownText.vue'
+import MessageIconActions from './MessageIconActions.vue'
+import ReasoningRow from './ReasoningRow.vue'
 import ToolCard from './ToolCard.vue'
 import VDisclosureRow from '../ui/VDisclosureRow.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
-import { useToastStore } from '../../stores/toast'
-import { formatRelative } from '../../utils/relativeTime'
 import type { Block } from '../../types'
 
 defineEmits<{ toggle: [key: string, open: boolean] }>()
 const props = defineProps<{ b: Block; isOpen: boolean }>()
 
 const store = useSessionStore()
-const toast = useToastStore()
 
 const b = computed(() => props.b)
 const text = computed(() => b.value.tokens.join(''))
 const open = computed(() => !b.value.closed)
-const isProse = computed(() => b.value.type === 'Thought' || b.value.type === 'Docs')
-const clock = computed(() => formatRelative(b.value.meta?.ts ? new Date(b.value.meta.ts * 1000).toISOString() : ''))
+const isProse = computed(() => b.value.type === 'Docs')
+/** 块与 span 都用 unix 秒（后端事件原样），只有读数组件要 ms。 */
+const timeMs = computed(() => (b.value.ts === undefined ? undefined : b.value.ts * 1000))
 
 const fileName = computed(
   () => b.value.meta?.filename || b.value.doc?.filename || b.value.path?.split(/[\\/]/).pop() || ''
@@ -88,15 +89,6 @@ const row = computed(() => {
     ''
   return { ...kind, state: state as 'running' | 'ok' | 'error' | 'stopped', summary: summary.slice(0, 200) }
 })
-
-async function copy(t: string) {
-  try {
-    await navigator.clipboard.writeText(t)
-    toast.push('已复制', 'success')
-  } catch {
-    toast.push('复制失败', 'error')
-  }
-}
 </script>
 
 <style scoped>
@@ -126,35 +118,9 @@ async function copy(t: string) {
   color: var(--dsw-alias-label-primary);
 }
 
+/* 横排与间距在 MessageIconActions 的 .actions 里；这里只留用户侧的 6px 出血 */
 .acts {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   margin-right: -6px;
-}
-
-.clock {
-  font-size: 12px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.act {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 6px;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
-}
-
-.act:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
 }
 
 .prose {

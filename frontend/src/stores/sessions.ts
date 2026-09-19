@@ -43,6 +43,8 @@ export const useSessionStore = defineStore('sessions', {
     lastSeq: 0,
     /** 合帧缓冲：SSE 事件先到这里，一帧结算一批（见 scheduleFlush） */
     pending: [] as WEvent[],
+    /** /trace 的 LLM 调用记录：轮次尾行的 tok/s 与 StatsLine 按时间窗取用它 */
+    spans: [] as TraceSpan[],
     flushHandle: undefined as { raf?: number; timer?: unknown } | undefined,
     busy: false
   }),
@@ -113,6 +115,18 @@ export const useSessionStore = defineStore('sessions', {
       this.status = s?.status || ''
       this.cost = s?.cost || {}
       this.connect()
+      void this.loadTrace(sid)
+    },
+
+    /** trace 仅 Redis 模式有数据；进程内 runner 回空表，尾行自然不显示 tok/s。
+     *  拉一次给轮次度量和右栏 trace 页共用，别各拉各的。 */
+    async loadTrace(sid: string) {
+      try {
+        const t = await api.sessionTrace(sid)
+        this.spans = sid === this.currentId ? t.spans || [] : this.spans
+      } catch {
+        this.spans = []
+      }
     },
 
     resetStream() {
@@ -121,6 +135,7 @@ export const useSessionStore = defineStore('sessions', {
       this.blocks = {}
       this.blockOrder = []
       this.logs = []
+      this.spans = []
       this.humanQuestion = null
       this.lastSeq = 0
       this.lastCursor = ''
@@ -207,6 +222,11 @@ export const useSessionStore = defineStore('sessions', {
           this.blocks[key] = b
           this.blockOrder.push(key)
         }
+        if (typeof ev.ts === 'number') {
+          if (b.ts === undefined) b.ts = ev.ts
+          b.lastTs = ev.ts
+          if (ev.name === 'content' && b.fts === undefined) b.fts = ev.ts
+        }
         switch (ev.name) {
           case 'meta':
             b.meta = ev.value
@@ -257,6 +277,9 @@ export const useSessionStore = defineStore('sessions', {
         if (v.status) {
           this.status = v.status
           if (this.current) this.mergeSessionLocal(this.current.id, { status: v.status, cost: v.cost })
+          // 终态才重拉 trace：tok/s 与 StatsLine 的用量要等这一跑收口才完整，
+          // 而中间态每步都在同步成本，每次拉就是打一串尖峰请求。
+          if (['finished', 'stopped', 'failed'].includes(v.status)) void this.loadTrace(this.currentId)
         }
         if (v.status !== 'awaiting_human') this.humanQuestion = null
       }
@@ -311,6 +334,8 @@ export const useSessionStore = defineStore('sessions', {
         type: 'User',
         role: 'user',
         closed: true,
+        ts: Date.now() / 1000,
+        lastTs: Date.now() / 1000,
         meta: null,
         tokens: [content],
         doc: null,

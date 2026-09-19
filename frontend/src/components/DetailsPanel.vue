@@ -93,7 +93,8 @@ const VIEWS = [
 
 const tree = ref<FileNodeT[]>([])
 const mermaid = ref('')
-const spans = ref<{ node: string; pt: number; ct: number; cost: number; ts: number }[]>([])
+/** spans 单一来源在 store：选中会话拉一次、终态再刷一次，右栏不发第二份请求。 */
+const spans = computed(() => store.spans)
 const preview = ref<{ name: string; kind: string; url?: string; text?: string } | null>(null)
 
 const edits = computed(() => store.blockList.filter((b) => b.type === 'Editor'))
@@ -103,20 +104,19 @@ const totals = computed(() =>
 
 function pick(k: string) {
   ui.rightView = k as typeof ui.rightView
+  if (k === 'trace' && store.currentId) void store.loadTrace(store.currentId)
 }
 
 async function load() {
   if (!store.currentId) {
     tree.value = []
     mermaid.value = ''
-    spans.value = []
     return
   }
   try {
-    const [f, g, t] = await Promise.all([api.fileTree(store.currentId), api.sessionGraph(store.currentId), api.sessionTrace(store.currentId)])
+    const [f, g] = await Promise.all([api.fileTree(store.currentId), api.sessionGraph(store.currentId)])
     tree.value = f.tree || []
     mermaid.value = g.mermaid || ''
-    spans.value = t.spans || []
   } catch (e) {
     toast.push((e as Error).message, 'error')
   }

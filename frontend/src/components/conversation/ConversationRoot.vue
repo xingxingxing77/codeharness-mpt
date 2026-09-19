@@ -29,13 +29,15 @@
           {{ store.isRunning ? '等待智能体输出…' : '暂无事件' }}
         </div>
 
-        <ChatNode
-          v-for="b in store.blockList"
-          :key="b.key"
-          :b="b"
-          :is-open="expanded[b.key] === true"
-          @toggle="setOpen"
-        />
+        <template v-for="r in rows" :key="r.kind === 'node' ? r.b.key : r.turn.key">
+          <ChatNode
+            v-if="r.kind === 'node'"
+            :b="r.b"
+            :is-open="expanded[r.b.key] === true"
+            @toggle="setOpen"
+          />
+          <TurnTail v-else :turn="r.turn" />
+        </template>
 
         <div v-if="store.isRunning" class="turnStatus" role="status" aria-live="polite">
           <span class="shimmer">Deep diving...</span>
@@ -62,11 +64,13 @@
  *  顶栏并入这里（参考项目没有独立顶栏，只有会话头）。 */
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ChatNode from './ChatNode.vue'
+import TurnTail from './TurnTail.vue'
 import QuestionCard from '../composer/QuestionCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
 import { useFollowScroll } from '../../composables/useFollowScroll'
+import { buildRows } from '../../utils/turns'
 
 const store = useSessionStore()
 const ui = useUiStore()
@@ -101,8 +105,13 @@ const TAKEOVERS: { kind: 'question'; when: (s: typeof store) => boolean }[] = [
 ]
 const takeover = computed(() => TAKEOVERS.find((t) => t.when(store))?.kind ?? null)
 
-/** 只在「结构」变化时跟滚，普通重渲染不抢滚动条 */
-const followSig = computed(() => `${store.blockList.length}:${store.blockList.at(-1)?.key || ''}:${store.isRunning ? 1 : 0}`)
+/** 只在「结构」变化时跟滚，普通重渲染不抢滚动条。尾行也算结构变化。 */
+const rows = computed(() => buildRows(store.blockList, store.spans))
+const followSig = computed(() => {
+  const last = rows.value.at(-1)
+  const tail = last && last.kind === 'node' ? last.b.key : last ? 'tail' : ''
+  return `${rows.value.length}:${tail}:${store.isRunning ? 1 : 0}`
+})
 
 const follow = useFollowScroll(scrollEl, flowEl, seatEl, () => followSig.value)
 

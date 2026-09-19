@@ -48,6 +48,21 @@ export interface Block {
   url: string
   page: any
   raw: any[]
+  /** 该块首个事件的 unix 秒（浮点）：轮次起始与时钟取它。 */
+  ts?: number
+  /** 首个 content 事件的 unix 秒：TTFT 的右端点，meta 事件不算。 */
+  fts?: number
+  /** 最近一个事件的 unix 秒：轮次收口时刻与「用时」的右端点。 */
+  lastTs?: number
+}
+
+/** `/trace` 一行 = 一笔 LLM 调用的节点名与 token/成本增量。 */
+export interface TraceSpan {
+  node: string
+  pt: number
+  ct: number
+  cost: number
+  ts: number
 }
 
 export interface FileNode {

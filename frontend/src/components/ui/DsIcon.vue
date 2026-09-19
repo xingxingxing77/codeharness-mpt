@@ -42,6 +42,7 @@ const ALIAS: Record<string, string> = {
   copy: 'IconCopyOutline16',
   code: 'IconCodeOutline16',
   think: 'IconThinkOutline16',
+  'think-14': 'IconThinkOutline14',
   globe: 'IconGlobeOutline14',
   'right-up': 'IconRightUpOutline16',
   link: 'IconLinkOutline14',
