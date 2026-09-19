@@ -23,6 +23,9 @@ server/data/users.json
 # 前端
 node_modules/
 frontend/dist/
+# 无头浏览器门禁的验证截图（scripts/shot.mjs 产出，随跑随生成）
+frontend/shots/
 
 # 第三方 agent 插件检出（嵌套 git 仓库，不入库）
 vendor/
+log问题/
