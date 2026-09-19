@@ -144,7 +144,7 @@ async function onDrafted(idea: string) {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 20px;
+  gap: 12px;
   /* 780 是 composer 卡的目标宽度，内衬要算在外面，否则卡被挤成 748 */
   width: 100%;
   max-width: calc(780px + 32px);
@@ -153,26 +153,49 @@ async function onDrafted(idea: string) {
 }
 
 .brand {
-  display: flex;
+  /* 参考项目 .headline：grid「34px 图标 / 标题 / 徽标」，26/32 wt500 居中 */
+  display: grid;
+  grid-template-columns: 34px auto auto;
+  column-gap: 10px;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  font-size: 26px;
+  line-height: 32px;
+  font-weight: 500;
   color: var(--dsw-alias-label-primary);
 }
 
-.brand h1 {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 600;
-  line-height: 32px;
+.brand > :first-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
+.brand h1 {
+  grid-row: 1;
+  grid-column: 2;
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+/* 徽标是骑在标题右上角的等宽小胶囊，不是跟着基线居中的标签 */
 .badge {
-  padding: 1px 8px;
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-module-platform);
+  grid-row: 1;
+  grid-column: 3;
+  align-self: start;
+  margin-top: 2px;
+  margin-left: -3px;
+  padding: 1px 7px 0;
+  border: 1px solid var(--dsw-alias-interactive-bg-hover);
+  border-radius: 24px;
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-label-primary-bluish);
+  font-family: var(--ds-font-family-code);
   font-size: 12px;
   line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
 }
 
 .wsRow {
@@ -181,31 +204,37 @@ async function onDrafted(idea: string) {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: center;
+  /* figma 75:8208 workspace row：卡上方那一行左右各留 8px */
+  padding: 0 8px;
 }
 
 .wsChip {
+  /* 参考项目 .workspace：静止无框透明，只在 hover/展开时上底色 */
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
+  gap: 4px;
+  min-height: 28px;
+  max-width: min(100%, 360px);
+  padding: 0 8px;
+  border: none;
   border-radius: 16px;
   background: transparent;
   font-family: inherit;
   font-size: 13px;
   line-height: 20px;
-  color: var(--dsw-alias-label-secondary);
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
-.wsChip:hover {
+.wsChip:hover,
+.wsChip[aria-expanded='true'] {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .wsChip.on {
-  border-color: var(--dsw-alias-state-business-primary);
   color: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .warn {
