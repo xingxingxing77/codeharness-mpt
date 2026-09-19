@@ -28,7 +28,6 @@
             <ToolsPanel v-if="ui.rightPanel" />
           </template>
         </AppFrame>
-        <HumanInputDialog />
         <CreateSessionModal />
         <ToastLayer />
       </n-dialog-provider>
@@ -55,7 +54,6 @@ import ComposerCard from './components/composer/ComposerCard.vue'
 import ConversationRoot from './components/conversation/ConversationRoot.vue'
 import EmptyHero from './components/composer/EmptyHero.vue'
 import CreateSessionModal from './components/CreateSessionModal.vue'
-import HumanInputDialog from './components/HumanInputDialog.vue'
 import LoginPage from './components/LoginPage.vue'
 import SidebarRoot from './components/sidebar/SidebarRoot.vue'
 import SettingsView from './components/SettingsView.vue'

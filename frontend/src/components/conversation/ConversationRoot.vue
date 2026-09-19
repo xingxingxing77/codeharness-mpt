@@ -50,7 +50,8 @@
       </div>
 
       <div ref="seatEl" class="composerSeat" data-composer-seat>
-        <slot name="composer" />
+        <QuestionCard v-if="takeover === 'question'" :question="store.humanQuestion?.value || ''" />
+        <slot v-else name="composer" />
       </div>
     </div>
   </div>
@@ -61,6 +62,7 @@
  *  顶栏并入这里（参考项目没有独立顶栏，只有会话头）。 */
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ChatNode from './ChatNode.vue'
+import QuestionCard from '../composer/QuestionCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
@@ -81,6 +83,14 @@ function setOpen(key: string, v: boolean) {
 const paradigmLabel = computed(
   () => ({ classic: '标准模式', dynamic: '计划模式', react: 'ReAct 模式' })[store.current?.paradigm || 'classic'] || '标准模式'
 )
+
+/** takeover 优先级栈：靠前的赢。后端目前只有 ask_human 一种挂起交互
+ *  （没有审批与计划评审通道），所以只有一项；将来加审批条是往这里添一项，
+ *  而不是往模板里加 v-else-if。 */
+const TAKEOVERS: { kind: 'question'; when: (s: typeof store) => boolean }[] = [
+  { kind: 'question', when: (s) => !!s.humanQuestion }
+]
+const takeover = computed(() => TAKEOVERS.find((t) => t.when(store))?.kind ?? null)
 
 /** 只在「结构」变化时跟滚，普通重渲染不抢滚动条 */
 const followSig = computed(() => `${store.blockList.length}:${store.blockList.at(-1)?.key || ''}:${store.isRunning ? 1 : 0}`)
