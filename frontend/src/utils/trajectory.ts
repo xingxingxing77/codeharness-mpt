@@ -11,6 +11,8 @@ export interface TrajRow {
   node: string
   /** 调用结束时刻，unix 秒。 */
   ts: number
+  /** 本次调用耗时 ms = ts − t0。批次16 之前的 span 没有 t0，留 undefined。 */
+  durMs?: number
   pt: number
   ct: number
   cost: number
@@ -34,6 +36,7 @@ export function buildTrajectory(spans: TraceSpan[], blocks: Block[]): TrajRow[] 
       idx: i + 1,
       node: s.node || '—',
       ts: s.ts,
+      ...(s.t0 ? { durMs: Math.max(0, (s.ts - s.t0) * 1000) } : {}),
       pt: s.pt,
       ct: s.ct,
       cost: s.cost,

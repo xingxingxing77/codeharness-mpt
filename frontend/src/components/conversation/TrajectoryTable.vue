@@ -7,6 +7,7 @@
           <th class="num">#</th>
           <th>节点</th>
           <th>时刻</th>
+          <th class="num">耗时</th>
           <th class="num">入</th>
           <th class="num">出</th>
           <th class="num">成本</th>
@@ -23,6 +24,7 @@
           <td class="num">{{ r.idx }}</td>
           <td>{{ r.node }}</td>
           <td class="mono">{{ clock(r.ts) }}</td>
+          <td class="num">{{ r.durMs === undefined ? '—' : dur(r.durMs) }}</td>
           <td class="num">{{ r.pt }}</td>
           <td class="num">{{ r.ct }}</td>
           <td class="num">{{ r.cost.toFixed(4) }}</td>
@@ -31,7 +33,7 @@
       </tbody>
       <tfoot>
         <tr>
-          <td colspan="3">合计 {{ rows.length }} 次调用</td>
+          <td colspan="4">合计 {{ rows.length }} 次调用</td>
           <td class="num">{{ totals.pt }}</td>
           <td class="num">{{ totals.ct }}</td>
           <td class="num">{{ totals.cost.toFixed(4) }}</td>
@@ -47,12 +49,13 @@
  *  报文检视做不了——我们没把 prompt/响应原文落盘，见 utils/trajectory.ts 的天花板注释。 */
 import { computed } from 'vue'
 import { producedLabel, type TrajRow } from '../../utils/trajectory'
-import { formatMessageClock } from '../../utils/messageChrome'
+import { formatLatencySeconds, formatMessageClock } from '../../utils/messageChrome'
 
 const emit = defineEmits<{ jump: [key: string] }>()
 const props = defineProps<{ rows: TrajRow[] }>()
 
 const clock = (sec: number) => formatMessageClock(sec * 1000)
+const dur = (ms: number) => `${formatLatencySeconds(ms)}秒`
 /** 台账一次跑几十到几百行，够不上虚拟化的门槛；真到了再照参考项目那套上。 */
 const totals = computed(() =>
   props.rows.reduce((a, r) => ({ pt: a.pt + r.pt, ct: a.ct + r.ct, cost: a.cost + r.cost }), { pt: 0, ct: 0, cost: 0 })
