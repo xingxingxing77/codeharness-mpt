@@ -30,7 +30,11 @@ const OPT = {
   height: Number(arg('height', 900)),
   eval: arg('eval'),
   waitFor: arg('wait-for'),
-  theme: arg('theme') // light | dark —— 截图前把主题钉住
+  theme: arg('theme'), // light | dark —— 截图前把主题钉住
+  // 端口不能写死：上一轮的 chrome 没退干净时端口还被旧实例占着，
+  // 于是 jsonPort() 拿到的是**旧浏览器**的 page target，在它身上 evaluate 必然
+  // 得到「Execution context was destroyed」——页面其实活着（批次14/16 误判为无头抖动）。
+  port: Number(arg('port')) || 9300 + Math.floor(Math.random() * 600)
 }
 
 function findBrowser() {
@@ -86,7 +90,7 @@ class Cdp {
 
 async function main() {
   const exe = findBrowser()
-  const port = 9333
+  const port = OPT.port
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ch-shot-'))
   const proc = spawn(
     exe,
@@ -105,9 +109,18 @@ async function main() {
   )
 
   try {
-    const targets = await jsonPort(port)
-    const page = targets.find((t) => t.type === 'page')
-    if (!page) throw new Error('没有 page target')
+    // 只认 URL 与本次请求一致的 target：端口已经随机化，这一条兜住重定向/复用等残余情形，
+    // 宁可等不到报错，也不要在上一次跑的页面上做探针。
+    const want = new URL(OPT.url).href
+    let page = null
+    for (let i = 0; i < 40 && !page; i++) {
+      page = (await jsonPort(port)).find((t) => t.type === 'page' && t.url === want)
+      if (!page) await sleep(250)
+    }
+    if (!page) {
+      const seen = (await jsonPort(port)).map((t) => t.url).join(', ')
+      throw new Error(`端口 ${port} 上没有 URL 为 ${want} 的 page target（实际有：${seen}）`)
+    }
     const ws = new WebSocket(page.webSocketDebuggerUrl)
     await new Promise((r, j) => {
       ws.addEventListener('open', r)
@@ -124,6 +137,25 @@ async function main() {
       deviceScaleFactor: 1,
       mobile: false
     })
+
+    // 必须等这次导航提交完再发长求值。判定不能用 `document.readyState==='complete'` 一条：
+    // 提交前 Chrome 给的是 about:blank，它的 readyState 本来就是 complete，于是探针照旧
+    // 发在提交前，等真正文档提交时上下文被销毁 → -32000。必须再加「页面自己的 location.href
+    // 已经是本次 URL」这一条。此前它被当成「无头页面打崩了、重跑即可」（批次14/16 的结论），
+    // 其实一直是探针连早了。
+    const readyExpr = `location.href === ${JSON.stringify(want)} && document.readyState === 'complete' ? 1 : 0`
+    for (let i = 0; i < 150; i++) {
+      let ready = false
+      try {
+        ready = (await cdp.expr(readyExpr)) === 1
+      } catch {
+        ready = false                      // 这一次求值正好撞上提交，下一轮重来
+      }
+      if (ready) break
+      await sleep(100)
+    }
+    // 提交之后 Vue 还要挂载与拉数据，给它一个最短稳定窗口
+    await sleep(300)
 
     if (OPT.waitFor) {
       let ok = false

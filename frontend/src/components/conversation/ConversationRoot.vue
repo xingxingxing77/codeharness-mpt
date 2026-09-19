@@ -70,7 +70,10 @@
 
       <div ref="seatEl" class="composerSeat" data-composer-seat>
         <QuestionCard v-if="takeover === 'question'" :question="store.humanQuestion?.value || ''" />
-        <slot v-else name="composer" />
+        <template v-else>
+          <slot name="composer" />
+          <StatsLine />
+        </template>
       </div>
     </div>
   </div>
@@ -82,6 +85,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ChatNode from './ChatNode.vue'
 import TurnTail from './TurnTail.vue'
+import StatsLine from './StatsLine.vue'
 import TrajectoryTable from './TrajectoryTable.vue'
 import QuestionCard from '../composer/QuestionCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
