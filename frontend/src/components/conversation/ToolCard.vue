@@ -5,7 +5,16 @@
       <span class="cwd" :title="b.cmd">{{ cwdLabel }}</span>
       <code>{{ b.cmd || '(无命令)' }}</code>
     </div>
-    <pre v-if="b.lines.length" class="termOut">{{ b.lines.join('\n') }}</pre>
+    <template v-if="b.lines.length">
+      <pre class="termOut">{{ term.head }}</pre>
+      <FoldToggle
+        v-if="term.cap.hidden > 0"
+        :hidden="term.cap.hidden"
+        :expanded="open.term"
+        @toggle="open.term = !open.term"
+      />
+      <pre v-if="term.tail" class="termOut">{{ term.tail }}</pre>
+    </template>
     <div v-else-if="b.closed" class="dim">无输出</div>
     <div v-if="exitCode !== null" class="termFoot">
       <VPill :tone="exitCode === 0 ? 'success' : 'error'">exit code {{ exitCode }}</VPill>
@@ -50,22 +59,42 @@
   <div v-else class="card inOut">
     <div class="ioRow">
       <span class="ioLabel">IN</span>
-      <pre class="ioBody">{{ inText }}</pre>
+      <div class="ioCol">
+        <pre class="ioBody">{{ inFold.head }}</pre>
+        <FoldToggle
+          v-if="inFold.cap.hidden > 0"
+          :hidden="inFold.cap.hidden"
+          :expanded="open.in"
+          @toggle="open.in = !open.in"
+        />
+        <pre v-if="inFold.tail" class="ioBody">{{ inFold.tail }}</pre>
+      </div>
     </div>
     <div class="ioRow">
       <span class="ioLabel">OUT</span>
-      <pre class="ioBody" :class="{ err: failed }">{{ outText }}</pre>
+      <div class="ioCol">
+        <pre class="ioBody" :class="{ err: failed }">{{ outFold.head }}</pre>
+        <FoldToggle
+          v-if="outFold.cap.hidden > 0"
+          :hidden="outFold.cap.hidden"
+          :expanded="open.out"
+          @toggle="open.out = !open.out"
+        />
+        <pre v-if="outFold.tail" class="ioBody" :class="{ err: failed }">{{ outFold.tail }}</pre>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 /** 工具行展开后的正文卡。按后端 block 词汇表分派，未知类型落到 IN/OUT。 */
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import { useSessionStore } from '../../stores/sessions'
 import { highlightCode, langOfFilename } from '../../utils/render'
+import { DEFAULT_MAX_LINES, sliceHeadTail } from '../../utils/headTailCap'
 import { useToastStore } from '../../stores/toast'
 import DsIcon from '../ui/DsIcon.vue'
+import FoldToggle from './FoldToggle.vue'
 import VPill from '../ui/VPill.vue'
 import type { Block } from '../../types'
 
@@ -115,6 +144,13 @@ const outText = computed(() =>
     ? b.value.lines.join('\n')
     : b.value.tokens.join('') || (b.value.obj ? JSON.stringify(b.value.obj, null, 2) : '')
 )
+
+/* 长输出的中段折叠：三处各自记展开态（ToolCard 一实例一块，所以是组件内态、不落盘）。
+   Editor 代码卡不在这里折叠——它整份下发、自带 320px 滚动，切它要把高亮结果重算一遍。 */
+const open = reactive({ term: false, in: false, out: false })
+const term = computed(() => sliceHeadTail(b.value.lines.join('\n'), DEFAULT_MAX_LINES, open.term))
+const inFold = computed(() => sliceHeadTail(inText.value, DEFAULT_MAX_LINES, open.in))
+const outFold = computed(() => sliceHeadTail(outText.value, DEFAULT_MAX_LINES, open.out))
 
 async function copy(t: string) {
   try {
