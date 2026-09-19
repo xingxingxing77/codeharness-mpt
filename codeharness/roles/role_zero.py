@@ -47,7 +47,8 @@ class RoleZero:
     def __init__(self, profile: dict, tools: list, llm, system_prompt: str = SYSTEM_PROMPT,
                  instruction: str = ROLE_INSTRUCTION, max_loops: int = 15, env_desc: str = "",
                  longterm_memory=None, memory: Memory | None = None,
-                 brain: BrainMemory | None = None, redis_key: str = "", memory_k: int = 0):
+                 brain: BrainMemory | None = None, redis_key: str = "", memory_k: int = 0,
+                 plan_fn=None):
         self.profile = profile
         profile.setdefault("strategy", "role_zero")   # N3：RoleZero 引擎的自报策略（见施工3 批4）
         self.tools = {t.name: t for t in tools}
@@ -56,6 +57,7 @@ class RoleZero:
         self.instruction = instruction
         self.max_loops = max_loops
         self.env_desc = env_desc
+        self.plan_fn = plan_fn              # 批次1：ToT 等外部规划器接此处；as_node 新任务时先规划再 think
         self.ltm = longterm_memory          # 第 4 步 LongTermMemory，可空
         self.memory = memory if memory is not None else Memory()
         self.brain = brain                  # None → 超窗直接丢，语义同源的 memory_k 截断
@@ -292,6 +294,16 @@ class RoleZero:
                 self._plan_goal = task
                 self.memory.add(Message(content=task, role="user", sent_from="user",
                                         cause_by=RequirementTag.USER_REQUIREMENT))
+                if self.plan_fn is not None:
+                    # 批次1：ToT 等外部规划器——先树搜索出择优路径，写进记忆供 think 取材（源 ToT 无角色
+                    # 消费者，本仓把它接到 RoleZero 首轮规划这一真实接缝上）
+                    try:
+                        plan_text = await self.plan_fn(task)
+                        if plan_text:
+                            self.memory.add(Message(content=f"[Planned path]\n{plan_text}", role="assistant",
+                                                    cause_by=RequirementTag.USER_REQUIREMENT))
+                    except Exception as e:
+                        logger.warning(f"plan_fn({type(self.plan_fn).__name__}) 失败，退回无规划: {type(e).__name__}: {e}")
             sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
                                        "respond_language": "中文", "finished": False})
             results = sub["history"][-1]["results"] if sub["history"] else []

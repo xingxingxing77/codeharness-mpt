@@ -3,11 +3,11 @@
 > 口径与状态词汇见 `对照1-上下文管理.md` 文件头。源快照 `E:\MetaGPT\metagpt`（version=1.0.0），本项目 `E:\Codeharness`。
 > 这是账本里 `重` 得最狠的一片：R3（`roles/role.py` 596 行 + `team.py` + `base_env.py` 手写轮次循环）、R4a（持久化 → checkpointer）、R5（阻塞 `input()` → `interrupt`/`Command`）、R2（`action_node.py` 结构化引擎 → 逐字段 validator）。本文件核对：**换掉之后，循环语义是等价、更强、还是有丢**。
 >
-> **复核时间 2026-09-19**：本轮（B5 提交 `c973726`）把 §结论-3「ToT 系四件漏判」补成了代码——新增 `strategy/tot.py` 并接进 `build_role(strategy="tot")`。但它是**深度 1 的 MVP，带两处已核实的致命逻辑 bug（§五-新1）**：「择优」其实是空操作，剪枝分支一触发就 `AttributeError`。且**判定表 §四 尚未补这条判定**（原 §七-3 待办仍在）。其余 interrupt 覆盖、role_zero resume、修复管线、死装饰器族本轮未触碰，结论按当前代码重新核对。
+> **复核时间 2026-09-19（批次0/1 落地后）**：批次1（`c973726` 的初版 → 批次1 重写）把 §结论-3「ToT 系四件漏判 + 空壳」彻底补齐：`strategy/base.py` 纯 Python 树（去 anytree）、`strategy/tot.py` 照源移植 `ThoughtSolverBase` 四拍 + `BFSSolver`/`DFSSolver`（**MCTS 判弃**），并接 `RoleZero.plan_fn` 真钩子（旧的空挂 `role._plan` 废）。**两处 bug 已修**：evaluate 现真写回 `node.value`、剪枝不再引用不存在的 `n.id`。判定表 §三 已补 ToT 移植行。其余 interrupt 覆盖、role_zero resume、修复管线、死装饰器族本轮未触碰，结论按当前代码重新核对。
 
 ## 结论速览
 
-**实现度：约 82%（上版 80%）——单角色循环、精准激活、断点续跑、结构化输出与定向重试、跨 worker 停止与插话都已落地且门禁密度最高；丢的是「角色内恢复」与「人在环的覆盖面」。** ToT 本轮从「未实现且漏判」推进到「有代码、接进 build_role、但是坏的空壳」，净增有限（见 §结论-3）。
+**实现度：约 84%（上版 80%）——单角色循环、精准激活、断点续跑、结构化输出与定向重试、跨 worker 停止与插话都已落地且门禁密度最高；丢的是「角色内恢复」与「人在环的覆盖面」。** ToT 经批次1 已从「坏的空壳」移植成能跑的 BFS/DFS 树搜索（见 §结论-3）。
 
 四条最要紧的缺口：
 

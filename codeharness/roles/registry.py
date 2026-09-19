@@ -243,12 +243,10 @@ def build_role(name: str, llm, strategy: str | None = None, **kw):
             if strategy == "role_zero":
                 pass  # 默认引擎
             elif strategy == "tot":
-                # B5: ToT 引擎——替换 _plan 为 TotAgent.think（树搜索 + 择优）
-                async def tot_plan(goal: str) -> str:
-                    from codeharness.strategy.tot import TotAgent
-                    tot = TotAgent(llm=llm, goal=goal, num_paths=3, max_depth=3)
-                    return await tot.think()
-                role._plan = tot_plan
+                # 批次1：ToT 树搜索接到 RoleZero 的真钩子 plan_fn（as_node 新任务时先规划再 think）。
+                # 旧实现 role._plan=tot_plan 是空挂——RoleZero 无 _plan 读者，属假接线，已废。
+                from codeharness.strategy.tot import make_tot_planner
+                role.plan_fn = make_tot_planner(llm)
                 role.profile["strategy"] = "tot"
             else:
                 raise ValueError(f"{name} 是 role_zero 引擎，只认 role_zero/tot，收到 {strategy!r}")

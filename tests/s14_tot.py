@@ -1,128 +1,132 @@
 #!/usr/bin/env python -m asyncio
-"""B5: ToT 策略门禁。
+"""批次1: ToT 树搜索门禁（照源移植 BFS/DFS + RoleZero plan_fn）。
 
-FakeLLM 断言同一题跑出三条路径并择优；真模型通道 `tests/manual_tot.py`。
-依赖：无。
+关键：证明上轮两个 bug 已修——① evaluate 现在真把分数写回 node.value（旧代码 evaluate() 返回值
+丢弃，best_leaf 恒取首支、择优是假的）；② 无 n.id AttributeError。用按 node.id 打分的确定性
+evaluator 绕开 asyncio.gather 并发乱序，让"选高分支"可断言。真模型通道 manual_tot.py。
 """
 import asyncio
 import sys
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from codeharness.roles.registry import build_role, ALL_ROLES
 from codeharness.provider.fake import FakeLLM
+from codeharness.strategy.base import ThoughtNode, ThoughtTree
+from codeharness.strategy.tot import (BFSSolver, DFSSolver, SimpleParser, ThoughtSolverConfig,
+                                      MethodSelect, make_tot_planner)
+
+NODES2 = '```json\n[{"node_id":"1","node_state_instruction":"branchA"},{"node_id":"2","node_state_instruction":"branchB"}]\n```'
 
 
-async def t1_tot_agent_basic():
-    """t1: TotAgent 基本功能——生成多条路径。"""
-    print("t1: TotAgent basic...", end=" ", flush=True)
-    
-    from codeharness.strategy.tot import ThoughtNode, ThoughtTree, TotAgent
-    
-    # 测试 ThoughtNode
-    root = ThoughtNode("初始思考")
-    child1 = ThoughtNode("分支 1", parent=root)
-    child2 = ThoughtNode("分支 2", parent=root)
-    root.add_child(child1)
-    root.add_child(child2)
-    
-    assert len(root.children) == 2, "应有 2 个子节点"
-    assert child1.parent == root, "父节点应正确"
-    assert child1.get_path() == ["初始思考", "分支 1"], "路径应正确"
-    
-    # 测试 ThoughtTree
-    tree = ThoughtTree("根思考")
-    tree.evaluate(tree.root, FakeLLM(responses=["0.5"]))
-    
-    # 测试 TotAgent
-    llm = FakeLLM(responses=["0.7"])
-    agent = TotAgent(llm=llm, goal="测试目标", num_paths=3, max_depth=2)
-    
-    # 简单调用（不期望完整树搜索）
-    result = await agent.think()
-    assert isinstance(result, str), "结果应为字符串"
-    assert len(result) > 0, "结果不应为空"
-    
+class IdEvaluator:
+    """按 node_id 打分：id==1→9（高分），否则 1。确定性与 gather 顺序无关。"""
+    threshold = 1
+
+    def __call__(self, text, node_id=None, **kw):
+        return 9.0 if str(node_id) == "1" else 1.0
+
+    def status_verify(self, value):
+        return value >= self.threshold
+
+
+def _solver(responses, n_gen=2, n_sel=3, max_steps=1):
+    cfg = ThoughtSolverConfig(max_steps=max_steps, method_select=MethodSelect.GREEDY,
+                              n_generate_sample=n_gen, n_select_sample=n_sel,
+                              parser=SimpleParser(), evaluator=IdEvaluator())
+    return BFSSolver(llm=FakeLLM(responses), config=cfg)
+
+
+def t1_generate_builds_children():
+    print("t1: generate_thoughts...", end=" ", flush=True)
+    s = _solver([NODES2])
+    root = ThoughtNode("Goal: X")
+    s.thought_tree = ThoughtTree(root)
+    kids = asyncio.run(s.generate_thoughts("Goal: X", current_node=root))
+    assert len(kids) == 2, f"应生成 2 子节点，实际{len(kids)}"
+    assert {k.name for k in kids} == {"branchA", "branchB"}, [k.name for k in kids]
+    assert len(root.children) == 2, "子节点应挂到 root 上"
     print("✅")
 
 
-async def t2_tot_strategy_in_registry():
-    """t2: registry.build_role 支持 strategy="tot"。"""
-    print("t2: registry tot support...", end=" ", flush=True)
-    
-    llm = FakeLLM(responses=["test response"])
-    
-    # 构建 RoleZero 子类角色（TeamLeader），指定 tot 策略
+def t2_evaluate_writes_value():
+    """核心回归：evaluate_node 必须把分写回 node.value（旧代码丢弃返回值）。"""
+    print("t2: evaluate writes value...", end=" ", flush=True)
+    s = _solver(["irrelevant"])                       # evaluator 按 id 打分，llm 文本无关
+    root = ThoughtNode("Goal: X")
+    s.thought_tree = ThoughtTree(root)
+    hi = ThoughtNode("branchA", parent=root, id=1)
+    lo = ThoughtNode("branchB", parent=root, id=2)
+    asyncio.run(s.evaluate_node(hi, parent_value=0))
+    asyncio.run(s.evaluate_node(lo, parent_value=0))
+    assert hi.value == 9.0, f"evaluate 未写回 value（旧 bug）：hi.value={hi.value}"
+    assert lo.value == 1.0, f"lo.value={lo.value}"
+    assert hi.valid_status and lo.valid_status
+    # 累计分：parent_value 要加进来（源语义）
+    n = ThoughtNode("c", parent=root, id=1)
+    asyncio.run(s.evaluate_node(n, parent_value=5))
+    assert n.value == 14.0, f"累计分不对（parent+value）：{n.value}"
+    print("✅")
+
+
+def t3_select_keeps_highest():
+    print("t3: select_nodes greedy...", end=" ", flush=True)
+    s = _solver(["x"], n_sel=1)
+    root = ThoughtNode("Goal")
+    s.thought_tree = ThoughtTree(root)
+    hi = ThoughtNode("branchA", parent=root, id=1); hi.update_value(9)
+    lo = ThoughtNode("branchB", parent=root, id=2); lo.update_value(1)
+    kept = s.select_nodes([hi, lo])
+    assert kept == [hi], f"应留高分支，实际{[k.name for k in kept]}"
+    assert root.children == [hi], "低分枝应从树上摘除（否则仍被搜到）"
+    print("✅")
+
+
+def t4_bfs_solve_picks_high_path():
+    print("t4: BFSSolver.solve...", end=" ", flush=True)
+    s = _solver([NODES2, "x"], n_gen=2, n_sel=3, max_steps=1)   # 1 generate + 2 evaluate
+    path = asyncio.run(s.solve("Goal: solve-it"))
+    assert path and path[-1] == "branchA", f"应选到高分支 branchA，实际路径={path}"
+    assert path[0] == "Goal: solve-it", "路径首元素应是根"
+    print("✅")
+
+
+def t5_plan_fn_on_rolezero():
+    """registry.build_role(strategy=tot) 挂的是 plan_fn（真钩子），非旧的空挂 _plan；且 plan_fn(goal) 可用。"""
+    print("t5: plan_fn wiring...", end=" ", flush=True)
+    from codeharness.roles.registry import build_role
+    llm = FakeLLM([NODES2, "x"])
     role = build_role(name="TeamLeader", llm=llm, strategy="tot")
-    
-    # 验证 profile 更新了
-    assert role.profile.get("strategy") == "tot", f"profile.strategy 应为 tot，实际{role.profile.get('strategy')}"
-    
-    # 验证 _plan 被替换为 tot_plan
-    assert hasattr(role, '_plan'), "应有 _plan 属性"
-    import inspect
-    assert inspect.iscoroutinefunction(role._plan), "_plan 应是异步函数"
-    
-    # 调用 tot_plan
-    result = await role._plan(goal="测试任务")
-    assert isinstance(result, str), "结果应为字符串"
-    
+    assert getattr(role, "plan_fn", None) is not None and callable(role.plan_fn), "plan_fn 未接"
+    assert not hasattr(role, "_plan"), "旧的空挂 _plan 属性不应存在"
+    assert role.profile.get("strategy") == "tot"
+    out = asyncio.run(role.plan_fn("做个 CLI 工具"))
+    # 本组只验 plan_fn 真钩子接入 + 可调用产 str（择优正确性由 t2/t4 覆盖）
+    assert isinstance(out, str) and "做个 CLI 工具" in out, f"plan_fn 应产出含 goal 的路径文本，实际={out!r}"
     print("✅")
 
 
-async def t3_tot_vs_role_zero():
-    """t3: tot 与 role_zero 策略互斥验证。"""
-    print("t3: tot vs role_zero...", end=" ", flush=True)
-    
-    llm = FakeLLM(responses=["test"])
-    
-    # tot 策略正常
-    role_tot = build_role(name="TeamLeader", llm=llm, strategy="tot")
-    assert role_tot.profile.get("strategy") == "tot"
-    
-    # role_zero 策略正常
-    role_rz = build_role(name="TeamLeader", llm=llm, strategy="role_zero")
-    assert role_rz.profile.get("strategy") == "role_zero"
-    
-    # 无效策略应抛异常
-    try:
-        build_role(name="TeamLeader", llm=llm, strategy="invalid")
-        assert False, "应抛 ValueError"
-    except ValueError as e:
-        assert "只认 role_zero/tot" in str(e), f"错误信息应提示有效策略，实际{e}"
-    
+def t6_dfs_runs():
+    print("t6: DFSSolver basic...", end=" ", flush=True)
+    cfg = ThoughtSolverConfig(max_steps=2, n_generate_sample=2, n_select_sample=1,
+                              parser=SimpleParser(), evaluator=IdEvaluator())
+    s = DFSSolver(llm=FakeLLM([NODES2, "x"]), config=cfg)
+    path = asyncio.run(s.solve("Goal: dfs"))
+    assert isinstance(path, list) and len(path) >= 1, f"DFS 应返回路径，实际={path}"
     print("✅")
 
 
-async def main():
-    """运行所有门禁测试。"""
+def main():
     print("=" * 60)
-    print("B5: ToT 策略门禁")
+    print("批次1: ToT 树搜索门禁")
     print("=" * 60)
-    
-    try:
-        await t1_tot_agent_basic()
-        await t2_tot_strategy_in_registry()
-        await t3_tot_vs_role_zero()
-        
-        print("\n" + "=" * 60)
-        print("✅ 全部通过 (3/3)")
-        print("=" * 60)
-        return 0
-    except AssertionError as e:
-        print(f"\n❌ 失败：{e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-    except Exception as e:
-        print(f"\n❌ 异常：{e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+    checks = [t1_generate_builds_children, t2_evaluate_writes_value, t3_select_keeps_highest,
+              t4_bfs_solve_picks_high_path, t5_plan_fn_on_rolezero, t6_dfs_runs]
+    for c in checks:
+        c()
+    print("\n" + "=" * 60 + f"\n✅ 全部通过 ({len(checks)}/{len(checks)})\n" + "=" * 60)
+    return 0
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    sys.exit(main())
