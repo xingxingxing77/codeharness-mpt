@@ -93,9 +93,72 @@ async def t5_system_preserved():
     print("✅")
 
 
+def _msg_setup():
+    from langchain_core.messages import HumanMessage
+    from codeharness.configs.compress_msg_config import CompressType
+    cfg = LLMConfig(model="fake", context_length=100, compress_threshold=1.0)  # 不经 ainvoke 门，直测裁剪
+    gw, _ = _mk_gateway(cfg)
+    h0 = HumanMessage(content="HEAD " + "filler " * 40)   # 长，塞不下
+    h1 = HumanMessage(content="one")
+    h2 = HumanMessage(content="two")
+    return gw, [h0, h1, h2], CompressType, 6              # keep=6：h1+h2 整条够，h0 不够
+
+
+def t6_post_by_msg_and_token():
+    """POST_*：保末尾消息完整；by_msg 丢弃边界首条，by_token 把边界截断填余额（token 更多）。"""
+    print("t6: post by_msg vs by_token...", end=" ", flush=True)
+    gw, msgs, CT, keep = _msg_setup()
+    by_msg = gw._compress_messages(list(msgs), keep, CT.POST_CUT_BY_MSG)
+    by_tok = gw._compress_messages(list(msgs), keep, CT.POST_CUT_BY_TOKEN)
+    assert by_msg[-1].content == "two", "POST 应保住末尾消息"
+    # by_msg 整条丢弃塞不下的边界条；by_token 把它截断填余额 → 多一条、总 token 更大
+    assert len(by_msg) == 2, f"by_msg 应只留 h1,h2，实际{len(by_msg)}"
+    assert len(by_tok) == 3, f"by_token 应额外留截断后的边界条，实际{len(by_tok)}"
+    assert gw._count_tokens_direct(by_tok) > gw._count_tokens_direct(by_msg), "by_token 应填更多余额"
+    assert by_tok[-1].content == "two" and by_tok[-2].content == "one", "by_token 也应保末尾完整"
+    print("✅")
+
+
+def t7_pre_by_msg_and_token():
+    """PRE_*：从头往后塞，保首条完整；边界出现在末尾（by_msg 丢、by_token 截头填）。"""
+    print("t7: pre by_msg vs by_token...", end=" ", flush=True)
+    from langchain_core.messages import HumanMessage
+    from codeharness.configs.compress_msg_config import CompressType as CT
+    cfg = LLMConfig(model="fake", context_length=100, compress_threshold=1.0)
+    gw, _ = _mk_gateway(cfg)
+    msgs = [HumanMessage(content="one"), HumanMessage(content="two"),
+            HumanMessage(content="tail " + "filler " * 40)]
+    by_msg = gw._compress_messages(list(msgs), 6, CT.PRE_CUT_BY_MSG)
+    by_tok = gw._compress_messages(list(msgs), 6, CT.PRE_CUT_BY_TOKEN)
+    assert by_msg[0].content == "one", "PRE 应保住首条"
+    assert len(by_msg) == 2, f"PRE by_msg 应留 one,two 丢边界 tail，实际{len(by_msg)}"
+    assert len(by_tok) == 3 and by_tok[0].content == "one" and by_tok[1].content == "two", \
+        "PRE by_token 应保 one,two + 截断 tail"
+    assert by_tok[2].content != msgs[2].content, "tail 应被截断而非整条保留"
+    print("✅")
+
+
+def t8_no_compress_passthrough():
+    """NO_COMPRESS 原样返回。"""
+    print("t8: no compress...", end=" ", flush=True)
+    gw, msgs, CT, keep = _msg_setup()
+    assert gw._compress_messages(list(msgs), keep, CT.NO_COMPRESS) == msgs
+    print("✅")
+
+
+def t9_config_helpers():
+    """CompressType.get_type/cut_types（批次5 补源残缺）。"""
+    print("t9: config helpers...", end=" ", flush=True)
+    from codeharness.configs.compress_msg_config import CompressType as CT
+    assert CT.get_type("bogus") == CT.NO_COMPRESS and CT.get_type("") == CT.NO_COMPRESS
+    assert CT.get_type("post_cut_by_msg") == CT.POST_CUT_BY_MSG
+    assert len(CT.cut_types()) == 4, f"四个真裁剪策略，实际{CT.cut_types()}"
+    print("✅")
+
+
 async def main():
     print("=" * 60)
-    print("批次0: 网关 token 压缩门禁（token 口径）")
+    print("批次0/5: 网关 token 压缩门禁（token 口径 + 四策略）")
     print("=" * 60)
     try:
         await t1_compress_disabled()
@@ -103,8 +166,12 @@ async def main():
         await t3_minimum()
         await t4_token_count_positive()
         await t5_system_preserved()
+        t6_post_by_msg_and_token()
+        t7_pre_by_msg_and_token()
+        t8_no_compress_passthrough()
+        t9_config_helpers()
         print("\n" + "=" * 60)
-        print("✅ 全部通过 (5/5)")
+        print("✅ 全部通过 (9/9)")
         print("=" * 60)
         return 0
     except AssertionError as e:

@@ -102,34 +102,57 @@ class LLMGateway:
             tokens = len(content) // 4
         return tokens
     
-    async def _compress_messages(self, msgs: list, max_tokens: int) -> list:
-        """B6: 精确压缩——保留最近的消息直到总 token ≤ max_tokens（post_cut_by_token）。
+    def _truncate_tokens(self, msg, n_tokens: int, keep_tail: bool):
+        """把一条消息的 content 按 token 截到 n_tokens（keep_tail 决定留尾/留头）。"""
+        content = getattr(msg, "content", "") or ""
+        if n_tokens <= 0:
+            return msg
+        try:
+            from tiktoken import get_encoding
+            enc = get_encoding("cl100k_base")
+            toks = enc.encode(content)
+            cut = toks[-n_tokens:] if keep_tail else toks[:n_tokens]
+            new_content = enc.decode(cut)
+        except Exception:
+            new_content = content[-n_tokens * 4:] if keep_tail else content[:n_tokens * 4]
+        return msg.model_copy(update={"content": new_content}) if hasattr(msg, "model_copy") else msg
 
-        是否触发压缩由调用点 ainvoke 按 `context_length × compress_threshold` 决定；
-        本函数被调用即执行裁剪（不再二次判 compress_type，否则与调用点两套门互搏）。
-        策略按 compress_type 分派（源 base_llm.py 四策略）在批次 5 引入。
-        ponytail: ceiling = 目前只有 post_cut_by_token 一种，by_msg/pre_cut 留待批次 5。
+    def _compress_messages(self, msgs: list, keep_token: int, compress_type) -> list:
+        """源 base_llm.py:340-412 的四策略表驱动（批次5）。
 
-        system 恒留（照源 base_llm.py：先摘 system 再裁非 system，最后 system 插回队首）。
+        system 恒留；POST_* 从尾往前塞、PRE_* 从头往后塞；
+        by_msg 只整条取舍（除非一条都没塞下才截边界条），by_token 把边界条按 token 截断填余额。
+        是否触发由调用点 ainvoke 决定（本函数被调即按 compress_type 裁剪）。
         """
+        from codeharness.configs.compress_msg_config import CompressType
+        if compress_type == CompressType.NO_COMPRESS:
+            return msgs
+
         system_msgs = [m for m in msgs if getattr(m, "type", getattr(m, "role", "")) in ("system", "developer")]
         rest = [m for m in msgs if m not in system_msgs]
-        budget = max_tokens - self._count_tokens_direct(system_msgs)
+        budget = keep_token - self._count_tokens_direct(system_msgs)
 
-        compressed = []
-        current_tokens = 0
+        post = compress_type in (CompressType.POST_CUT_BY_TOKEN, CompressType.POST_CUT_BY_MSG)
+        by_token = compress_type in (CompressType.POST_CUT_BY_TOKEN, CompressType.PRE_CUT_BY_TOKEN)
+        ordered = list(reversed(rest)) if post else rest
 
-        # 从后往前累加（保留最近的）
-        for msg in reversed(rest):
-            msg_tokens = self._count_tokens_direct([msg])
-            if current_tokens + msg_tokens > budget and compressed:
-                break
-            current_tokens += msg_tokens
-            compressed.insert(0, msg)  # 保持顺序
+        kept: list = []
+        used = 0
+        for msg in ordered:
+            n = self._count_tokens_direct([msg])
+            if used + n <= budget:
+                kept.append(msg)
+                used += n
+                continue
+            # 边界条：by_token 一定截断填余额；by_msg 仅在一条都没塞下时才截，否则丢弃
+            if by_token or not kept:
+                room = max(budget - used, 1)
+                kept.append(self._truncate_tokens(msg, room, keep_tail=post))
+            break
 
-        if not compressed and rest:
-            compressed = [rest[-1]]    # 至少保留最后一条非 system
-        return system_msgs + compressed  # system 恒在队首
+        if post:
+            kept.reverse()                      # 还原成正序（尾部那些留在末尾）
+        return system_msgs + kept
     
     @staticmethod
     def embeddings():
@@ -179,17 +202,14 @@ class LLMGateway:
         """唯一的出口：所有计数/trace 都在这里，**别在别处再算一遍**。"""
         msgs = self.format_msg(msgs or [])
         
-        # B6: token 压缩——按 context_length × threshold 裁断（保留最近的消息）
-        if self.cfg.context_length and self.cfg.compress_threshold < 1.0:
-            max_tokens = int(self.cfg.context_length * self.cfg.compress_threshold)
-            
-            # 直接计算 tokens（不调用 count_message_tokens 避免模型查表）
-            current_tokens = self._count_tokens_direct(msgs)
-            
-            if current_tokens > max_tokens:
-                # 精确压缩：逐条累加直到超过阈值
-                compressed = await self._compress_messages(msgs, max_tokens)
-                msgs = compressed
+        # 批次5: token 压缩——四策略表驱动（源 base_llm.py:340-412）。触发权在此，_compress_messages 只管裁。
+        from codeharness.configs.compress_msg_config import CompressType
+        _ct = self.cfg.compress_type
+        if self.cfg.context_length and (_ct != CompressType.NO_COMPRESS or self.cfg.compress_threshold < 1.0):
+            strategy = _ct if _ct != CompressType.NO_COMPRESS else CompressType.POST_CUT_BY_TOKEN
+            keep_token = int(self.cfg.context_length * self.cfg.compress_threshold)
+            if self._count_tokens_direct(msgs) > keep_token:
+                msgs = self._compress_messages(msgs, keep_token, strategy)
         
         model = self._model.bind(**kwargs) if kwargs else self._model
         deadline = timeout or self.cfg.timeout
