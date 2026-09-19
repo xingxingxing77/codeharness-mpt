@@ -48,13 +48,16 @@ class RoleZero:
                  instruction: str = ROLE_INSTRUCTION, max_loops: int = 15, env_desc: str = "",
                  longterm_memory=None, memory: Memory | None = None,
                  brain: BrainMemory | None = None, redis_key: str = "", memory_k: int = 0,
-                 plan_fn=None):
+                 plan_fn=None, instruction_provider=None, task_type_desc: str = None, example: str = ""):
         self.profile = profile
         profile.setdefault("strategy", "role_zero")   # N3：RoleZero 引擎的自报策略（见施工3 批4）
         self.tools = {t.name: t for t in tools}
         self.llm = llm
         self.system_prompt = system_prompt
         self.instruction = instruction
+        self.instruction_provider = instruction_provider   # 批次3：源 TL 每轮 _think 重算 instruction 的等价钩子
+        self.task_type_desc = task_type_desc               # 批次3：源 RoleZero.task_type_desc 类字段的构造期等价
+        self.example = example                             # 批次3：源 _retrieve_experience 的静态覆写口（如 ARCHITECT_EXAMPLE）
         self.max_loops = max_loops
         self.env_desc = env_desc
         self.plan_fn = plan_fn              # 批次1：ToT 等外部规划器接此处；as_node 新任务时先规划再 think
@@ -148,11 +151,15 @@ class RoleZero:
             out.append(AIMessage(content=m.content) if m.role == "assistant" else HumanMessage(content=m.content))
         return out
 
-    # ---- 源 _get_prefix(:276)：人设 + 当前时间 ----
+    # ---- 源 _get_prefix(:276)：人设 + 约束 + 当前时间（对齐 Agent.build_prefix 的三段式）----
     def _prefix(self) -> str:
         p = self.profile
         s = (f"You are a {p.get('profile', 'helper')}, named {p['name']}, "
              f"your goal is {p.get('goal', '')}.")
+        if p.get("constraints"):
+            s += f" The constraint is {p['constraints']}."
+        if p.get("desc"):
+            s += f" {p['desc']}"
         if self.env_desc:
             s += f" You are in {self.env_desc}."
         s += f" The current time is {datetime.now():%Y-%m-%d %H:%M:%S}."
@@ -206,9 +213,11 @@ class RoleZero:
         tool_info = json.dumps({n: {"description": t.description} for n, t in self.tools.items()},
                                ensure_ascii=False)
         plan_status, current_task = self._plan_status(s)
+        # 批次3：instruction 可每轮重算（源 TL 把 team_info 现填）；task_type_desc/example 接构造期覆写。
+        _instruction = self.instruction_provider() if self.instruction_provider else self.instruction
         system_prompt = self.system_prompt.format(
-            role_info=self._prefix(), task_type_desc=TASK_TYPE_DESC,
-            available_commands=tool_info, example=experience, instruction=self.instruction)
+            role_info=self._prefix(), task_type_desc=self.task_type_desc or TASK_TYPE_DESC,
+            available_commands=tool_info, example=(self.example or experience), instruction=_instruction)
         prompt = CMD_PROMPT.format(experience=experience, current_state="ready",
                                    plan_status=plan_status, current_task=current_task,
                                    respond_language=s.get("respond_language", "中文"))

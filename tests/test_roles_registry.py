@@ -65,6 +65,32 @@ async def main():
                                    "memory": [], "action_cursor": -1, "chosen": "", "loops": 0, "output": []})
     assert "未配置 OCR 服务" in r3["output"][0].content
 
-    print(f"角色注册表自测通过：{len(ALL_ROLES)} 个角色实例化 + Researcher/DataAnalyst/Tutorial/InvoiceOCR 实跑")
+    # ⑧ 批次3：源专属 instruction/constraints/example 真接进实例（非 grep，读装配后的对象）
+    il = FakeLLM(["x"])
+    pm = build_role("ProductManager", il)
+    ar = build_role("Architect", il)
+    en2 = build_role("Engineer2", il)
+    pj = build_role("ProjectManager", il)
+    sw = build_role("SweAgent", il)
+    tl = build_role("TeamLeader", il)
+    from codeharness.prompts.product_manager import PRODUCT_MANAGER_INSTRUCTION
+    from codeharness.prompts.di.architect import ARCHITECT_INSTRUCTION, ARCHITECT_EXAMPLE
+    from codeharness.prompts.di.engineer2 import ENGINEER2_INSTRUCTION
+    from codeharness.prompts.di.swe_agent import NEXT_STEP_TEMPLATE
+    assert pm.instruction == PRODUCT_MANAGER_INSTRUCTION, "PM 未接源 instruction"
+    assert ar.instruction == ARCHITECT_INSTRUCTION and ar.example == ARCHITECT_EXAMPLE, "Architect instruction/example 未接"
+    assert en2.instruction == ENGINEER2_INSTRUCTION, "Engineer2 未接源 instruction"
+    assert pj.instruction == "Use WriteTasks tool to write a project task list", "ProjectManager 未接源一句话"
+    assert sw.instruction == NEXT_STEP_TEMPLATE, "SweAgent 未回接源 NEXT_STEP_TEMPLATE"
+    # constraints 进 _prefix（源 PM/Architect 皆有 constraints → Role._get_prefix；两引擎拉平）
+    assert "The constraint is" in pm._prefix() and "same language" in pm._prefix(), "PM constraints 没进 prefix"
+    assert "The constraint is" in ar._prefix(), "Architect constraints 没进 prefix"
+    # TeamLeader 走 provider 钩子（源每轮 format team_info），此处证明 provider 生效且非静态默认
+    assert callable(tl.instruction_provider), "TL 未接 instruction_provider"
+    from codeharness.prompts.di.team_leader import TL_INSTRUCTION
+    assert tl.instruction_provider() == TL_INSTRUCTION.format(team_info=""), "TL provider 产物不对"
+
+    print(f"角色注册表自测通过：{len(ALL_ROLES)} 个角色实例化 + Researcher/DataAnalyst/Tutorial/InvoiceOCR 实跑"
+          f" + 批次3 instruction/constraints/example 接线⑧组")
 
 asyncio.run(main())

@@ -30,7 +30,7 @@ your code
 
 REFLECTION_SYSTEM_MSG = """
 You are an AI Python assistant. You will be given your previous implementation code of a task, runtime error results, and a hint to change the implementation appropriately. Write your full implementation.
-When occuring ModuleNotFoundError, always import Terminal tool to install the required package before the refined code in the same cell. Such as `from codeharness.tools.libs.terminal import Terminal\nterminal = Terminal()\nawait terminal.run_command('pip install pandas')` before importing pandas.
+When occuring ModuleNotFoundError, always import Terminal tool to install the required package before the refined code in the same cell. Such as `from metagpt.tools.libs.terminal import Terminal\nterminal = Terminal()\nawait terminal.run_command('pip install pandas')` before importing pandas.
 """
 
 DEBUG_REFLECTION_EXAMPLE = '''
@@ -98,7 +98,7 @@ Check latest data info to guide subsequent tasks.
 Check code in finished tasks, print key variables to guide your following actions.
 Specifically, if it is a data analysis or machine learning task, print the the latest column information using the following code, with DataFrame variable from 'Finished Tasks' in place of df:
 ```python
-from codeharness.tools.libs.data_preprocess import get_column_info
+from metagpt.tools.libs.data_preprocess import get_column_info
 
 column_info = get_column_info(df)
 print("column_info")

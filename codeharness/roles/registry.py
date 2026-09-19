@@ -29,43 +29,56 @@ from codeharness.actions.write_teaching_plan import WriteTeachingPlan
 from codeharness.actions.invoice_ocr import InvoiceOCR
 from codeharness.actions.data_analysis import WriteAnalysisCode, RunPythonCode
 
+# 批次3：把源角色专属 prompt 资产接进工厂（此前 registry 只有 Assistant/SweAgent 传 instruction，
+# 其余 RoleZero 角色同质——对照5 §结论-1 的死资产，此处接线后 prompt 常量有了生产读者）
+from codeharness.prompts.product_manager import PRODUCT_MANAGER_INSTRUCTION
+from codeharness.prompts.di.architect import ARCHITECT_INSTRUCTION, ARCHITECT_EXAMPLE
+from codeharness.prompts.di.engineer2 import ENGINEER2_INSTRUCTION
+from codeharness.prompts.di.swe_agent import NEXT_STEP_TEMPLATE
+from codeharness.prompts.di.team_leader import TL_INSTRUCTION
+
 
 # ============ RoleZero 族（源 roles/ + roles/di 的 RoleZero 子类） ============
 
 def TeamLeader(llm, **kw):
-    """源 roles/di/team_leader.py：调度中枢"""
+    """源 roles/di/team_leader.py：调度中枢。源在 _think 每轮 TL_INSTRUCTION.format(team_info=...)
+    ——本仓用 instruction_provider 钩子等价（委派批次前 team_info 空串，与源无 env 时返回 "" 自洽）。"""
     return RoleZero({"name": TEAMLEADER_NAME, "profile": "Team Leader",
                      "goal": "Manage a team to assist users"},     # 源 team_leader.py 逐字（t17 对账抓出旧抄错）
-                    REGISTRY, llm, **kw)
+                    REGISTRY, llm,
+                    instruction_provider=lambda: TL_INSTRUCTION.format(team_info=""), **kw)
 
 
 def ProductManager(llm, **kw):
-    """源 roles/product_manager.py:33-38（字段逐字）"""
+    """源 roles/product_manager.py:33-38（字段逐字）——批次3 接上 instruction + constraints 死资产。"""
     return RoleZero({"name": "Alice", "profile": "Product Manager",
-                     "goal": "Create a Product Requirement Document or market research/competitive product research."},
-                    REGISTRY, llm, **kw)
+                     "goal": "Create a Product Requirement Document or market research/competitive product research.",
+                     "constraints": "utilize the same language as the user requirements for seamless communication"},
+                    REGISTRY, llm, instruction=PRODUCT_MANAGER_INSTRUCTION, **kw)
 
 
 def Architect(llm, **kw):
-    """源 roles/architect.py:29-30"""
+    """源 roles/architect.py:29-41：接 ARCHITECT_INSTRUCTION + ARCHITECT_EXAMPLE（_retrieve_experience 等价）+ constraints。"""
     return RoleZero({"name": "Bob", "profile": "Architect",
-                     "goal": "design a concise, usable, complete software system. output the system design."},
-                    REGISTRY, llm, **kw)
+                     "goal": "design a concise, usable, complete software system. output the system design.",
+                     "constraints": "make sure the architecture is simple enough and use  appropriate open source "
+                                    "libraries. Use same language as user requirement"},
+                    REGISTRY, llm, instruction=ARCHITECT_INSTRUCTION, example=ARCHITECT_EXAMPLE, **kw)
 
 
 def ProjectManager(llm, **kw):
-    """源 roles/project_manager.py:25-26（Eve）"""
+    """源 roles/project_manager.py:25-26（Eve）：源 instruction 是一句话型，照搬。"""
     return RoleZero({"name": "Eve", "profile": "Project Manager",
                      "goal": "break down tasks according to PRD/technical design, generate a task list, "
                              "and analyze task dependencies to start with the prerequisite modules"},
-                    REGISTRY, llm, **kw)
+                    REGISTRY, llm, instruction="Use WriteTasks tool to write a project task list", **kw)
 
 
 def Engineer2(llm, **kw):
-    """源 roles/di/engineer2.py（Alex / Engineer，生产写码 RoleZero）"""
+    """源 roles/di/engineer2.py（Alex / Engineer，生产写码 RoleZero）：接 ENGINEER2_INSTRUCTION。"""
     return RoleZero({"name": "Alex", "profile": "Engineer",
                      "goal": "Take on game, app, web development and deployment."},
-                    REGISTRY, llm, **kw)
+                    REGISTRY, llm, instruction=ENGINEER2_INSTRUCTION, **kw)
 
 
 def Assistant(llm, **kw):
@@ -86,7 +99,7 @@ def SweAgent(llm, **kw):
     return RoleZero({"name": "Swen", "profile": "Issue Solver",
                      "goal": "Resolve GitHub issue or bug in any existing codebase"},
                     swe_tools, llm,
-                    instruction="Work via terminal commands. Locate the bug, patch the file, re-run the failing test.",
+                    instruction=NEXT_STEP_TEMPLATE,   # 批次3：换回源 _instruction 资产（原手写一行远弱于此）
                     **kw)
 
 
