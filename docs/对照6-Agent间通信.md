@@ -2,17 +2,19 @@
 
 > 口径与状态词汇见 `对照1-上下文管理.md` 文件头。源快照 `E:\MetaGPT\metagpt`（version=1.0.0），本项目 `E:\Codeharness`。
 > 账本 R3 把源的订阅路由判 `重`：`base_env.publish_message` 遍历投递 + `_observe` 过滤 → LangGraph 条件边 + `Send` 精准激活。本文件核对：**换完之后，"谁把消息交给谁"这条线还剩多少源的能力，以及本项目自建的对外通道是否闭合。**
+>
+> **复核时间 2026-09-19**：本轮 B1–B7 + P0 **未触碰通信面**（`team_graph.route`、`Send` 扇出、`ChatQueue`、`events` SSE 均无改动）。核实结论不变：新增的 `SearchEnhancedQA`/`ImportRepo`/`UploadKB` action 都**不设 `send_to`、不进任何路由**（`grep send_to codeharness/actions/*.py` 仍只有 `run_code.py`/`debug_error.py`）——本轮没造出任何新的 agent→agent 通道。下面按当前代码重新核对。
 
 ## 结论速览
 
-**实现度：约 65%。经典线的订阅式路由是等价迁移（过滤条件逐字一致，且比源多了「每轮激活数」自证）；多 worker 一致性、前端事件流、插话与跨 worker 停止是源没有的增量。丢的是动态线——严格意义上，本项目目前只有一处 agent→agent 具名投递。**
+**实现度：约 65%。经典线的订阅式路由是等价迁移（过滤条件逐字一致，且比源多了「每轮激活数」自证）；多 worker 一致性、前端事件流、插话与跨 worker 停止是源没有的增量。丢的是动态线——严格意义上，本项目目前只有少数几处 agent→agent 具名投递（QA↔Engineer 一条回路 + debug 回流），且动态线仍没有 agent 间通信。**
 
 四条最要紧的缺口：
 
-1. **agent→agent 具名通信只有一例**：`actions/run_code.py:98-109`——QA 测试失败且分诊判定该回开发时 `send_to={"Engineer"}`，经 `team_graph.py:112-114` 具名分支 + `agent.py:80`（`s["name"] in m.send_to`）双侧闭环。除此之外全部靠 `cause_by`→SOP 表路由。动态线（对应源 MGXEnv 那条线）**没有** agent 间通信。
-2. **动态线委派未实现**（与对照 5 §结论-2 同一条，从通信视角看）：源 `TeamLeader.publish_team_message`（`roles/di/team_leader.py:75-86`）可点名唤醒任意队友；本仓 `team.py:65-71` 注释自认「需求只喂队长（`TEAMLEADER_NAME`=源逐字 "Mike"）、Alice/Bob 空转」，`Command.assignee` 只是展示字段（`role_zero.py:165`）。
+1. **agent→agent 具名通信极少**：`actions/run_code.py:98-109`——QA 测试失败且分诊判定该回开发时 `send_to={"Engineer"}`，经 `team_graph.py:112-114` 具名分支 + `agent.py:80`（`s["name"] in m.send_to`）双侧闭环；`actions/debug_error.py` 回流带 `send_to`。除此之外全部靠 `cause_by`→SOP 表路由。动态线（对应源 MGXEnv 那条线）**没有** agent 间通信。
+2. **动态线委派未实现**（与对照 5 §结论-2 同一条，从通信视角看）：源 `TeamLeader.publish_team_message`（`roles/di/team_leader.py:75-86`）可点名唤醒任意队友；本仓 `team.py:65-71` 注释自认「需求只喂队长（`TEAMLEADER_NAME`=源逐字 "Mike"）、Alice/Bob 空转」，`Command.assignee` 只是展示字段（`role_zero.py:165`）。本轮未动。
 3. **`<all>` 不再是广播**（有意，代价需记清）：源 `is_send_to`（`utils/common.py:411-418`）见 `<all>` 即投全员，而 `send_to` 的默认值就是 `{<all>}`（`schema.py:241`）；本仓 `team_graph.py:108-110` 明确否决——「多数 Action 不显式设 send_to，一旦把 `<all>` 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活」。判断成立且 `s3b t6` 钉死了它，但结果是**源里"任何角色都能被指名广播触达"这个能力在本仓没有对等物**（要广播必须显式列出收件人）。
-4. **产物文档的 state 通道是假的**：`TeamState.docs`（`team_graph.py:22`，注释「filename -> Document（产物仓）」）在三处 init 写 `{}`（`team.py:42,61`、`sop/builder.py:34`）后**零读零写**，交接实际全走磁盘 `ArtifactStore`。它还在 `checkpoint.py:21` 的 msgpack 白名单里挂着——一个会让人误以为"文档经图传递"的空声明。
+4. **产物文档的 state 通道是假的**：`TeamState.docs`（`team_graph.py:22`，注释「filename -> Document（产物仓）」）在三处 init 写 `{}`（`team.py:42,61`、`sop/builder.py:34`）后**零读零写**，交接实际全走磁盘 `ArtifactStore`。它还在 `checkpoint.py:21` 的 msgpack 白名单里挂着——一个会让人误以为"文档经图传递"的空声明。（本轮复核：`grep "docs\[" codeharness` 仅命中 `document.py:204` 的另一个 `DocumentStore` 类，`TeamState.docs` 无读写方，结论不变。）
 
 ## 一、源项目怎么做（一条消息的完整路径）
 
@@ -55,8 +57,8 @@
 | 发布/订阅精准路由 | `base_env.py:176-191` + `role.py:413-416` | `team_graph.py:107-119` | 现代化替换 | SOP 表 + `Send`；`stats` 自证「4 角色激活 1」 |
 | 按角色消息缓冲与隔离 | `role.py:100,453-456` | `agent.py:17 inbox` + `TeamState.memories:21` | 已复刻 | `Send` 载荷取代 `put_message`；`MessageQueue` 复制件未接线（对照 1 §五-1） |
 | 自投递 `<self>`（内环） | `const.py:85` + `run_code` mappings | `team_graph.py:96-104`; `run_code.py:98` | 已复刻 | 含 `debug_rounds>=3` 硬闸（源靠 test_round 语义） |
-| 具名跨角色投递 | `role.py:415` + `base_env.py:176-191` | `run_code.py:104` + `team_graph.py:112` + `agent.py:80` | **部分实现** | 全仓仅 QA→Engineer 一例（§结论-1） |
-| 广播 `<all>` | `common.py:411-418`；`schema.py:241` 默认值 | 刻意不实现（`team_graph.py:108-110`） | 有意不做 | `t6` 钉；副作用：`is_send_to` 在本仓**零调用者**成死码 |
+| 具名跨角色投递 | `role.py:415` + `base_env.py:176-191` | `run_code.py:104` + `debug_error.py` + `team_graph.py:112` + `agent.py:80` | **部分实现** | 全仓仅 QA↔Engineer 一例回路（§结论-1）；本轮新增 action 无一设 `send_to` |
+| 广播 `<all>` | `common.py:411-418`；`schema.py:241` 默认值 | 刻意不实现（`team_graph.py:108-110`） | 有意不做 | `t6` 钉；副作用：`is_send_to` 在本仓**零调用者**成死码（本轮复核仍零） |
 | 优先级 / 顺序调度 | 源无此机制 | `agent.py:95-101` BY_ORDER 游标 | 有意不做 | 源不存在，不算缺口 |
 | 共享文档产物交接（经典线主通道） | `software_company.py:44-66` + `document_store/` | `artifact_store.py:43-68`（磁盘）；`TeamState.docs` | 部分实现 | 磁盘是真通道；**state 里的 docs 零读写**（§结论-4） |
 | 文档经消息装配 | `qa_engineer.i_context` | `team_graph.py:44-79 CONTEXT_WIRING` | 已复刻 | 读产物仓装 `CodingContext`/`TestingContext` |
@@ -69,11 +71,12 @@
 
 ## 四、「看着像有、其实没接线」
 
-- **A. `TeamState.docs`（`team_graph.py:22`）**：三处 init 写空 dict，零读零写（已核实）。真正的文档交接是磁盘 + `CONTEXT_WIRING` 装配进消息。这个字段还进了 `checkpoint.py:21` 的 msgpack 白名单——删它要同步改白名单。
-- **B. `utils/common.py:411 is_send_to`**：定义完整（含 `<all>` 判断），**全仓零调用者**（实测）。LangGraph 靠节点名查表取代了它。同类的还有 `addresses` / `member_addrs` 概念在本仓根本不存在。
+- **A. `TeamState.docs`（`team_graph.py:22`）**：三处 init 写空 dict，零读零写（本轮复核：`grep "docs\[" codeharness` 只命中 `document.py:204` 那个**同名不同类**的 `DocumentStore`，非本字段）。真正的文档交接是磁盘 + `CONTEXT_WIRING` 装配进消息。这个字段还进了 `checkpoint.py:21` 的 msgpack 白名单——删它要同步改白名单。
+- **B. `utils/common.py:411 is_send_to`**：定义完整（含 `<all>` 判断），**全仓零调用者**（本轮复核 `grep -v "def is_send_to"` 仍空）。LangGraph 靠节点名查表取代了它。同类的还有 `addresses` / `member_addrs` 概念在本仓根本不存在。
 - **C. `actions/talk_action.py` 是对人通道，不是 agent 间**（17 行全读）：`run()` 只做 `llm.aask` 并返回 `role="assistant"`、**不带 `send_to`** 的消息（`:11-17`），profile 文案明写 `reply_to_human`（`registry.py:77`）。它挂在 Sales/CustomerService 人设下面向终端用户。**别把它误认成"两个 agent 在对话"**。
 - **D. `default_team` 的三个 RoleZero 角色（Mike/Alice/Bob）名不在任何路由表**：见对照 5 §五-B。它们即便被 `dynamic_assembly` 装进图，也只能收需求、不会互发。
 - **E. `MESSAGE_ROUTE_TO_ALL`（`const.py:89`）与 `MESSAGE_ROUTE_TO_NONE`（`:90`）**：常量逐字照搬过来了，生产无读者（`route()` 只认 `<self>` 与具名）。属于「为了对账齐而保留」，与对照 4 §五-E 的 `finished` 同类，无害但要清楚它们不驱动任何行为。
+- **F.【本轮】B2 新增的 `SearchEnhancedQA`/`ImportRepo`/`UploadKB` 都不参与通信**：这三件既不设 `send_to`、也不在任何 `SOP`/`CONTEXT_WIRING` 表里（对照 3 §四-A、对照 5 §五-E 同一条），所以它们不新增、也不改变本子系统任何一条 agent→agent 边。列在这里是为了堵住「加了 action ≠ 加了通信能力」的误读。
 
 ## 五、门禁覆盖
 
@@ -90,16 +93,18 @@
 
 1. **先给已存在的唯一具名投递补断言**：拿 `run_code.py:98-109` 两个分支（ok→自环、失败且分诊=Engineer→具名）各做一条 FakeLLM 断言。这是当前全仓唯一的 agent→agent 语义，裸奔不值得。
 2. **`TeamState.docs` 二选一**：接成真通道（route 里读写、`ArtifactStore` 作 backend），或删字段 + 改 `checkpoint.py:21` 白名单。别留第三种「注释里是通道」。
-3. **委派这条线要有个结论**：要么在 `dynamic_assembly` 补队友节点 + 让 `Command.assignee` 成为 `Send` 目标（机制已具备，缺的是路由表和断言），要么在 `判定-复制与重构清单.md` 里明写「动态线=单引擎，多角色委派 `弃`」。**这是六份对照里唯一一处"范式级"缺口**，它决定这个平台到底能不能跑多 agent 协作，值得单独决策。
+3. **委派这条线要有个结论**：要么在 `dynamic_assembly` 补队友节点 + 让 `Command.assignee` 成为 `Send` 目标（机制已具备，缺的是路由表和断言），要么在 `判定-复制与重构清单.md` 里明写「动态线=单引擎，多角色委派 `弃`」。**这是六份对照里唯一一处"范式级"缺口**，它决定这个平台到底能不能跑多 agent 协作，值得单独决策。本轮未触及，仍是那条。
 4. 若确实不需要广播，把 `is_send_to` 删掉（对照 4 §五-D 那批死装饰器同理），并让 `<all>` 出现在 `send_to` 时**显式告警**而不是静默忽略——现在它是被静默丢掉的目标。
 
 ## 复核方式
 
 ```bash
 cd /e/Codeharness
-grep -rn "send_to" --include=*.py codeharness | grep -v __pycache__        # 三处读者：team_graph:96,112 / agent:80
-grep -rn "is_send_to\|docs" --include=*.py codeharness/environment codeharness/utils/common.py  # §四-A/B
+grep -rn "send_to" --include=*.py codeharness | grep -v __pycache__        # 三处读者：team_graph:96,112 / agent:80；设方：run_code/debug_error
+grep -rn "docs\[" --include=*.py codeharness                                # §四-A：仅 document.py 的 DocumentStore，非 TeamState.docs
+grep -rn "is_send_to" --include=*.py codeharness server | grep -v "def "    # §四-B：空（零调用）
 cat codeharness/actions/talk_action.py                                      # §四-C 全文 17 行
+grep -rln "send_to" codeharness/actions/*.py                                # §四-F：新 action 无一设 send_to
 PYTHONPATH=. PYTHONIOENCODING=utf-8 python tests/s3b_runtime.py
 PYTHONPATH=. PYTHONIOENCODING=utf-8 python tests/s7_platform.py
 # 源侧锚点
