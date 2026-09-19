@@ -14,20 +14,29 @@ import json
 import threading
 import time
 from collections import deque
+from typing import Union
 
 import redis
 import redis.asyncio as aioredis
 
 from codeharness.configs.settings import RedisConfig, settings
-from server.events import Event, MAX_EVENTS_PER_SESSION
+from server.events import Event, MAX_EVENTS_PER_SESSION, norm_cursor
 
 STREAM = "ch:ev:{}"
 _RING_MAX = 20000
 
 
 def enc_id(seq: int) -> str:
+    """XRANGE 边界用。cnt 必须定宽补零：否则同毫秒内 "...-9" 的字典序大于
+    "...-10"，前端按游标去重会反过来吞事件。"""
     ms, cnt = divmod(seq, 10**6)
-    return f"{ms}-{cnt}"
+    return f"{ms:013d}-{cnt:06d}"
+
+
+def pad_eid(eid: str) -> str:
+    """Redis 返回的是规范化 id（不带前导零），不能直接当前端游标，过一道归一。"""
+    ms, cnt = eid.split("-", 1)
+    return f"{int(ms):013d}-{int(cnt):06d}"
 
 
 def dec_id(sid_str: str) -> int:
@@ -46,6 +55,7 @@ class RedisEventBus:
         self._ring: deque = deque(maxlen=_RING_MAX)     # (sid, Event)——publish 入队即返回
         self._lock = threading.Lock()                   # loguru sink 线程与 loop 线程都会 publish
         self._flusher: asyncio.Task | None = None
+        self._inflight = 0                                    # 正在写出的批次数，停机要等它归零
         self._readers: dict[asyncio.Queue, asyncio.Task] = {}
 
     # ---- 同步出口（桥接铁律：普通函数，不 await） ----
@@ -70,28 +80,39 @@ class RedisEventBus:
             with self._lock:
                 while self._ring:
                     batch.append(self._ring.popleft())
-            for sid, ev in batch:
-                key = STREAM.format(sid)
-                eid = await self.client.xadd(key, {"d": json.dumps(ev.model_dump(), ensure_ascii=False)},
-                                             maxlen=self.maxlen, approximate=True)
-                ev.seq = dec_id(eid)                    # seq 由服务端承接（XADD id 单调）
-            await asyncio.sleep(0.02)                   # 攒批窗口：20ms 对 SSE 无感
+            if batch:
+                self._inflight += 1
+                try:
+                    for sid, ev in batch:
+                        key = STREAM.format(sid)
+                        eid = await self.client.xadd(key, {"d": json.dumps(ev.model_dump(), ensure_ascii=False)},
+                                                     maxlen=self.maxlen, approximate=True)
+                        ev.seq = dec_id(eid)                    # seq 由服务端承接（XADD id 单调）
+                        ev.cursor = pad_eid(eid)                # 前端去重/续传只认这个串
+                finally:
+                    self._inflight -= 1
+            await asyncio.sleep(0.02)                           # 攒批窗口：20ms 对 SSE 无感
 
     async def flush_now(self):
-        """测试/停机用：把 ring 里的积压刷干净（生产靠 flusher 自转）。"""
+        """测试/停机用：把 ring 里的积压刷干净（生产靠 flusher 自转）。
+        必须连在途批次一起等——ring 在 popleft 时就空了，那时 XADD 还没发完，
+        只看 ring 会让停机路径丢掉整批事件。"""
         while True:
             with self._lock:
-                if not self._ring:
-                    break
+                idle = not self._ring
+            if idle and self._inflight == 0:
+                return
             await asyncio.sleep(0.03)
 
-    def history(self, sid: str, after_seq: int = 0) -> list:
+    def history(self, sid: str, after: Union[str, int] = "") -> list:
         key = STREAM.format(sid)
-        lo = f"({enc_id(after_seq)}" if after_seq else "-"
+        a = norm_cursor(after)
+        lo = f"({a}" if a and a != "0" else "-"
         out = []
         for eid, fields in self._sync.xrange(key, min=lo):
             ev = Event(**json.loads(dict(fields)["d"]))
             ev.seq = dec_id(eid)
+            ev.cursor = pad_eid(eid)
             out.append(ev)
         return out
 
@@ -115,6 +136,7 @@ class RedisEventBus:
                         d = dict(fields)
                         ev = Event(**json.loads(d["d"]))
                         ev.seq = dec_id(eid)
+                        ev.cursor = pad_eid(eid)
                         q.put_nowait(ev)
 
         self._readers[q] = asyncio.get_running_loop().create_task(_reader())

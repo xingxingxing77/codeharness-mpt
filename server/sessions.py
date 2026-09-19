@@ -34,6 +34,8 @@ class Session(BaseModel):
     created_at: str = ""
     started_at: str = ""
     finished_at: str = ""
+    archived: bool = False          # 侧栏「归档」：非破坏性隐藏，可撤销
+    pinned: bool = False            # 置顶排在列表最前
 
 
 def _now() -> str:
@@ -77,7 +79,17 @@ class SessionStore:
         return self._sessions.get(sid)
 
     def list(self) -> list:
-        return sorted(self._sessions.values(), key=lambda s: s.created_at, reverse=True)
+        # 两个方向没法塞进一次 sort：先按创建时间倒序，再按「未置顶」稳定排一次，
+        # 组内顺序不受影响。
+        by_recency = sorted(self._sessions.values(), key=lambda s: s.created_at, reverse=True)
+        return sorted(by_recency, key=lambda s: not s.pinned)
+
+    def delete(self, sid: str) -> bool:
+        if sid not in self._sessions:
+            return False
+        del self._sessions[sid]
+        self._persist()
+        return True
 
     def update(self, sid: str, persist: bool = True, **fields) -> Session:
         data = self._sessions[sid].model_dump()

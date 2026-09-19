@@ -2,6 +2,7 @@
 auth 关恒 "default"（现状行为），开时校验 Bearer 并按 user 隔离（越权一律 404 不泄露存在性）。"""
 import asyncio
 from pathlib import Path
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -55,6 +56,13 @@ class HumanInputReq(BaseModel):
     content: str = Field(min_length=1)
 
 
+class PatchSessionReq(BaseModel):
+    """三个都可选：不传的字段保持原值，所以取消归档要显式发 archived=false。"""
+    idea: Optional[str] = Field(default=None, min_length=1)
+    archived: Optional[bool] = None
+    pinned: Optional[bool] = None
+
+
 def _get(request: Request, name: str):
     return getattr(request.app.state, name)
 
@@ -97,6 +105,26 @@ async def create_session(req: CreateSessionReq, request: Request, user: str = De
 def get_session(sid: str, request: Request, user: str = Depends(current_user)):
     s = _owned(request, sid, user)
     return s.model_dump()
+
+
+@router.patch("/{sid}")
+def patch_session(sid: str, req: PatchSessionReq, request: Request, user: str = Depends(current_user)):
+    """侧栏的重命名/归档/置顶。只认这三个字段，其余一律不接受。"""
+    s = _owned(request, sid, user)
+    fields = req.model_dump(exclude_unset=True)   # 没传的字段不动：false 与「未传」必须可区分
+    if not fields:
+        return s.model_dump()
+    return _get(request, "store").update(s.id, **fields).model_dump()
+
+
+@router.delete("/{sid}")
+def delete_session(sid: str, request: Request, user: str = Depends(current_user)):
+    s = _owned(request, sid, user)
+    if s.status in (SessionStatus.running, SessionStatus.stopping, SessionStatus.awaiting_human):
+        # runner 还在往这条记录合流 cost/status，删了会留下往空会话写事件的怪状态
+        raise HTTPException(409, "会话进行中，请先停止再删除")
+    _get(request, "store").delete(s.id)
+    return {"ok": True, "deleted": s.id}
 
 
 def _owned(request: Request, sid: str, user: str):
@@ -192,7 +220,7 @@ async def human_input(sid: str, req: HumanInputReq, request: Request, user: str 
 
 
 @router.get("/{sid}/events")
-async def events(sid: str, request: Request, after: int = 0, user: str = Depends(current_user)):
+async def events(sid: str, request: Request, after: str = "", user: str = Depends(current_user)):
     bus, store = _get(request, "bus"), _get(request, "store")
     _owned(request, sid, user)
 
@@ -227,7 +255,7 @@ def session_trace(sid: str, request: Request, user: str = Depends(current_user))
 
 
 @router.get("/{sid}/events/history")
-def events_history(sid: str, request: Request, after: int = 0, user: str = Depends(current_user)):
+def events_history(sid: str, request: Request, after: str = "", user: str = Depends(current_user)):
     """有界 JSON 回放：`/events` 是给浏览器 EventSource 的无界活流，**任何要读完再走的
     消费方都必须用这条**——冒烟脚本挂死两场的根因就是拿普通 GET 读无限流（TestClient 的
     transport 会把应用跑到底才返回，`while True` 永不返回）。事后审计、S9 采集、断线重连

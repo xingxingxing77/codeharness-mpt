@@ -6,7 +6,7 @@ const MAX_LOGS = 800
 
 function newBlock(ev: WEvent): Block {
   return {
-    key: ev.uuid || `e${ev.seq}`,
+    key: ev.uuid || `e${ev.cursor || ev.seq}`,
     type: ev.block || 'System',
     role: ev.role || '',
     closed: false,
@@ -36,6 +36,10 @@ export const useSessionStore = defineStore('sessions', {
     cost: {} as Record<string, number>,
     connected: false,
     evtSource: null as EventSource | null,
+    /** 主游标：定宽补零串，字典序==到达序。 */
+    lastCursor: '',
+    /** 退化路径：后端未带 cursor 时才用 seq。Redis 总线的 seq≈1.79e18 过 JSON.parse
+     *  会舍入到 ulp=256，同毫秒内上千事件塌缩成几个值，拿它去重会吞事件。 */
     lastSeq: 0,
     busy: false
   }),
@@ -89,6 +93,7 @@ export const useSessionStore = defineStore('sessions', {
       idea: string
       project_name?: string
       n_round?: number
+      paradigm?: string
       llm?: Record<string, any>
     }): Promise<Session> {
       const s = await api.createSession(payload)
@@ -115,6 +120,7 @@ export const useSessionStore = defineStore('sessions', {
       this.logs = []
       this.humanQuestion = null
       this.lastSeq = 0
+      this.lastCursor = ''
       this.connected = false
     },
 
@@ -125,7 +131,8 @@ export const useSessionStore = defineStore('sessions', {
       // N1：EventSource 发不了 Authorization header，auth 开时走 access_token 查询参数（client.ts 的 Bearer 只管 fetch）
       const tok = getToken()
       const authQ = tok ? `&access_token=${encodeURIComponent(tok)}` : ''
-      const src = new EventSource(`/api/sessions/${sid}/events?after=${this.lastSeq}${authQ}`)
+      const after = this.lastCursor || String(this.lastSeq)
+      const src = new EventSource(`/api/sessions/${sid}/events?after=${encodeURIComponent(after)}${authQ}`)
       src.onopen = () => {
         this.connected = true
       }
@@ -148,13 +155,18 @@ export const useSessionStore = defineStore('sessions', {
     },
 
     applyEvent(ev: WEvent) {
-      if (ev.seq <= this.lastSeq) return
-      this.lastSeq = ev.seq
+      if (ev.cursor) {
+        if (this.lastCursor && ev.cursor <= this.lastCursor) return
+        this.lastCursor = ev.cursor
+      } else if (ev.seq <= this.lastSeq) {
+        return
+      }
+      if (ev.seq > this.lastSeq) this.lastSeq = ev.seq
 
       if (ev.kind === 'report') {
         // 孤立收口标记（uuid 从未开过块）直接丢：否则下面会凭空创建一个空块
         if (ev.name === 'end_marker' && ev.uuid && !(ev.uuid in this.blocks)) return
-        const key = ev.uuid || `e${ev.seq}`
+        const key = ev.uuid || `e${ev.cursor || ev.seq}`
         let b = this.blocks[key]
         if (!b) {
           b = newBlock(ev)
@@ -200,7 +212,7 @@ export const useSessionStore = defineStore('sessions', {
         if (this.logs.length > MAX_LOGS) this.logs.splice(0, this.logs.length - MAX_LOGS)
       } else if (ev.kind === 'ask_human') {
         this.humanQuestion = ev
-        if (this.current) this.patchSession(this.current.id, { status: 'awaiting_human' })
+        if (this.current) this.mergeSessionLocal(this.current.id, { status: 'awaiting_human' })
         this.status = 'awaiting_human'
       } else if (ev.kind === 'error') {
         this.logs.push(`[error] ${ev.value}`)
@@ -210,13 +222,13 @@ export const useSessionStore = defineStore('sessions', {
         if (v.message) this.logs.push(`[status] ${v.message}`)
         if (v.status) {
           this.status = v.status
-          if (this.current) this.patchSession(this.current.id, { status: v.status, cost: v.cost })
+          if (this.current) this.mergeSessionLocal(this.current.id, { status: v.status, cost: v.cost })
         }
         if (v.status !== 'awaiting_human') this.humanQuestion = null
       }
     },
 
-    patchSession(sid: string, patch: Partial<Session>) {
+    mergeSessionLocal(sid: string, patch: Partial<Session>) {
       const s = this.sessions.find((x) => x.id === sid)
       if (s) Object.assign(s, patch)
     },
@@ -226,7 +238,7 @@ export const useSessionStore = defineStore('sessions', {
       this.busy = true
       try {
         await api.startSession(this.currentId)
-        this.patchSession(this.currentId, { status: 'running' })
+        this.mergeSessionLocal(this.currentId, { status: 'running' })
         this.status = 'running'
       } finally {
         this.busy = false
@@ -241,6 +253,19 @@ export const useSessionStore = defineStore('sessions', {
       } finally {
         this.busy = false
       }
+    },
+
+    /** PATCH 返回服务端权威对象，直接覆盖本地那一条，失败自然抛出给调用方提示。 */
+    async patchSession(sid: string, patch: { idea?: string; archived?: boolean; pinned?: boolean }) {
+      const s = await api.patchSession(sid, patch)
+      this.mergeSessionLocal(sid, s)
+      return s
+    },
+
+    async removeSession(sid: string) {
+      await api.deleteSession(sid)
+      this.sessions = this.sessions.filter((x) => x.id !== sid)
+      if (this.currentId === sid) this.goHome()
     },
 
     async sendChat(content: string, sendTo = '') {

@@ -21,13 +21,28 @@ async function req<T = any>(method: string, url: string, body?: any): Promise<T>
   const rsp = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
   if (!rsp.ok) {
     if (rsp.status === 401 && !url.startsWith('/api/auth')) setToken('')
-    let detail = rsp.statusText
+    let detail: unknown = rsp.statusText
     try {
       detail = (await rsp.json()).detail || detail
     } catch {}
-    throw new Error(detail)
+    throw new Error(flattenDetail(detail))
   }
   return rsp.json()
+}
+
+/** 校验失败时 FastAPI 给的 detail 是数组，直接塞进 Error 会渲染成 [object Object]。 */
+function flattenDetail(detail: unknown): string {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d: any) => {
+        const where = Array.isArray(d?.loc) ? d.loc.filter((x: any) => x !== 'body').join('.') : ''
+        const msg = d?.ctx?.msg || d?.msg || JSON.stringify(d)
+        return where ? `${where}: ${msg}` : String(msg)
+      })
+      .join('；')
+  }
+  return String(detail)
 }
 
 export const api = {
@@ -43,10 +58,20 @@ export const api = {
     idea: string
     project_name?: string
     n_round?: number
+    paradigm?: string
     llm?: Record<string, any>
   }) => req<Session>('POST', '/api/sessions', payload),
   startSession: (sid: string) => req('POST', `/api/sessions/${sid}/start`),
   stopSession: (sid: string) => req('POST', `/api/sessions/${sid}/stop`),
+  /** 侧栏写操作：只接受 idea / archived / pinned，不传的字段保持原值 */
+  patchSession: (sid: string, patch: { idea?: string; archived?: boolean; pinned?: boolean }) =>
+    req<Session>('PATCH', `/api/sessions/${sid}`, patch),
+  deleteSession: (sid: string) => req<{ ok: boolean; deleted: string }>('DELETE', `/api/sessions/${sid}`),
+  /** 有界回放：活流 /events 读不完，要「读完再走」的消费方必须走这条 */
+  eventHistory: (sid: string, after = '') =>
+    req<{ events: any[] }>('GET', `/api/sessions/${sid}/events/history?after=${encodeURIComponent(after)}`),
+  importRepo: (sid: string, payload: { repo_path: string; save_name?: string; include_files?: boolean }) =>
+    req<Record<string, any>>('POST', `/api/sessions/${sid}/workspace/import_repo`, payload),
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>

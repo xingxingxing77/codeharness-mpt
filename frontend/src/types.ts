@@ -14,11 +14,15 @@ export interface Session {
   created_at: string
   started_at: string
   finished_at: string
+  // F4 的 PATCH 路由提供；后端未升级前不会返回，故可选
+  archived?: boolean
+  pinned?: boolean
 }
 
 export interface WEvent {
   session_id: string
   seq: number
+  cursor: string // 去重/续传唯一依据；seq 只做展示——Redis 总线上它超出 2^53
   ts: number
   kind: string // report | log | status | ask_human | error
   block: string | null

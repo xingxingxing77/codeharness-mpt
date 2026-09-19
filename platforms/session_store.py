@@ -78,7 +78,15 @@ class RedisSessionStore:
         for sid, h in zip(sids, pipe.execute()):
             if h:
                 out.append(_load(sid, h))
-        return sorted(out, key=lambda s: s.created_at, reverse=True)
+        # 与 JSON store 同一口径：先时间倒序，再按「未置顶」稳定排一次
+        by_recency = sorted(out, key=lambda s: s.created_at, reverse=True)
+        return sorted(by_recency, key=lambda s: not s.pinned)
+
+    def delete(self, sid: str) -> bool:
+        # 索引也要一起摘：只删哈希会让 list() 里留下一个 get 不到的幽灵条目
+        removed = self.r.delete(KEY.format(sid))
+        self.r.zrem(INDEX, sid)
+        return bool(removed)
 
     def update(self, sid: str, persist: bool = True, **fields) -> Session:
         s = self.get(sid)

@@ -132,12 +132,15 @@ async def t2_dual_worker_replay():
         await a.flush_now()
         full = a.history("sX")
         assert len(full) == 10 and all(full[i].seq < full[i + 1].seq for i in range(9)), "seq 非单调"
-        # 游标取**真实事件 seq**（前端 ?after=<lastSeq> 的语义）：seq 编码自 stream id，不是小整数
-        cut = full[2].seq
-        ha, hb = a.history("sX", after_seq=cut), b.history("sX", after_seq=cut)
+        # 游标取**真实事件的 cursor**（前端 ?after=<cursor> 的语义）：seq 编码自 stream id，
+        # 量级 1.79e18 超出 float64 安全整数，只有定宽补零的字符串游标能原样回到服务端
+        cut = full[2].cursor
+        assert all(len(e.cursor) == len(cut) for e in full), "cursor 必须定宽，否则字典序 != 数值序"
+        assert [e.cursor for e in full] == sorted(e.cursor for e in full), "cursor 字典序非单调"
+        ha, hb = a.history("sX", after=cut), b.history("sX", after=cut)
         assert [e.seq for e in ha] == [e.seq for e in hb] and len(ha) == 7, (len(ha), len(hb))
         assert [e.value for e in hb] == [f"m{i}" for i in range(3, 10)], hb
-        _ok("t2", "双 worker：after=seq 重放在两个 worker 上逐条一致（seq 由服务端承接，单调）")
+        _ok("t2", "双 worker：after=cursor 重放在两个 worker 上逐条一致（定宽补零，字典序==数值序）")
     finally:
         await a.aclose(); await b.aclose()
 
@@ -292,11 +295,28 @@ async def t12_sse_reconnect_continuity():
         await bus.flush_now()
         hist = bus.history("sR")
         assert len(hist) == 5
-        last = hist[-1].seq
+        last = hist[-1].cursor
         bus.publish("sR", kind="report", block="Thought", value="gap")   # 「断线窗口」里产生的事件
         await bus.flush_now()
-        catchup = bus.history("sR", after_seq=last)                     # 重连补历史
+        catchup = bus.history("sR", after=last)                          # 重连补历史
         assert [e.value for e in catchup] == ["gap"], catchup
+
+        # 突发：seq 编码 ms*10^6+cnt 量级 1.79e18，过一遍 JS 的 JSON.parse 会舍入到
+        # ulp=256，同毫秒内上千个 seq 塌缩成几个不同值——前端正是按 seq 去重才丢事件的。
+        gapCursor = catchup[-1].cursor
+        before = len(bus.history("sR"))
+        for i in range(1000):
+            bus.publish("sR", kind="report", block="Thought", value=f"b{i}", uuid=f"bu{i}")
+        await bus.flush_now()
+        burst = bus.history("sR", after=gapCursor)
+        assert len(burst) == 1000, f"突发回放少给了：{len(burst)}/1000"
+        assert len({e.cursor for e in burst}) == 1000, "cursor 不唯一，前端去重会吞事件"
+        assert len({e.seq for e in burst}) > 900, "seq 本身就撞了（同毫秒 cnt 递增应保证唯一）"
+        assert burst == sorted(burst, key=lambda e: e.cursor), "cursor 字典序必须等于到达序"
+        # 反证：把 seq 当作前端会看到的 JS number，它确实塌缩——所以只能用 cursor
+        collapsed = {int(float(e.seq)) for e in burst}
+        assert len(collapsed) < 1000, "float64 未塌缩说明环境不符，此断言的保护失效"
+        assert len(bus.history("sR")) == before + 1000
         q = bus.subscribe("sR")                                          # 补完后从流尾续推
         bus.publish("sR", kind="report", block="Thought", value="live")
         await bus.flush_now()

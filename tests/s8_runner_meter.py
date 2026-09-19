@@ -187,10 +187,14 @@ def t6_events_history_bounded():
             assert r.status_code == 200
             evs = r.json()["events"]
             assert [e["kind"] for e in evs] == ["status", "report", "status"], evs   # seq1=created
-            # 游标取**真实事件 seq**（redis 模式 seq 是 stream-id 编码的大整数，进程内是 1..N——
-            # 断言只钉「after=第2条seq ⇒ 只剩第3条」这条 SSE 同款游标语义，不钉字面值）
-            tail = c.get(f"/api/sessions/{sid}/events/history?after={evs[1]['seq']}").json()["events"]
-            assert len(tail) == 1 and tail[0]["seq"] == evs[2]["seq"] > evs[1]["seq"], tail
+            # 游标取**真实事件的 cursor**（redis 模式 seq≈1.79e18 过 JS JSON.parse 会舍入，
+            # 所以线上契约是定宽补零字符串游标；断言仍不钉字面值，只钉游标语义）
+            assert all(len(e["cursor"]) == len(evs[0]["cursor"]) for e in evs), "cursor 必须定宽"
+            assert [e["cursor"] for e in evs] == sorted(e["cursor"] for e in evs), "cursor 字典序非单调"
+            tail = c.get(f"/api/sessions/{sid}/events/history?after={evs[1]['cursor']}").json()["events"]
+            assert len(tail) == 1 and tail[0]["cursor"] == evs[2]["cursor"], tail
+            # 老口径的裸数字 after 仍要能用（历史 URL、外部脚本）
+            assert len(c.get(f"/api/sessions/{sid}/events/history?after=0").json()["events"]) == 3
             assert c.get("/api/sessions/nope/events/history").status_code == 404
     finally:
         ss.SESSIONS_FILE = keep
