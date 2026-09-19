@@ -1,6 +1,6 @@
 import MarkdownIt from 'markdown-it'
 import hljs from 'highlight.js'
-import 'highlight.js/styles/github-dark.css'
+import '../styles/hljs.css'
 
 const md: MarkdownIt = new MarkdownIt({ html: false, linkify: true, breaks: false })
 

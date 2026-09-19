@@ -1,3 +1,5 @@
+@import './styles/tokens.css';
+
 html,
 body,
 #app {
@@ -6,32 +8,34 @@ body,
   padding: 0;
 }
 
-:root {
-  /* 侧边栏（米色暖调） */
-  --sb-bg: #f2ecdd;
-  --sb-hover: rgba(80, 66, 30, 0.055);
-  --sb-active: #e7dec7;
-  --sb-text: #37352e;
-  --sb-muted: #a29b88;
-  --sb-line: #e5ddc9;
+/* 临时桥接：旧令牌名 → 新令牌层。让 F1–F6 期间尚未重写的组件继续渲染，
+ * 观感已对齐参考主题。F7 删掉最后一批旧组件时整块一并删除。
+ * 必须坐在 body 上：--dsw-* 定义在 body，自定义属性只向下继承，
+ * 放 :root 会解析成 guaranteed-invalid（tokens.css 的滚动条规则同理）。 */
+body {
+  --sb-bg: var(--dsw-specific-sidebar-fill);
+  --sb-hover: var(--dsw-alias-interactive-bg-hover);
+  --sb-active: var(--dsw-specific-sidebar-nav-item-active);
+  --sb-text: var(--dsw-alias-label-primary);
+  --sb-muted: var(--dsw-alias-label-tertiary);
+  --sb-line: var(--dsw-alias-border-l1);
 
-  /* 主区 */
-  --text: #262521;
-  --text-2: #55524a;
-  --text-3: #8f8b7e;
-  --line: #e8e4d9;
-  --card: #fdfcf9;
-  --card-border: #e9e4d8;
-  --chip-bg: #f4f2ee;
-  --bubble: #efeeec;
-  --tool-card: #f6f5f2;
-  --kbd: #eae8e2;
-  --dark-btn: #2c2b28;
-  --accent: #7a5af8;
-  --accent-soft: #f1ecfd;
-  --blue: #3d6fd6;
+  --text: var(--dsw-alias-label-primary);
+  --text-2: var(--dsw-alias-label-secondary);
+  --text-3: var(--dsw-alias-label-tertiary);
+  --line: var(--dsw-alias-border-l2);
+  --card: var(--dsw-alias-bg-layer-1);
+  --card-border: var(--dsw-alias-border-l2);
+  --chip-bg: var(--dsw-alias-bg-module-platform);
+  --bubble: var(--dsw-specific-bubble);
+  --tool-card: var(--dsw-alias-markdown-code-block);
+  --kbd: var(--dsw-alias-markdown-tag);
+  --dark-btn: var(--dsw-alias-button-primary-fill);
+  --accent: var(--dsw-alias-state-business-primary);
+  --accent-soft: var(--dsw-alias-state-business-tertiary);
+  --blue: var(--dsw-alias-state-business-primary);
 
-  --mono: Consolas, Menlo, 'Courier New', monospace;
+  --mono: var(--ds-font-family-code);
 }
 
 * {
@@ -39,25 +43,10 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
-  color: var(--text);
+  font-family: var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
   -webkit-font-smoothing: antialiased;
-}
-
-/* 细滚动条 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(120, 110, 80, 0.22);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(120, 110, 80, 0.38);
-}
-::-webkit-scrollbar-track {
-  background: transparent;
 }
 
 /* ---- 通用：主区结构 ---- */

@@ -169,10 +169,6 @@ function rel(iso: string): string {
   return `${Math.floor(ms / (30 * day))} 个月`
 }
 
-function toggleTheme() {
-  ui.theme = ui.theme === 'dark' ? 'light' : 'dark'
-}
-
 function openSettings(page: string) {
   ui.settingsMenuOpen = false
   ui.settingsPage = page

@@ -1,0 +1,109 @@
+/* highlight.js 双主题：一套规则、两套值，靠令牌层的 presence 属性切换。
+ * 参考项目原本用 shiki + --shiki-* 变量做同一件事，这里用 --hljs-* 对齐同一机制。
+ * 深色是 body[data-ds-dark-theme]，浅色是该属性不存在 —— 写 ="light" 永不命中。 */
+body {
+  --hljs-comment: #6a737d;
+  --hljs-keyword: #d73a49;
+  --hljs-string: #032f62;
+  --hljs-number: #005cc5;
+  --hljs-title: #6f42c1;
+  --hljs-attr: #005cc5;
+  --hljs-built_in: #e36209;
+  --hljs-literal: #005cc5;
+  --hljs-type: #d73a49;
+  --hljs-meta: #6a737d;
+  --hljs-deletion: #b31d28;
+  --hljs-addition: #22863a;
+  --hljs-selector: #e36209;
+}
+
+body[data-ds-dark-theme] {
+  --hljs-comment: #8b949e;
+  --hljs-keyword: #ff7b72;
+  --hljs-string: #a5d6ff;
+  --hljs-number: #79c0ff;
+  --hljs-title: #d2a8ff;
+  --hljs-attr: #79c0ff;
+  --hljs-built_in: #ffa657;
+  --hljs-literal: #79c0ff;
+  --hljs-type: #ff7b72;
+  --hljs-meta: #8b949e;
+  --hljs-deletion: #ffdcd7;
+  --hljs-addition: #aff5b4;
+  --hljs-selector: #ffa657;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: var(--hljs-comment);
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-doctag,
+.hljs-name {
+  color: var(--hljs-keyword);
+  font-weight: 600;
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-addition {
+  color: var(--hljs-string);
+}
+
+.hljs-number,
+.hljs-link {
+  color: var(--hljs-number);
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-title.function_ {
+  color: var(--hljs-title);
+}
+
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable {
+  color: var(--hljs-attr);
+}
+
+.hljs-built_in,
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--hljs-built_in);
+}
+
+.hljs-literal,
+.hljs-constant {
+  color: var(--hljs-literal);
+}
+
+.hljs-type,
+.hljs-class .hljs-title {
+  color: var(--hljs-type);
+}
+
+.hljs-meta {
+  color: var(--hljs-meta);
+}
+
+.hljs-deletion {
+  color: var(--hljs-deletion);
+}
+
+.hljs-selector-id,
+.hljs-selector-class {
+  color: var(--hljs-selector);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}

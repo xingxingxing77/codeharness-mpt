@@ -22,13 +22,13 @@
               <TerminalPanel v-if="ui.terminalOpen" />
             </template>
             <template v-else>
-              <SessionTopBar home />
-              <HomeComposer />
+              <BoltHero />
             </template>
           </main>
         </div>
         <HumanInputDialog />
         <CreateSessionModal />
+        <ToastLayer />
       </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>
@@ -47,9 +47,10 @@ import {
 import { useSessionStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
 import { useAuthStore } from './stores/auth'
+import { useThemeStore } from './stores/theme'
+import BoltHero from './components/BoltHero.vue'
 import ChatInput from './components/ChatInput.vue'
 import CreateSessionModal from './components/CreateSessionModal.vue'
-import HomeComposer from './components/HomeComposer.vue'
 import HumanInputDialog from './components/HumanInputDialog.vue'
 import LoginPage from './components/LoginPage.vue'
 import OutputsCard from './components/OutputsCard.vue'
@@ -58,13 +59,14 @@ import SessionTopBar from './components/SessionTopBar.vue'
 import SettingsView from './components/SettingsView.vue'
 import TerminalPanel from './components/TerminalPanel.vue'
 import Timeline from './components/Timeline.vue'
+import ToastLayer from './components/ui/ToastLayer.vue'
 import ToolsPanel from './components/ToolsPanel.vue'
-import './style.css'
 
 const store = useSessionStore()
 const ui = useUiStore()
 const auth = useAuthStore()
-const naiveTheme = computed(() => (ui.theme === 'dark' ? darkTheme : null))
+const theme = useThemeStore()
+const naiveTheme = computed(() => (theme.dark ? darkTheme : null))
 
 // N1：先探 auth（enabled=0 直接进主界面），登录态成立才拉会话——顺序反了会 401 一片
 onMounted(async () => {
@@ -87,7 +89,7 @@ watch(
   display: flex;
   height: 100vh;
   overflow: hidden;
-  background: #fff;
+  background: var(--dsw-alias-bg-base);
 }
 
 .sb {
