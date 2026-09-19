@@ -41,7 +41,7 @@
 <script setup lang="ts">
 /** 参考项目 Menu：4px 内衬、r12、反向发丝边、shadow-lv3、主卡 218 宽。
  *  数据驱动：本项目只有行操作 / 视图选项两类菜单，不值得开插槽式 API。 */
-import { nextTick, onBeforeUnmount, ref } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import DsIcon from './DsIcon.vue'
 import type { MenuItem } from './menuTypes'
 
@@ -49,12 +49,14 @@ const props = withDefaults(
   defineProps<{ items: MenuItem[]; align?: 'start' | 'end'; compact?: boolean; closeOnPointerLeave?: boolean }>(),
   { align: 'start', compact: false, closeOnPointerLeave: true }
 )
-const emit = defineEmits<{ select: [item: MenuItem] }>()
+const emit = defineEmits<{ select: [item: MenuItem]; 'update:open': [v: boolean] }>()
 
 const rootEl = ref<HTMLElement>()
 const listEl = ref<HTMLElement>()
 const open = ref(false)
 const pos = ref<Record<string, string>>({})
+// 开合状态对外可见：owner 要拿它禁用 hover 卡（参考项目 HoverCard 的 disabled={menuOpen}）
+watch(open, (v) => emit('update:open', v))
 
 const GAP = 4
 const MIN_W = 218

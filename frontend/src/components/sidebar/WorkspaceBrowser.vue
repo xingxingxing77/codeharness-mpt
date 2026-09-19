@@ -45,11 +45,18 @@
           :s="s"
           :selected="s.id === store.currentId"
           :pinned="!!s.pinned"
+          :draggable="canDrag"
+          :drag-active="dragActive"
+          :marker="markerFor(s.id)"
           @open="store.select"
           @rename="renaming = $event"
           @archive="onArchive"
           @pin="onPin"
           @remove="confirming = $event"
+          @drag-start="onDragStart"
+          @drag-end="onDragEnd"
+          @drag-over="onDragOver"
+          @drop="(id, half) => onDrop('', idsOf({ sessions: shownFlat }), id, half)"
         />
       </template>
 
@@ -72,11 +79,18 @@
             :s="s"
             :selected="s.id === store.currentId"
             :pinned="!!s.pinned"
+            :draggable="canDrag"
+            :drag-active="dragActive"
+            :marker="markerFor(s.id)"
             @open="store.select"
             @rename="renaming = $event"
             @archive="onArchive"
             @pin="onPin"
             @remove="confirming = $event"
+            @drag-start="onDragStart"
+            @drag-end="onDragEnd"
+            @drag-over="onDragOver"
+            @drop="(id, half) => onDrop(g.key, idsOf(g), id, half)"
           />
           <button
             v-if="g.sessions.length > LIMIT"
@@ -196,6 +210,42 @@ function visible(g: { key: string; sessions: Session[] }): Session[] {
   return overflow[g.key] ? g.sessions : g.sessions.slice(0, LIMIT)
 }
 
+/* ---------- 拖拽排序（orderBy: 'manual'） ----------------------------------
+ * 行只报「落在哪一行的上半/下半」，插位在这里算——因为基准必须是**当下渲染出来的
+ * 那串 id**（含溢出收起后的可见顺序），行自己看不到兄弟节点。 */
+const dragId = ref('')
+const over = ref<{ id: string; half: 'before' | 'after' } | null>(null)
+const dragActive = computed(() => !!dragId.value)
+
+/** 搜索态不拖：拖的是过滤后的半截列表，落点会算进被过滤掉的邻居身上。 */
+const canDrag = computed(() => !query.value.trim())
+
+function markerFor(id: string): 'before' | 'after' | null {
+  return over.value && over.value.id === id ? over.value.half : null
+}
+
+function onDragStart(id: string) {
+  dragId.value = id
+  over.value = null
+}
+
+function onDragEnd() {
+  dragId.value = ''
+  over.value = null
+}
+
+function onDragOver(id: string, half: 'before' | 'after') {
+  if (!dragId.value || id === dragId.value) return
+  over.value = { id, half }
+}
+
+function onDrop(groupKey: string, ids: string[], id: string, half: 'before' | 'after') {
+  if (dragId.value) view.moveManual(groupKey, ids, dragId.value, id, half)
+  onDragEnd()
+}
+
+const idsOf = (g: { sessions: Session[] }) => g.sessions.map((s) => s.id)
+
 /* ---------- 视图选项 ---------- */
 const viewItems = computed<MenuItem[]>(() => [
   { kind: 'label', label: '分组方式' },
@@ -204,13 +254,14 @@ const viewItems = computed<MenuItem[]>(() => [
   { kind: 'sep' },
   { kind: 'label', label: '排序' },
   { key: 'o:updated', label: '最近活动', checked: view.orderBy === 'updated' },
-  { key: 'o:created', label: '创建时间', checked: view.orderBy === 'created' }
+  { key: 'o:created', label: '创建时间', checked: view.orderBy === 'created' },
+  { key: 'o:manual', label: '手动排序', checked: view.orderBy === 'manual' }
 ])
 
 function onView(it: MenuItem) {
   const k = String(it.key)
   if (k.startsWith('g:')) view.setGroupBy(k.slice(2) as 'workspace' | 'flat')
-  else if (k.startsWith('o:')) view.setOrderBy(k.slice(2) as 'updated' | 'created')
+  else if (k.startsWith('o:')) view.setOrderBy(k.slice(2) as 'updated' | 'created' | 'manual')
 }
 
 /* ---------- 行操作 ---------- */
