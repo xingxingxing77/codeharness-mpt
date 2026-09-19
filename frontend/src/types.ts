@@ -63,6 +63,10 @@ export interface TraceSpan {
   ct: number
   cost: number
   ts: number
+  /** 派发时刻（unix 秒）。老 span 没有这个字段——缺就不显示 TTFT/耗时，不给 0。 */
+  t0?: number | null
+  /** 首 token 时刻（unix 秒）。structured 输出不走打字机，取不到即为 null。 */
+  ft?: number | null
 }
 
 export interface FileNode {

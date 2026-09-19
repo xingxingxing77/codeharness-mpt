@@ -45,6 +45,9 @@ class SessionRunner:
         self._ctl = None                           # 跨 worker stop 的发布端（redis 模式才有）
         self._ctl_task = None
         self._last_span: dict[str, tuple] = {}     # sid -> (pt, ct, cost) 上次累计值，span 取增量
+        # (sid, run_id) -> [派发时刻, 首 token 时刻]。键用 run_id 不用节点名：同一节点在一跑里
+        # 会被调多次（n_round 循环），按节点名会把复用/并发的调用串成一条。
+        self._call_t0: dict[tuple[str, str], list] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def start(self, session: Session):
@@ -260,6 +263,9 @@ class SessionRunner:
         self.chats.pop(sid, None)
         self.costs.pop(sid, None)
         self._last_span.pop(sid, None)
+        # 中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净，否则永久留着
+        for k in [k for k in self._call_t0 if k[0] == sid]:
+            self._call_t0.pop(k, None)
         if terminal:
             self.graphs.pop(sid, None)
             project = self.projects.pop(sid, None)
@@ -338,35 +344,47 @@ class SessionRunner:
                          value={"status": status, "error": session.error,
                                 "cost": cost, "message": ""})
 
-    def _trace_span(self, sid: str, node: str):
+    def _trace_span(self, sid: str, node: str, slot=None):
         """N4 数据层：每笔 LLM 调用记一条 span（节点/token 增量/时刻）→ ch:trace:{sid}。
+        `t0` 是派发时刻、`ft` 是首 token 时刻，来自 `_translate` 按 run_id 攒的在途表；
+        采不到就是 null——前端据此**不显示**读数，而不是显示一个假的 0。
         trace 未注入（进程内默认）= 零开销直通。"""
         if self.trace is None:
             return
         cm = self.costs.get(sid)
         if cm is None:
             return
+        t0, ft = slot if slot else (None, None)
         cur = (cm.total_prompt_tokens, cm.total_completion_tokens, round(cm.total_cost, 6))
         prev = self._last_span.get(sid, (0, 0, 0.0))
         self._last_span[sid] = cur
         self.trace.record(sid, {"node": node, "pt": cur[0] - prev[0], "ct": cur[1] - prev[1],
-                                "cost": round(cur[2] - prev[2], 6), "ts": time.time()})
+                                "cost": round(cur[2] - prev[2], 6), "ts": time.time(),
+                                "t0": t0, "ft": ft})
 
     # ---- astream_events 翻译（LLM 用量合流与打字机、interrupt，其余块走报道槽） ----
     def _translate(self, sid: str, ev: dict):
         kind = ev.get("event", "")
-        if kind == "on_chat_model_end":
+        rid = str(ev.get("run_id") or "")
+        if kind == "on_chat_model_start":
+            if rid:
+                self._call_t0[(sid, rid)] = [time.time(), None]
+        elif kind == "on_chat_model_end":
             self._sync_cost(sid)
             # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）
             node = ev.get("metadata", {}).get("langgraph_node", "")
             self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
                              name="end_marker", value=None, role=node)
-            self._trace_span(sid, node)
+            self._trace_span(sid, node, self._call_t0.pop((sid, rid), None) if rid else None)
         elif kind == "on_chat_model_stream":
             # structured 输出不进这里做打字机（内核 Thought 块整段上屏）；这里只兜底裸文本流
             chunk = ev["data"]["chunk"]
             if getattr(chunk, "content", ""):
                 node = ev.get("metadata", {}).get("langgraph_node", "")
+                slot = self._call_t0.get((sid, rid)) if rid else None
+                # 首 token 只认第一个有内容的分片；没采到就是 None，不拿收口时刻凑一个假 TTFT。
+                if slot is not None and slot[1] is None:
+                    slot[1] = time.time()
                 self.bus.publish(sid, kind="report", block="Thought",
                                  uuid=f"stream-{node}", name="content",
                                  value=chunk.content, role=node)

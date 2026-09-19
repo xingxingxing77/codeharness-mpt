@@ -201,6 +201,29 @@ def t6_events_history_bounded():
     print("✅ t6: /events/history 有界回放 + seq 游标 + 404（SSE 无界流不再是读完型的口）")
 
 
+async def t7_span_timing():
+    """span 必须带派发时刻与首 token 时刻：尾行 TTFT、StatsLine、台账耗时列全吃这两个字段。
+    没采到 run_id 的老路（structured 输出不走打字机）落 null 而不是 0——前端据此不显示读数，
+    显示一个恒为 0 的 TTFT 比缺数更坏。"""
+    tmp, store, bus, runner, s = await _make_runner()
+    rows = []
+    runner.trace = type("T", (), {"record": lambda self, sid, span: rows.append(span)})()
+    runner.costs[s.id] = CostManager()
+    runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "r1"})
+    runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r1",
+                             "metadata": {"langgraph_node": "PM"},
+                             "data": {"chunk": type("C", (), {"content": "hi"})()}})
+    runner._translate(s.id, {"event": "on_chat_model_end", "run_id": "r1",
+                             "metadata": {"langgraph_node": "PM"}})
+    assert rows, "trace 注入了却没落 span"
+    got = rows[-1]
+    assert got["t0"] and got["ft"] and got["ft"] >= got["t0"], got
+    assert (s.id, "r1") not in runner._call_t0, "收口后在途表没清，长跑会一直攒"
+    runner._translate(s.id, {"event": "on_chat_model_end", "metadata": {"langgraph_node": "PM"}})
+    assert rows[-1]["t0"] is None and rows[-1]["ft"] is None, f"老路必须落 null：{rows[-1]}"
+    _ok("t7", "span 带 t0/ft 且 ft≥t0，收口清在途表；无 run_id 的老路落 null 而不是 0")
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -208,7 +231,8 @@ def main():
     asyncio.run(t4_ensure_graph_single_ledger())
     t5_lifespan_unwires_seams()
     t6_events_history_bounded()
-    print("\ns8_runner_meter: 6/6 全绿")
+    asyncio.run(t7_span_timing())
+    print("\ns8_runner_meter: 7/7 全绿")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@
       :text="text"
       :time="turn.endTs * 1000"
       :run-ms="turn.runMs"
+      :ttft-ms="turn.ttftMs"
       :tokens-per-second="turn.tokensPerSecond"
       clock="end"
     />

@@ -16,6 +16,7 @@ export interface Turn {
   /** 最后一个有正文的块：复制取它，没有正文则尾行只剩时间读数。 */
   closing: Block | null
   runMs?: number
+  ttftMs?: number
   tokensPerSecond?: number
 }
 
@@ -32,14 +33,14 @@ function summarize(blocks: Block[], spans: TraceSpan[]): Turn | null {
   const firstTokens = blocks.map((b) => b.fts).filter((n): n is number => typeof n === 'number')
   const firstTokenTs = firstTokens.length ? Math.min(...firstTokens) : undefined
   const closing = [...blocks].reverse().find((b) => blockText(b).trim() !== '') ?? null
-  // ponytail: 参考项目尾行还有 TTFT，我们算不出来——事件流里没有 LLM 派发时刻（打字机流块
-  // 首个事件就是 content，内核块 meta/content 同毫秒），硬算只会永远显示 0 秒。升级路径：给
-  // /trace 的 span 补 t0 与首 token 时刻（server/runner.py 接 on_chat_model_start），
-  // 尾行的 TTFT 与 StatsLine 的 LLM 耗时一起吃这份数据。
+  // TTFT 取本轮窗口里第一笔同时带 t0 与 ft 的调用（span 由 server/runner.py 按 run_id 攒）。
+  // 真实限制：这两个字段是批次16 才加的，**只有那之后新跑的会话才有**，老会话的读数自然缺席
+  // ——宁缺不假，这里不会退化成 0 秒。structured 输出不走打字机，ft 为 null 同样跳过。
   // tok/s 只能从 /trace 的 ct 增量拿：块事件里没有 provider usage。
   const window = spans.filter((s) => s.ts >= startTs && s.ts <= endTs)
   const completion = window.reduce((a, s) => a + (s.ct || 0), 0)
   const decodeMs = firstTokenTs === undefined ? 0 : (endTs - firstTokenTs) * 1000
+  const timed = window.find((s) => s.t0 && s.ft)
   return {
     key: `t:${blocks[0].key}`,
     blocks,
@@ -47,6 +48,7 @@ function summarize(blocks: Block[], spans: TraceSpan[]): Turn | null {
     endTs,
     closing,
     runMs: Math.max(0, (endTs - startTs) * 1000),
+    ...(timed ? { ttftMs: Math.max(0, (timed.ft! - timed.t0!) * 1000) } : {}),
     ...(completion > 0 && decodeMs > 0 ? { tokensPerSecond: completion / (decodeMs / 1000) } : {}),
   }
 }

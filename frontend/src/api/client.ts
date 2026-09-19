@@ -82,8 +82,7 @@ export const api = {
     req('GET', `/api/sessions/${sid}/workspace/file?path=${encodeURIComponent(path)}`),
   sessionGraph: (sid: string) => req<{ mermaid: string }>('GET', `/api/sessions/${sid}/graph`),
   sessionTrace: (sid: string) =>
-    req<{ spans: { node: string; pt: number; ct: number; cost: number; ts: number }[] }>(
-      'GET',
-      `/api/sessions/${sid}/trace`
-    )
+    req<{
+      spans: { node: string; pt: number; ct: number; cost: number; ts: number; t0: number | null; ft: number | null }[]
+    }>('GET', `/api/sessions/${sid}/trace`)
 }
