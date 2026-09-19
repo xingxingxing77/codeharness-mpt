@@ -1,12 +1,11 @@
 import { defineStore } from 'pinia'
+import { useLayoutStore } from './layout'
 
 export const useUiStore = defineStore('ui', {
   state: () => ({
     showCreate: false,
     /* 从首页输入卡的 + 按钮进高级设置时预填需求 */
     createIdea: '',
-    /* 右侧工具面板 */
-    rightPanel: false,
     rightView: 'cards' as 'cards' | 'files' | 'review' | 'graph' | 'trace',
     /* 底部终端面板 */
     terminalOpen: false,
@@ -20,5 +19,23 @@ export const useUiStore = defineStore('ui', {
       project: 'MetaGPT',
       rounds: 5
     }
-  })
+  }),
+
+  getters: {
+    /** 右栏开关的唯一真相在 layout（宽度 0 = 关），这里只做只读投影，
+     *  免得「拖过宽度」和「点按钮」两条路各持一份布尔互相打脸。 */
+    rightPanel: () => !useLayoutStore().detailsCollapsed
+  },
+
+  actions: {
+    openRight() {
+      useLayoutStore().openDetails()
+    },
+    closeRight() {
+      useLayoutStore().closeDetails()
+    },
+    toggleRight() {
+      useLayoutStore().toggleDetails()
+    }
+  }
 })

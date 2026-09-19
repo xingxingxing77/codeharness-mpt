@@ -42,7 +42,7 @@ const sources = computed(() => {
 })
 
 function openFiles() {
-  ui.rightPanel = true
+  ui.openRight()
   ui.rightView = 'files'
 }
 </script>

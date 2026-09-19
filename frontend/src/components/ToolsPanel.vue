@@ -14,7 +14,7 @@
       <button class="bar-btn" title="在浏览器打开工作区" @click="openWorkspace">
         <Icon name="external" :size="15" />
       </button>
-      <button class="bar-btn" title="收起面板" @click="ui.rightPanel = false">
+      <button class="bar-btn" title="收起面板" @click="ui.closeRight()">
         <Icon name="x" :size="15" />
       </button>
     </div>

@@ -4,20 +4,18 @@
       <n-dialog-provider>
         <LoginPage v-if="auth.needLogin" />
         <SettingsView v-else-if="ui.settingsFull" />
-        <div v-else class="shell">
-          <aside class="sb">
+        <AppFrame v-else>
+          <template #sidebar>
             <SessionSidebar />
-          </aside>
-          <main class="main">
+          </template>
+
+          <main class="center">
             <template v-if="store.current">
               <SessionTopBar />
-              <div class="main-body">
-                <div class="chat-col" :class="{ 'os-gap': !ui.rightPanel && store.blockList.length > 0 }">
-                  <Timeline />
-                  <OutputsCard v-if="!ui.rightPanel" />
-                  <ChatInput />
-                </div>
-                <ToolsPanel v-if="ui.rightPanel" />
+              <div class="chat-col">
+                <Timeline />
+                <OutputsCard v-if="!ui.rightPanel" />
+                <ChatInput />
               </div>
               <TerminalPanel v-if="ui.terminalOpen" />
             </template>
@@ -25,7 +23,11 @@
               <BoltHero />
             </template>
           </main>
-        </div>
+
+          <template #details>
+            <ToolsPanel v-if="ui.rightPanel" />
+          </template>
+        </AppFrame>
         <HumanInputDialog />
         <CreateSessionModal />
         <ToastLayer />
@@ -49,6 +51,7 @@ import { useUiStore } from './stores/ui'
 import { useAuthStore } from './stores/auth'
 import { useThemeStore } from './stores/theme'
 import BoltHero from './components/BoltHero.vue'
+import AppFrame from './components/frame/AppFrame.vue'
 import ChatInput from './components/ChatInput.vue'
 import CreateSessionModal from './components/CreateSessionModal.vue'
 import HumanInputDialog from './components/HumanInputDialog.vue'
@@ -85,35 +88,20 @@ watch(
 </script>
 
 <style scoped>
-.shell {
+/* 中栏自己只是一根竖直列；三栏几何在 AppFrame + stores/layout 里 */
+.center {
+  min-width: 0;
   display: flex;
-  height: 100vh;
+  flex-direction: column;
   overflow: hidden;
-  background: var(--dsw-alias-bg-base);
 }
 
-.sb {
-  width: 300px;
-  flex: none;
-  background: var(--sb-bg);
-  border-right: 1px solid var(--sb-line);
-}
-
-.main {
+.chat-col {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-}
-
-.main-body {
-  display: flex;
-  flex: 1;
   min-height: 0;
-}
-
-/* 输出/来源卡浮在右上时，对话内容列让出右侧空间（对齐参考图比例） */
-.chat-col.os-gap :deep(.timeline) {
-  padding-right: 330px;
+  position: relative;
 }
 </style>
