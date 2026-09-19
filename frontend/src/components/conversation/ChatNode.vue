@@ -32,6 +32,9 @@
     @update:open="$emit('toggle', b.key, $event)"
   >
     <ToolCard :b="b" />
+    <button type="button" class="inspectPill" @click="ui.inspect(b.key)">
+      <DsIcon name="inspect" :size="12" /> 检视
+    </button>
   </VDisclosureRow>
 </template>
 
@@ -46,12 +49,14 @@ import ToolCard from './ToolCard.vue'
 import VDisclosureRow from '../ui/VDisclosureRow.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
+import { useUiStore } from '../../stores/ui'
 import type { Block } from '../../types'
 
 defineEmits<{ toggle: [key: string, open: boolean] }>()
 const props = defineProps<{ b: Block; isOpen: boolean }>()
 
 const store = useSessionStore()
+const ui = useUiStore()
 
 const b = computed(() => props.b)
 const text = computed(() => b.value.tokens.join(''))
@@ -127,6 +132,36 @@ const row = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 参考项目 ToolRow.module.css 的 .inspectButton：常驻流内、只改 opacity，
+   所以显现时不会顶动布局；底色用 bg-base 而非 bg-overlay（后者是抬起的深色面，
+   对这么安静的流内控件太重）。 */
+.inspectPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 2px 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.wrap:hover .inspectPill,
+.inspectPill:focus-visible {
+  opacity: 1;
+}
+
+.inspectPill:hover {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
 }
 
 .artifact {

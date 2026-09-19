@@ -3,7 +3,9 @@ import { useLayoutStore } from './layout'
 
 export const useUiStore = defineStore('ui', {
   state: () => ({
-    rightView: 'cards' as 'cards' | 'files' | 'review' | 'graph' | 'trace',
+    rightView: 'cards' as 'cards' | 'files' | 'review' | 'graph' | 'trace' | 'inspect',
+    /** 被检视的块 key：对话流的 inspect 钮写、右栏读，两边不各持一份。 */
+    selectedKey: '',
     /* 设置弹窗开关 */
     settingsFull: false,
     settingsPage: 'general' as string,
@@ -30,6 +32,16 @@ export const useUiStore = defineStore('ui', {
     },
     toggleRight() {
       useLayoutStore().toggleDetails()
+    },
+    /** 参考项目的 inspectCall：选中即联动，一次做完「记选中 + 切页 + 开栏」。 */
+    inspect(key: string) {
+      this.selectedKey = key
+      this.rightView = 'inspect'
+      this.openRight()
+    },
+    closeDetails() {
+      this.selectedKey = ''
+      this.closeRight()
     }
   }
 })

@@ -39,6 +39,20 @@
       <div v-else class="dim">{{ store.current ? '尚无编排图（会话未装配）' : '未选择会话' }}</div>
     </div>
 
+    <div v-else-if="ui.rightView === 'inspect'" class="body">
+      <div v-if="!inspectBlock" class="empty">未选中调用——展开工具行，点左下角的「检视」。</div>
+      <template v-else>
+        <section v-if="inspectInput" class="section">
+          <div class="sectionLabel">输入</div>
+          <pre class="code">{{ inspectInput }}</pre>
+        </section>
+        <section class="section">
+          <div class="sectionLabel">输出</div>
+          <ToolCard :b="inspectBlock" />
+        </section>
+      </template>
+    </div>
+
     <div v-else class="body">
       <div v-if="!spans.length" class="dim">trace 仅在 Redis 模式下有数据</div>
       <table v-else class="trace">
@@ -85,6 +99,7 @@ const toast = useToastStore()
 
 const VIEWS = [
   { key: 'cards', label: '日志' },
+  { key: 'inspect', label: '检视' },
   { key: 'files', label: '文件' },
   { key: 'review', label: '变更' },
   { key: 'graph', label: '编排' },
@@ -98,6 +113,22 @@ const spans = computed(() => store.spans)
 const preview = ref<{ name: string; kind: string; url?: string; text?: string } | null>(null)
 
 const edits = computed(() => store.blockList.filter((b) => b.type === 'Editor'))
+/** 选中态唯一真相在 ui store：对话流的「检视」钮写、这里读，两边不各持一份。 */
+const inspectBlock = computed(() => (ui.selectedKey ? store.blocks[ui.selectedKey] : undefined))
+/** 参考项目这节显示 provider 下发的 argsRaw；我们的块里入参散在 cmd/path/url/page/obj/doc 上，
+ *  取非空的那几项拼一份。全空（比如纯正文块）就不画这一节，不摆一个空花括号。 */
+const inspectInput = computed(() => {
+  const b = inspectBlock.value
+  if (!b) return ''
+  const args: Record<string, unknown> = {}
+  if (b.cmd) args.command = b.cmd
+  if (b.path) args.path = b.path
+  if (b.url) args.url = b.url
+  if (b.page) args.page = b.page
+  if (b.obj) args.input = b.obj
+  if (b.doc) args.document = b.doc
+  return Object.keys(args).length ? JSON.stringify(args, null, 2) : ''
+})
 const totals = computed(() =>
   spans.value.reduce((a, s) => ({ pt: a.pt + s.pt, ct: a.ct + s.ct, cost: a.cost + s.cost }), { pt: 0, ct: 0, cost: 0 })
 )
@@ -246,6 +277,40 @@ const FileNode = defineComponent({
 
 .dim {
   padding: 16px 2px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 检视视图三件套，取值照抄参考项目 DetailsPanel.module.css */
+.section {
+  margin-bottom: 16px;
+}
+
+.sectionLabel {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* figma Code-block（I54:42735;43:41429）：r12、pad 16、mono 13/22 */
+.code {
+  margin: 0;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--dsw-alias-markdown-code-block);
+  font-family: var(--ds-font-family-code);
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.empty {
+  padding: 8px 0;
+  font-size: 13px;
+  line-height: 20px;
   color: var(--dsw-alias-label-tertiary);
 }
 
