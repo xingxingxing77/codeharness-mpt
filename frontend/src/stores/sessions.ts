@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { api, getToken } from '../api/client'
-import type { Block, Health, Session, WEvent } from '../types'
+import type { Block, Health, Session, TraceSpan, WEvent } from '../types'
 
 const MAX_LOGS = 800
 
