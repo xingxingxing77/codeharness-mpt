@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia'
-import { api, getToken, setToken } from '../api/client'
+import { api, getToken, REQUEST_TIMEOUT_MS, setToken } from '../api/client'
 
 async function reqMe(): Promise<{ user: string }> {
-  // client.req 的 401 会清票并 throw——这里只为拿 user
+  // client.req 的 401 会清票并 throw——这里只为拿 user。
+  // 但绕过 req() 也就绕过了它的 deadline，所以信号要自己带（F2 同类面：挂起=init() 永久 pending）。
   const r = await fetch('/api/auth/me', {
-    headers: { Authorization: `Bearer ${getToken()}` }
+    headers: { Authorization: `Bearer ${getToken()}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
   })
   if (!r.ok) throw new Error('unauthorized')
   return r.json()

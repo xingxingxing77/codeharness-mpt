@@ -476,7 +476,15 @@ def t9_request_deadline():
     ms = int(ref) if ref.isdigit() else int(re.search(rf"const {ref} = (\d+)", fe).group(1))
     assert 5000 <= ms <= 60000, f"F2 超时取值不合理：{ms}ms（导入实测 0.71s 封顶，15s 是同步返回的余量）"
     assert "TimeoutError" in req_body, "F2：AbortSignal.timeout 抛的是 DOMException，没改名直接进 toast 用户看不懂"
-    _ok("t9", f"F2 fetch deadline={ms}ms 且 TimeoutError 已翻中文")
+    # 同类面：绕过 req() 的直接 fetch 也得带同一个 deadline，否则 F2 只修了主路、旁路照旧永久 pending
+    for f in list(FE.rglob("*.ts")) + list(FE.rglob("*.vue")):
+        if f.name == "client.ts":
+            continue
+        txt = f.read_text(encoding="utf-8")
+        for m in re.finditer(r"\bfetch\(", txt):
+            assert "AbortSignal.timeout" in txt[m.end():m.end() + 300], \
+                f"F2 同类面：{f.relative_to(FE)} 绕过 req() 的 fetch 没带 deadline（挂起即永久 pending）"
+    _ok("t9", f"F2 fetch deadline={ms}ms 且 TimeoutError 已翻中文；旁路 fetch 全部同带信号")
 
 
 def t10_approval_rollback_realign():

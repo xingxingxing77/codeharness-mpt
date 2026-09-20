@@ -13,9 +13,11 @@ export function setToken(t: string) {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
-/** F2：请求 deadline。取值依据——所有端点都在请求内同步返回（runner 只登记任务、
- *  `stop` 只发 cancel），最重的 import_repo 实测 12287 文件 0.71s（log/probe_import_timing.py）。 */
-const REQUEST_TIMEOUT_MS = 15000
+/** F2：请求 deadline。**导出**是给唯一一处有意绕过 `req()` 的直接 fetch 共用
+ *  （`stores/auth.ts` 的 `/api/auth/me`——它要 401 不清票），两处取值不许漂移。
+ *  取值依据——所有端点都在请求内同步返回（runner 只登记任务、`stop` 只发 cancel），
+ *  最重的 import_repo 实测 12287 文件 0.71s（log/probe_import_timing.py）。 */
+export const REQUEST_TIMEOUT_MS = 15000
 
 async function req<T = any>(method: string, url: string, body?: any): Promise<T> {
   const headers: Record<string, string> = {}
