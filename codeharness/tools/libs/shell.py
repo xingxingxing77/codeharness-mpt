@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple, Union
@@ -49,5 +50,11 @@ async def shell_execute(
     """
     cwd = str(cwd) if cwd else None
     shell = True if isinstance(command, str) else False
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, env=env, timeout=timeout, shell=shell)
+    # 阻塞的 subprocess.run 原本直接跑在事件循环线程上：一次调用最长把整个服务冻 timeout 秒
+    # （所有 SSE、所有会话一起停）。丢线程池，签名/返回值/TimeoutExpired 语义都不变。
+    # ponytail: 用的是 asyncio 默认线程池（上限 min(32, cpu+4)），并发 shell 打满后会排队；
+    #           升级路径 = 换 sandbox.run_proc 那套 create_subprocess_*（超时还能收下已产出的输出）。
+    result = await asyncio.to_thread(
+        subprocess.run, command, cwd=cwd, capture_output=True, text=True,
+        env=env, timeout=timeout, shell=shell)
     return result.stdout, result.stderr, result.returncode

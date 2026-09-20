@@ -132,5 +132,10 @@ def _add_line(rows: List[str]) -> List[str]:
 
 async def _execute_tree(root: Path, gitignore: str | Path) -> str:
     args = ["--gitfile", str(gitignore)] if gitignore else []
-    stdout, _, _ = await shell_execute(["tree"] + args + [str(root)])
+    try:
+        stdout, _, _ = await shell_execute(["tree"] + args + [str(root)])
+    except FileNotFoundError:
+        # 与 tools/libs/git.py `_gh` 同款口径：可执行文件不在场要给可读文案，不给 traceback
+        # （Windows 系统自带的 tree 是 .com，shell=False 解析不到，本机实测就是这条分支）
+        return "[tree 命令不可用：未找到 `tree` 可执行文件。改用 run_command=False 的内置渲染]"
     return stdout
