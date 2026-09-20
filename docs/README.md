@@ -78,7 +78,6 @@
 ## 环境准备
 
 ```bash
-# 0) 先修 .gitignore：删掉 docs/ 那一行，然后把文档提交（见下方警示）
 cd /e/Codeharness
 docker compose up -d          # qdrant + redis，tag 必须 pin 死
 pip install -e .
@@ -285,7 +284,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
-1. **`.gitignore` 最后一行 `docs/` 仍未删**（2026-09-14 复测：`git ls-files docs` 为空）。全套文档至今**零版本控制**——本轮全部改判只存在于工作区，一次误 `clean` 就蒸发。**开工第一件事仍是删这行并提交 docs/。**
+1. **`.gitignore` 里的 `docs/` 行——已闭环，别再当待办**（2026-09-15 提交 `33244d8` 把全套文档入库；2026-09-21 06:15 复测：`git ls-files docs` = 14、`git check-ignore -v docs/README.md` 退出码 1、`grep docs .gitignore` 零命中）。本条旧文字写着「仍未删…开工第一件事仍是删这行并提交 docs/」，**照做只会去删一个不存在的配置并重复提交同一批文档**，故按实测改成本段。同族风险仍然真实：**未跟踪的 `plan/`（写在 `.git/info/exclude:7`）和 `log/`（开发日志）一次 `git clean -fdx` 就连锅端**，`plan/` 那个本地小仓库里是全部阶段计划的真值与游标——别在本工作区跑 `clean -fdx`。
 2. **只在真实路径上才炸的洞，FakeLLM 主线路径照不出来**。这已经是第三次：先是 `debug_error.py` 用了未 import 的 `Document`；第二次是 `stream_usage`——五条自测全绿，而真模型流式一秒账都记不上；第三次是 runner 兜底组队的角色名与 `SOP` 目标名对不上，九个自测全绿而真实会话一次 LLM 都没调（2026-09-15 晚实测并已修，S3b t10 钉住）。**立规矩：每条 FakeLLM 门禁都要写明"断言打在回放上，还是打在 `_build()` 的构造参数上"；凡是"真模型才会有的字段"，必须有一条打在构造参数上的断言。** 结构性的同理：凡是「两套表必须互相自洽」的地方（角色名 ↔ SOP 目标名、工具名 ↔ profile 选择名），要有一条双向断言。
 3. **本仓库存在并发写入者**。2026-09-14 20:12:57 出现提交 `9a765ba`（23 文件 / 2,632 行，含那个 0 字节 `actions/action.py`），当时有审查会话正在读同一工作区，根目录的一次性脚本 `_neutralize_batch1.py`、`_revert.py` 同时消失。多个会话同仓工作时，"改前 `git status`、改后立刻小口分批提交"不是仪式，是防丢工。
 
