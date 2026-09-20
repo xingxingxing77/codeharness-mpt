@@ -15,6 +15,7 @@
   t8 工具审批（批次36）：判定表 fail-closed 且覆盖全量工具/Action、两张图真连 gate 节点、
      同一 approval_id 重放幂等、未批的动作不执行、permission 与 respond 端点的值域。
      全程不打模型——云端额度只剩几块钱，判定与端点都能离线验。
+  t9 F2：req() 的 fetch 必须真带 AbortSignal.timeout（否则服务端挂起=前端永久 pending、按钮焊死）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_frontend_contract.py
@@ -461,6 +462,21 @@ def t8_tool_approval_gate():
         ss.SESSIONS_FILE = keep
 
 
+def t9_request_deadline():
+    """F2：req() 的 fetch 必须真带 deadline（源码级钉住；15s 到点与按钮复位的读数在浏览器取，
+    见 plan/governance-gate-stage4.md）。判据打在**信号是否进了 fetch 选项**，不是打在
+    「文件里出现过 AbortSignal」——挪个位置就等于没接。"""
+    fe = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    req_body = re.search(r"async function req<.*?\n\}", fe, re.S).group(0)
+    sig = re.search(r"signal:\s*AbortSignal\.timeout\((\w+|'\d+')\)", req_body)
+    assert sig, "F2 回归：req() 的 fetch 选项里没有 AbortSignal.timeout——服务端挂起=前端永久 pending"
+    ref = sig.group(1).strip("'")
+    ms = int(ref) if ref.isdigit() else int(re.search(rf"const {ref} = (\d+)", fe).group(1))
+    assert 5000 <= ms <= 60000, f"F2 超时取值不合理：{ms}ms（导入实测 0.71s 封顶，15s 是同步返回的余量）"
+    assert "TimeoutError" in req_body, "F2：AbortSignal.timeout 抛的是 DOMException，没改名直接进 toast 用户看不懂"
+    _ok("t9", f"F2 fetch deadline={ms}ms 且 TimeoutError 已翻中文")
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -474,7 +490,8 @@ def main():
     t6_trace_span_vocabulary()
     t7_chat_target_from_assembly()
     t8_tool_approval_gate()
-    print("\ns8_frontend_contract: 8/8 全绿")
+    t9_request_deadline()
+    print("\ns8_frontend_contract: 9/9 全绿")
 
 
 if __name__ == "__main__":

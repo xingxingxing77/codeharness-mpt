@@ -13,12 +13,29 @@ export function setToken(t: string) {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
+/** F2：请求 deadline。取值依据——所有端点都在请求内同步返回（runner 只登记任务、
+ *  `stop` 只发 cancel），最重的 import_repo 实测 12287 文件 0.71s（log/probe_import_timing.py）。 */
+const REQUEST_TIMEOUT_MS = 15000
+
 async function req<T = any>(method: string, url: string, body?: any): Promise<T> {
   const headers: Record<string, string> = {}
   if (body) headers['Content-Type'] = 'application/json'
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
-  const rsp = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined })
+  let rsp: Response
+  try {
+    rsp = await fetch(url, {
+      method, headers, body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    })
+  } catch (e) {
+    // 超时抛的是 DOMException('TimeoutError')，文案既没 url 也不说人话；调用方直接把
+    // e.message 塞进 toast（ApprovalCard / QuestionCard 等），所以在这里翻成「哪个操作几秒没回」。
+    if ((e as Error)?.name === 'TimeoutError') {
+      throw new Error(`${method} ${url} 超时（${REQUEST_TIMEOUT_MS / 1000}s 无响应，后端可能卡住）`)
+    }
+    throw e
+  }
   if (!rsp.ok) {
     if (rsp.status === 401 && !url.startsWith('/api/auth')) setToken('')
     let detail: unknown = rsp.statusText
