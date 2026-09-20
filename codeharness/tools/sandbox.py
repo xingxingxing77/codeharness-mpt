@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from codeharness.runtime import session_root
 from codeharness.schema import RunCodeContext, RunCodeResult
+from codeharness.tools._boundary import safe_session_path
 
 DEVNULL = asyncio.subprocess.DEVNULL
 
@@ -85,7 +86,12 @@ def _env_with_paths(ctx: RunCodeContext) -> dict | None:
 
 
 async def run_context(ctx: RunCodeContext, timeout: int = 120) -> RunCodeResult:
-    """RunCodeContext.command 形如 ["python", "-m", "pytest", "tests/"]"""
-    workdir = Path(ctx.working_directory).resolve() if ctx.working_directory else session_root()
+    """RunCodeContext.command 形如 ["python", "-m", "pytest", "tests/"]
+
+    working_directory 出自 LLM 产出的结构化输出，边界判据与文件工具共用 safe_session_path
+    （S3：此前这里只 `Path(…).resolve()`，`..`/绝对路径既能在会话外执行，
+    下面的 mkdir 还会把目录**建到会话外**）。越界退回会话根——界内执行，而不是拒绝整场。
+    """
+    workdir = safe_session_path(ctx.working_directory or "") or session_root()
     workdir.mkdir(parents=True, exist_ok=True)
     return await run_proc(ctx.command, cwd=workdir, timeout=timeout, env=_env_with_paths(ctx))

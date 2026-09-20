@@ -218,6 +218,22 @@ def t13_run_context_honors_working_directory():
     assert nonzero.return_code == 3, nonzero
 
 
+def t13b_run_context_clamps_outside_working_directory():
+    """S3：working_directory 整字段来自 LLM 产出。越界必须退回会话根，且不得把目录建到会话外。"""
+    cwd_of = [sys.executable, "-c", "import os;print(os.getcwd())"]
+    for bad in (str(BASE / "escape_abs"),               # 绝对路径，会话根的父目录之下
+                str(WS.parent / "escape_up"),           # 直接跳到 workspace_root 外面
+                str(Path(sys.executable).parent),       # 解释器自己的目录（最像"合理"的越界）
+                "../escape_rel"):                        # 相对跳一层
+        r = asyncio.run(run_context(RunCodeContext(command=cwd_of, working_directory=bad)))
+        got = Path(r.stdout.strip())
+        assert got == ROOT, f"越界 working_directory={bad!r} 应落回会话根 {ROOT}，实际 {got}"
+    for outside in (BASE / "escape_abs", WS.parent / "escape_up", WS / "escape_rel"):
+        assert not outside.exists(), f"mkdir 把目录建到了会话外：{outside}"
+    rel = asyncio.run(run_context(RunCodeContext(command=cwd_of, working_directory="tests")))
+    assert Path(rel.stdout.strip()) == ROOT / "tests", f"界内相对路径应落会话根下，实际 {rel.stdout.strip()}"
+
+
 def t14_default_workdir_and_scratch_stay_inside():
     asyncio.run(run_python_code("print('s')"))
     scratch = ROOT / "scratch"
@@ -555,6 +571,7 @@ def main():
               t11_search_routes_to_serper_when_key_set, t11b_search_degrades_on_failure,
               t12_sandbox_runs_and_reports_exit_code,
               t13_run_context_honors_working_directory,
+              t13b_run_context_clamps_outside_working_directory,
               t14_default_workdir_and_scratch_stay_inside,
               t15_registry_and_tools_share_one_source,
               t16_select_unions_names_and_tags_without_duplicates,
