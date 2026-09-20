@@ -215,17 +215,23 @@ class LLMGateway:
         deadline = timeout or self.cfg.timeout
 
         if stream:
-            pieces, usage, meta = [], None, {}
-            async for chunk in model.astream(msgs):
-                if getattr(chunk, "usage_metadata", None):
-                    usage = chunk.usage_metadata        # usage 常在中间块，末块反而是 None
-                meta = getattr(chunk, "response_metadata", None) or meta
-                if chunk.content:
-                    pieces.append(chunk.content)
-                    log_llm_stream(chunk.content)
-            resp = AIMessage(content="".join(pieces), response_metadata=meta)
-            if usage is not None:
-                resp.usage_metadata = usage
+            async def _collect():
+                pieces, usage, meta = [], None, {}
+                async for chunk in model.astream(msgs):
+                    if getattr(chunk, "usage_metadata", None):
+                        usage = chunk.usage_metadata    # usage 常在中间块，末块反而是 None
+                    meta = getattr(chunk, "response_metadata", None) or meta
+                    if chunk.content:
+                        pieces.append(chunk.content)
+                        log_llm_stream(chunk.content)
+                resp = AIMessage(content="".join(pieces), response_metadata=meta)
+                if usage is not None:
+                    resp.usage_metadata = usage
+                return resp
+            # deadline 口径与非流式一致（整次调用一条），挂死的连接不再无限等：外层 RoleZero 的
+            # 180s 工具超时管不到模型调用本身。超时抛 asyncio.TimeoutError；**不做半包重试**——
+            # 半截已经上屏，重放就是重复渲染（_acall 注释里同一句纪律）。
+            resp = await (asyncio.wait_for(_collect(), deadline) if deadline else _collect())
         else:
             resp = await _acall(model.ainvoke, msgs, timeout=deadline)
 

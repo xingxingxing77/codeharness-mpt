@@ -491,18 +491,86 @@ def t14_retry_predicate():
     assert asyncio.run(_acall(flaky)) == "ok" and calls["n"] == 2   # 真走通一次重试环
 
 
+# ---------- 15. 流式分支的 deadline（B8：挂死的连接不能无限等） ----------
+class _StreamStub:
+    def __init__(self, n=6, gap=0.05, hang=False):
+        self.n, self.gap, self.hang = n, gap, hang
+
+    async def astream(self, msgs, **kw):
+        for i in range(self.n):
+            await asyncio.sleep(self.gap)
+            yield AIMessage(content=str(i))
+        if self.hang:
+            await asyncio.Event().wait()          # 连接挂死：一块也不再给，且永远不会自己结束
+
+    def bind(self, **kw):
+        return self
+
+
+def t15_stream_deadline():
+    import time
+    from codeharness import logs as _logs
+
+    async def _quiet(factory):                   # 打字机回调在门禁里不需要，别刷屏
+        orig = _logs._llm_stream_log
+        _logs.set_llm_stream_logfunc(lambda *_: None)
+        try:
+            return await factory()
+        finally:
+            _logs.set_llm_stream_logfunc(orig)
+
+    async def _drain_hang():
+        async for _ in _StreamStub(n=1, gap=0, hang=True).astream([]):
+            pass
+
+    # ① 对照：这条流是真挂死（测试侧自己给 0.5s 也收不完），不是「其实会很快报错」的假对照
+    try:
+        asyncio.run(asyncio.wait_for(_drain_hang(), 0.5))
+        _fail("15. 对照不成立：挂死的流竟然在 0.5s 内收完了")
+    except asyncio.TimeoutError:
+        pass                                     # 期望：没有 deadline 包着就是无限等
+
+    # ② 修复后：同一条挂死的流按 deadline 失败，而不是把这场会话冻住等人工 stop
+    g = _gw(reply="x")
+    g._model = _StreamStub(n=1, gap=0, hang=True)
+    t0 = time.monotonic()
+    try:
+        asyncio.run(_quiet(lambda: g.ainvoke("q", stream=True, timeout=1)))
+        _fail("15. 流式挂死没按 deadline 失败（B8 未修好）")
+    except asyncio.TimeoutError:
+        pass
+    spent = time.monotonic() - t0
+    if not 0.8 < spent < 2.0:
+        _fail(f"15. deadline=1s 实测 {spent:.2f}s——太松或提前都不对")
+
+    # ③ deadline 内正常收完：拼接与单点记账不受影响
+    g2 = _gw(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", timeout=10))
+    g2._model = _StreamStub(n=6, gap=0.02)
+    r = asyncio.run(_quiet(lambda: g2.ainvoke("q", stream=True)))
+    if r.content != "012345" or len(g2.cost_manager.records) != 1:
+        _fail(f"15. 正常流被改动影响: content={r.content!r} records={len(g2.cost_manager.records)}")
+
+    # ④ cfg.timeout=0（不走 wait_for 那条分支）不破
+    g3 = _gw(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", timeout=0))
+    g3._model = _StreamStub(n=3, gap=0.02)
+    r3 = asyncio.run(_quiet(lambda: g3.ainvoke("q", stream=True)))
+    if r3.content != "012":
+        _fail(f"15. timeout=0 分支异常: {r3.content!r}")
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
               t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
-              t13_usage_field_shapes, t14_retry_predicate]
+              t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS2 门禁全部通过：{len(checks)} 组（cfg→客户端快照 / 未支持厂商显式失败 / format_msg / "
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
-          f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑）")
+          f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑 / "
+          f"流式分支按 deadline 失败）")
 
 
 if __name__ == "__main__":
