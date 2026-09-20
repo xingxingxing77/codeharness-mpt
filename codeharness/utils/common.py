@@ -905,7 +905,10 @@ async def get_mime_type(filename: str | Path, force_read: bool = False) -> str:
     }
 
     try:
-        stdout, stderr, _ = await shell_execute(f"file --mime-type '{str(filename)}'")
+        # 必须走 list：字符串形态 = shell=True，文件名里的单引号会闭合外面的引号，后面的内容
+        # 由 shell 执行（filename 来自文档/仓库路径，模型可产出）。list 分支 shell=False，
+        # 路径就是一个 argv，注入面随之闭合。
+        stdout, stderr, _ = await shell_execute(["file", "--mime-type", str(filename)])
         if stderr:
             logger.debug(f"file:{filename}, error:{stderr}")
             return guess_mime_type
