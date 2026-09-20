@@ -29,7 +29,10 @@
             @click.stop="pick(it)"
           >
             <span class="itemIcon"><DsIcon v-if="it.icon" :name="it.icon" :size="16" /></span>
-            <span class="itemLabel">{{ it.label }}</span>
+            <span class="itemText">
+              <span class="itemLabel">{{ it.label }}</span>
+              <span v-if="it.desc" class="itemDesc">{{ it.desc }}</span>
+            </span>
             <DsIcon v-if="it.checked" name="check" :size="14" class="tick" />
           </button>
         </template>
@@ -72,8 +75,10 @@ async function show() {
   const left = props.align === 'end'
     ? { right: `${Math.max(8, innerWidth - r.right)}px` }
     : { left: `${Math.min(r.left, innerWidth - MIN_W - 8)}px` }
-  // 下方放不下就翻到上方
-  const below = innerHeight - r.bottom > 280
+  /* 下方放不下就翻到上方。阈值取列表自身的 max-height——写死 280 时，
+     一个几十行的项目菜单会在视口底被切掉。 */
+  const listMax = Math.min(420, innerHeight * 0.7)
+  const below = innerHeight - r.bottom > listMax + GAP
   pos.value = {
     ...left,
     ...(below ? { top: `${r.bottom + GAP}px` } : { bottom: `${innerHeight - r.top + GAP}px` })
@@ -136,6 +141,9 @@ defineExpose({ close, toggle })
   box-shadow: var(--dsw-shadow-lv3);
   min-width: 218px;
   max-width: 360px;
+  /* 项目/模型这类目录菜单可能有几十行：列表自己滚，别把视口顶穿 */
+  max-height: min(420px, 70vh);
+  overflow-y: auto;
   /* 抬升面：滚动条取 l2 一档，重绑在这张卡上由后代继承 */
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
@@ -183,12 +191,24 @@ defineExpose({ close, toggle })
   color: var(--dsw-alias-label-tertiary);
 }
 
-.itemLabel {
+.itemText {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.itemLabel {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.itemDesc {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
 }
 
 .tick {

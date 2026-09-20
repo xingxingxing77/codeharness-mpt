@@ -46,6 +46,14 @@ class CreateSessionReq(BaseModel):
             raise ValueError("project_name 不能包含路径分隔")
         return v
 
+    @field_validator("llm")
+    @classmethod
+    def _only_model(cls, v: dict) -> dict:
+        """只留 `model`。其余键（尤其 base_url/api_key）存进会话记录会看着像生效，
+        而 `team._make_llm` 明确不吃它们——在入口就丢掉，别让记录说谎。"""
+        m = str(v.get("model") or "").strip()
+        return {"model": m} if m else {}
+
 
 class ChatReq(BaseModel):
     content: str = Field(min_length=1)

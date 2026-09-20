@@ -81,10 +81,16 @@ def react_assembly(llm):
     return agents
 
 
-def _make_llm(cost_manager=None):
+def _make_llm(cost_manager=None, override: dict | None = None):
+    """会话级模型覆盖。**只认 `model` 一个键**：base_url / api_key 若也吃客户端输入，
+    等于让请求方指定任意端点（SSRF 面）；模型名只会送到已配置的那个端点，最坏 4xx。"""
+    from codeharness.configs.settings import settings
     from codeharness.provider.gateway import LLMGateway
     from codeharness.provider.cost import CostManager
-    return LLMGateway(cost_manager=cost_manager or CostManager())
+    model = str((override or {}).get("model") or "").strip()
+    cfg = settings.llm.model_copy(update={"model": model}) \
+        if model and model != settings.llm.model else None
+    return LLMGateway(cfg=cfg, cost_manager=cost_manager or CostManager())
 
 
 def _default_agents(cost_manager=None):

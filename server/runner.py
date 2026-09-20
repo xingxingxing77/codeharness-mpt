@@ -136,21 +136,27 @@ class SessionRunner:
         """按会话三态装配三件套：sop=N7 模板线（9.3 扩展入口）；dynamic=S9.1 对照的 RoleZero 线；
         classic=默认经典线。resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的
         （第十一处教训）。thread_id 必须带会话唯一值：多会话共用模板不能在 checkpointer 里串台。"""
-        from codeharness.team import prepare_project, _make_llm
+        from codeharness.team import prepare_project, _make_llm, classic_team
+        # 一次装配只建一个网关：会话的 llm_override 就在这里落地。经典线原先走
+        # prepare_project 的 agents=None 兜底，而 _default_agents 会另建一个不认
+        # override 的网关——所以三条线都显式组队。
+        llm = _make_llm(cost_manager, getattr(session, "llm_override", None))
         if getattr(session, "sop", ""):
             from codeharness.sop.builder import build_team_from_template
-            team, config, init = build_team_from_template(session.sop, _make_llm(cost_manager),
+            team, config, init = build_team_from_template(session.sop, llm,
                                                           checkpointer=await self._saver(),
                                                           idea=session.idea, thread_id=project)
         else:
-            agents = sop = None
+            sop = None
             paradigm = getattr(session, "paradigm", "classic")
             if paradigm == "dynamic":
                 from codeharness.team import dynamic_assembly
-                agents, sop = dynamic_assembly(_make_llm(cost_manager))
+                agents, sop = dynamic_assembly(llm)
             elif paradigm == "react":                     # 9.2 策略曲线第三腿：经典队形×REACT 循环
                 from codeharness.team import react_assembly
-                agents = react_assembly(_make_llm(cost_manager))
+                agents = react_assembly(llm)
+            else:
+                agents = classic_team(llm)
             team, config, init = prepare_project(session.idea, project, agents=agents,
                                                  checkpointer=await self._saver(),
                                                  cost_manager=cost_manager, sop=sop)

@@ -1,6 +1,8 @@
 export interface MenuItem {
   key?: string
   label?: string
+  /** 第二行说明：参考项目模式菜单那种「标题 + 一段解释」的行 */
+  desc?: string
   icon?: string
   danger?: boolean
   checked?: boolean

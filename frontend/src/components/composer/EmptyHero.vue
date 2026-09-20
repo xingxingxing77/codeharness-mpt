@@ -9,15 +9,37 @@
       </div>
 
       <div class="wsRow">
-        <VMenu :items="projectItems" align="start" compact @select="pickProject">
+        <input
+          v-if="naming"
+          ref="nameEl"
+          v-model="nameDraft"
+          class="wsInput"
+          placeholder="新项目名，回车确认"
+          aria-label="新项目名"
+          @keydown.enter.prevent="commitName"
+          @keydown.esc.prevent="cancelName"
+          @blur="commitName"
+        />
+        <VMenu v-else :items="projectItems" align="start" compact @select="pickProject">
           <template #default="{ open, toggle }">
             <button class="wsChip" :aria-expanded="open" @click="toggle()">
               <DsIcon name="folder" :size="14" />
-              <span>{{ ui.composer.project || '选择项目' }}</span>
+              <span class="chipLabel">{{ ui.composer.project || '选择项目' }}</span>
               <DsIcon name="chevron-down" :size="12" />
             </button>
           </template>
         </VMenu>
+
+        <VMenu :items="modeItems" align="start" @select="pickMode">
+          <template #default="{ open, toggle }">
+            <button class="wsChip" :aria-expanded="open" @click="toggle()">
+              <DsIcon name="personalization" :size="14" />
+              <span>{{ modeShort }}</span>
+              <DsIcon name="chevron-down" :size="12" />
+            </button>
+          </template>
+        </VMenu>
+
         <VMenu :items="roundItems" align="start" compact @select="pickRounds">
           <template #default="{ open, toggle }">
             <button class="wsChip" :aria-expanded="open" @click="toggle()">
@@ -26,10 +48,6 @@
             </button>
           </template>
         </VMenu>
-        <button class="wsChip" :class="{ on: planMode }" @click="planMode = !planMode">
-          <DsIcon name="checklist" :size="14" />
-          <span>先出计划</span>
-        </button>
       </div>
 
       <ComposerCard ref="composerEl" hero draft @drafted="onDrafted" />
@@ -45,8 +63,8 @@
 
 <script setup lang="ts">
 /** 空态首页：居中品牌 + 同一个 composer 的 hero 变体。
- *  只放后端真支持的三个参数：项目名、轮数、是否先出计划（paradigm=dynamic）。 */
-import { computed, ref } from 'vue'
+ *  只放后端真支持的参数：项目名、范式（classic|dynamic|react）、轮数、模型覆盖。 */
+import { computed, nextTick, ref } from 'vue'
 import ComposerCard from './ComposerCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import VMenu from '../ui/VMenu.vue'
@@ -61,21 +79,32 @@ const toast = useToastStore()
 const composerEl = ref<InstanceType<typeof ComposerCard>>()
 
 const health = computed(() => store.health)
-const planMode = computed({
-  get: () => ui.composer.paradigm === 'dynamic',
-  set: (v: boolean) => (ui.composer.paradigm = v ? 'dynamic' : 'classic')
-})
 
-/** 项目候选来自已有会话的 project_name，不给它编一个假的下拉列表 */
+/** 后端 create 只认这三个 paradigm（server/api/sessions.py 的校验器）。
+ *  说明按各自装配线如实写：classic=五角色 SOP，dynamic=单 RoleZero，react=队形不变换执行循环。 */
+const MODES = [
+  { key: 'classic', short: 'SOP 流程', label: 'SOP 流程（软件公司）', desc: 'PM→架构→排期→工程→QA 五角色按 SOP 路由表接力' },
+  { key: 'dynamic', short: '动态组队', label: '主 Agent 动态组队', desc: '单个 RoleZero 工具循环，自己决定下一步调哪个工具' },
+  { key: 'react', short: 'ReAct 队形', label: '经典队形 × ReAct', desc: '五角色不变，每人换成「思考—行动—观察」的 ReAct 循环' }
+]
+const modeShort = computed(
+  () => MODES.find((m) => m.key === ui.composer.paradigm)?.short ?? MODES[0].short
+)
+const modeItems = computed<MenuItem[]>(() =>
+  MODES.map((m) => ({ key: m.key, label: m.label, desc: m.desc, checked: ui.composer.paradigm === m.key }))
+)
+
+/** 项目候选与侧栏同源（store.projects()），不给它编一个假的下拉列表。
+ *  实测 94 个名字里一大把是 8 位 hex（测试会话拿 id 当项目名），不藏它们，排后面。 */
 const projectItems = computed<MenuItem[]>(() => {
-  const names = [...new Set(store.sessions.map((s) => s.project_name).filter(Boolean))].slice(0, 12)
-  const items = names.map((n) => ({
-    key: n,
-    label: n,
-    checked: ui.composer.project === n
-  }))
+  const cur = ui.composer.project
+  const named = store.projects().map((p) => p.name)
+  const list = cur && !named.includes(cur) ? [cur, ...named] : named
+  const items: MenuItem[] = list
+    .sort((a, b) => Number(/^[0-9a-f]{8,}$/i.test(a)) - Number(/^[0-9a-f]{8,}$/i.test(b)))
+    .map((n) => ({ key: n, label: n, icon: 'folder', checked: cur === n }))
   items.push({ kind: 'sep' })
-  items.push({ key: '__new', label: '用新名字（下一个输入框填）', checked: false })
+  items.push({ key: '__new', label: '新建项目', icon: 'project-add' })
   return items
 })
 
@@ -83,18 +112,52 @@ const roundItems = computed<MenuItem[]>(() =>
   [1, 3, 5, 8].map((n) => ({ key: String(n), label: `${n} 轮`, checked: ui.composer.rounds === n }))
 )
 
+/** 新建项目就地输入（原来是 window.prompt，样式与产品口径都不对） */
+const naming = ref(false)
+const nameDraft = ref('')
+const nameEl = ref<HTMLInputElement>()
+let escCancel = false
+
 function pickProject(it: MenuItem) {
-  if (it.key === '__new') {
-    const v = window.prompt('新项目名（不能含路径分隔符）', ui.composer.project)
-    if (v) ui.composer.project = v.trim()
+  if (it.key !== '__new') {
+    if (it.key) ui.composer.project = String(it.key)
     return
   }
-  if (it.key) ui.composer.project = String(it.key)
+  escCancel = false
+  nameDraft.value = ''
+  naming.value = true
+  void nextTick(() => nameEl.value?.focus())
+}
+
+function pickMode(it: MenuItem) {
+  if (it.key) ui.composer.paradigm = String(it.key)
 }
 
 function pickRounds(it: MenuItem) {
   const n = Number(it.key)
   if (n > 0) ui.composer.rounds = n
+}
+
+function cancelName() {
+  escCancel = true
+  naming.value = false
+}
+
+function commitName() {
+  if (escCancel) {
+    escCancel = false
+    return
+  }
+  const v = nameDraft.value.trim()
+  nameDraft.value = ''
+  naming.value = false
+  if (!v) return
+  // 后端 create 见路径分隔就 422，这里先挡住，别让名字白填一遍
+  if (/[\\/]/.test(v)) {
+    toast.push('项目名不能包含路径分隔符', 'error')
+    return
+  }
+  ui.composer.project = v
 }
 
 async function onDrafted(idea: string) {
@@ -103,7 +166,8 @@ async function onDrafted(idea: string) {
       idea,
       project_name: ui.composer.project,
       n_round: ui.composer.rounds,
-      paradigm: ui.composer.paradigm
+      paradigm: ui.composer.paradigm,
+      llm: ui.composer.model ? { model: ui.composer.model } : {}
     })
     await store.start()
     toast.push(`已创建会话 ${s.id} 并开始运行`, 'success')
@@ -236,9 +300,26 @@ async function onDrafted(idea: string) {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.wsChip.on {
-  color: var(--dsw-alias-state-business-primary);
-  background: var(--dsw-alias-interactive-bg-hover);
+/* 就地新建项目：与 chip 同一颗 28 高胶囊，只是换成描边 + 输入 */
+.wsInput {
+  width: 200px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 16px;
+  outline: none;
+  background: var(--dsw-specific-menu);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 源 .workspaceLabel：名字过长省略，不撑破这一行 */
+.chipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .warn {

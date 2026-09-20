@@ -26,6 +26,9 @@ function newBlock(ev: WEvent): Block {
 export const useSessionStore = defineStore('sessions', {
   state: () => ({
     health: null as Health | null,
+    /** /api/models 的目录。modelsOk=false 表示端点不给列表，模型位退化成只读文本 */
+    models: [] as string[],
+    modelsOk: false,
     sessions: [] as Session[],
     currentId: '',
     blocks: {} as Record<string, Block>,
@@ -65,7 +68,20 @@ export const useSessionStore = defineStore('sessions', {
     async init() {
       this.health = await api.health()
       await this.loadSessions()
+      // 模型目录是旁路信息：端点不给也不能把首屏拖挂，loadModels 自己吞错
+      void this.loadModels()
       // 不再自动选中会话：落地页显示"我们应该构建什么"首页（参考 OpenHarness 布局）
+    },
+
+    async loadModels() {
+      try {
+        const r = await api.listModels()
+        this.models = r.models || []
+        this.modelsOk = !!r.ok
+      } catch {
+        this.models = []
+        this.modelsOk = false
+      }
     },
 
     goHome() {

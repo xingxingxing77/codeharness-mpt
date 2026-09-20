@@ -22,11 +22,19 @@
             </button>
           </template>
         </VMenu>
-        <span v-if="store.current?.paradigm === 'dynamic'" class="chip plain">计划模式</span>
+        <span v-if="store.current?.paradigm === 'dynamic'" class="chip plain">动态组队</span>
       </div>
 
       <span class="trailing">
-        <span v-if="model" class="modelChip" :title="model">{{ model }}</span>
+        <VMenu v-if="modelPick" :items="modelItems" align="end" compact @select="pickModel">
+          <template #default="{ open, toggle }">
+            <button class="modelChip" :aria-expanded="open" :title="model" @mousedown.prevent="toggle()">
+              <span class="modelName">{{ model }}</span>
+              <DsIcon :name="open ? 'chevron-up' : 'chevron-down'" :size="12" />
+            </button>
+          </template>
+        </VMenu>
+        <span v-else-if="model" class="modelChip" :title="model">{{ model }}</span>
         <button
           v-if="store.isRunning && !editable"
           class="primary"
@@ -65,6 +73,7 @@ import VMenu from '../ui/VMenu.vue'
 import type { MenuItem } from '../ui/menuTypes'
 import { useToastStore } from '../../stores/toast'
 import { useSessionStore } from '../../stores/sessions'
+import { useUiStore } from '../../stores/ui'
 
 const props = withDefaults(
   defineProps<{ hero?: boolean; draft?: boolean; stoppable?: boolean }>(),
@@ -74,6 +83,7 @@ const emit = defineEmits<{ stop: []; drafted: [idea: string] }>()
 
 const store = useSessionStore()
 const toast = useToastStore()
+const ui = useUiStore()
 
 const content = ref('')
 const sending = ref(false)
@@ -96,7 +106,24 @@ const targetLabel = computed(
 )
 
 const showTarget = computed(() => !props.draft && !!store.currentId)
-const model = computed(() => (store.health?.llm_configured ? store.health.model : ''))
+
+/** 生效模型：草稿态看 composer 上选的那个，会话内看它建会话时定下的 llm_override，
+ *  都没选就是后端配置的默认模型（llm_configured=false 时不给名字，与健康检查同口径）。 */
+const model = computed(() => {
+  const chosen = props.draft
+    ? ui.composer.model
+    : String(store.current?.llm_override?.model || '')
+  return chosen || (store.health?.llm_configured ? store.health.model : '')
+})
+/** 会话的模型在建会话那一刻定，运行中改不了 → 只在草稿态画箭头 */
+const modelPick = computed(() => props.draft && store.modelsOk && store.models.length > 0)
+const modelItems = computed<MenuItem[]>(() =>
+  store.models.map((m) => ({ key: m, label: m, checked: model.value === m }))
+)
+
+function pickModel(it: MenuItem) {
+  if (it.key) ui.composer.model = String(it.key)
+}
 
 /** draft = 空态首页，此时还没有会话，可以直接发；否则必须会话在跑或刚创建 */
 const editable = computed(() => props.draft || store.isRunning || store.status === 'created')
@@ -269,21 +296,39 @@ textarea:disabled {
 }
 
 /* 模型名：与 .chip/.select 同一质感（透明底、r8、13/20 二级字）。
-   不画下箭头——模型目录还没接（llm_override 存了但 _make_llm 从不读），
-   画一个没有菜单的箭头就是假 affordance。 */
+   /api/models 给得出目录时它是按钮（带箭头），给不出就退回纯文本——
+   箭头只在真能点开有东西的地方出现。 */
 .modelChip {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 2px;
   height: 28px;
-  line-height: 28px;
   max-width: 220px;
   padding: 0 8px;
+  border: none;
   border-radius: 8px;
+  background: transparent;
+  font-family: inherit;
   font-size: 13px;
   font-weight: 500;
+  line-height: 20px;
   color: var(--dsw-alias-label-secondary);
   white-space: nowrap;
+}
+
+.modelName {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+button.modelChip {
+  padding-right: 6px;
+  cursor: pointer;
+}
+
+button.modelChip:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .primary {

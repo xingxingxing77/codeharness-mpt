@@ -47,6 +47,9 @@ function flattenDetail(detail: unknown): string {
 
 export const api = {
   health: () => req<Health>('GET', '/api/health'),
+  /** 端点侧 /models 摊平。ok=false 表示拿不到目录，模型位退化成只读文本 */
+  listModels: () =>
+    req<{ models: string[]; current: string; ok: boolean; error: string }>('GET', '/api/models'),
   login: (username: string, password: string) =>
     req<{ ok: boolean; token: string }>('POST', '/api/auth/login', { username, password }),
   register: (username: string, password: string) =>

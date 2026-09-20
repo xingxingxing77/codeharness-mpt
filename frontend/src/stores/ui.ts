@@ -15,7 +15,9 @@ export const useUiStore = defineStore('ui', {
     composer: {
       project: 'MetaGPT',
       rounds: 5,
-      paradigm: 'classic'
+      paradigm: 'classic',
+      /* 空=用后端配置的默认模型；选了才作为 llm_override.model 发出去 */
+      model: ''
     }
   }),
 
