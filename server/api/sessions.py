@@ -248,7 +248,11 @@ async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(cur
 @router.post("/{sid}/human-input")
 async def human_input(sid: str, req: HumanInputReq, request: Request, user: str = Depends(current_user)):
     _owned(request, sid, user)
-    return {"ok": _get(request, "runner").answer_human(sid, req.content)}
+    if not _get(request, "runner").answer_human(sid, req.content):
+        # B2：拒收必须是 409。原先 200 + {"ok": false} 到了前端是恒真的信封
+        # （store 把整个响应体当布尔用），用户以为回答已送达、卡片就地消失。
+        raise HTTPException(409, "会话正在运行或已在恢复中，人工回答未接收")
+    return {"ok": True}
 
 
 @router.get("/{sid}/events")

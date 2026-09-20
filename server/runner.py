@@ -189,6 +189,12 @@ class SessionRunner:
     def answer_human(self, sid: str, content: str) -> bool:
         if not self.store.get(sid):
             return False
+        if self.is_running(sid):
+            # _run 与 _resume 共用同一个 tasks[sid] 槽：抢槽会让先结束的一方 pop 掉另一方的
+            # 引用（is_running 误报 False、stop() 取消错对象、跨 worker 停止失配）。
+            # 判据用活任务视角而不是 store.status：实测 interrupt 收尾时 _run 会把
+            # awaiting_human 覆写成 finished（tests/s17::t1 读数），状态在这儿不可信。
+            return False
         self.tasks[sid] = asyncio.create_task(self._resume(sid, content))
         return True
 
