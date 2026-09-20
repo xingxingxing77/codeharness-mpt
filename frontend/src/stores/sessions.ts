@@ -412,7 +412,10 @@ export const useSessionStore = defineStore('sessions', {
       try {
         return await api.respondApproval(this.currentId, aid, outcome)
       } catch (e) {
+        // 只回滚不重取=把「别处已决议」的卡复活（SSE resolved 先出队，快照里它还在）。
+        // 顺序不能反：loadApprovals 失败是静默的，断网时唯一能让卡回队列的就是这句快照回滚。
         this.approvals = keep
+        void this.loadApprovals(this.currentId)
         throw e
       }
     },

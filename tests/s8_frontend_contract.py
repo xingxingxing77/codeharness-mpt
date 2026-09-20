@@ -16,6 +16,8 @@
      同一 approval_id 重放幂等、未批的动作不执行、permission 与 respond 端点的值域。
      全程不打模型——云端额度只剩几块钱，判定与端点都能离线验。
   t9 F2：req() 的 fetch 必须真带 AbortSignal.timeout（否则服务端挂起=前端永久 pending、按钮焊死）。
+  t10 F3：respondApproval 的 catch 必须「快照回滚 + 服务端重取」两句都在
+     （只回滚会复活别处已决议的卡，只重取则断网时卡片再也回不来）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_frontend_contract.py
@@ -477,6 +479,21 @@ def t9_request_deadline():
     _ok("t9", f"F2 fetch deadline={ms}ms 且 TimeoutError 已翻中文")
 
 
+def t10_approval_rollback_realign():
+    """F3：respondApproval 的 catch 必须「快照回滚 + 服务端重取」两句都在（顺序：先回滚后重取）。
+    只回滚=把别处已决议的卡复活；只重取=loadApprovals 失败是静默的，断网时卡片再也回不来。"""
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    respond = re.search(r"async respondApproval\(.*?\n    \},", st, re.S).group(0)
+    catch = respond.split("catch", 1)[1]
+    assert "this.approvals = keep" in catch, \
+        "F3 回归：只剩服务端重取——loadApprovals 失败是静默的，断网时卡片再也回不来"
+    assert "loadApprovals(" in catch, \
+        "F3 回归：整快照回滚没有服务端真值对齐——别处已决议的卡会被复活"
+    assert catch.index("this.approvals = keep") < catch.index("loadApprovals("), \
+        "F3：顺序反了会让错误提示等到重取回来才弹（最长一个 timeout），先回滚再对齐"
+    _ok("t10", "F3 catch 里回滚与服务端重取都在，且顺序是先回滚后对齐")
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -491,7 +508,8 @@ def main():
     t7_chat_target_from_assembly()
     t8_tool_approval_gate()
     t9_request_deadline()
-    print("\ns8_frontend_contract: 9/9 全绿")
+    t10_approval_rollback_realign()
+    print("\ns8_frontend_contract: 10/10 全绿")
 
 
 if __name__ == "__main__":
