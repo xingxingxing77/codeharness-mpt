@@ -298,6 +298,19 @@ def t8_tool_approval_gate():
     assert gate_decide("terminal_command", {"command": "dir"}, node="gate", io_=io_,
                        permission="readonly")[0] == "rejected"
 
+    # ⑤b 调用点不显式传档时，必须从 PERMISSION ContextVar 读——生产路径（两个 gate 与两处
+    # _act）全都不传 permission，而本门禁原来每次都显式传，等于把这条路径留成盲区：
+    # 「服务端装的档位永远不生效、full_access 的会话也被当只读拦」就是这么溜过去的（s7 t13 抓到）。
+    from codeharness.runtime import PERMISSION as _PERM
+    io_ctx = _IO()
+    for tier, want in (("full_access", "allowed"), ("readonly", None)):
+        tok = _PERM.set(tier)
+        try:
+            got = gate_decide("write_file", {"path": "a.md"}, node="gate", io_=io_ctx)
+            assert got[0] == want, f"ContextVar={tier} 应该判 {want}，实际 {got[0]}"
+        finally:
+            _PERM.reset(tok)
+
     # ⑥ 未批/被拒的动作不执行：拿一个会举手的 stub Action 直接喂 _act
     from codeharness.base.action import Action as BaseAction
     from codeharness.schema import Message

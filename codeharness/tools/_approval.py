@@ -121,6 +121,11 @@ def gate_decide(name: str, args: dict, *, node: str, io_, reason: str = "",
     必定装载 `io_`，缺装载只可能出现在 server 之外。
     """
     required = required_tier(name, args, kind=kind)
+    if permission is None:
+        # 没显式传档就读 ContextVar（runner._session_ctx 按会话装的）——直接兜默认值会让
+        # 服务端装的档位永远不生效，full_access 的会话也被当成只读拦（2026-09-20 s7 t13 抓到）
+        from codeharness.runtime import PERMISSION
+        permission = PERMISSION.get()
     tier = permission if permission in TIER_RANK else PERMISSION_DEFAULT
     if not needs_approval(tier, required):
         return "allowed", None
