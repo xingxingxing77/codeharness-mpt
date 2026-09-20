@@ -12,7 +12,9 @@ const defaults = {
   agentEnv: 'Windows 原生',
   shell: 'PowerShell',
   language: '自动检测',
-  enterToSend: false,
+  /* 键名对齐这一行的标题「需按 ^ + 回车键发送」：默认 false=Enter 直接发送（接线前的行为）。
+     旧键 enterToSend 从无消费者，存下的值不代表用户意图，故不沿用。 */
+  sendWithCtrlOnly: false,
   popupShortcut: '',
   noProjectChat: false,
   dictationHold: '关闭',

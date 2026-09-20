@@ -212,11 +212,16 @@ async def stop_session(sid: str, request: Request, user: str = Depends(current_u
 
 @router.post("/{sid}/chat")
 async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(current_user)):
-    _owned(request, sid, user)
+    s = _owned(request, sid, user)
+    target = req.send_to or ""
+    # 目标必须是这场装配里的真节点。route 对不认识的目标是「不投递、不报错」
+    # （team_graph.py:127 无 else），所以在入口挡住并回列出可选项。
+    if target and s.roles and target not in s.roles:
+        raise HTTPException(422, f"目标角色 {target!r} 不在这场装配里（可选：{'、'.join(s.roles)}）")
     runner = _get(request, "runner")
     if not runner.is_running(sid):
         raise HTTPException(409, "session is not running")
-    if not runner.enqueue_chat(sid, req.content, req.send_to or ""):
+    if not runner.enqueue_chat(sid, req.content, target):
         raise HTTPException(409, "session chat queue unavailable")
     return {"ok": True}
 

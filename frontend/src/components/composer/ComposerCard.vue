@@ -67,12 +67,13 @@
 /** Composer：780px 卡 + 自动增高 + 发送/停止同位互换。
  *  只做后端真支持的事：文本消息、发送对象、首条启动；没有附件/steer/上下文环的
  *  接口，就不画那些控件。 */
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import DsIcon from '../ui/DsIcon.vue'
 import VMenu from '../ui/VMenu.vue'
 import type { MenuItem } from '../ui/menuTypes'
 import { useToastStore } from '../../stores/toast'
 import { useSessionStore } from '../../stores/sessions'
+import { useSettingsStore } from '../../stores/settings'
 import { useUiStore } from '../../stores/ui'
 
 const props = withDefaults(
@@ -84,26 +85,28 @@ const emit = defineEmits<{ stop: []; drafted: [idea: string] }>()
 const store = useSessionStore()
 const toast = useToastStore()
 const ui = useUiStore()
+const prefs = useSettingsStore().prefs
 
 const content = ref('')
 const sending = ref(false)
 const composing = ref(false)
 const ta = ref<HTMLTextAreaElement>()
 
-const TARGETS = [
-  { label: 'TeamLeader（自动调度）', value: '' },
-  { label: 'ProductManager', value: 'ProductManager' },
-  { label: 'Architect', value: 'Architect' },
-  { label: 'Engineer2', value: 'Engineer2' },
-  { label: 'DataAnalyst', value: 'DataAnalyst' }
-]
+/** 直聊目标只渲染后端真装配给出的角色名（`Session.roles`，runner._prepare 回填）。
+ *  原先这里硬编码 ProductManager/Engineer2/DataAnalyst——一个都不在装配里，
+ *  选中后追问会被 route 的 `recv in agents` 判假而静默丢弃。 */
 const target = ref('')
-const targetItems = computed<MenuItem[]>(() =>
-  TARGETS.map((t) => ({ key: t.value, label: t.label, checked: target.value === t.value, keepOpen: false }))
-)
-const targetLabel = computed(
-  () => (target.value === '' ? '自动调度' : TARGETS.find((t) => t.value === target.value)!.label)
-)
+const roles = computed(() => store.current?.roles ?? [])
+const targetItems = computed<MenuItem[]>(() => [
+  { key: '', label: '自动调度', checked: target.value === '' },
+  ...roles.value.map((r) => ({ key: r, label: r, checked: target.value === r }))
+])
+const targetLabel = computed(() => target.value || store.current?.entry_role || '自动调度')
+
+// 切会话后原目标可能不在这场装配里：清回自动调度，别让 /chat 吃 422
+watch(roles, (list) => {
+  if (target.value && !list.includes(target.value)) target.value = ''
+})
 
 const showTarget = computed(() => !props.draft && !!store.currentId)
 
@@ -149,17 +152,15 @@ function onCompositionEnd() {
   setTimeout(() => (composing.value = false), 10)
 }
 
+/** 偏好「需按 ^ + 回车键发送」关（默认）：Enter 发送、Shift+Enter 换行——接线前的行为。
+ *  开：只有 Ctrl/Cmd+Enter 发送，Enter 交回浏览器原生换行。 */
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Enter' && e.shiftKey) return // 无条件换行，先于 IME 判定
   if (e.key !== 'Enter') return
   if (composing.value || e.isComposing || e.keyCode === 229) return
+  const send = prefs.sendWithCtrlOnly ? (e.ctrlKey || e.metaKey) : !e.shiftKey
+  if (!send) return
   e.preventDefault()
-  if (e.ctrlKey || e.metaKey) {
-    // 空闲时 Ctrl+Enter 与 Enter 行为互换：运行中它承担「停止」
-    if (store.isRunning && props.stoppable) emit('stop')
-    else submit()
-    return
-  }
+  // 运行中且允许打断时，发送键承担「停止」
   if (store.isRunning && props.stoppable) emit('stop')
   else submit()
 }

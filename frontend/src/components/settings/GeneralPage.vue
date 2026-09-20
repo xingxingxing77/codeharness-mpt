@@ -40,7 +40,7 @@
         <SelectBox v-model="p.language" :options="['自动检测', '简体中文', 'English']" />
       </Row>
       <Row title="需按 ^ + 回车键发送长文本提示" desc="启用后，长文本提示需按 ^ + 回车键发送。">
-        <Toggle v-model="p.enterToSend" />
+        <Toggle v-model="p.sendWithCtrlOnly" />
       </Row>
     </div>
 

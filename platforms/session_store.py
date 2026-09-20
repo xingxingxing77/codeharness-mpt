@@ -20,7 +20,9 @@ from server.sessions import Session, SessionStatus, _now
 
 KEY = "ch:sess:{}"
 INDEX = "ch:index"
-_JSON_FIELDS = ("llm_override", "cost")
+# 存进 Redis 哈希时一切都被 str() 过，这些字段要走 JSON；兜底值按类型给（列表字段
+# 用 "{}" 会反序列化成 dict，pydantic 直接炸）。
+_JSON_FIELDS = {"llm_override": {}, "cost": {}, "roles": []}
 
 
 def _dump(s: Session) -> dict:
@@ -33,8 +35,8 @@ def _dump(s: Session) -> dict:
 def _load(sid: str, h: dict) -> Session:
     d = dict(h)
     d["id"] = d.get("id") or sid
-    for f in _JSON_FIELDS:
-        d[f] = json.loads(d.get(f) or "{}")
+    for f, empty in _JSON_FIELDS.items():
+        d[f] = json.loads(d.get(f) or json.dumps(empty))
     return Session(**d)
 
 

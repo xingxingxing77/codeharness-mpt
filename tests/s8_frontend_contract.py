@@ -10,6 +10,8 @@
      断言每个角色名成节点、每个 watch tag 成边；不存在的会话 404。
   t5 /workspace/file 响应形状：预览分发靠 ext 键（真浏览器第十五处——字段一直没回，
      markdown/image/.mmd 三类预览从未命中，路由门禁 t3 查不出"路由在但形状错"）。
+  t7 直聊目标出自真装配：三线各自的路由目标必须在自己角色集里，/chat 对未知目标 422，
+     前端 ComposerCard 不得再硬编码角色名（曾写着三个装配里不存在的名字→追问静默丢弃）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_frontend_contract.py
@@ -29,11 +31,15 @@ _FE_KIND_RE = re.compile(r"ev\.kind === '(\w+)'")
 
 def t1_blocktype_vocabulary():
     from codeharness.report import BlockType
-    tl = (FE / "components" / "Timeline.vue").read_text(encoding="utf-8")
-    dispatched = set(re.findall(r"b\.type === '([^']+)'", tl))
+    # 分发从 Timeline.vue 搬到了 conversation/：ChatNode 管 prose 与 User，
+    # ToolCard 按 block 类型给展开卡。模板里写 b.type、脚本里写 b.value.type，
+    # 所以匹配 type === '...' 而不是写死前缀。
+    src = ''.join((FE / 'components' / 'conversation' / f).read_text(encoding='utf-8')
+                  for f in ('ChatNode.vue', 'ToolCard.vue'))
+    dispatched = set(re.findall(r"type === '([^']+)'", src))
     missing = {b.value for b in BlockType} - dispatched
-    assert not missing, f"BlockType {missing} 在 Timeline.vue 无分发分支——块会静默降级灰色 GenericBlock"
-    _ok("t1", f"九值 BlockType 词汇表 ↔ Timeline 分发逐一对上（{len(dispatched)} 支）")
+    assert not missing, f"BlockType {missing} 在 ChatNode/ToolCard 无分发分支——块会静默降级灰色 GenericBlock"
+    _ok("t1", f"九值 BlockType 词汇表 ↔ conversation 分发逐一对上（{len(dispatched)} 支）")
 
 
 def t2_envelope_and_kinds():
@@ -188,6 +194,40 @@ def t6_trace_span_vocabulary():
         ss.SESSIONS_FILE = keep
 
 
+def t7_chat_target_from_assembly():
+    """直聊目标必须出自真装配。前端那份硬编码名单写着 ProductManager/Engineer2/DataAnalyst，
+    一个都不在装配里 → route 判 `recv in agents` 失败，追问静默蒸发而 API 回 200。"""
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        from codeharness.team import classic_team, dynamic_assembly
+        from codeharness.environment.team_graph import SOP
+        classic = classic_team(None)
+        dyn, dyn_route = dynamic_assembly(None)
+        for name, ag, route in (("classic", classic, SOP), ("react", classic, SOP),
+                                ("dynamic", dyn, dyn_route)):
+            entry = next((r for r in route.get("UserRequirement") or [] if r in ag), "")
+            assert entry, f"{name} 线的 USER_REQUIREMENT 目标不在装配 {sorted(ag)} 里 → 插话无人接"
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "x", "project_name": "s8chat"}).json()["id"]
+            c.app.state.store.update(sid, roles=["PM"], entry_role="PM")
+            bad = c.post(f"/api/sessions/{sid}/chat", json={"content": "hi", "send_to": "Ghost"})
+            assert bad.status_code == 422 and "PM" in bad.json()["detail"], (bad.status_code, bad.text[:120])
+            good = c.post(f"/api/sessions/{sid}/chat", json={"content": "hi", "send_to": "PM"})
+            assert good.status_code == 409, f"真目标应过校验、停在「没在跑」：{good.status_code}"
+        # 剥掉注释再查：讲这条历史 bug 的注释里必然出现那些旧名字
+        src = re.sub(r"/\*.*?\*/|//[^\n]*", "",
+                     (FE / "components" / "composer" / "ComposerCard.vue").read_text(encoding="utf-8"),
+                     flags=re.S)
+        stale = [n for n in ("ProductManager", "Engineer2", "DataAnalyst") if n in src]
+        assert "roles" in src and not stale, f"ComposerCard 又硬编码直聊目标了：{stale}——必须渲染 Session.roles"
+        _ok("t7", f"三线插话目标出自真装配（classic/react→PM、dynamic→Mike）；未知目标 /chat 即 422")
+    finally:
+        ss.SESSIONS_FILE = keep
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -199,7 +239,8 @@ def main():
     t4_graph_endpoint()
     t5_workspace_file_response_shape()
     t6_trace_span_vocabulary()
-    print("\ns8_frontend_contract: 6/6 全绿")
+    t7_chat_target_from_assembly()
+    print("\ns8_frontend_contract: 7/7 全绿")
 
 
 if __name__ == "__main__":

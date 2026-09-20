@@ -8,6 +8,9 @@ export interface Session {
   user_id: string // N1：创建者（auth 关恒 "default"）
   status: string // created | running | awaiting_human | stopping | finished | stopped | failed
   llm_override: Record<string, any>
+  // 装配出口回填（runner._prepare）：直聊下拉只渲染 roles，空目标走 entry_role
+  roles?: string[]
+  entry_role?: string
   workspace: string
   error: string
   cost: Record<string, number>

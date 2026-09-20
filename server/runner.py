@@ -136,16 +136,21 @@ class SessionRunner:
         """按会话三态装配三件套：sop=N7 模板线（9.3 扩展入口）；dynamic=S9.1 对照的 RoleZero 线；
         classic=默认经典线。resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的
         （第十一处教训）。thread_id 必须带会话唯一值：多会话共用模板不能在 checkpointer 里串台。"""
+        from codeharness.const import RequirementTag
+        from codeharness.environment.team_graph import SOP
         from codeharness.team import prepare_project, _make_llm, classic_team
         # 一次装配只建一个网关：会话的 llm_override 就在这里落地。经典线原先走
         # prepare_project 的 agents=None 兜底，而 _default_agents 会另建一个不认
         # override 的网关——所以三条线都显式组队。
         llm = _make_llm(cost_manager, getattr(session, "llm_override", None))
         if getattr(session, "sop", ""):
-            from codeharness.sop.builder import build_team_from_template
+            from codeharness.sop.builder import build_team_from_template, get_template
+            edges = get_template(session.sop).edges
             team, config, init = build_team_from_template(session.sop, llm,
                                                           checkpointer=await self._saver(),
                                                           idea=session.idea, thread_id=project)
+            names = sorted({str(r) for roles in edges.values() for r in roles})
+            entry = str(next(iter(edges.get(RequirementTag.USER_REQUIREMENT) or []), ""))
         else:
             sop = None
             paradigm = getattr(session, "paradigm", "classic")
@@ -160,6 +165,20 @@ class SessionRunner:
             team, config, init = prepare_project(session.idea, project, agents=agents,
                                                  checkpointer=await self._saver(),
                                                  cost_manager=cost_manager, sop=sop)
+            names = sorted(agents)
+            # 插话默认目标 = 真正订阅 USER_REQUIREMENT 的那个节点（dynamic 用自己的表，
+            # classic/react 走 prepare_project 里的 team_graph.SOP）
+            route = sop or SOP
+            entry = next((str(r) for r in (route.get(RequirementTag.USER_REQUIREMENT) or [])
+                          if r in agents), "")
+        # 装配出口回填：前端直聊下拉与 /chat 的目标校验都读这两个值。原先前端硬编码
+        # ProductManager/Engineer2/DataAnalyst——一个都不在装配里，追问会被 route 静默丢掉。
+        if names != list(session.roles) or entry != session.entry_role:
+            self.store.update(session.id, roles=names, entry_role=entry)
+        session.roles, session.entry_role = names, entry
+        chat = self.chats.get(session.id)
+        if chat is not None and entry:
+            chat.default_target = entry                 # 空目标也要落在真节点上
         # N9：全链路 trace 的唯一注入点（_run 与 _resume 都从这里拿 config）。
         # 节点内裸 model.ainvoke()/tool.ainvoke() 靠 langchain-core 的 var_child_runnable_config
         # 继承，网关与节点里**不得**再传一次——同一 handler 既显式又继承会双 span。
