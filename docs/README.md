@@ -294,7 +294,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
   `s13_redis_qdrant_auth`、`s20_auth_race_ratelimit` + `s20_p0_complete` 各自两件同号。
 - **本轮实测**（`HEAD=abcd75f`，跑法见环境准备段的姿势三件套）：`s7_platform` **13/13 全绿（双配置）**、
   `s8_frontend_contract` **10/10 全绿**、`s14_tot` **6/6 全绿**。其余 23 件 `s*` **本轮未跑**；
-  `s3b_runtime` 本轮起跑后 25 分钟未收口（它的长腿要真起沙箱跑 pytest），故治理阶段门记的
+  `s3b_runtime` 本轮 06:13 起跑、写到本段（06:34）仍未返回（它的长腿要真起沙箱跑 pytest），故治理阶段门记的
   **既有基线红 `s3b_runtime::t14` 本轮没有自测读数**，不要当成已复核。
   最近一次全量读数是治理驱动器 09-21 05:14 的阶段门（清单 1 = 29 条 **28 绿 + 1 既有基线红**），
   原文在 `plan/governance-gate-stage4.md`；那是别的会话跑的，此处按指针引用。
