@@ -95,12 +95,11 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
         # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播）
         if MESSAGE_ROUTE_TO_SELF in last.send_to:
             if last.sent_from in agents:
-                if last.cause_by in (RequirementTag.DEBUG_ERROR, RequirementTag.RUN_CODE):
-                    # 测试修复自环也计数（源 qa_engineer test_round 上限语义）：
-                    # RunCode失败→DebugError→RunCode… 不设闸就是 QA↔沙箱 的活循环
-                    state["debug_rounds"] = state.get("debug_rounds", 0) + 1
-                    if state["debug_rounds"] >= 3:
-                        return END
+                # 源 qa_engineer test_round 语义：RunCode失败→DebugError→RunCode… 不设闸就是
+                # QA↔沙箱 的活循环。**只读**——条件边函数里写 state 会被丢弃，计数在 router 节点。
+                if (last.cause_by in (RequirementTag.DEBUG_ERROR, RequirementTag.RUN_CODE)
+                        and state.get("debug_rounds", 0) >= 3):
+                    return END
                 return [Send(last.sent_from, {"_inbox": [last]})]
             # 目标节点不存在时绝不能发 Send——LangGraph 会直接抛 Unknown node
 
@@ -133,10 +132,8 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
                           "roles": len(agents)})
         if not sends:
             return END                                 # 无订阅者且无插话 = 散会
-        if last.cause_by == RequirementTag.DEBUG_ERROR:
-            state["debug_rounds"] = state.get("debug_rounds", 0) + 1
-            if state["debug_rounds"] >= 3:             # 修复回路上限，防 QA↔Engineer 死循环
-                return END
+        if last.cause_by == RequirementTag.DEBUG_ERROR and state.get("debug_rounds", 0) >= 3:
+            return END                                 # 修复回路上限，防 QA↔Engineer 死循环（计数见 router 节点）
         return sends
 
     return route
@@ -152,7 +149,22 @@ def build_team(agents: dict, checkpointer=None, sop: dict | None = None, stats: 
     g = StateGraph(TeamState)
 
     async def router(state: TeamState):
-        return {}                                     # 汇聚虚节点：所有产出流回这里再路由
+        """汇聚虚节点：所有产出流回这里再路由。
+
+        ⚠ **`debug_rounds` 的唯一写入口在这里**：节点返回值才是状态提交口，条件边函数（`route`）里
+        `state[k] = v` 会被丢掉（langgraph 1.2.11 实测，见 `tests/s16_route_state.py::t1`）——
+        原先写在 route 里的那道 `>= 3` 闸恒不生效，QA↔沙箱 / QA↔Engineer 的活循环只靠
+        `recursion_limit=60` 兜底，撞上就把整个会话打成 failed。
+        计数判据与 route 的两个刹车分支严格一致（`<self>` 重试环 + DEBUG_ERROR 广播环各算一轮）。"""
+        msgs = state.get("messages") or []
+        last = msgs[-1] if msgs else None
+        if last is None:
+            return {}
+        self_retry = (MESSAGE_ROUTE_TO_SELF in last.send_to
+                      and last.cause_by in (RequirementTag.DEBUG_ERROR, RequirementTag.RUN_CODE))
+        if self_retry or last.cause_by == RequirementTag.DEBUG_ERROR:
+            return {"debug_rounds": state.get("debug_rounds", 0) + 1}
+        return {}
 
     g.add_node("router", router)
     for name, agent in agents.items():
