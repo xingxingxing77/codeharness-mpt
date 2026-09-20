@@ -92,13 +92,13 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
             return END
         last = state["messages"][-1]
 
-        # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播）
+        # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播；B9 的错误/拒绝回喂同路）
         if MESSAGE_ROUTE_TO_SELF in last.send_to:
             if last.sent_from in agents:
-                # 源 qa_engineer test_round 语义：RunCode失败→DebugError→RunCode… 不设闸就是
-                # QA↔沙箱 的活循环。**只读**——条件边函数里写 state 会被丢弃，计数在 router 节点。
-                if (last.cause_by in (RequirementTag.DEBUG_ERROR, RequirementTag.RUN_CODE)
-                        and state.get("debug_rounds", 0) >= 3):
+                # 自环一律计数、不挑 cause_by：B9 回喂的错误/拒绝消息 cause_by=action.name，
+                # 挑白名单会漏掉它——实测同一失败动作激活 12 次打到 recursion_limit
+                # （log/b9_probe.py）。**只读**：条件边里写 state 会被丢弃，计数在 router 节点。
+                if state.get("debug_rounds", 0) >= 3:
                     return END
                 return [Send(last.sent_from, {"_inbox": [last]})]
             # 目标节点不存在时绝不能发 Send——LangGraph 会直接抛 Unknown node
@@ -155,14 +155,12 @@ def build_team(agents: dict, checkpointer=None, sop: dict | None = None, stats: 
         `state[k] = v` 会被丢掉（langgraph 1.2.11 实测，见 `tests/s16_route_state.py::t1`）——
         原先写在 route 里的那道 `>= 3` 闸恒不生效，QA↔沙箱 / QA↔Engineer 的活循环只靠
         `recursion_limit=60` 兜底，撞上就把整个会话打成 failed。
-        计数判据与 route 的两个刹车分支严格一致（`<self>` 重试环 + DEBUG_ERROR 广播环各算一轮）。"""
+        计数判据与 route 的刹车严格一致：`<self>` 自环一律一轮，DEBUG_ERROR 广播环一轮。"""
         msgs = state.get("messages") or []
         last = msgs[-1] if msgs else None
         if last is None:
             return {}
-        self_retry = (MESSAGE_ROUTE_TO_SELF in last.send_to
-                      and last.cause_by in (RequirementTag.DEBUG_ERROR, RequirementTag.RUN_CODE))
-        if self_retry or last.cause_by == RequirementTag.DEBUG_ERROR:
+        if MESSAGE_ROUTE_TO_SELF in last.send_to or last.cause_by == RequirementTag.DEBUG_ERROR:
             return {"debug_rounds": state.get("debug_rounds", 0) + 1}
         return {}
 

@@ -3,6 +3,7 @@
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
+from codeharness.const import MESSAGE_ROUTE_TO_SELF
 from codeharness.schema import Message
 
 
@@ -177,7 +178,8 @@ class Agent:
             if verdict != "allowed":
                 # 未决（None）也按不执行处理：gate 漏接线的后果必须是「没干」，不是「照干」
                 msg = Message(content=f"[已拒绝] {name} 未获批准，不执行",
-                              role="user", cause_by=name, sent_from=self.profile["name"])
+                              role="user", cause_by=name, sent_from=self.profile["name"],
+                              send_to={MESSAGE_ROUTE_TO_SELF})
                 return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],
                         "inbox": [], "action_cursor": s["action_cursor"]}
         if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
@@ -200,11 +202,14 @@ class Agent:
             # Action 抛错 → 错误消息回喂记忆，下一轮自愈——真模型输出漂移是常态（第十二处：
             # WriteTasks 给了 filename="/main.py"，产物仓按契约写拒，这异常原本一路吹穿
             # team graph，把已完成的角色与花掉的钱全部陪葬）。拒写是对的，炸会话不是。
+            # 「下一轮」靠 `<self>` 让团队图把本角色再激活一次（B9）：cause_by=action.name 不在
+            # SOP 表里，而默认 send_to=<all> 在 route 里刻意不广播 → 无订阅者 = 一抛错就散会。
             from codeharness.logs import logger
             logger.warning(f"{self.profile['name']}.{action.name} 抛错，回喂自愈: "
                            f"{type(e).__name__}: {e}")
             result = Message(content=f"[错误] {action.name} 执行失败: {type(e).__name__}: {e}",
-                             role="user", cause_by=action.name, sent_from=self.profile["name"])
+                             role="user", cause_by=action.name, sent_from=self.profile["name"],
+                             send_to={MESSAGE_ROUTE_TO_SELF})
         if isinstance(result, Message):
             msg = result
         else:

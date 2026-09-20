@@ -6,11 +6,14 @@
 
 langgraph 版本 = **1.2.11**（t1 实测的语义属于这个版本，升级后 t1 会红，那是有意义的信号）。
 
-三条：
+三条刹车语义 + 两条 B9 回喂：
   t1 语义实验（总文档 §B1 的 20 行验证实验转正）：条件边里写 state 丢弃 vs 节点里写提交；
   t2 真图 QA `<self>` 自环（RUN_CODE）：三轮内刹车生效，不是打到 recursion_limit；
   t3 真图 DEBUG_ERROR 广播回路（QA↔Engineer）：同上。
-t2/t3 在修复前是红的（`debug_rounds` 恒 0 → 循环到 recursion_limit 抛 GraphRecursionError），
+  t4 真图 Action 抛错（B9）：错误消息回到 `<self>` → 角色被再激活，3 轮内收尾
+     （修复前只激活 1 次就散会；只改 send_to 不放宽刹车则激活 12 次打到 recursion_limit）；
+  t5 真图审批拒绝（B9）：被拒动作一次都不执行，角色照样被再激活并走同一道闸。
+t2/t3 在 B1 修复前是红的（`debug_rounds` 恒 0 → 循环到 recursion_limit 抛 GraphRecursionError），
 这正是总文档 B1 说的「刹车可能从未生效」的行为级读数。
 """
 import asyncio
@@ -20,9 +23,12 @@ from typing import TypedDict
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel
 
+from codeharness.base.action import BaseAction
 from codeharness.const import MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_SELF, RequirementTag
 from codeharness.environment.team_graph import build_team
+from codeharness.roles.agent import Agent
 from codeharness.schema import Message
 
 LANGGRAPH_VERSION = md.version("langgraph")
@@ -152,14 +158,82 @@ def t3_debug_error_broadcast_brake():
     assert engineer.hits == 2, f"t3 第 3 轮该 END，Engineer 实际被激活 {engineer.hits} 次"
 
 
+# ---------- 4/5. B9：自愈回喂（抛错 / 审批拒绝）必须有人接，且仍在 3 轮闸内 ----------
+class _Rec(BaseModel):
+    done: str = ""
+
+
+class _Boom(BaseAction):
+    """每次都抛错的 Action（真模型输出漂移→产物仓写拒的最小替身）"""
+    output_schema = _Rec
+
+    async def run(self, msg: Message) -> Message:
+        HITS.append("run")
+        raise ValueError("非法产物文件名 '/main.py'")
+
+
+HITS: list[str] = []
+
+
+def _boom_agent():
+    HITS.clear()
+    ag = Agent({"name": "E", "profile": "p", "goal": "g"}, [_Boom(llm=None)], None,
+               react_mode="BY_ORDER", max_loops=2, watch={RequirementTag.USER_REQUIREMENT})
+    graph = build_team({"E": ag}, sop={RequirementTag.USER_REQUIREMENT: ["E"]})
+    msg = Message(content="开工", role="user", cause_by=RequirementTag.USER_REQUIREMENT,
+                  sent_from="user")
+    return graph, _init(msg)
+
+
+def t4_action_error_reactivates_role():
+    """B9 验收：mock Action 抛错 → 角色节点被 Send 第二次（回喂有订阅者），且 3 轮内收尾。
+
+    修复前：错误消息 `send_to=<all>` 在 route 里刻意不广播 + `cause_by=action.name` 不在 SOP
+    → 无订阅者 → 角色只激活 1 次就散会（会话以 "run completed" 收口，自愈轮从未发生）。
+    中间态（只改 send_to=<self>、刹车仍挑 cause_by）：激活 12 次打到 recursion_limit，
+    读数见 log/b9_probe.py —— 所以这道闸必须不挑 cause_by。"""
+    graph, init = _boom_agent()
+    try:
+        out = _ainvoke(graph, init, "s16-b9-error")
+    except GraphRecursionError as e:
+        raise AssertionError(f"t4 回喂自环没被刹住，执行 {len(HITS)} 次 → {e}") from e
+    assert len(HITS) == 3, f"t4 角色应被激活 3 次（1 次原发 + 2 次自愈）后刹车，实际 {len(HITS)}"
+    assert out["debug_rounds"] == 3, f"t4 debug_rounds 应为 3，实际 {out['debug_rounds']}"
+
+
+def t5_approval_reject_does_not_run_action():
+    """审批拒绝路径：动作一次都不能执行，但角色要被再激活（有换动作的机会），同样 3 轮收尾。"""
+    from codeharness.runtime import APPROVAL_IO
+    from codeharness.tools import _approval
+
+    graph, init = _boom_agent()
+    saved = _approval.gate_decide
+    _approval.gate_decide = lambda *a, **k: ("rejected", None)
+    tok = APPROVAL_IO.set(object())                    # 装了待批通道（没装时 gate fail-open 放行）
+    try:
+        out = _ainvoke(graph, init, "s16-b9-reject")
+    except GraphRecursionError as e:
+        raise AssertionError(f"t5 拒绝回喂自环没被刹住 → {e}") from e
+    finally:
+        _approval.gate_decide = saved
+        APPROVAL_IO.reset(tok)
+    assert HITS == [], f"t5 被拒的动作照跑了：{HITS}"
+    assert out["debug_rounds"] == 3, f"t5 拒绝回喂应走同一道闸（3 轮），实际 {out['debug_rounds']}"
+    last = out["messages"][-1]
+    assert last.content.startswith("[已拒绝]"), f"t5 末条不是拒绝消息：{last.content[:40]!r}"
+    assert MESSAGE_ROUTE_TO_SELF in last.send_to, "t5 拒绝消息没回到 <self>，下一轮没人接"
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
-              t3_debug_error_broadcast_brake]
+              t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
+              t5_approval_reject_does_not_run_action]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS16 门禁通过：{len(checks)} 组（langgraph {LANGGRAPH_VERSION}）—— "
-          f"条件边写 state 不持久化 1 组（含节点写入对照组）+ 真图刹车 2 组（<self> 自环 / DEBUG_ERROR 广播）")
+          f"条件边写 state 不持久化 1 组（含节点写入对照组）+ 真图刹车 2 组（<self> 自环 / DEBUG_ERROR 广播）"
+          f"+ B9 自愈回喂 2 组（Action 抛错 / 审批拒绝，都要再激活角色且 3 轮内收尾）")
 
 
 if __name__ == "__main__":
