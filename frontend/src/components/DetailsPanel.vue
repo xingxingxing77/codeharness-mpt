@@ -25,6 +25,21 @@
     </div>
 
     <div v-else-if="ui.rightView === 'files'" class="body">
+      <!-- importRepo 的唯一入口：后端有路由，界面才有这个控件 -->
+      <div v-if="store.currentId" class="importRow">
+        <input
+          v-model="importPath"
+          class="importInput"
+          :placeholder="`仓库目录（须在 ${store.health?.workspace_root || 'workspace_root'} 内）`"
+          aria-label="仓库目录路径"
+          :disabled="importBusy"
+          @keydown.enter.prevent="doImport"
+        />
+        <VButton variant="ghost" size="s" :disabled="importBusy || !importPath.trim()" @click="doImport">
+          {{ importBusy ? '导入中…' : '导入仓库' }}
+        </VButton>
+      </div>
+      <div v-if="importErr" class="importErr">{{ importErr }}</div>
       <div v-if="!tree.length" class="dim">{{ store.current ? '工作区为空' : '未选择会话' }}</div>
       <FileNode v-for="n in tree" :key="n.path" :n="n" :depth="0" @open="openFile" />
     </div>
@@ -87,6 +102,7 @@ import MarkdownText from './conversation/MarkdownText.vue'
 import MermaidView from './MermaidView.vue'
 import ToolCard from './conversation/ToolCard.vue'
 import DsIcon from './ui/DsIcon.vue'
+import VButton from './ui/VButton.vue'
 import { api } from '../api/client'
 import { useSessionStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
@@ -138,7 +154,12 @@ function pick(k: string) {
   if (k === 'trace' && store.currentId) void store.loadTrace(store.currentId)
 }
 
+const importPath = ref('')
+const importBusy = ref(false)
+const importErr = ref('')
+
 async function load() {
+  importErr.value = ''
   if (!store.currentId) {
     tree.value = []
     mermaid.value = ''
@@ -150,6 +171,27 @@ async function load() {
     mermaid.value = g.mermaid || ''
   } catch (e) {
     toast.push((e as Error).message, 'error')
+  }
+}
+
+/** 越界与不存在的目录由 server 判 400，报错原样显示；动作件吞错返回的 {error} 也不算成功。 */
+async function doImport() {
+  const p = importPath.value.trim()
+  if (!p || !store.currentId || importBusy.value) return
+  importBusy.value = true
+  importErr.value = ''
+  try {
+    const r = await api.importRepo(store.currentId, { repo_path: p })
+    if (r.error) {
+      importErr.value = String(r.error)
+    } else {
+      toast.push(`已导入 ${r.node_count} 节点 / ${r.edge_count} 边`, 'success')
+      await load()
+    }
+  } catch (e) {
+    importErr.value = (e as Error).message
+  } finally {
+    importBusy.value = false
   }
 }
 
@@ -273,6 +315,35 @@ const FileNode = defineComponent({
   padding: 10px 12px 14px;
   font-size: 13px;
   color: var(--dsw-alias-label-secondary);
+}
+
+.importRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.importInput {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  outline: none;
+  background: var(--dsw-specific-menu);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.importErr {
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .dim {
