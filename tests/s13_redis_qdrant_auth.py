@@ -224,7 +224,9 @@ def t5_real_qdrant_server_enforces_key():
                                          QDRANT__STORAGE__STORAGE_PATH=storage,
                                          QDRANT__TELEMETRY_DISABLED="true",
                                          QDRANT__SERVICE__API_KEY=key),
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                # qdrant 往**工作目录**写 .qdrant-initialized 标记，不设 cwd 就落在仓库根
+                                cwd=storage)
         url = f"http://127.0.0.1:{port}"
         deadline = 25.0
         while deadline > 0 and _http_status(url + "/collections") is None:
