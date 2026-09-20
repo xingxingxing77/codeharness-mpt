@@ -90,6 +90,37 @@ def create_app() -> FastAPI:
             await runner._ctl.aclose()
 
     app = FastAPI(title="Codeharness Studio", lifespan=lifespan)
+
+    # S1 守门（注册在 CORS 之前 = CORS 在外层，401/403 的响应头仍带 CORS）：
+    # /workspace 是裸 StaticFiles 挂载、不经 current_user，而 WORKSPACE_ROOT 下除了各会话产物
+    # 还住着 storage/checkpoints.db（完整黑板消息 + 角色记忆）。两条规矩：
+    #   1) storage/ 一律 403——断点库从暴露面彻底摘掉，落盘位置不动、零迁移，auth 关也挡；
+    #   2) auth 开时其余 /workspace/* 要求 access_token——与 current_user/SSE 同一条 ceiling 口径
+    #      （<img> 与 EventSource 都发不了 header，token 只能进 query，代价见 B13 已知债）。
+    # 判据走 resolve() 而不是字符串前缀：StaticFiles 也会把 .. / . / 反斜杠 / 大小写归一，
+    # 两边必须按同一个落点说话，否则 `/workspace/./storage/x` 这类写法就从缝里漏出去。
+    from urllib.parse import unquote
+    from fastapi.responses import JSONResponse
+    from server.auth import auth_enabled, tokens
+    _WS_PREFIX, _STORAGE_ROOT = "/workspace", (WORKSPACE_ROOT / "storage").resolve()
+
+    @app.middleware("http")
+    async def guard_workspace(request, call_next):
+        path = request.url.path
+        if path != _WS_PREFIX and not path.startswith(_WS_PREFIX + "/"):
+            return await call_next(request)
+        rel = unquote(path[len(_WS_PREFIX):]).replace("\\", "/").strip("/")
+        target = (WORKSPACE_ROOT / rel).resolve() if rel else WORKSPACE_ROOT.resolve()
+        if target == _STORAGE_ROOT or target.is_relative_to(_STORAGE_ROOT):
+            return JSONResponse(status_code=403, content={"detail": "storage 不对外"})
+        if auth_enabled():
+            auth = request.headers.get("Authorization", "")
+            token = request.query_params.get("access_token", "") or (
+                auth[7:].strip() if auth.startswith("Bearer ") else "")
+            if not token or not tokens.resolve(token):
+                return JSONResponse(status_code=401, content={"detail": "workspace 需要登录"})
+        return await call_next(request)
+
     app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173",
                                                        "http://127.0.0.1:5173"],
                        allow_methods=["*"], allow_headers=["*"])

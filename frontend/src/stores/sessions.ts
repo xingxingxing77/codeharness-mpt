@@ -436,7 +436,10 @@ export const useSessionStore = defineStore('sessions', {
       const norm = absPath.replace(/\\/g, '/')
       let rel = norm.toLowerCase().startsWith(root.toLowerCase()) ? norm.slice(root.length) : norm
       rel = rel.replace(/^\//, '')
-      return `/workspace/${rel}`
+      // S1：/workspace 静态挂载在 auth 开时要求 access_token（<img> 发不了 header）。
+      // 有票就无条件带上，auth 关时服务端忽略它——少一个分支。
+      const token = getToken()
+      return token ? `/workspace/${rel}?access_token=${encodeURIComponent(token)}` : `/workspace/${rel}`
     }
   }
 })
