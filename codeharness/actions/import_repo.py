@@ -50,7 +50,13 @@ class ImportRepo(Action):
         repo_path = params.get("repo_path", ".")
         save_name = params.get("save_name", "repo")
         include_files = params.get("include_files", True)
-        
+
+        # save_name 拼成 `{会话根}/{save_name}.json` 交给 load_from，`../` = 越界读任意 .json
+        # （读进来的图会并进本次产物）。写侧因下面 save 显式传会话根才没越界。
+        # HTTP 端点已拦一次（400），这里不依赖调用方守规矩：ext_api 装配可能有第二个调用者。
+        if not save_name or Path(save_name).name != save_name:
+            raise ValueError(f"非法 save_name {save_name!r}：不能包含路径分隔")
+
         repo_path = Path(repo_path).resolve()
         if not repo_path.exists():
             return {"error": f"repository path does not exist: {repo_path}"}

@@ -47,6 +47,36 @@ def t2_import_repo_path_guard():
     print("✅")
 
 
+def t3_import_repo_save_name_guard():
+    """save_name 越界（S2）：带路径分隔必须 400 且服务端无新文件；带空格的合法名仍 200。"""
+    print("t3: import_repo save_name guard...", end=" ", flush=True)
+    with TestClient(create_app()) as c:
+        s = c.post("/api/sessions", json={"idea": "穿越", "project_name": "s11_traversal"}).json()
+        sid, workspace = s["id"], s["workspace"]
+        wp = Path(workspace)
+        wp.mkdir(parents=True, exist_ok=True)
+        (wp / "sample.py").write_text("x = 1\n", encoding="utf-8")
+
+        bad_names = ("../../server/data/users", "../../server/data/x", "/tmp/x", "a/b", "  ")
+        # 越界路径上的文件既不许多建也不许多改（users.json 是现成的靶，只比 exists() 抓不到覆写）
+        targets = [(wp / f"{n}{ext}").resolve() for n in bad_names for ext in (".json", ".mmd")]
+        before = {t: (t.exists(), t.read_bytes() if t.exists() else None) for t in targets}
+
+        for bad in bad_names:
+            r = c.post(f"/api/sessions/{sid}/workspace/import_repo",
+                       json={"repo_path": str(wp), "save_name": bad})
+            assert r.status_code == 400, f"越界 save_name={bad!r} 应 400，实际{r.status_code}: {r.text[:200]}"
+        for t in targets:
+            now = (t.exists(), t.read_bytes() if t.exists() else None)
+            assert now == before[t], f"越界产物已落盘/覆写：{t}"
+
+        r = c.post(f"/api/sessions/{sid}/workspace/import_repo",
+                   json={"repo_path": str(wp), "save_name": " repo ", "include_files": True})
+        assert r.status_code == 200, f"合法 save_name（含空格）应 200，实际{r.status_code}: {r.text[:200]}"
+        assert Path(r.json()["saved_json"]).name == "repo.json", f"应落 repo.json: {r.json()}"
+    print("✅")
+
+
 def main():
     print("=" * 60)
     print("批次2: 仓库导入端点门禁")
@@ -54,7 +84,8 @@ def main():
     try:
         t1_import_repo_endpoint()
         t2_import_repo_path_guard()
-        print("\n" + "=" * 60 + "\n✅ 全部通过 (2/2)\n" + "=" * 60)
+        t3_import_repo_save_name_guard()
+        print("\n" + "=" * 60 + "\n✅ 全部通过 (3/3)\n" + "=" * 60)
         return 0
     except AssertionError as e:
         print(f"\n❌ 失败：{e}")

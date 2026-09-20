@@ -64,6 +64,12 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
         raise HTTPException(400, "repo_path 必须是已存在的目录")
     if not repo_path.is_relative_to(ws_root):
         raise HTTPException(400, "repo_path 必须在 workspace_root 内")
+    # save_name 原样拼成 `{会话根}/{save_name}.json` 交给 load_from 读：`../` 可越界读任意 .json
+    # （探针实测：../别的会话/repo 会把那个会话的图并进本次产物，N1 隔离在此失效）。
+    # 判据与会话目录名同源（sessions.py `_single_dir_name`）。
+    save_name = str(body.get("save_name", "repo")).strip()
+    if not save_name or Path(save_name).name != save_name:
+        raise HTTPException(400, "save_name 不能包含路径分隔")
 
     workspace = _ws(request, sid, user)                    # 顺带越权校验（404）
     tok = CURRENT_PROJECT.set(workspace.name)              # 让 ImportRepo 内 ArtifactStore 落到本会话
@@ -71,7 +77,7 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
         from codeharness.actions.import_repo import ImportRepo
         return await ImportRepo(llm=None)._call({
             "repo_path": str(repo_path),
-            "save_name": str(body.get("save_name", "repo")),
+            "save_name": save_name,
             "include_files": bool(body.get("include_files", True)),
         })
     finally:
