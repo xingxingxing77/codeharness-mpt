@@ -9,6 +9,8 @@ from server.auth import current_user
 
 router = APIRouter(prefix="/api/sessions", tags=["workspace"])
 
+MAX_PREVIEW_BYTES = 5 * 1024 * 1024     # 文本预览上限：超了不读，直接 413（不另做下载通道）
+
 
 def _ws(request: Request, sid: str, user: str) -> Path:
     from server.api.sessions import _owned
@@ -46,6 +48,12 @@ def file(sid: str, path: str, request: Request, user: str = Depends(current_user
     ext = target.suffix.lower()
     if mime.startswith("image/"):
         return {"path": str(target), "ext": ext, "mime": mime}   # 二进制不回文本，前端走 /workspace 静态 URL
+    size = target.stat().st_size
+    if size > MAX_PREVIEW_BYTES:
+        # 整份 read_text 会把一个几百 MB 的日志全量读进内存再序列化给浏览器（一次请求就是一次卡顿）；
+        # 上限之上不读，直接 413。图片那条分支不在这里——它只回元数据，不读字节。
+        raise HTTPException(413, f"文件 {size / 1048576:.1f}MB 超过预览上限 "
+                                 f"{MAX_PREVIEW_BYTES // 1048576}MB，不在浏览器里预览")
     return {"path": str(target), "content": target.read_text(encoding="utf-8", errors="replace"),
             "mime": mime, "ext": ext}
 

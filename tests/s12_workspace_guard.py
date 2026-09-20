@@ -6,6 +6,7 @@
   t2 auth 开：无票/坏票 401，真票走 query 与 Bearer 两条都 200；storage 仍 403（守门在鉴权之前，
      有票也不给下断点库）。
   t3 前端半边（s8 惯例的源码契约）：workspaceUrl 有票就拼 access_token——<img> 发不了 header。
+  t4 B10 半边：`/workspace/file` 文本预览的体积上限（超限 413 且证明没去读；图片元数据分支不受牵连）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \
@@ -100,6 +101,45 @@ def t3_frontend_token_wired():
     print("  t3 前端 workspaceUrl 无条件拼 access_token")
 
 
+def t4_file_size_cap():
+    """B10：`/workspace/file` 的文本预览有上限——超限 413 且**不去读**；图片分支不受牵连。"""
+    import pathlib
+    from server.api.workspace import MAX_PREVIEW_BYTES
+    print("  t4 文本预览上限（>5MB → 413）...", end=" ", flush=True)
+    with _Env(auth_on=False) as c:
+        s = c.post("/api/sessions", json={"idea": "大文件", "project_name": "s12_cap"}).json()
+        sid = s["id"]
+        wp = Path(s["workspace"])
+        wp.mkdir(parents=True, exist_ok=True)
+        (wp / "ok.md").write_text("# hi\n" * 500, encoding="utf-8")
+        (wp / "exact.md").write_bytes(b"y" * MAX_PREVIEW_BYTES)
+        (wp / "big.log").write_bytes(b"x" * (MAX_PREVIEW_BYTES + 4096))
+        (wp / "big.png").write_bytes(bytes.fromhex("89504e470d0a1a0a") + b"\x00" * (MAX_PREVIEW_BYTES + 4096))
+
+        r = c.get(f"/api/sessions/{sid}/workspace/file", params={"path": str(wp / "ok.md")})
+        assert r.status_code == 200 and r.json().get("content", "").startswith("# hi"), \
+            f"上限内应照常 200 带 content：{r.status_code} {r.text[:120]}"
+        r = c.get(f"/api/sessions/{sid}/workspace/file", params={"path": str(wp / "exact.md")})
+        assert r.status_code == 200, f"恰好等于上限应放行（判据是 >，不是 >=）：{r.status_code}"
+
+        reads: list = []
+        real_read_text = pathlib.Path.read_text
+        pathlib.Path.read_text = lambda self, *a, **kw: (reads.append(self.name),
+                                                          real_read_text(self, *a, **kw))[-1]
+        try:
+            r = c.get(f"/api/sessions/{sid}/workspace/file", params={"path": str(wp / "big.log")})
+        finally:
+            pathlib.Path.read_text = real_read_text
+        assert r.status_code == 413, f"超上限应 413，实际 {r.status_code}: {r.text[:120]}"
+        assert not reads, f"413 之前仍然把整个文件读了（等于没护栏）：{reads}"
+        assert "MB" in r.text, f"413 该说清大小与上限：{r.text[:160]}"
+        # 图片分支只回元数据、不读字节 → 不受上限牵连
+        r = c.get(f"/api/sessions/{sid}/workspace/file", params={"path": str(wp / "big.png")})
+        assert r.status_code == 200 and "content" not in r.json() and r.json()["mime"] == "image/png", \
+            f"图片元数据分支被上限误伤：{r.status_code} {r.text[:120]}"
+    print(f"✅ 上限内 200/恰好等于 200；超限 413 且 read_text 调用数=0；{MAX_PREVIEW_BYTES // 1048576}MB+ 的图仍 200（只回元数据）")
+
+
 def main():
     print("=" * 60)
     print("S12: /workspace 静态挂载守门（S1）")
@@ -108,7 +148,8 @@ def main():
         t1_auth_off()
         t2_auth_on()
         t3_frontend_token_wired()
-        print("\n" + "=" * 60 + "\n✅ 全部通过 (3/3)\n" + "=" * 60)
+        t4_file_size_cap()
+        print("\n" + "=" * 60 + "\n✅ 全部通过 (4/4)\n" + "=" * 60)
         return 0
     except AssertionError as e:
         print(f"\n❌ 失败：{e}")
