@@ -228,13 +228,27 @@ async def t6_metering_over_redis_bus():
 
 
 async def t7_trace_spans():
-    from platforms.trace import TraceStore
+    from platforms.trace import KEY, MAX_SPANS, TraceStore
     tr = TraceStore(TEST_DB)
     tr.record("s7tr", {"node": "PM", "pt": 100, "ct": 20, "cost": 0.001, "ts": 1.0})
     tr.record("s7tr", {"node": "Engineer", "pt": 50, "ct": 10, "cost": 0.0005, "ts": 2.0})
     spans = tr.spans("s7tr")
     assert [s["node"] for s in spans] == ["PM", "Engineer"], spans
-    _ok("t7", "trace（N4 数据层）：每笔 span 落 ZSET 可读，出 P95/token 归因的原料就位")
+    # B11：只加不裁 → 长跑会话的 trace 无界增长。验收 = 记 6000 条后 ZCARD==5000 且最新条在。
+    # i 补零到 6 位：同一 time.time() 的多笔按 member 字典序排，不补零时 "999" > "1000" 会让断言
+    # 随本机时钟粒度翻脸（补零后字典序==数值序，与插入序一致）。
+    cap_sid = "s7tr_cap"
+    n = MAX_SPANS + 1000
+    for i in range(n):
+        tr.record(cap_sid, {"node": "PM", "i": f"{i:06d}"})
+    assert tr.r.zcard(KEY.format(cap_sid)) == MAX_SPANS, \
+        f"记 {n} 条后 ZCARD={tr.r.zcard(KEY.format(cap_sid))}，应裁到 {MAX_SPANS}"
+    kept = tr.spans(cap_sid)
+    assert len(kept) == MAX_SPANS and kept[-1]["i"] == f"{n - 1:06d}", \
+        f"最新条不在了：末条={kept[-1]['i'] if kept else None}"
+    assert kept[0]["i"] == f"{1000:06d}", f"该被淘汰的头部没被淘汰：首条={kept[0]['i']}"
+    tr.r.delete(KEY.format(cap_sid))
+    _ok("t7", f"trace（N4 数据层）：每笔 span 落 ZSET 可读；记 {n} 条裁到 {MAX_SPANS} 且最新在、最老 1000 条已淘汰")
 
 
 async def t8_field_level_concurrency():
