@@ -72,7 +72,7 @@
 | 取消 / 停止 | 源无协作式取消 | `runner.py:59-104` | **本项目新增** | 整任务级 `task.cancel`，**不能停单个角色** |
 | `is_idle` / `<all>` 广播 | `role.py:561`; `base_env.py:229-235` | `team_graph.py:106-114` | 有意不做 | `<all>` 刻意不当广播（`s3b t6` 钉死），散会改判「无 Send 即 END」 |
 | 异常恢复（删记忆重观察） | `common.py:689-716` | 无对应物；改由 `agent.py:150` 错误回喂 | 现代化替换（**语义有变**） | 见 §四-3 |
-| ToT / 树搜索 | `strategy/tot.py:1-277`、`solver.py:44-77`、`search_space.py`、`strategy/base.py`(109) | `strategy/tot.py`（本轮）+ `registry.build_role strategy=tot` | **部分实现（空壳）** | 接线有、择优逻辑坏（§结论-3）；判定表仍未补这条 |
+| ToT / 树搜索 | `strategy/tot.py:1-277`、`solver.py:44-77`、`search_space.py`、`strategy/base.py`(109) | `strategy/base.py`（纯 Python 树，`update_value` 写回）+ `strategy/tot.py`（`BFSSolver`/`DFSSolver`）+ `registry.build_role strategy=tot` → `RoleZero.plan_fn` | **已移植、可择优**（2026-09-21 复核） | `3f975f7` 批次1 修掉旧「空壳」两 bug（evaluate 真写回 `node.value`、剪枝不再引用不存在的 `id`），判定表已补这行（`判定-复制与重构清单.md:120`，MCTS 判 `弃`）；本轮实测 `tests/s14_tot.py` **6/6 全绿**，其中 t2 写回 / t3 贪心保留 / t4 BFS 真选高分支是**行为断言**（旧 §五-新1 说的「浅断言」已闭）。边界不变：只换 RoleZero 的一次规划调用，**不替换主循环** |
 | 经验检索编排 | `strategy/experience_retriever.py` | `role_zero.py:214-235`（experience 槽）+ `@exp_cache` | 部分实现 | 判定要求「认真做」，现为经验池命中而非源的多路检索编排 |
 | 公众号订阅推送 | `subscription.py:11-100` | 无 | 有意不做 | 清单 `:145`「接渠道时按渠道抽象重做」 |
 | SK skill_manager | `management/skill_manager.py` | 无 | 有意不做 | 清单 `:135` |
@@ -104,16 +104,16 @@
 - `s3_report_action.py:163-245` t7–t12：字段级定向重试（只补缺、齐全不重发、合并不覆盖、plain-text 路不受影响）。该文件 `:4,:329` 明确声明「R3/R4a/R5 尚未做」——**这是它写给自己当时的状态，现在已过期**，别再据此判断现状。
 - `s5_memory_rag.py:858-884` t27：唯一真跑双 interrupt 闸的人在工作流（不 resume 不放行 + confirm 词表照源）。
 - `s7_platform.py:71,145,181`：msgpack 白名单、跨 worker stop、跨 worker chat。
-- 本轮 `s14_tot.py`（3 组）：t1 TotNode/Tree/Agent 实例化 + think() 返回 str、t2 build_role 换 tot 后 `_plan` 是协程且 profile 更新、t3 tot/role_zero 互斥。**都是浅断言，未测「是否真在多条路径里挑了分最高那条」**（§五-新1）。
+- ~~本轮 `s14_tot.py`（3 组）：t1 实例化 + think() 返回 str、t2 build_role 换 tot、t3 tot/role_zero 互斥，**都是浅断言**~~ —— **2026-09-21 复核：现为 6 组**，`t1_generate_builds_children` / **`t2_evaluate_writes_value`** / **`t3_select_keeps_highest`** / **`t4_bfs_solve_picks_high_path`** / `t5_plan_fn_on_rolezero` / `t6_dfs_runs`，加粗那三组正是「多条路径里真挑分最高那条」的行为断言（旧结论出自 B5 那轮的 3 组状态，保留作证据）。
 - `s9_benchmark.py` 是离线检索质量回归（hit@1/hit@5/mrr），**与循环无关**；策略曲线三档在 `manual_strategy_curve.py:28-29`，真钱通道、不进门禁。
 
-零断言：经典线 interrupt（因为无实现）；`recursion_limit` 触发后的状态归因；**ToT 的择优正确性**（实现了但没被行为断言）；`debug_rounds` 两处硬闸的上限行为只在 QA 自环一例里间接见过，没有独立断言。
+零断言：经典线 interrupt（因为无实现）；`recursion_limit` 触发后的状态归因；~~**ToT 的择优正确性**~~（**已闭，2026-09-21：`s14_tot` t2/t3/t4 是行为断言，本轮 6/6 绿**）；`debug_rounds` 两处硬闸的上限行为只在 QA 自环一例里间接见过，没有独立断言。
 
 ## 七、建议的收口顺序
 
 1. **给经典线一个 review 闸**：源 `auto_review`/`auto_revise`（`action_node.py:680,768`）在本仓没有对应物，而评审类 Action 已经存在——在 `WritePRDReview`/`WriteCodeReview` 后加一个无 LLM 的 `interrupt` 节点（照 `plan_and_act.py:108-132` 的现成姿势），一次性把 §结论-1、§五-A、§五-B 和前端死路径全部激活。
 2. **把 `role_zero._act` 的 interrupt 挪出工具执行节点**（§四-1），否则 resume 重复执行非幂等工具。
-3. **ToT 先修 bug 再谈推广**：`tot.py` ① 让 `think` 把 `evaluate` 的返回值赋回 `node.score`（或让 `evaluate` 就地写 `node.score`），否则「择优」永远挑第一支；② 剪枝去掉 `n.id`（`ThoughtNode` 没有 id）；③ 加一条 FakeLLM 门禁：给一棵分数可区分的树，断 `best_leaf` 真选高分支、剪枝不抛异常。然后**在 `判定-复制与重构清单.md` §四 补记 ToT 系四件的判定**（复/改/重/弃任一处），把「漏判」闭环——这是原 §七-3 未兑现的项。
+3. ~~**ToT 先修 bug 再谈推广**~~ —— **已闭合（`3f975f7` 批次1，2026-09-21 复核实测）**：① evaluate 的返回值真写回节点（`strategy/base.py:26 update_value`）；② 剪枝不再引用不存在的 `id`；③ `tests/s14_tot.py` 本轮跑 **6/6 全绿**，t2 `evaluate_writes_value` / t3 `select_keeps_highest` / t4 `bfs_solve_picks_high_path` 就是那条「分数可区分的树里真选高分支」的行为断言；④ 判定表已补（`判定-复制与重构清单.md:120`，MCTS 判弃）。**本条不再占排队位**；要推广（接进主循环）是另一件，未做。
 4. 清 D/E/F 三处死码与只写字段（`role_raise_decorator`、`serialize_decorator`、`round`、`finished`、`profile["strategy"]`、`extract_state_value_from_output`）——`finished` 若保留就该有处置 True 的地方，否则删。
 5. `recursion_limit` 命中时给一个明确的 stopped-with-rounds 状态，不要归 `failed`。
 
