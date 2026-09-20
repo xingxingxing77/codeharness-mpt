@@ -175,6 +175,10 @@ def session_graph(sid: str, request: Request, user: str = Depends(current_user))
     「画的就是跑的」只对默认线成立，扩展线在这里是不可见的）：
       sop 非空 → N7 模板装配（ext_api.register_template 的扩展线从这里可见）；
       dynamic  → dynamic_assembly（RoleZero 三角色）；否则 → classic 兜底。
+    ⚠ react 会话走的也是 classic 兜底，这是**对的**不是漏判：`team.react_assembly` 只在经典
+    五角色上翻 `react_mode`（换执行策略，路由表仍是 SOP），队形没变→图没变。别给 react 加分支。
+    两个分支的 `_make_llm()` 不传会话 override 同样是对的：这条端点只现采装配画图，
+    构造 gateway 不发模型请求（`model` 覆盖只在真跑图时由 runner 传，画图不需要知道选了哪个模型）。
     门禁 s8 t4 钉「节点集与 watch 边必须出自真装配」。"""
     s = _owned(request, sid, user)
     from codeharness.team import _default_agents, _make_llm
