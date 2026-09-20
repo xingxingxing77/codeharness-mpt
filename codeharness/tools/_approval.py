@@ -93,12 +93,26 @@ def needs_approval(permission: str, required: str) -> bool:
 
 
 def preview(name: str, args: dict) -> str:
-    """审批卡上那一行原文：命令 > 路径 > 查询 > 整包截断。"""
+    """审批卡上那一行原文：命令 > 路径 > 查询 > 整包截断。
+
+    S4：Action 面的真实参数不在顶层，而嵌在 `args["instruct"]`（触发消息的
+    instruct_content，见 roles/agent.py `_approval_key`）——先摊平再挑键，否则经典线
+    的卡上永远只有消息散文，人类看不到将要执行的那条命令。工具面没这个键，行为不变。
+    """
     args = args or {}
-    for key in ("command", "cmd", *_PATH_KEYS, "query", "question", "content"):
-        v = args.get(key)
+    inst = args.get("instruct")
+    view = {**(inst if isinstance(inst, dict) else {}), **args}
+    for key in ("command", "cmd", *_PATH_KEYS, "working_directory", "query", "question", "content"):
+        v = view.get(key)
+        if isinstance(v, (list, tuple)):            # RunCodeContext.command 是 argv 列表
+            v = " ".join(str(x) for x in v)
         if isinstance(v, str) and v.strip():
-            return f"{name}: {v.strip()[:200]}"
+            line = f"{name}: {v.strip()[:200]}"
+            if key in ("command", "cmd"):           # 同一条命令在哪个目录跑是两回事，一起给人类看
+                wd = view.get("working_directory")
+                if isinstance(wd, str) and wd.strip():
+                    line += f"  (cwd={wd.strip()[:80]})"
+            return line
     return f"{name}: {json.dumps(args, ensure_ascii=False, default=str)[:200]}"
 
 

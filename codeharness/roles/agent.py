@@ -79,14 +79,22 @@ class Agent:
     # ---- 工具审批闸门（S11-批次36）----
     def _approval_key(self, s: AgentState) -> tuple[str, dict]:
         """审批判定的唯一输入：Action 类名 + 能从 state 确定性复现的载荷。
-        gate 与 act 两处必须算出同一个 approval_id，所以这段只许有一个出口。"""
+        gate 与 act 两处必须算出同一个 approval_id，所以这段只许有一个出口。
+
+        S4：`instruct_content` 必须在内——它就是下面 `_act` 原样透传给 Action 的那份载荷。
+        不含它时，同一条触发消息下 command/working_directory 完全不同的两次 RunCode 算出
+        **同一个 approval_id**：人工批一次 = 此后所有命令都被放行，批准粒度失真成「批消息」。
+        放整包 dict 而不是截断后的 JSON 串：摘要只进 sha1，不心疼长度，而截断会把
+        「差异在 cut 之后」的两笔又并成同一个 id——正是要修的洞。
+        """
         action = self.actions.get(s["chosen"])
         name = type(action).__name__ if action is not None else str(s["chosen"])
         trig = (s["inbox"][-1] if s.get("inbox")
                 else (s.get("memory") or [None])[-1])
         args = {"cause_by": str(getattr(trig, "cause_by", "") or ""),
                 "send_from": str(getattr(trig, "send_from", "") or ""),
-                "content": (getattr(trig, "content", "") or "")[:500]}
+                "content": (getattr(trig, "content", "") or "")[:500],
+                "instruct": getattr(trig, "instruct_content", None) or {}}
         return name, args
 
     async def _gate_action(self, s: AgentState):

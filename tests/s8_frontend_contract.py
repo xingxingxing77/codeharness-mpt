@@ -241,7 +241,7 @@ def t8_tool_approval_gate():
     import server.sessions as ss
     from codeharness.tools._approval import (ACTION_TIER, TIERS, TIER_RANK, TOOL_TIER,
                                              approval_id, gate_decide, needs_approval,
-                                             required_tier)
+                                             preview, required_tier)
     # ① fail-closed：认不出的、越界的都往高档走
     assert required_tier("no_such_tool") == "full_access"
     assert required_tier("NoSuchAction", kind="action") == "full_access"
@@ -338,6 +338,33 @@ def t8_tool_approval_gate():
         APPROVAL_IO.get().d[aid] = "allowed-once"
         asyncio.run(solo._act(state))
         assert stub.ran, "批过的动作没被执行"
+
+        # ⑥b S4：批准粒度必须落在真实参数上。同一条触发消息、instruct_content 里 command
+        #       不同的两笔 RunCode，此前算出同一个 approval_id（批一次=后面全放行）。
+        def _st(cmd, wd):
+            st = dict(state)
+            st["inbox"] = [Message(content="跑一下", role="user",
+                                   instruct_content={"command": cmd, "working_directory": wd})]
+            return st
+
+        st_a = _st(["python", "-m", "pytest", "test_a"], "repo/tests")
+        st_b = _st(["python", "-m", "pytest", "test_b"], "repo/tests")
+        n_a, a_a = solo._approval_key(st_a)
+        n_b, a_b = solo._approval_key(st_b)
+        id_a, id_b = approval_id("t8", "gate", n_a, a_a), approval_id("t8", "gate", n_b, a_b)
+        assert id_a != id_b, "command 不同的两笔动作共用一个 approval_id——批一次等于批全部"
+        assert "test_a" in preview(n_a, a_a) and "test_b" in preview(n_b, a_b), \
+            f"审批卡上看不见将要执行的命令：{preview(n_a, a_a)} / {preview(n_b, a_b)}"
+        assert "repo/tests" in preview(n_a, a_a), f"卡上缺 working_directory：{preview(n_a, a_a)}"
+        solo.actions = {"hand": _Hand(llm=None)}        # 批 A 只放行 A：B 必须仍被拦
+        APPROVAL_IO.get().d[id_a] = "allowed-once"
+        out_a = asyncio.run(solo._act(st_a))            # _act 自己重算 id：与 gate 一致才会执行
+        assert solo.actions["hand"].ran and "[已拒绝]" not in out_a["output"][-1].content, \
+            "gate 与 act 按新载荷算出的 id 不一致（instruct 没被稳定复现）"
+        solo.actions = {"hand": _Hand(llm=None)}
+        out_b = asyncio.run(solo._act(st_b))
+        assert not solo.actions["hand"].ran and "[已拒绝]" in out_b["output"][-1].content, \
+            "批过 A 就把 B 也放行了——批准粒度仍停在消息级"
     finally:
         APPROVAL_IO.reset(tok_io)
         PERMISSION.reset(tok_p)
