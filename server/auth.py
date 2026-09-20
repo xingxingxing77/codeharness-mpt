@@ -12,6 +12,7 @@
 import json
 import re
 import secrets
+import threading
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -22,6 +23,8 @@ from server.settings import SESSIONS_FILE
 USERS_FILE = SESSIONS_FILE.parent / "users.json"
 TOKEN_TTL = 7 * 24 * 3600
 _USER_RE = re.compile(r"^[a-zA-Z0-9_-]{2,32}$")
+# 读-改-写整文件必须串行：两笔并发 register 各自 load 到旧表、各自 save，后写的把先写的账号抹掉。
+_USERS_LOCK = threading.Lock()
 
 
 def _load_users() -> dict:
@@ -47,18 +50,62 @@ def register(username: str, password: str) -> None:
         raise HTTPException(422, "用户名只能是 2-32 位字母/数字/下划线/连字符")
     if len(password) < 6:
         raise HTTPException(422, "密码至少 6 位")
-    users = _load_users()
-    if username in users:
-        raise HTTPException(409, "用户名已存在")
     salt = secrets.token_hex(16)
-    users[username] = {"salt": salt, "hash": _hash(password, salt),
-                       "created": time.strftime("%Y-%m-%d %H:%M:%S")}
-    _save_users(users)
+    hashed = _hash(password, salt)               # pbkdf2 120k 轮，放在锁外算，别把注册串行化
+    with _USERS_LOCK:
+        users = _load_users()
+        if username in users:
+            raise HTTPException(409, "用户名已存在")
+        users[username] = {"salt": salt, "hash": hashed,
+                           "created": time.strftime("%Y-%m-%d %H:%M:%S")}
+        _save_users(users)
 
 
 def verify(username: str, password: str) -> bool:
     u = _load_users().get(username)
     return bool(u and secrets.compare_digest(u["hash"], _hash(password, u["salt"])))
+
+
+# 登录失败计数（B12：原先 login 可无限试）。ceiling：进程内字典，多 worker 各算各的
+# （与 token 同一坦白，升级路径=计数放 redis）；且按 username 记，拿到别人用户名的人
+# 可以把那个账号短暂锁住——60s 窗口 + 5 次的代价换来「不再无限试」，划算。
+_LOGIN_WINDOW = 60
+_LOGIN_MAX_FAILS = 5
+_login_fails: dict[str, list] = {}              # username -> [失败次数, 窗口起始]
+_LOGIN_LOCK = threading.Lock()
+
+
+def _login_locked_out(username: str) -> float:
+    """返回还需等待的秒数，0 表示没被限。"""
+    with _LOGIN_LOCK:
+        ent = _login_fails.get(username)
+        if not ent:
+            return 0.0
+        wait = _LOGIN_WINDOW - (time.time() - ent[1])
+        if wait <= 0:
+            _login_fails.pop(username, None)
+            return 0.0
+        return wait if ent[0] >= _LOGIN_MAX_FAILS else 0.0
+
+
+def _login_failed(username: str):
+    with _LOGIN_LOCK:
+        ent = _login_fails.get(username)
+        if ent and time.time() - ent[1] > _LOGIN_WINDOW:
+            ent = None                           # 旧窗口作废，从这次重新计
+        if ent:
+            ent[0] += 1
+        else:
+            _login_fails[username] = [1, time.time()]
+        if len(_login_fails) > 4096:             # 不存在的用户名也会进字典：到量清掉过期窗口
+            now = time.time()
+            for k in [k for k, v in _login_fails.items() if now - v[1] > _LOGIN_WINDOW]:
+                _login_fails.pop(k, None)
+
+
+def _login_ok(username: str):
+    with _LOGIN_LOCK:
+        _login_fails.pop(username, None)
 
 
 class _Tokens:
@@ -127,8 +174,13 @@ def register_route(req: AuthReq):
 
 @router.post("/login")
 def login_route(req: AuthReq):
+    wait = _login_locked_out(req.username)
+    if wait:
+        raise HTTPException(429, f"失败次数过多，请 {int(wait) + 1}s 后再试")
     if not verify(req.username, req.password):
+        _login_failed(req.username)
         raise HTTPException(401, "用户名或密码错误")
+    _login_ok(req.username)
     return {"ok": True, "token": tokens.issue(req.username)}
 
 
