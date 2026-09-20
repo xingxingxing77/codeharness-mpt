@@ -3,16 +3,30 @@ services:
     image: qdrant/qdrant:v1.19.0     # pin 到与 qdrant-client 1.19.0 对齐；原为无版本 tag
     volumes: ["qdrant_data:/qdrant/storage"]
     ports: ["6333:6333"]
+    # S5：原先无 api_key 且把 6333 发布到宿主机——同网段任意主机可读写长期记忆向量与 payload。
+    # 走 qdrant 自己那套 `QDRANT__<段>__<字段>` 嵌套 env（不用 command 覆盖，镜像 entrypoint
+    # 的初始化逻辑得留着）。`:?` 是刻意的：少了密钥必须在 compose 解析期失败，不能悄悄起裸服务。
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT__API_KEY:?need QDRANT__API_KEY}
   redis:
     image: redis:7-alpine
     # AOF 关掉：会话态/事件流/配额都是可重建的运行态，S7 的 checkpointer 自带 TTL
-    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    # S5：原先无密码还把 6379 发布到宿主机——里面是会话态哈希、事件流、审批台账（可伪造回执）、
+    # trace、配额。--requirepass 与 backend 那侧 REDIS__PASSWORD 必须同源，缺一边就是全线 NOAUTH。
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no",
+              "--requirepass", "${REDIS_PASSWORD:?need REDIS_PASSWORD}"]
     volumes: ["redis_data:/data"]
     ports: ["6379:6379"]
   backend:
     build: .                     # 构建上下文 = 仓库根（codeharness 包 + server 同仓）
     env_file: .env
-    environment: [QDRANT__URL=http://qdrant:6333, REDIS__HOST=redis]
+    # ⚠ 必须写成块式：flow 序列 `[A=x, B=${B:?…}]` 里的 `${}` 花括号是 YAML 保留字符，
+    # `docker compose config` 当场报 "did not find expected ',' or ']'"（实测 exit 15）。
+    environment:
+      QDRANT__URL: http://qdrant:6333
+      REDIS__HOST: redis
+      QDRANT__API_KEY: ${QDRANT__API_KEY:?need QDRANT__API_KEY}
+      REDIS__PASSWORD: ${REDIS_PASSWORD:?need REDIS_PASSWORD}
     depends_on: [qdrant, redis]
     command: uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 1
     volumes: ["workspace:/app/workspace"]

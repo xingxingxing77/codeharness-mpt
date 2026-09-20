@@ -5,6 +5,7 @@
 字段名一律照源（含源的 `max_token` 单数），以免 S6 逐字复制的源代码取不到属性。
 """
 from typing import Optional
+from urllib.parse import quote
 
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,7 +52,14 @@ class RedisConfig(BaseModel):
 
     def to_url(self) -> str:
         scheme = "rediss" if self.ssl else "redis"
-        return f"{scheme}://{self.host}:{self.port}/{self.db}"
+        # S5：凭据以前被静默丢掉。`platforms/` 五件 + `server/runner` 的跨 worker 控制通道 +
+        # `utils/redis` 全走这一个出口——compose 里给 redis 上了 --requirepass 之后，
+        # URL 不带凭据就是全线 NOAUTH（会话态/事件流/审批台账一起断）。
+        # quote(safe="") 不是讲究：密码里能有 @ : /，不编码等于把分隔符拼进 URL。
+        auth = ""
+        if self.password or self.username:
+            auth = f"{quote(self.username or '', safe='')}:{quote(self.password or '', safe='')}@"
+        return f"{scheme}://{auth}{self.host}:{self.port}/{self.db}"
 
 
 class ExpPoolConfig(BaseModel):

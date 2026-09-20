@@ -72,6 +72,7 @@ class QdrantStore:
         # check_compatibility=False：qdrant 不在时其版本探测线程（_check_compatibility，非 daemon）
         # 会无限重试吊住进程退出——门禁「不挂在外部服务上」的硬要求（s3b t14 卡退实测现形）。
         self.client = client or AsyncQdrantClient(url=url or settings.qdrant.url,
+                                                  api_key=settings.qdrant.api_key or None,
                                                   check_compatibility=False)
         self._ready = False
 
