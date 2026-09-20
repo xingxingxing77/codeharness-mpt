@@ -11,6 +11,7 @@ This script is designed to create a symbols repository from the provided source 
 """
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 import re
@@ -725,12 +726,16 @@ class RepoParser(BaseModel):
         init_file = path / "__init__.py"
         if not init_file.exists():
             raise ValueError("Failed to import module __init__ with error:No module named __init__.")
-        command = f"pyreverse {str(path)} -o dot"
+        command = ["pyreverse", str(path), "-o", "dot"]
         output_dir = path / "__dot__"
         output_dir.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(command, shell=True, check=True, cwd=str(output_dir))
+        # list 形态走 shell=False：路径带空格/元字符不再被 shell 拆词；阻塞调用丢线程池（同 B4）。
+        # 不用 check=True：它会让紧随的 returncode 判断变成死代码（非零先抛 CalledProcessError），
+        # 而 ValueError 带 stderr 文本才是调用方（RebuildClassView action）看得懂的东西。
+        result = await asyncio.to_thread(
+            subprocess.run, command, cwd=str(output_dir), capture_output=True, text=True)
         if result.returncode != 0:
-            raise ValueError(f"{result}")
+            raise ValueError(f"pyreverse 失败 rc={result.returncode}: {result.stderr[:500]}")
         class_view_pathname = output_dir / "classes.dot"
         class_views = await self._parse_classes(class_view_pathname)
         relationship_views = await self._parse_class_relationships(class_view_pathname)
