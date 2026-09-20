@@ -173,7 +173,9 @@ defineExpose({ focus: () => ta.value?.focus() })
   width: 100%;
   max-width: calc(var(--dsh-chat-content-width, 748px) + 32px);
   margin: 0 auto;
-  padding: 10px 8px 6px;
+  /* 源 .card 只有 padding-top:10 —— 横向与底部内衬由 textarea 与 .row 各自承担，
+     这里再补一层会把卡比源垫高 6px。 */
+  padding: 10px 0 0;
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
   border-radius: 22px;
   background: var(--dsw-specific-input-major);

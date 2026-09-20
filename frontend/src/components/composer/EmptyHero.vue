@@ -1,5 +1,5 @@
 <template>
-  <div class="hero">
+  <div class="heroShell">
     <div class="glow" aria-hidden="true" />
     <div class="inner">
       <div class="brand">
@@ -115,7 +115,9 @@ async function onDrafted(idea: string) {
 </script>
 
 <style scoped>
-.hero {
+/* 类名不能叫 .hero：scoped 会把本组件 scope id 加到子组件根元素上，
+   而 ComposerCard 的根就带 `hero` 修饰类，这套布局会整个泄漏到输入卡。 */
+.heroShell {
   position: relative;
   flex: 1;
   min-height: 0;
@@ -143,12 +145,14 @@ async function onDrafted(idea: string) {
   position: relative;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* 源 .stack: stretch —— 卡与 chip 行占满栈宽，标题靠自己的 grid 居中 */
+  align-items: stretch;
   gap: 12px;
-  /* 780 是 composer 卡的目标宽度，内衬要算在外面，否则卡被挤成 748 */
+  /* 780 是 composer 卡的目标宽度，内衬要算在外面，否则卡被挤成 748。
+     纵向不给 padding：源 .root 只有横向内衬，栈靠 flex 居中精确落在视口中线。 */
   width: 100%;
   max-width: calc(780px + 32px);
-  padding: 32px 16px 48px;
+  padding: 0 16px;
   box-sizing: border-box;
 }
 
@@ -203,9 +207,9 @@ async function onDrafted(idea: string) {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  justify-content: center;
-  /* figma 75:8208 workspace row：卡上方那一行左右各留 8px */
-  padding: 0 8px;
+  min-width: 0;
+  /* 源 .workspaceRow：卡上方那行左对齐，只有 padding-left 8px，不居中 */
+  padding-left: 8px;
 }
 
 .wsChip {

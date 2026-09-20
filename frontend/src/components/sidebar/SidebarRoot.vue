@@ -22,7 +22,7 @@
       </VTooltip>
     </div>
 
-    <VTooltip label="新建会话" :delay="500" :disabled="wide">
+    <VTooltip class="nsTip" label="新建会话" :delay="500" :disabled="wide">
       <button class="newSession" aria-label="新建会话" @click="emit('newSession')">
         <DsIcon name="new-chat" :size="wide ? 14 : 18" />
         <span v-if="wide" class="newSessionLabel">新会话</span>
@@ -312,8 +312,16 @@ onBeforeUnmount(() => {
   display: none;
 }
 
+/* VTooltip 的根是 inline-flex，按钮在它下面只会按内容收缩成 96px；
+   源里这条 38px 栏是侧栏列的直接 flex 子项，靠 stretch 通栏。 */
+.root > .nsTip {
+  display: block;
+}
+
 .newSession {
   flex: none;
+  /* 隔了一层包裹拿不到 stretch，而 button 即使 display:flex 也按固有宽度排版 */
+  width: calc(100% - 4px);
   display: flex;
   align-items: center;
   justify-content: center;
