@@ -204,6 +204,9 @@ class Agent:
             # team graph，把已完成的角色与花掉的钱全部陪葬）。拒写是对的，炸会话不是。
             # 「下一轮」靠 `<self>` 让团队图把本角色再激活一次（B9）：cause_by=action.name 不在
             # SOP 表里，而默认 send_to=<all> 在 route 里刻意不广播 → 无订阅者 = 一抛错就散会。
+            # ⚠ 自愈可见度只到 BY_ORDER：REACT 的 _think 只读 inbox[-1]，而这条消息过不了
+            # _observe 的 watch 过滤（cause_by=action.name 不在 watch、send_to=<self> 不含角色名）
+            # → REACT 下一轮看不到错误文本。更深的设计缝隙，B9 不扩 scope（总文档 §B9 风险②）。
             from codeharness.logs import logger
             logger.warning(f"{self.profile['name']}.{action.name} 抛错，回喂自愈: "
                            f"{type(e).__name__}: {e}")
