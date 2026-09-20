@@ -54,16 +54,25 @@ def file(sid: str, path: str, request: Request, user: str = Depends(current_user
 async def import_repo(sid: str, request: Request, user: str = Depends(current_user)):
     """把仓库导入成 SPO 图 + .mmd（批次2：ImportRepo 从死件接成有唯一调用者）。
 
-    repo_path 取自 body，必须落在 workspace_root 内（防任意路径读取）；产物写进本会话工作区。
+    repo_path 取自 body：auth 开=只许本会话工作区（跨会话导入会泄露别人的目录结构），
+    auth 关=workspace_root 内即可（导入公共模板目录是合法用法）；产物一律写进本会话工作区。
     """
     from codeharness.runtime import CURRENT_PROJECT, session_root
     body = await request.json()
+    workspace = _ws(request, sid, user)                    # 先定归属（越权 404），边界用它
     repo_path = Path(str(body.get("repo_path", ""))).resolve()
-    ws_root = Path(session_root()).resolve().parent        # workspace_root（各会话目录的父）
     if not repo_path.is_dir():
         raise HTTPException(400, "repo_path 必须是已存在的目录")
-    if not repo_path.is_relative_to(ws_root):
-        raise HTTPException(400, "repo_path 必须在 workspace_root 内")
+    from codeharness.configs.settings import settings
+    if settings.platform.auth_enabled:
+        # N1：auth 开 = 只许导入本会话目录。原先只判到 workspace_root，用户 A 可以把
+        # repo_path 指到 B 的会话目录，把 B 的目录结构扫成自己的关系图。
+        boundary, where = workspace.resolve(), "本会话工作区"
+    else:
+        boundary = Path(session_root()).resolve().parent   # auth 关：导入公共模板目录是合法用法
+        where = "workspace_root"
+    if not repo_path.is_relative_to(boundary):
+        raise HTTPException(400, f"repo_path 必须在{where}内")
     # save_name 原样拼成 `{会话根}/{save_name}.json` 交给 load_from 读：`../` 可越界读任意 .json
     # （探针实测：../别的会话/repo 会把那个会话的图并进本次产物，N1 隔离在此失效）。
     # 判据与会话目录名同源（sessions.py `_single_dir_name`）。
@@ -71,7 +80,6 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
     if not save_name or Path(save_name).name != save_name:
         raise HTTPException(400, "save_name 不能包含路径分隔")
 
-    workspace = _ws(request, sid, user)                    # 顺带越权校验（404）
     tok = CURRENT_PROJECT.set(workspace.name)              # 让 ImportRepo 内 ArtifactStore 落到本会话
     try:
         from codeharness.actions.import_repo import ImportRepo

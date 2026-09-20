@@ -16,6 +16,8 @@ from codeharness.document_store.artifact_store import ArtifactStore
 from codeharness.schema import Document
 from codeharness.utils.di_graph_repository import DiGraphRepository
 
+MAX_IMPORT_NODES = 20_000     # 单次导入的节点上限（含 node_modules 的巨型目录会让集合无界增长）
+
 
 class ImportRepo(Action):
     """导入仓库结构并建立关系图。
@@ -44,7 +46,8 @@ class ImportRepo(Action):
                 "node_count": int,         # 节点数
                 "edge_count": int,         # 边数
                 "saved_json": str|None,    # JSON 落盘路径
-                "saved_mmd": str|None      # Mermaid 落盘路径
+                "saved_mmd": str|None,     # Mermaid 落盘路径
+                "truncated": bool          # 扫描撞到 MAX_IMPORT_NODES 即为 true（结果只是前若干节点）
             }
         """
         repo_path = params.get("repo_path", ".")
@@ -68,13 +71,19 @@ class ImportRepo(Action):
 
         # 扫描仓库结构
         node_set = set()
+        truncated = False
         
         # 添加根节点
         root_node = str(repo_path)
         node_set.add(root_node)
         
         # 递归扫描目录和文件
+        # ponytail: 上限是「超过 MAX_IMPORT_NODES 就只取前若干个」，不是按目录重要性取舍
+        #           （rglob 是任意序）。升级路径 = 先剪掉 node_modules/.git 这类目录再扫。
         for item in repo_path.rglob("*"):
+            if len(node_set) > MAX_IMPORT_NODES:
+                truncated = True
+                break
             if item.is_dir():
                 node_set.add(str(item))
             elif item.is_file() and include_files:
@@ -116,7 +125,8 @@ class ImportRepo(Action):
             "node_count": node_count,
             "edge_count": edge_count,
             "saved_json": saved_json,
-            "saved_mmd": saved_mmd
+            "saved_mmd": saved_mmd,
+            "truncated": truncated,
         }
 
     def _generate_mmd(self, graph: networkx.DiGraph) -> str:
