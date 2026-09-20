@@ -94,6 +94,8 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 ## 现状基线（2026-09-14 晚实测）
 
+> ⚠ **本节往下每一段里的「N 个不花钱脚本全 exit 0」都是当日快照，不是当前基线**（脚本数随治理与批次一路涨到 26 件 `s*`）。当前清单、编号撞车登记与探活式名单见文末段 **`### 2026-09-21 · 门禁脚本清单对账（D2）`**。
+
 `codeharness` 90 + `server` 10 + `tests` 6 = **105 个 py / 10,938 行**（另有 `workspace/` 下沙箱生成的 47 个产物文件，不计账）。五个自测脚本**全部 exit 0**：`s1_schema`（12 组）/ `s2_gateway`（12 组，含 `t11_budget`）/ `test_p1` / `test_roles_registry`（18 角色，实测 `ALL_ROLES` 确为 18）/ `test_e2e_classic_line`（SOP 链 + 沙箱真跑 pytest）。**全部 FakeLLM 驱动，真实模型从未端到端跑完过一次。** `/api/health` 已实测可返回 `llm_configured=true`。
 
 ### 2026-09-15 增量（全部当场实测或当场复现后修掉）
@@ -281,6 +283,28 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **前端**：ToolsPanel 第六卡「用量」→ trace 视图：汇总行（调用数/prompt/completion/成本）+ 每笔调用一行（时刻 · 节点 · ↑pt ↓ct · ¥增量）；status 到 finished/stopped/failed 自动刷新；`api.sessionTrace` + `ui.rightView` 扩 'trace' 态，样式复用 review 骨架。
 - **门禁 t6（s8 5→6 组）**：/trace 回 spans 键（进程内/redis 两态都成立）+ **span 词汇表核对**——runner `trace.record({...})` 键字面量 == client.ts 消费字段集（5 字段）。「路由在但形状错」t3 查不出（真浏览器第十五处同族洞），词汇表核对同 t1/t2 法。基线 16 脚本全绿。
 - **ceiling 在册**：面板拉取式（进视图/跑完/手动刷新），不做流式增量——span 每调用才一条，频度低，拉取够用；P95 聚合未做（数据可查即可出）。
+
+### 2026-09-21 · 门禁脚本清单对账（D2）
+
+- **磁盘读数**（本轮 `ls tests/`）：**26 件 `s*.py` + 3 件 `test_*.py` + 6 件 `manual_*.py`**。
+  上面各段记的 5/8/9/11/12/13/14/15/16 全是当日快照；**当前件数以本行为准**，涨的主要是治理驱动器
+  阶段一~四新增的 `s13_redis_qdrant_auth`/`s16_route_state`/`s17_human_input_guard`/`s18_session_store_fields`/
+  `s19_shell_family`/`s20_auth_race_ratelimit`/`s20_p0_complete` 等。
+- **编号已不唯一**（点名一律带全名）：`s12_rebuild_views` + `s12_workspace_guard`、`s13_compress` +
+  `s13_redis_qdrant_auth`、`s20_auth_race_ratelimit` + `s20_p0_complete` 各自两件同号。
+- **本轮实测**（`HEAD=abcd75f`，跑法见环境准备段的姿势三件套）：`s7_platform` **13/13 全绿（双配置）**、
+  `s8_frontend_contract` **10/10 全绿**、`s14_tot` **6/6 全绿**。其余 23 件 `s*` **本轮未跑**；
+  `s3b_runtime` 本轮起跑后 25 分钟未收口（它的长腿要真起沙箱跑 pytest），故治理阶段门记的
+  **既有基线红 `s3b_runtime::t14` 本轮没有自测读数**，不要当成已复核。
+  最近一次全量读数是治理驱动器 09-21 05:14 的阶段门（清单 1 = 29 条 **28 绿 + 1 既有基线红**），
+  原文在 `plan/governance-gate-stage4.md`；那是别的会话跑的，此处按指针引用。
+- **探活式（缺外部服务就打印跳过、退出码仍然 0 —— 退 0 不等于验过）**，本轮逐件读源码点名 8 件：
+  `s5_memory_rag`（t3/t5/t9 无 Redis、t12 无 Qdrant）、`s6_sop`（t1/t4 需供体 `E:/MetaGPT/prompts`）、
+  `s7_platform`（redis 段：6379 不通则 t2–t9/t12/t13 整段跳）、`s9_benchmark`（t1 需源 `rag_bm` 数据集）、
+  `s9_langfuse`（t2/t3 需 Langfuse 服务，`LF_LIVE=1` 才跑真模型那一发）、`s10_auth`（t5 无 Redis）、
+  `s13_redis_qdrant_auth`（t2/t6 需本机 `redis-server.exe`/qdrant 二进制，t5 需 `QDRANT_BINARY` 或
+  `QDRANT_URL`+`QDRANT_API_KEY`）、`s18_session_store_fields`（**缺服务时整件全跳**，它自己打印
+  「退出码 0 不代表验过」）。其余 `s*` 是本进程内的 FakeLLM/静态核对，不依赖外部服务。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 
