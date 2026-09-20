@@ -23,6 +23,15 @@
           </template>
         </VMenu>
         <span v-if="store.current?.paradigm === 'dynamic'" class="chip plain">动态组队</span>
+        <!-- 免审档：后端真有 permission 字段与 gate 判定，所以这枚 chip 不是装饰 -->
+        <VMenu v-if="showTarget" :items="permissionItems" align="start" compact @select="pickPermission">
+          <template #default="{ open, toggle }">
+            <button class="chip" :aria-expanded="open" @mousedown.prevent="toggle()">
+              <span>{{ permissionLabel }}</span>
+              <DsIcon name="chevron-down" :size="12" />
+            </button>
+          </template>
+        </VMenu>
       </div>
 
       <span class="trailing">
@@ -126,6 +135,30 @@ const modelItems = computed<MenuItem[]>(() =>
 
 function pickModel(it: MenuItem) {
   if (it.key) ui.composer.model = String(it.key)
+}
+
+/** 免审档 = 「哪些动作不用问我」。文案与后端判定表同源三档
+ *  （codeharness/tools/_approval.py），改档位从下一个节点边界起生效。 */
+const PERMISSIONS = [
+  { key: 'readonly', label: '只读', desc: '只读免审；写文件、执行命令、联网都要批' },
+  { key: 'workspace_write', label: '工作区写入', desc: '写进本会话工作区免审；命令与联网仍要批' },
+  { key: 'full_access', label: '全面访问', desc: '全免审' }
+]
+const permission = computed(() => store.current?.permission || 'readonly')
+const permissionLabel = computed(
+  () => PERMISSIONS.find((p) => p.key === permission.value)?.label || permission.value
+)
+const permissionItems = computed<MenuItem[]>(() =>
+  PERMISSIONS.map((p) => ({ key: p.key, label: p.label, desc: p.desc, checked: p.key === permission.value }))
+)
+
+async function pickPermission(it: MenuItem) {
+  if (!it.key || it.key === permission.value) return
+  try {
+    await store.setPermission(String(it.key))
+  } catch (e) {
+    toast.push((e as Error).message || '改档失败', 'error')
+  }
 }
 
 /** draft = 空态首页，此时还没有会话，可以直接发；否则必须会话在跑或刚创建 */

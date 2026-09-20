@@ -57,6 +57,7 @@ import VMenu from '../ui/VMenu.vue'
 import VStateDot from '../ui/VStateDot.vue'
 import type { MenuItem } from '../ui/menuTypes'
 import { formatRelative } from '../../utils/relativeTime'
+import { useSessionStore } from '../../stores/sessions'
 import type { Session } from '../../types'
 
 defineOptions({ inheritAttrs: false })   // owner 的 class="indented" 必须落在行元素上，不是 hover 卡的包装
@@ -127,7 +128,14 @@ const STATUS: Record<string, { dot: 'done' | 'warning' | 'error' | 'ongoing' | n
 
 const cur = computed(() => STATUS[props.s.status] ?? { dot: null, label: '' })
 const dot = computed(() => cur.value.dot)
-const statusLabel = computed(() => cur.value.label)
+/* 待批只在选中的那个会话上跟踪（store.approvals 跟着 currentId 走），所以别的会话仍按
+   ask_human 显示「等待回答」——这是当前的能力边界，不是漏了分支。 */
+const store = useSessionStore()
+const statusLabel = computed(() =>
+  props.s.status === 'awaiting_human' && props.s.id === store.currentId && store.hasPendingApproval
+    ? '等待审批'
+    : cur.value.label
+)
 
 const menu = computed<MenuItem[]>(() => [
   { key: 'rename', label: '重命名', icon: 'edit' },

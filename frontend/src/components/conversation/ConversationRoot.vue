@@ -70,6 +70,8 @@
 
       <div ref="seatEl" class="composerSeat" data-composer-seat>
         <QuestionCard v-if="takeover === 'question'" :question="store.humanQuestion?.value || ''" />
+        <ApprovalCard v-else-if="takeover === 'approval' && store.pendingApproval"
+                      :item="store.pendingApproval" />
         <template v-else>
           <slot name="composer" />
           <StatsLine />
@@ -88,6 +90,7 @@ import TurnTail from './TurnTail.vue'
 import StatsLine from './StatsLine.vue'
 import TrajectoryTable from './TrajectoryTable.vue'
 import QuestionCard from '../composer/QuestionCard.vue'
+import ApprovalCard from '../composer/ApprovalCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
@@ -133,14 +136,13 @@ function openLogs() {
 }
 
 const paradigmLabel = computed(
-  () => ({ classic: '标准模式', dynamic: '计划模式', react: 'ReAct 模式' })[store.current?.paradigm || 'classic'] || '标准模式'
+  () => ({ classic: '标准模式', dynamic: '动态组队', react: 'ReAct 模式' })[store.current?.paradigm || 'classic'] || '标准模式'
 )
 
-/** takeover 优先级栈：靠前的赢。后端目前只有 ask_human 一种挂起交互
- *  （没有审批与计划评审通道），所以只有一项；将来加审批条是往这里添一项，
- *  而不是往模板里加 v-else-if。 */
-const TAKEOVERS: { kind: 'question'; when: (s: typeof store) => boolean }[] = [
-  { kind: 'question', when: (s) => !!s.humanQuestion }
+/** takeover 优先级栈：靠前的赢。顺序照施工5 F6 定的「问题卡 > 审批条 > 常规 composer」。 */
+const TAKEOVERS: { kind: 'question' | 'approval'; when: (s: typeof store) => boolean }[] = [
+  { kind: 'question', when: (s) => !!s.humanQuestion },
+  { kind: 'approval', when: (s) => s.hasPendingApproval }
 ]
 const takeover = computed(() => TAKEOVERS.find((t) => t.when(store))?.kind ?? null)
 

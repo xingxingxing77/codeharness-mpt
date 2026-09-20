@@ -258,22 +258,31 @@ class SessionRunner:
 
     @contextmanager
     def _session_ctx(self, sid: str):
-        """装/卸四个 ContextVar。token 只能是局部变量——挂在 self 上会被并发会话互相覆盖，
+        """装/卸六个 ContextVar。token 只能是局部变量——挂在 self 上会被并发会话互相覆盖，
         随后 reset 到别人 context 里创建的 token 直接 ValueError。
+
+        批次36 多装两个：PERMISSION（工具审批的会话级免审档）与 APPROVAL_IO（待批通道，
+        内核 gate 只认它的 sid/decision/request 三个口，因此内核保持零 server / 零 redis 依赖）。
 
         N9：同时套一层 Langfuse 的会话属性（session_id/user/tags）——两个 astream 循环共用的
         唯一上下文口，OTel 上下文按 asyncio task 隔离，并发会话不串；未开启时是 nullcontext。"""
         from contextlib import ExitStack
-        from codeharness.runtime import CURRENT_PROJECT, REPORT_SINK, CHAT_SINK, CURRENT_USER
+        from codeharness.runtime import (CURRENT_PROJECT, REPORT_SINK, CHAT_SINK, CURRENT_USER,
+                                         APPROVAL_IO, PERMISSION)
         from codeharness.observability import session_attributes
+        from platforms.approval_store import ApprovalStore
+        session = self.store.get(sid)
         pairs = (
             (SESSION_ID, SESSION_ID.set(sid)),
             (CURRENT_PROJECT, CURRENT_PROJECT.set(self.projects.get(sid, sid))),
             (REPORT_SINK, REPORT_SINK.set(self._make_sink(sid))),
             (CHAT_SINK, CHAT_SINK.set(self.chats.get(sid))),
             # N1：user_id 贯穿进内核（记忆/经验池的切片键从这里兜底），auth 关恒 "default"
-            (CURRENT_USER, CURRENT_USER.set(getattr(self.store.get(sid), "user_id", "default")
-                                            if self.store.get(sid) else "default")),
+            (CURRENT_USER, CURRENT_USER.set(getattr(session, "user_id", "default")
+                                            if session else "default")),
+            # 取不到会话时按最严的 readonly（多问一次，不是放行一切）
+            (PERMISSION, PERMISSION.set(getattr(session, "permission", "") or "readonly")),
+            (APPROVAL_IO, APPROVAL_IO.set(ApprovalStore(sid))),
         )
         with ExitStack() as stack:
             stack.enter_context(session_attributes(self.store.get(sid), self.projects.get(sid, sid)))
@@ -415,9 +424,15 @@ class SessionRunner:
                                  value=chunk.content, role=node)
         elif kind == "on_interrupt":
             q = ev.get("value")
-            question = q[0].get("question", "") if isinstance(q, list) and q else str(q)
+            payload = q[0] if isinstance(q, list) and q else q
             self.store.update(sid, status=SessionStatus.awaiting_human)
-            self.bus.publish(sid, kind="ask_human", value=question)
+            item = payload.get("approval") if isinstance(payload, dict) else None
+            if item:
+                # 待批项是内核 gate 用 HSETNX 登记过的那条，这里只把它推给界面（不重复登记）
+                self.bus.publish(sid, kind="approval", name="requested", value=item)
+            else:
+                question = payload.get("question", "") if isinstance(payload, dict) else str(payload)
+                self.bus.publish(sid, kind="ask_human", value=question)
             self._publish_status(self.store.get(sid), "awaiting human")
 
     def _publish_status(self, session: Session, message: str = ""):

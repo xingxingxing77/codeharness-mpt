@@ -1,4 +1,4 @@
-import type { Health, Session } from '../types'
+import type { ApprovalItem, Health, Session } from '../types'
 
 /* N1：token 存 localStorage；带 Authorization 出请求；401 即清票（App 层据 needLogin 切登录页）。
    auth 关闭（PLATFORM__AUTH=0）时服务端不校验，这里带不带都行——header 只在有票时附加。 */
@@ -63,13 +63,21 @@ export const api = {
     n_round?: number
     paradigm?: string
     llm?: Record<string, any>
+    permission?: string
   }) => req<Session>('POST', '/api/sessions', payload),
   startSession: (sid: string) => req('POST', `/api/sessions/${sid}/start`),
   stopSession: (sid: string) => req('POST', `/api/sessions/${sid}/stop`),
-  /** 侧栏写操作：只接受 idea / archived / pinned，不传的字段保持原值 */
-  patchSession: (sid: string, patch: { idea?: string; archived?: boolean; pinned?: boolean }) =>
+  /** 侧栏写操作：只接受 idea / archived / pinned / permission，不传的字段保持原值 */
+  patchSession: (sid: string, patch: { idea?: string; archived?: boolean; pinned?: boolean;
+                                       permission?: string }) =>
     req<Session>('PATCH', `/api/sessions/${sid}`, patch),
   deleteSession: (sid: string) => req<{ ok: boolean; deleted: string }>('DELETE', `/api/sessions/${sid}`),
+  /** 工具审批（批次36）：pending=还在等人，decided=已给结论（含 outcome） */
+  approvals: (sid: string) =>
+    req<{ pending: ApprovalItem[]; decided: ApprovalItem[] }>('GET', `/api/sessions/${sid}/approvals`),
+  respondApproval: (sid: string, aid: string, outcome: 'allowed-once' | 'rejected') =>
+    req<{ ok: boolean; outcome: string }>('POST', `/api/sessions/${sid}/approvals/${aid}/respond`,
+                                          { outcome }),
   /** 有界回放：活流 /events 读不完，要「读完再走」的消费方必须走这条 */
   eventHistory: (sid: string, after = '') =>
     req<{ events: any[] }>('GET', `/api/sessions/${sid}/events/history?after=${encodeURIComponent(after)}`),

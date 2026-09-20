@@ -12,6 +12,9 @@
      markdown/image/.mmd 三类预览从未命中，路由门禁 t3 查不出"路由在但形状错"）。
   t7 直聊目标出自真装配：三线各自的路由目标必须在自己角色集里，/chat 对未知目标 422，
      前端 ComposerCard 不得再硬编码角色名（曾写着三个装配里不存在的名字→追问静默丢弃）。
+  t8 工具审批（批次36）：判定表 fail-closed 且覆盖全量工具/Action、两张图真连 gate 节点、
+     同一 approval_id 重放幂等、未批的动作不执行、permission 与 respond 端点的值域。
+     全程不打模型——云端额度只剩几块钱，判定与端点都能离线验。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_frontend_contract.py
@@ -51,7 +54,8 @@ def t2_envelope_and_kinds():
     assert fe_fields == be_fields, f"信封字段漂移 server={sorted(be_fields)} fe={sorted(fe_fields)}"
 
     server_srcs = [ROOT / "server" / p for p in
-                   ("events.py", "runner.py") ] + [ROOT / "server" / "api" / "sessions.py"]
+                   ("events.py", "runner.py")] + [ROOT / "server" / "api" / p
+                                                  for p in ("sessions.py", "approvals.py")]
     kinds = set()
     for f in server_srcs:
         for m in _KIND_RE.finditer(f.read_text(encoding="utf-8")):
@@ -69,9 +73,9 @@ def t3_routes_exist():
     consumed = set()
     for f in (FE / "api" / "client.ts", FE / "stores" / "sessions.ts"):
         txt = f.read_text(encoding="utf-8")
-        # fetch/EventSource 模板串里的 /api 路径（${...} → {sid}）
+        # fetch/EventSource 模板串里的 /api 路径（${x} → {x}，与 FastAPI 的占位符同名）
         for raw in re.findall(r"[`'\"](\/api\/[^`'\"\s?]*)", txt):
-            consumed.add(re.sub(r"\$\{[^}]*\}", "{sid}", raw))
+            consumed.add(re.sub(r"\$\{(\w+)\}", r"{\1}", raw))
     assert consumed, "client.ts/sessions.ts 里没解析出任何 /api 路径——正则失效，本门禁空转"
     # N1：client.ts 的 startsWith('/api/auth') 守卫串会进捕获——不是端点，是真前缀，豁免
     missing = {p for p in consumed
@@ -228,6 +232,195 @@ def t7_chat_target_from_assembly():
         ss.SESSIONS_FILE = keep
 
 
+def t8_tool_approval_gate():
+    """批次36：工具审批。全程不打模型（云端额度只剩几块钱，判定与端点都能离线验）。
+
+    断言六件事：判定表 fail-closed、三档矩阵、两张图真连了 gate、重放幂等、
+    未批的动作**不执行**、端点值域。"""
+    import asyncio
+    import server.sessions as ss
+    from codeharness.tools._approval import (ACTION_TIER, TIERS, TIER_RANK, TOOL_TIER,
+                                             approval_id, gate_decide, needs_approval,
+                                             required_tier)
+    # ① fail-closed：认不出的、越界的都往高档走
+    assert required_tier("no_such_tool") == "full_access"
+    assert required_tier("NoSuchAction", kind="action") == "full_access"
+    assert required_tier("write_file", {"path": "../escape.md"}) == "full_access"
+    assert required_tier("write_file", {"path": "a.md"}) == "workspace_write"
+    assert required_tier("terminal_command", {"command": "dir"}) == "full_access"
+    assert required_tier("read_file", {"path": "a.md"}) == "readonly"
+    # ② 三档矩阵 9 格 + 认不出的会话档按最严
+    for perm in TIERS:
+        for req in TIERS:
+            assert needs_approval(perm, req) is (TIER_RANK[req] > TIER_RANK[perm]), (perm, req)
+    assert needs_approval("bogus", "readonly") is False
+    # ③ 表覆盖全量：新加工具/Action 不登记就判红（不靠默认值兜，兜哪边都不对）
+    from codeharness.tools import REGISTRY
+    miss_tools = {t.name for t in REGISTRY} - set(TOOL_TIER)
+    assert not miss_tools, f"这些工具没定档：{sorted(miss_tools)}"
+    acts = {m.group(1) for p in (ROOT / "codeharness" / "actions").rglob("*.py")
+            for m in re.finditer(r"class\s+([A-Za-z0-9_]+)\(([^)]*)\)",
+                                 p.read_text(encoding="utf-8", errors="replace"))
+            if "Action" in m.group(2)}
+    miss_acts = acts - set(ACTION_TIER)
+    assert not miss_acts, f"这些 Action 没定档：{sorted(miss_acts)}"
+
+    # ④ 两张图真连了 gate（think→gate→act / route→gate→act）
+    from codeharness.roles.agent import Agent
+    from codeharness.roles.role_zero import RoleZero
+    for cls in (Agent, RoleZero):
+        nodes = cls({"name": "Solo", "profile": "p", "goal": "g"}, [], None).build().get_graph().nodes
+        assert "gate" in nodes, f"{cls.__name__} 的图里没有 gate 节点——审批会被绕过"
+
+    # ⑤ 重放幂等：同一 approval_id 答过就不再问
+    class _IO:
+        sid = "t8"
+
+        def __init__(self):
+            self.d, self.asked = {}, []
+
+        def decision(self, aid):
+            return self.d.get(aid)
+
+        def request(self, item):
+            self.asked.append(item["id"])
+            return True
+
+    io_ = _IO()
+    verdict, item = gate_decide("terminal_command", {"command": "dir"}, node="gate",
+                                io_=io_, permission="readonly")
+    assert verdict is None and item["id"] == approval_id("t8", "gate", "terminal_command",
+                                                         {"command": "dir"})
+    io_.d[item["id"]] = "allowed-once"
+    assert gate_decide("terminal_command", {"command": "dir"}, node="gate", io_=io_,
+                       permission="readonly")[0] == "allowed"
+    io_.d[item["id"]] = "rejected"      # 首个回执生效，后来的改不动（这里直接改台账模拟二次回执）
+    assert gate_decide("terminal_command", {"command": "dir"}, node="gate", io_=io_,
+                       permission="readonly")[0] == "rejected"
+
+    # ⑥ 未批/被拒的动作不执行：拿一个会举手的 stub Action 直接喂 _act
+    from codeharness.base.action import Action as BaseAction
+    from codeharness.schema import Message
+
+    class _Hand(BaseAction):
+        ran: bool = False          # Action 是 pydantic 模型，举手标记必须是字段
+
+        async def run(self, msg: Message) -> Message:
+            self.ran = True
+            return msg
+
+    stub = _Hand(llm=None)
+    solo = Agent({"name": "Solo", "profile": "p", "goal": "g"}, {}, None)
+    solo.actions = {"hand": stub}
+    state = {"name": "Solo", "inbox": [Message(content="跑一下", role="user")], "memory": [],
+             "action_cursor": 0, "chosen": "hand", "plan": [], "loops": 0, "output": []}
+    from codeharness.runtime import APPROVAL_IO, PERMISSION
+    tok_io, tok_p = APPROVAL_IO.set(_IO()), PERMISSION.set("readonly")
+    try:
+        out = asyncio.run(solo._act(state))
+        assert not stub.ran and "[已拒绝]" in out["output"][-1].content, "没批的动作被执行了"
+        # 同一个 state 再喂一次：载荷不变 → approval_id 不变，批过就该真执行
+        name, args = solo._approval_key(state)
+        aid = approval_id("t8", "gate", name, args)
+        APPROVAL_IO.get().d[aid] = "allowed-once"
+        asyncio.run(solo._act(state))
+        assert stub.ran, "批过的动作没被执行"
+    finally:
+        APPROVAL_IO.reset(tok_io)
+        PERMISSION.reset(tok_p)
+
+    # ⑧ 真图跑一遍挂起→重放→续跑（这一步才是「拆 gate 节点」这个选择要买的保险）
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import StateGraph, END
+    from langgraph.types import Command
+    from codeharness.roles.role_zero import RoleZero, RoleZeroState
+
+    class _FakeTool:
+        def __init__(self):
+            self.calls = 0
+
+        async def ainvoke(self, args):
+            self.calls += 1
+            return "ran"
+
+    fake = _FakeTool()
+    rz = RoleZero({"name": "Z", "profile": "p", "goal": "g"}, [], None)
+    rz.tools = {"terminal_command": fake}
+    sub = StateGraph(RoleZeroState)
+    sub.add_node("gate", rz._gate_commands)
+    sub.add_node("act", rz._act)
+    sub.set_entry_point("gate")
+    sub.add_edge("gate", "act")
+    sub.add_edge("act", END)
+    runner_graph = sub.compile(checkpointer=InMemorySaver())
+    cfg = {"configurable": {"thread_id": "t8graph"}}
+    state = {"task": "装依赖", "experience": "", "respond_language": "中文", "finished": False,
+             "history": [{"thought": "先装依赖", "commands": [
+                 {"command_name": "terminal_command", "args": {"command": "pip install x"}}]}]}
+    # 换一条载荷不同的命令 → 新 aid → 重新挂起（这一次批「允许一次」，就该真执行）
+    state2 = {**state, "history": [{"thought": "再装一次", "commands": [
+        {"command_name": "terminal_command", "args": {"command": "pip install y"}}]}]}
+    cfg2 = {"configurable": {"thread_id": "t8graph2"}}
+    io3 = _IO()
+    tok3 = APPROVAL_IO.set(io3)
+
+    async def _drive():
+        held = (await runner_graph.ainvoke(state, cfg)).get("__interrupt__")
+        assert held, "gate 没挂起图"
+        aid = held[0].value["approval"]["id"]
+        io3.d[aid] = "rejected"
+        res = (await runner_graph.ainvoke(Command(resume=aid), cfg))["history"][-1]["results"]
+        held2 = (await runner_graph.ainvoke(state2, cfg2)).get("__interrupt__")
+        aid2 = held2[0].value["approval"]["id"]
+        io3.d[aid2] = "allowed-once"
+        res2 = (await runner_graph.ainvoke(Command(resume=aid2), cfg2))["history"][-1]["results"]
+        return aid, aid2, str(res), str(res2)
+
+    try:
+        aid, aid2, res, res2 = asyncio.run(_drive())
+        assert io3.asked == [aid, aid2], io3.asked          # 各问过一次的只有这两条
+        assert aid != aid2
+        assert fake.calls == 1, f"被拒不执行 / 允许才执行没成立：calls={fake.calls}"
+        assert "[已拒绝]" in res, res
+        assert "ran" in res2, res2
+    finally:
+        APPROVAL_IO.reset(tok3)
+
+    # ⑦ 端点值域
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            assert c.post("/api/sessions", json={"idea": "x", "permission": "bogus"}).status_code == 422
+            sid = c.post("/api/sessions", json={"idea": "x", "project_name": "s8appr"}).json()["id"]
+            assert c.patch(f"/api/sessions/{sid}", json={"permission": "nope"}).status_code == 422
+            got = c.patch(f"/api/sessions/{sid}", json={"permission": "workspace_write"})
+            assert got.status_code == 200 and got.json()["permission"] == "workspace_write", got.text[:120]
+            assert c.get(f"/api/sessions/{sid}/approvals").json() == {"pending": [], "decided": []}
+            assert c.post(f"/api/sessions/{sid}/approvals/nope/respond",
+                          json={"outcome": "allowed-once"}).status_code == 404
+            assert c.post(f"/api/sessions/{sid}/approvals/x/respond",
+                          json={"outcome": "maybe"}).status_code == 422
+            from platforms.approval_store import ApprovalStore, new_item
+            st = ApprovalStore(sid)
+            item = new_item("a1", "terminal_command", "dir", "要列目录", "full_access",
+                            "workspace_write", "gate")
+            assert st.request(item) and st.request(item) is False, "重放登记不该出第二条"
+            assert [p["id"] for p in st.pending()] == ["a1"]
+            r = c.post(f"/api/sessions/{sid}/approvals/a1/respond", json={"outcome": "allowed-once"})
+            assert r.status_code == 200 and r.json()["outcome"] == "allowed-once", r.text[:120]
+            assert st.pending() == [] and st.decision("a1") == "allowed-once"
+            assert c.post(f"/api/sessions/{sid}/approvals/a1/respond",
+                          json={"outcome": "rejected"}).json()["outcome"] == "allowed-once", "二次回执改了首个结论"
+            assert [d["id"] for d in c.get(f"/api/sessions/{sid}/approvals").json()["decided"]] == ["a1"]
+            c.delete(f"/api/sessions/{sid}")
+        _ok("t8", "工具审批：判定表 fail-closed 且覆盖全量、两图真连 gate、重放幂等、"
+                  "未批不执行、端点值域与首个回执生效")
+    finally:
+        ss.SESSIONS_FILE = keep
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -240,7 +433,8 @@ def main():
     t5_workspace_file_response_shape()
     t6_trace_span_vocabulary()
     t7_chat_target_from_assembly()
-    print("\ns8_frontend_contract: 7/7 全绿")
+    t8_tool_approval_gate()
+    print("\ns8_frontend_contract: 8/8 全绿")
 
 
 if __name__ == "__main__":

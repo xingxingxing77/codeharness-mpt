@@ -32,6 +32,10 @@ class Session(BaseModel):
     # 前端直聊下拉只渲染这两个值——原先硬编码的名单与装配对不上，追问会被 route 静默丢掉。
     roles: list[str] = Field(default_factory=list)
     entry_role: str = ""
+    # 工具审批的会话级免审档：readonly | workspace_write | full_access（判定表见
+    # codeharness/tools/_approval.py）。新建默认最保守的 readonly——只读面免审，
+    # 任何写文件 / 执行 / 联网都要人批一次；嫌烦可在 composer 那枚 chip 上切档。
+    permission: str = "readonly"
     workspace: str = ""
     error: str = ""
     cost: dict = Field(default_factory=dict)
@@ -67,11 +71,12 @@ class SessionStore:
 
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: Optional[dict] = None,
-               paradigm: str = "classic", sop: str = "", user_id: str = "default") -> Session:
+               paradigm: str = "classic", sop: str = "", user_id: str = "default",
+               permission: str = "readonly") -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
         s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
-                    paradigm=paradigm, sop=sop, user_id=user_id,
+                    paradigm=paradigm, sop=sop, user_id=user_id, permission=permission,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name),      # 产物目录=会话目录（前端文件树读这里）
                     created_at=_now())

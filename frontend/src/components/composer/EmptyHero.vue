@@ -40,6 +40,15 @@
           </template>
         </VMenu>
 
+        <VMenu :items="permissionItems" align="start" compact @select="pickPermission">
+          <template #default="{ open, toggle }">
+            <button class="wsChip" :aria-expanded="open" @click="toggle()">
+              <span>{{ permissionLabel }}</span>
+              <DsIcon name="chevron-down" :size="12" />
+            </button>
+          </template>
+        </VMenu>
+
         <VMenu :items="roundItems" align="start" compact @select="pickRounds">
           <template #default="{ open, toggle }">
             <button class="wsChip" :aria-expanded="open" @click="toggle()">
@@ -63,19 +72,21 @@
 
 <script setup lang="ts">
 /** 空态首页：居中品牌 + 同一个 composer 的 hero 变体。
- *  只放后端真支持的参数：项目名、范式（classic|dynamic|react）、轮数、模型覆盖。 */
+ *  只放后端真支持的参数：项目名、范式（classic|dynamic|react）、轮数、模型覆盖、免审档。 */
 import { computed, nextTick, ref } from 'vue'
 import ComposerCard from './ComposerCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import VMenu from '../ui/VMenu.vue'
 import type { MenuItem } from '../ui/menuTypes'
 import { useSessionStore } from '../../stores/sessions'
+import { useSettingsStore } from '../../stores/settings'
 import { useUiStore } from '../../stores/ui'
 import { useToastStore } from '../../stores/toast'
 
 const store = useSessionStore()
 const ui = useUiStore()
 const toast = useToastStore()
+const prefs = useSettingsStore().prefs
 const composerEl = ref<InstanceType<typeof ComposerCard>>()
 
 const health = computed(() => store.health)
@@ -133,6 +144,30 @@ function pickMode(it: MenuItem) {
   if (it.key) ui.composer.paradigm = String(it.key)
 }
 
+/** 草稿态没有会话，免审档就先存设置页那条「沙盒设置」偏好（它存英文标签，这里映射一次）。
+ *  建会话时随 permission 落进会话，之后由会话自己管——设置页布局与文案一个字没改。 */
+const SANDBOX_TIER: Record<string, string> = {
+  'Read only': 'readonly', 'Workspace write': 'workspace_write', 'Full access': 'full_access'
+}
+const TIERS = [
+  { key: 'readonly', label: '只读', desc: '只读免审；写文件、执行命令、联网都要批' },
+  { key: 'workspace_write', label: '工作区写入', desc: '写进本会话工作区免审；命令与联网仍要批' },
+  { key: 'full_access', label: '全面访问', desc: '全免审' }
+]
+const permissionTier = computed(() => SANDBOX_TIER[prefs.sandbox] || 'readonly')
+const permissionLabel = computed(
+  () => TIERS.find((t) => t.key === permissionTier.value)?.label || permissionTier.value
+)
+const permissionItems = computed<MenuItem[]>(() =>
+  TIERS.map((t) => ({ key: t.key, label: t.label, desc: t.desc, checked: t.key === permissionTier.value }))
+)
+
+function pickPermission(it: MenuItem) {
+  if (!it.key) return
+  const label = Object.keys(SANDBOX_TIER).find((k) => SANDBOX_TIER[k] === it.key)
+  if (label) prefs.sandbox = label
+}
+
 function pickRounds(it: MenuItem) {
   const n = Number(it.key)
   if (n > 0) ui.composer.rounds = n
@@ -167,6 +202,7 @@ async function onDrafted(idea: string) {
       project_name: ui.composer.project,
       n_round: ui.composer.rounds,
       paradigm: ui.composer.paradigm,
+      permission: permissionTier.value,
       llm: ui.composer.model ? { model: ui.composer.model } : {}
     })
     await store.start()

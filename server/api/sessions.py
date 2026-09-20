@@ -19,6 +19,15 @@ class CreateSessionReq(BaseModel):
     paradigm: str = "classic"       # classic|dynamic（S9.1 对照）|react（9.2 策略曲线）；其余值 422
     sop: str = ""                   # N7 模板名（9.3 扩展线入口）；非空时 create 即校验，别让拼错拖到 start 才炸
     llm: dict = Field(default_factory=dict)
+    permission: str = "readonly"    # 工具审批的免审档（判定表 codeharness/tools/_approval.py）；其余值 422
+
+    @field_validator("permission")
+    @classmethod
+    def _permission(cls, v: str) -> str:
+        from codeharness.tools._approval import TIERS
+        if v not in TIERS:
+            raise ValueError(f"permission 只能是 {'、'.join(TIERS)}")
+        return v
 
     @field_validator("paradigm")
     @classmethod
@@ -65,10 +74,19 @@ class HumanInputReq(BaseModel):
 
 
 class PatchSessionReq(BaseModel):
-    """三个都可选：不传的字段保持原值，所以取消归档要显式发 archived=false。"""
+    """四个都可选：不传的字段保持原值，所以取消归档要显式发 archived=false。"""
     idea: Optional[str] = Field(default=None, min_length=1)
     archived: Optional[bool] = None
     pinned: Optional[bool] = None
+    permission: Optional[str] = None        # 会话中途切免审档（composer 那枚 chip）
+
+    @field_validator("permission")
+    @classmethod
+    def _permission(cls, v: Optional[str]) -> Optional[str]:
+        from codeharness.tools._approval import TIERS
+        if v is not None and v not in TIERS:
+            raise ValueError(f"permission 只能是 {'、'.join(TIERS)}")
+        return v
 
 
 def _get(request: Request, name: str):
@@ -104,7 +122,8 @@ async def create_session(req: CreateSessionReq, request: Request, user: str = De
                 raise HTTPException(409, f"项目名 {name!r} 已被其他用户占用")
     s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
                                       project_name=name, llm_override=req.llm,
-                                      paradigm=req.paradigm, sop=req.sop, user_id=user)
+                                      paradigm=req.paradigm, sop=req.sop, user_id=user,
+                                      permission=req.permission)
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
     return s.model_dump()
 

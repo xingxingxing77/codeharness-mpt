@@ -19,6 +19,7 @@ from server.bridges import LogBridge
 from server.runner import SessionRunner
 from server.api import sessions as sessions_api
 from server.api import workspace as workspace_api
+from server.api import approvals as approvals_api
 from server.api import models as models_api
 
 
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
                        allow_methods=["*"], allow_headers=["*"])
     app.include_router(sessions_api.router)
     app.include_router(workspace_api.router)
+    app.include_router(approvals_api.router)
     app.include_router(models_api.router)
     from server.auth import router as auth_router
     app.include_router(auth_router)

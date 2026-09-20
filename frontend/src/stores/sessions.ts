@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { api, getToken } from '../api/client'
-import type { Block, Health, Session, TraceSpan, WEvent } from '../types'
+import type { ApprovalItem, Block, Health, Session, TraceSpan, WEvent } from '../types'
 
 const MAX_LOGS = 800
 
@@ -35,6 +35,9 @@ export const useSessionStore = defineStore('sessions', {
     blockOrder: [] as string[],
     logs: [] as string[],
     humanQuestion: null as WEvent | null,
+    /** 当前会话的待批项（批次36）。SSE `approval` 事件驱动，切会话时 GET 补一次——
+     *  刷新页面不该把已经挂着的审批弄没。 */
+    approvals: [] as ApprovalItem[],
     status: '',
     cost: {} as Record<string, number>,
     connected: false,
@@ -61,6 +64,13 @@ export const useSessionStore = defineStore('sessions', {
     },
     isRunning(state): boolean {
       return ['running', 'awaiting_human', 'stopping'].includes(state.status)
+    },
+    /** 队首那条占审批卡：状态可以并行多条，界面一次只占一个座位（照参考项目 apply.ts:108-109）。 */
+    pendingApproval(state): ApprovalItem | null {
+      return state.approvals[0] || null
+    },
+    hasPendingApproval(state): boolean {
+      return state.approvals.length > 0
     }
   },
 
@@ -116,6 +126,7 @@ export const useSessionStore = defineStore('sessions', {
       n_round?: number
       paradigm?: string
       llm?: Record<string, any>
+      permission?: string
     }): Promise<Session> {
       const s = await api.createSession(payload)
       await this.loadSessions()
@@ -132,6 +143,17 @@ export const useSessionStore = defineStore('sessions', {
       this.cost = s?.cost || {}
       this.connect()
       void this.loadTrace(sid)
+      void this.loadApprovals(sid)
+    },
+
+    /** 待批列表拉一次（切会话 / 刷新页面）。失败静默：审批是旁路信息，不该把首屏拖挂。 */
+    async loadApprovals(sid: string) {
+      try {
+        const r = await api.approvals(sid)
+        this.approvals = sid === this.currentId ? r.pending || [] : this.approvals
+      } catch {
+        /* 后端未升级或越权：保持现状，不弹错 */
+      }
     },
 
     /** trace 仅 Redis 模式有数据；进程内 runner 回空表，尾行自然不显示 tok/s。
@@ -153,6 +175,7 @@ export const useSessionStore = defineStore('sessions', {
       this.logs = []
       this.spans = []
       this.humanQuestion = null
+      this.approvals = []
       this.lastSeq = 0
       this.lastCursor = ''
       // 缓冲里可能还压着上一个会话的事件
@@ -284,6 +307,16 @@ export const useSessionStore = defineStore('sessions', {
         this.humanQuestion = ev
         if (this.current) this.mergeSessionLocal(this.current.id, { status: 'awaiting_human' })
         this.status = 'awaiting_human'
+      } else if (ev.kind === 'approval') {
+        // requested 按 id 去重入队（重放/双开标签页不该冒出两张一样的卡）；
+        // resolved 只出队——之后会话回到什么状态由紧随其后的 status 事件说，这里不猜。
+        const item = (ev.value || {}) as ApprovalItem
+        if (ev.name === 'resolved') this.approvals = this.approvals.filter((a) => a.id !== item.id)
+        else if (item.id && !this.approvals.some((a) => a.id === item.id)) {
+          this.approvals.push(item)
+          if (this.current) this.mergeSessionLocal(this.current.id, { status: 'awaiting_human' })
+          this.status = 'awaiting_human'
+        }
       } else if (ev.kind === 'error') {
         this.logs.push(`[error] ${ev.value}`)
       } else if (ev.kind === 'status') {
@@ -370,6 +403,25 @@ export const useSessionStore = defineStore('sessions', {
       const ok = await api.answerHuman(this.currentId, content)
       if (ok) this.humanQuestion = null
       return ok
+    },
+
+    /** 回执：先出队让卡片立刻消失，失败再塞回去（网络抖一下不该把用户困在原地）。 */
+    async respondApproval(aid: string, outcome: 'allowed-once' | 'rejected') {
+      const keep = this.approvals
+      this.approvals = this.approvals.filter((a) => a.id !== aid)
+      try {
+        return await api.respondApproval(this.currentId, aid, outcome)
+      } catch (e) {
+        this.approvals = keep
+        throw e
+      }
+    },
+
+    /** 会话中途切免审档：从下一个节点边界起生效（跑图任务已持有旧值）。 */
+    async setPermission(permission: string) {
+      const s = await api.patchSession(this.currentId, { permission })
+      this.mergeSessionLocal(s.id, { permission: s.permission })
+      return s
     },
 
     dismissHuman() {

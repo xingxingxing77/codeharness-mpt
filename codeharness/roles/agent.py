@@ -67,12 +67,48 @@ class Agent:
         g = StateGraph(AgentState)
         g.add_node("observe", self._observe)
         g.add_node("think", self._think)
+        g.add_node("gate", self._gate_action)          # 工具审批闸门（批次36）：无 LLM、无副作用
         g.add_node("act", self._act)
         g.set_entry_point("observe")
         g.add_edge("observe", "think")
         g.add_conditional_edges("think", self._route)
+        g.add_edge("gate", "act")
         g.add_edge("act", "think")
         return g.compile()
+
+    # ---- 工具审批闸门（S11-批次36）----
+    def _approval_key(self, s: AgentState) -> tuple[str, dict]:
+        """审批判定的唯一输入：Action 类名 + 能从 state 确定性复现的载荷。
+        gate 与 act 两处必须算出同一个 approval_id，所以这段只许有一个出口。"""
+        action = self.actions.get(s["chosen"])
+        name = type(action).__name__ if action is not None else str(s["chosen"])
+        trig = (s["inbox"][-1] if s.get("inbox")
+                else (s.get("memory") or [None])[-1])
+        args = {"cause_by": str(getattr(trig, "cause_by", "") or ""),
+                "send_from": str(getattr(trig, "send_from", "") or ""),
+                "content": (getattr(trig, "content", "") or "")[:500]}
+        return name, args
+
+    async def _gate_action(self, s: AgentState):
+        """经典线一个节点只跑一个 Action，粒度天然是「一次批一个动作」。
+
+        与 role_zero 的 gate 同一套：结论只认台账，`interrupt()` 的返回值当唤醒信号。
+        没装待批通道（内核直跑图）就跳过，保持原行为。"""
+        from codeharness.runtime import APPROVAL_IO
+        from codeharness.tools._approval import gate_decide
+        io_ = APPROVAL_IO.get()
+        if io_ is None or s["chosen"] not in self.actions:
+            return {}
+        name, args = self._approval_key(s)
+        reason = f"{self.profile.get('name', '')} 要执行 {name}：{args['content'][:120]}"
+        decision, item = gate_decide(name, args, node="gate", io_=io_, kind="action", reason=reason)
+        while decision is None:
+            io_.request(item)
+            from langgraph.types import interrupt
+            interrupt({"approval": item})
+            decision, item = gate_decide(name, args, node="gate", io_=io_, kind="action",
+                                         reason=reason)
+        return {}
 
     # ---- 源 _observe(:399-431) 逐行翻译：过滤条件一字未改(:415) ----
     async def _observe(self, s: AgentState):
@@ -116,12 +152,26 @@ class Agent:
             return END
         if s["chosen"] == "END" or s["chosen"] not in self.actions:
             return END
-        return "act"
+        return "gate"
 
     # ---- 源 _act(:381-397) 逐行翻译 + self-heal 收口 ----
     async def _act(self, s: AgentState):
         from langgraph.errors import GraphInterrupt
         action = self.actions[s["chosen"]]
+        # 执行前读台账（批次36）：被拒的动作**不 run**，回一条拒绝消息进记忆，走 [错误] 那条自愈路径，
+        # 而不是把会话炸掉。判定输入与 gate 共用 _approval_key，两边算出的 approval_id 必须一致。
+        from codeharness.runtime import APPROVAL_IO
+        from codeharness.tools._approval import gate_decide
+        io_ = APPROVAL_IO.get()
+        if io_ is not None:
+            name, args = self._approval_key(s)
+            verdict, _ = gate_decide(name, args, node="gate", io_=io_, kind="action")
+            if verdict != "allowed":
+                # 未决（None）也按不执行处理：gate 漏接线的后果必须是「没干」，不是「照干」
+                msg = Message(content=f"[已拒绝] {name} 未获批准，不执行",
+                              role="user", cause_by=name, sent_from=self.profile["name"])
+                return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],
+                        "inbox": [], "action_cursor": s["action_cursor"]}
         if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
             prompt = self._format_inbox(s["inbox"])
             trig = s["inbox"][-1]

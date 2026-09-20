@@ -30,7 +30,7 @@ class Event(BaseModel):
     seq: int
     ts: float
     cursor: str = ""            # 前端去重/续传唯一依据；seq 在 Redis 总线上会溢出 float64
-    kind: str = "report"          # report | log | status | ask_human | error
+    kind: str = "report"          # report | log | status | ask_human | approval | error
     block: Optional[str] = None
     uuid: Optional[str] = None
     name: Optional[str] = None

@@ -20,6 +20,15 @@ CURRENT_USER: ContextVar[str] = ContextVar("current_user", default="default")
 """N1 账号边界：当前会话的创建者。server 在 _session_ctx 装载；记忆/经验池的 user_id 切片键
 在调用方没显式给时从这里兜底——auth 关恒 "default"，qdrant payload 与既有行为逐字节兼容"""
 
+PERMISSION: ContextVar[str] = ContextVar("permission", default="readonly")
+"""工具审批的会话级免审档（readonly|workspace_write|full_access）。server 在 _session_ctx 装载；
+缺省取最严的 readonly——忘了装的后果是「多问一次」，不是「放行一切」。
+中途切档从**下一个节点边界**起生效（跑图任务已持有旧值，resume 时新建任务才读到新值）。"""
+
+APPROVAL_IO: ContextVar[object] = ContextVar("approval_io", default=None)
+"""待批通道：实现 `decision(aid)` / `request(item)` 的对象（server 注入 platforms.approval_store 适配器）。
+没装 = 内核直跑图（门禁与离线测试路径），此时 gate 一律放行——没有可问的人，挂起只会永久卡住。"""
+
 
 def session_root(project: str | None = None) -> Path:
     """本会话工作目录 = `workspace_root/{project 或 CURRENT_PROJECT}`，与 server 的 `session.workspace`、

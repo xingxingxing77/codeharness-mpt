@@ -181,13 +181,38 @@ class RoleZero:
     def build(self, checkpointer=None):
         g = StateGraph(RoleZeroState)
         g.add_node("think", self._think)
+        g.add_node("gate", self._gate_commands)        # 工具审批闸门（批次36）：无 LLM、无副作用
         g.add_node("act", self._act)
         g.set_entry_point("think")
-        g.add_conditional_edges("think", lambda s: END if s["finished"] else "act")
+        g.add_conditional_edges("think", lambda s: END if s["finished"] else "gate")
+        g.add_edge("gate", "act")
         # act 若已 finished（end 命令）直接收口：旧写法 act→think 无条件回跳，
         # 多烧一次模型不说，think 追加的无 results 条目还会让 as_node 收尾读 results 当场 KeyError。
         g.add_conditional_edges("act", lambda s: END if s["finished"] else "think")
         return g.compile(checkpointer=checkpointer or InMemorySaver())
+
+    # ---- 工具审批闸门（S11-批次36）----
+    async def _gate_commands(self, s: RoleZeroState):
+        """逐条判档，需要审批的**一条一问**（状态并行、UI 串行，照参考项目 `apply.ts:108-109`）。
+
+        `interrupt()` 的返回值只当「有人回过话」的信号，结论一律回台账读——所以重放时台账已命中的
+        条目不再 interrupt，中断序号与 langgraph 缓存对不对齐都不影响判定。
+        没装待批通道（内核直跑图：门禁、离线测试）就直接跳过，保持原行为。"""
+        from codeharness.runtime import APPROVAL_IO
+        from codeharness.tools._approval import gate_decide
+        io_ = APPROVAL_IO.get()
+        if io_ is None:
+            return {}
+        last = s["history"][-1] if s["history"] else {}
+        reason = str(last.get("thought", ""))[:200]
+        for cmd in last.get("commands", []):
+            name, args = cmd["command_name"], cmd.get("args", {})
+            decision, item = gate_decide(name, args, node="gate", io_=io_, reason=reason)
+            while decision is None:
+                io_.request(item)                          # HSETNX：重放不会冒出第二张卡
+                interrupt({"approval": item})
+                decision, item = gate_decide(name, args, node="gate", io_=io_, reason=reason)
+        return {}
 
     # ---- 源 llm_cached_aask(:267) 的对应件：带经验池缓存的单次 think ----
     @exp_cache(serializer=RoleZeroSerializer())
@@ -270,6 +295,18 @@ class RoleZero:
                     elif name in self.PLAN_COMMANDS:            # 台账 #10：真 Plan 状态机（源 :121-124）
                         results.append({"name": name, "result": self._run_plan_command(name, args)})
                     elif name in self.tools:
+                        # 执行前再判一次档：gate 节点负责挂起问人，这里只读台账结论——
+                        # 被拒的命令**不进 ainvoke**，副作用一次都不发生。
+                        from codeharness.runtime import APPROVAL_IO
+                        from codeharness.tools._approval import gate_decide
+                        io_ = APPROVAL_IO.get()
+                        verdict, _ = gate_decide(name, args, node="gate", io_=io_,
+                                                 reason=str(last.get("thought", ""))[:200])
+                        if verdict != "allowed":
+                            # 未决（None）也按不执行处理：正常图里 gate 一定先跑，走到 act 还
+                            # 没有结论只可能是接线漏了——这种情况绝不默默放行副作用。
+                            results.append({"name": name, "result": "[已拒绝] 未获批准，不执行"})
+                            continue
                         out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
                         results.append({"name": name, "result": str(out)[:4000]})
                     else:

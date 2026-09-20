@@ -355,7 +355,9 @@ async def t13_dual_runner_fakellm_line():
         # 两个 worker 各持**自己的** store 实例（生产形态），共享的只有 redis——B 读到的都是 A 写的
         a = SessionRunner(RedisSessionStore(TEST_DB), bus, chat_factory=factory)
         b = SessionRunner(RedisSessionStore(TEST_DB), bus, chat_factory=factory)
-        s = a.store.create("双runner线", project_name="s7e2e")
+        # 审批档位显式给满：这条只验跨 worker 的管线，审批本身由 s8 t8 钉（批次36 起新建
+        # 会话默认 readonly，不指定档位的经典线会在第一个 Action 就挂在 gate 上）。
+        s = a.store.create("双runner线", project_name="s7e2e", permission="full_access")
         # B 不经 runner.enqueue_chat（它手上没有这个会话的队列）——直接投递到共享 LIST，
         # 语义等同 HTTP 请求打到 B worker 后 B 写 redis。目标 Ghost 不在 agents：drain 后静默丢，
         # 但 LIST 被清空本身就是「A 的 route 从 redis 消费了 B 的投递」的证据。

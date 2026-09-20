@@ -11,6 +11,8 @@ export interface Session {
   // 装配出口回填（runner._prepare）：直聊下拉只渲染 roles，空目标走 entry_role
   roles?: string[]
   entry_role?: string
+  // 工具审批的免审档：readonly | workspace_write | full_access（判定表 codeharness/tools/_approval.py）
+  permission?: string
   workspace: string
   error: string
   cost: Record<string, number>
@@ -22,12 +24,27 @@ export interface Session {
   pinned?: boolean
 }
 
+/** gate 节点登记的待批项（platforms/approval_store.new_item 的形状）。
+ *  outcome 只在 decided 列表里出现——pending 项还没有结论。 */
+export interface ApprovalItem {
+  id: string
+  tool: string
+  kind: string // tool | action
+  args_preview: string
+  reason: string
+  tier_required: string
+  tier_session: string
+  node: string
+  ts: number
+  outcome?: string
+}
+
 export interface WEvent {
   session_id: string
   seq: number
   cursor: string // 去重/续传唯一依据；seq 只做展示——Redis 总线上它超出 2^53
   ts: number
-  kind: string // report | log | status | ask_human | error
+  kind: string // report | log | status | ask_human | approval | error
   block: string | null
   uuid: string | null
   name: string | null

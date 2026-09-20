@@ -35,6 +35,10 @@ def _dump(s: Session) -> dict:
 def _load(sid: str, h: dict) -> Session:
     d = dict(h)
     d["id"] = d.get("id") or sid
+    # 批次36 之前存的记录没有这个字段。缺字段≠新会话：老会话按改动前「无拦截」的行为读，
+    # 否则恢复一个跑了一半的老会话会凭空每步弹审批。新建走模型默认（readonly）。
+    if "permission" not in d:
+        d["permission"] = "full_access"
     for f, empty in _JSON_FIELDS.items():
         d[f] = json.loads(d.get(f) or json.dumps(empty))
     return Session(**d)
@@ -52,11 +56,12 @@ class RedisSessionStore:
 
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: dict | None = None,
-               paradigm: str = "classic", sop: str = "", user_id: str = "default") -> Session:
+               paradigm: str = "classic", sop: str = "", user_id: str = "default",
+               permission: str = "readonly") -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
         s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
-                    paradigm=paradigm, sop=sop, user_id=user_id,
+                    paradigm=paradigm, sop=sop, user_id=user_id, permission=permission,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name), created_at=_now())
         pipe = self.r.pipeline()
