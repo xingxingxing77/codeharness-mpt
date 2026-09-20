@@ -424,7 +424,17 @@ def t14_dynamic_paradigm_assembly():
     saved = team.prepare_project
     team.prepare_project = fake_prepare
     try:
-        r = SessionRunner(None, None)
+        # 批次28（81acdc7）起 `_prepare` 会把装配出口的 roles/entry_role 回填进 store，
+        # 生产里 store 由 app 装配注入、永不为 None → 测试替身得跟上，否则这里 `None.update` 直接炸。
+        class _FakeStore:
+            def __init__(self):
+                self.writes = []
+
+            def update(self, sid, **fields):
+                self.writes.append((sid, fields))
+
+        store = _FakeStore()
+        r = SessionRunner(store, None)
         r._saver = _none_saver
         dyn = ss.Session(id="d1", idea="x", project_name="p", paradigm="dynamic")
         asyncio.run(r._prepare(dyn, "p", None))
@@ -432,7 +442,13 @@ def t14_dynamic_paradigm_assembly():
         assert captured["sop"] is not None, "dynamic 没带路由表"
         cls = ss.Session(id="c1", idea="x", project_name="p")
         asyncio.run(r._prepare(cls, "p", None))
-        assert captured["agents"] is None and captured["sop"] is None, "classic 不该带装配"
+        # 旧断言是 `agents is None`（经典线走 prepare_project 的兜底组队），runner 已改成
+        # **三条线都显式组队**（`server/runner.py:142-144`：兜底路径会另建一个不认
+        # llm_override 的网关）→ 现在钉的是「classic 也显式组队、名字集等于 classic_team，但不带动态路由表」。
+        from codeharness.team import classic_team
+        assert captured["agents"] and set(captured["agents"]) == set(classic_team(FakeLLM([]))), \
+            "classic 必须显式组队（否则会话的 llm_override 不生效）"
+        assert captured["sop"] is None, "classic 不该带动态路由表"
         # 9.2 策略曲线第三腿：react=经典队形全员 REACT（路由表仍是经典 SOP，sop 传 None）
         from codeharness.roles.agent import Agent
         rct = ss.Session(id="r1", idea="x", project_name="p", paradigm="react")
@@ -441,6 +457,8 @@ def t14_dynamic_paradigm_assembly():
             isinstance(a, Agent) and a.react_mode == "REACT" for a in captured["agents"].values()), \
             "react 腿必须是经典队形×REACT 循环"
         assert captured["sop"] is None, "react 腿不改编排"
+        assert any("roles" in f and "entry_role" in f for _, f in store.writes), \
+            "装配出口没把 roles/entry_role 回填进 store（批次28 那半件必须被断言覆盖）"
         # 9.3 扩展线：sop 非空走模板装配，不再经 prepare_project（captured 不动）
         from codeharness.base.action import BaseAction
         from codeharness.roles.agent import Agent
