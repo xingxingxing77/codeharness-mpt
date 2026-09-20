@@ -164,11 +164,13 @@ async function copy(t: string) {
 
 <style scoped>
 .card {
-  border: 1px solid var(--dsw-alias-border-l2);
+  /* 源 ToolRow.module.css:189-192 的 ioCard：描边是 border-l1 一档（不是 l2）、r12、
+     bg markdown-code-block、margin 4px 0 4px 4px（左那 4px 由披露行 body 的内缩承担） */
+  border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 12px;
   background: var(--dsw-alias-markdown-code-block);
   padding: 10px 12px;
-  margin: 6px 0 10px;
+  margin: 4px 0;
   font-family: var(--ds-font-family-code);
   font-size: 12px;
   line-height: 18px;
@@ -195,8 +197,11 @@ async function copy(t: string) {
 
 .termOut {
   margin: 8px 0 0;
+  /* 源 ToolRow.module.css:292-295 嵌入态覆写：输出限高 224px，超出在卡内滚，
+     否则展开 229 行会把卡片顶成几千像素高 */
+  max-height: 224px;
+  overflow: auto;
   white-space: pre;
-  overflow-x: auto;
 }
 
 .termFoot {

@@ -370,7 +370,7 @@ async function submitDelete() {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 20px;
   color: var(--dsw-alias-label-tertiary);
 }

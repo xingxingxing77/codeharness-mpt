@@ -225,29 +225,37 @@ onBeforeUnmount(() => clearInterval(tick))
 }
 
 .header {
+  /* 参考项目 .header 的 padding 是 12/28/0/20，行高由 .titleRow 的 min-height 32 撑出来，
+     不写死总高——源里页签条包在 header 内，整块高度是内容加出来的。 */
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
-  padding: 0 16px;
+  min-height: 32px;
+  padding: 12px 28px 0 20px;
 }
 
 .crumbs {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
 .crumb {
   max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 12px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: 14px;
   line-height: 20px;
   color: var(--dsw-alias-label-primary);
+}
+
+.crumb:not(.cur):hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .crumb.dim {
@@ -308,8 +316,24 @@ onBeforeUnmount(() => clearInterval(tick))
   z-index: 1;
   display: flex;
   gap: 36px;
-  margin-top: 4px;
+  /* 源里页签条包在 .header 内：左移量 = header 的 20px + 自身 8px。
+     我们是 header 的兄弟节点，不补这 20px 的话页签文字会比面包屑偏左 8px。 */
+  margin: 4px 0 0 20px;
   padding-left: 8px;
+}
+
+/* 分隔线：源是 .header::after（1px、bottom 1px、border-l2），而页签在 header 内，
+   所以线落在页签之下而不是会话头与页签之间。 */
+.tabs::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0;
+  height: 1px;
+  background: var(--dsw-alias-border-l2);
+  pointer-events: none;
 }
 
 .tab {

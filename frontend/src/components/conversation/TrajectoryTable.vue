@@ -78,30 +78,46 @@ function jump(r: TrajRow) {
 .tbl {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
 }
 
 .tbl th,
 .tbl td {
-  padding: 6px 10px;
+  height: 30px;
+  padding: 0 8px;
   text-align: left;
-  border-bottom: 1px solid var(--dsw-alias-border-l1);
   white-space: nowrap;
+}
+
+.tbl td {
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
 }
 
 .tbl th {
   position: sticky;
   top: 0;
-  z-index: 1;
-  background: var(--dsw-alias-bg-base);
+  z-index: 3;
+  background: var(--dsw-specific-sidebar-fill);
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
   font-weight: 500;
   color: var(--dsw-alias-label-tertiary);
 }
 
+tbody tr {
+  transition: background-color 120ms var(--ds-ease-in-out), opacity 120ms var(--ds-ease-in-out);
+}
+
+tbody tr:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 数字/时间列：源是定宽 71px + 左对齐（.metric/.time），不是右对齐 */
 .num {
-  text-align: right;
+  width: 71px;
+  text-align: left;
   font-variant-numeric: tabular-nums;
 }
 

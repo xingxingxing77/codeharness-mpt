@@ -258,9 +258,10 @@ onBeforeUnmount(() => {
   gap: 6px;
   min-width: 0;
   height: 24px;
-  font-size: 17px;
+  font-size: 18px;
   font-weight: 600;
   line-height: 24px;
+  letter-spacing: 0.04em;
   white-space: nowrap;
 }
 

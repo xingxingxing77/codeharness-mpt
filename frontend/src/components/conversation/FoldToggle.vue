@@ -19,22 +19,21 @@ defineEmits<{ toggle: [] }>()
 
 <style scoped>
 .fold {
+  /* 参考项目 .expand（TerminalBlock/ReadBlock/SearchBlock 同族）：满宽块级、无框无底、
+     三级字、font:inherit（跟随卡片字号，终端卡是 12/18）、左对齐；
+     hover 只把颜色提到 label-secondary——没有 margin、没有圆角、没有 hover 底色。 */
   display: block;
   width: 100%;
-  margin: 2px 0;
-  padding: 3px 8px;
+  padding: 0;
   border: none;
-  border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
-  line-height: 18px;
+  font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
 .fold:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-label-secondary);
 }
 </style>
