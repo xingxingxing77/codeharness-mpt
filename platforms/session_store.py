@@ -25,11 +25,19 @@ INDEX = "ch:index"
 _JSON_FIELDS = {"llm_override": {}, "cost": {}, "roles": []}
 
 
-def _dump(s: Session) -> dict:
-    d = s.model_dump(mode="json")     # 枚举归一成 value 字符串（str(enum) 会打出 'SessionStatus.created'）
+def _dump_fields(fields: dict) -> dict:
+    """按 Redis 哈希的落库形态归一**任意字段子集**：JSON 字段先序列化，其余一律 str()。
+    `update()` 只写传入字段靠它，`_dump` 全量落库也走它——两处不重复、不会漂移。"""
+    d = dict(fields)
     for f in _JSON_FIELDS:
-        d[f] = json.dumps(d[f], ensure_ascii=False)
+        if f in d:
+            d[f] = json.dumps(d[f], ensure_ascii=False)
     return {k: str(v) for k, v in d.items()}
+
+
+def _dump(s: Session) -> dict:
+    # mode="json" 把枚举归一成 value 字符串（str(enum) 会打出 'SessionStatus.running'，_load 反序列化直接炸）
+    return _dump_fields(s.model_dump(mode="json"))
 
 
 def _load(sid: str, h: dict) -> Session:
@@ -103,8 +111,10 @@ class RedisSessionStore:
         data.update(fields)
         s = Session(**data)
         if persist:
-            # 字段级 HSET：只写传进来的那些字段（全量重写=并发覆盖的根因，这里也不做）
-            self.r.hset(KEY.format(sid), mapping=_dump(s))
+            # 字段级 HSET：只写传进来的字段。全量重写=拿本次读到旧快照覆掉并发方刚写的字段
+            # （cost 合流与 status 更新同刻必丢一边）；取值仍走重建后的模型，归一与 _dump 同源。
+            changed = {k: v for k, v in s.model_dump(mode="json").items() if k in fields}
+            self.r.hset(KEY.format(sid), mapping=_dump_fields(changed))
         return s
 
     def set_cost(self, sid: str, cost: dict, persist: bool = False):
