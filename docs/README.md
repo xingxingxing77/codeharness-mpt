@@ -138,9 +138,12 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 
 **仍未闭合（都有实测证据，按优先级）**：
 1. ~~**runner 的用量快照不合流**~~ —— **当晚闭合**（提交 `ed8e6e8` + `242d6a8`）：`on_chat_model_end` 每笔合流 store/落盘/SSE 三头；重启 resume 从落盘快照**续算**不覆盖；零用量漏账从"静默记 0"变成 `add_usage` warning（有 warning 才有可 grep 的账差）。新门禁 `tests/s8_runner_meter.py`（4 组）把"传给图的账本必须就是 runner 手上那个实例"钉成双向断言。冒烟复跑实证：跑动中 sessions.json 里的 cost 已在落且非零。那复跑当场又炸出**第十处**：`APIError: Model output became abnormal while generating a JSON response for response_format`——qwen MaaS **服务端**abort 掉 JSON 模式生成（这段错误文本不在任何本地包里），同一请求重发即成；`_acall` 原本只重 Timeout/ConnectionError/OSError，瞬态错直接吹掉整场会话。修法有个继承链坑：openai 的 `APIStatusError`（4xx/5xx，重了烧钱）是 **`APIError` 的子类**，判据必须 `isinstance(APIError) and not isinstance(APIStatusError)`（s2 t14 用真 SDK 异常类族两头钉）。
-2. ~~**embedding 端点没配**~~ —— **2026-09-16 闭合**（`0a62e4c`）：本机 ollama 的 bge-m3（`:11434/v1`，实测 1024 维）已写进 `.env`；`gateway.embeddings()` 必须 `check_embedding_ctx_length=False`（langchain 默认发 tiktoken token-id 数组，ollama 只收字符串，直接 400）。真语义路径由 s5 t25 门禁常驻验（探活式，不在线就跳）。**reranker 仍离线**（`bge-reranker-v2-m3` 未部署，精排照旧降级 + warning）。
+2. ~~**embedding 端点没配**~~ —— **2026-09-16 闭合**（`0a62e4c`）：本机 ollama 的 bge-m3（`:11434/v1`，实测 1024 维）已写进 `.env`；`gateway.embeddings()` 必须 `check_embedding_ctx_length=False`（langchain 默认发 tiktoken token-id 数组，ollama 只收字符串，直接 400）。真语义路径由 s5 t25 门禁常驻验（探活式，不在线就跳）。**reranker 已改成显式 opt-in**（C8，2026-09-21）：
+`RerankerConfig.base_url` 缺省从 `http://localhost:9998/v1` 改成空串，未配置即**干净跳过**（不发 HTTP、不抛、
+不刷 warning）；本机确实没部署 `bge-reranker-v2-m3`，要精排就设 `RERANKER__BASE_URL`。
+两条分支都有门禁：`s5 t32`（未配置=跳过）+ `s5 t28`（配了但服务离线=降级并留痕）。
 3. ~~**`qwen3.8-flash` 不在 `TOKEN_COSTS`**~~ —— **2026-09-16 闭合**（用户报价：输入 0.8 / 输出 2.7 元/百万 token）：表内注明该行是**人民币口径**（其余行美元，前端 "$" 符号是展示层遗留，不跨币种换算——归 S8 一并清）。缓存命中价（输入 0.1）未入账：MaaS 不回传 `cache_read` 字段，归 S9 计费口径对齐。
-4. ~~**LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"~~ —— **2026-09-17 闭合**（S7）：`checkpoint.py` 三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)` 白名单；门禁 s7 t10 双向钉（未配必警=断言不空转，配了静默+Message/Document 原样回读）。
+4. ~~**LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"~~ —— **2026-09-17 闭合**（S7）：`checkpoint.py` 三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)` 白名单；门禁 s7 t10 双向钉（未配必警=断言不空转，配了静默）。**C2（2026-09-21）改口径**：白名单只留真正进过 `TeamState` 的 Message 系（`Document`/`Documents` 原为已删的 `docs` 假通道而挂），t10 因此改成「Message 静默、**Document 照旧告警**」——反向那一格同时钉住白名单没被放宽成"什么都放行"。
 5. `structured` 的 `include_raw` 路径每次调用会打一条 pydantic 序列化 `UserWarning`（噪声，未影响结果）。
 
 

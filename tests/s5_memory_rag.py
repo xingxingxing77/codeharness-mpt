@@ -958,6 +958,45 @@ def t31_exp_tenant_isolation():
     print("  t31 经验池租户隔离：manager 随 CURRENT_USER 分流、A 写 B 查不到")
 
 
+def t32_rerank_unset_default_skips_cleanly():
+    """C8：精排**未配置**时必须「零 HTTP、零异常、零 warning」地跳过。
+    旧默认值 `base_url="http://localhost:9998/v1"` 非空，而 `_rerank` 的判据只挡「URL 为空」，
+    本机 `.env`/compose 又没有该服务 → 每次 recall 都真发一跳、再被 `except Exception` 吞掉降级 + 刷 warning
+    （`docs/对照2-记忆管理.md` §四-3 早就记成缺陷）。与 t28 成对：t28 钉「显式配了但服务离线」那一跳照旧降级留痕。
+
+    两层判据：① 打在**配置类的默认值**上（不是本机 live 值，免得门禁被 `.env` 绑架）；
+    ② 打在**实际走哪条分支**上——把 `httpx.AsyncClient` 换成「一碰就抛」的哨兵，跳过分支碰不到它；
+       同时抓 `logger.warning`，跳过不该留痕（留痕是给真降级的）。"""
+    from types import SimpleNamespace
+    from codeharness.configs.settings import RerankerConfig
+    from codeharness.memory import longterm as lt
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.logs import logger as _lg
+
+    assert RerankerConfig.model_fields["base_url"].default == "", \
+        f"缺省又指向了一个可能存在的服务：{RerankerConfig.model_fields['base_url'].default!r}" \
+        "——未配置就该是空串，精排是显式 opt-in 能力（C8）"
+    keep_url, keep_client = settings.reranker.base_url, lt.httpx.AsyncClient
+    warned = []
+    orig = _lg.warning
+
+    def _boom(*a, **k):
+        raise AssertionError("未配置精排却构造了 HTTP 客户端——退回「先抛再吞」那条老路了")
+
+    settings.reranker.base_url = ""
+    lt.httpx.AsyncClient = _boom
+    _lg.warning = lambda *a, **k: warned.append(a)
+    try:
+        hits = [SimpleNamespace(id=f"p{i}", payload={"text": f"t{i}"}) for i in range(4)]
+        ltm = LongTermMemory.__new__(LongTermMemory)     # _rerank 不吃 store/embeddings，直测接缝（同 t28）
+        got = asyncio.run(ltm._rerank("q", hits, k=3))
+        assert [h.payload["text"] for h in got] == ["t0", "t1", "t2"], got
+        assert not warned, f"跳过分支不该留 warning（那是真降级的留痕）：{warned}"
+    finally:
+        settings.reranker.base_url, lt.httpx.AsyncClient, _lg.warning = keep_url, keep_client, orig
+    print("  t32 精排未配置：默认值即跳过——零 HTTP、零异常、零 warning，粗排原序前 k 条")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -977,7 +1016,7 @@ def main():
               t25_real_bge_semantic_path, t26_plan_state_machine_wired,
               t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades,
               t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path,
-              t31_exp_tenant_isolation]
+              t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

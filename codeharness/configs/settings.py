@@ -25,9 +25,13 @@ class EmbeddingConfig(BaseModel):
 class RerankerConfig(BaseModel):
     model: str = "bge-reranker-v2-m3"
     api_key: str = ""
-    base_url: str = "http://localhost:9998/v1"      # /v1/rerank
+    # 精排是**可选**能力，默认不配：以前缺省指向 http://localhost:9998/v1，而 `.env` 与
+    # `docker-compose.yml` 都没有这个服务，`longterm._rerank` 的判据又只挡「URL 非空」
+    # → 每次 recall 都白等一次 HTTP、再被 except 吞掉降级 + 刷 warning（对照2 §四-3）。
+    # 要启用精排：设 `RERANKER__BASE_URL`（离线服务在时那一跳由 s5 t28 钉）。
+    base_url: str = ""
     top_n: int = 5
-    recall_k: int = 10                                # 粗排取 10 → 精排 top_n=5；服务离线自动降级为仅粗排
+    recall_k: int = 10                                # 粗排取 10 → 精排 top_n=5；未配置或服务离线都降级为仅粗排
 
 
 class QdrantConfig(BaseModel):
