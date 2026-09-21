@@ -547,9 +547,11 @@ def t37_git_tools_degrade_without_gh():
 def t38_no_dangling_metagpt_imports():
     """代码里不得残留 `from metagpt`（git.py 两函数与 editor.similarity_search 曾是'一接线就
     ModuleNotFoundError'的死复制件，本检查保证同类问题不再静默回归，台账 #8/#9 的机器版）。
-    ⚠ prompts/ 豁免：write_analysis_code.py / generate_skill.md 是 s6 t1 逐字保护的源 prompt 资产，
-    其中诱导模型 `from metagpt.tools.libs...` 的运行时隐患另记对照3 §结论-2（正解=加法拼接校准常量、
-    不动逐字，同 PRD_STACK_CALIBRATION 先例），不在此断言范围内。"""
+    ⚠ prompts/ 豁免：write_analysis_code.py / metagpt_sample.py / generate_skill.md 是 s6 t1 逐字保护的源
+    prompt 资产，且该门禁除"常量与源逐字相等"外还断言**顶层常量键集相等**——往这些模块里加法拼接一个新常量
+    同样当场红（`C9_PROBE_CALIBRATION` 探针，2026-09-21 实测）。其中诱导模型 `from metagpt.tools.libs...`
+    的文本不在此断言范围内：2026-09-21 C9 取证 = 三件资产生产路径**零消费者**，今日不构成运行时隐患；
+    「谁接进生产谁同批在消费处加法拼接校准常量」这条重开条件记在对照3 §结论-2。"""
     import re as _re
     root = Path(__file__).resolve().parents[1] / "codeharness"
     hits = []
