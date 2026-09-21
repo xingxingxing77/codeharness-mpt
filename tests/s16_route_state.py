@@ -224,16 +224,85 @@ def t5_approval_reject_does_not_run_action():
     assert MESSAGE_ROUTE_TO_SELF in last.send_to, "t5 拒绝消息没回到 <self>，下一轮没人接"
 
 
+def _unwrap_unknown(exc: BaseException):
+    """langgraph 会把条件边里的异常包一层，这里沿 __cause__/__context__ 找回 UnknownRecipient。"""
+    seen = []
+    while exc is not None and id(exc) not in seen:
+        seen.append(id(exc))
+        if type(exc).__name__ == "UnknownRecipient":
+            return str(exc)
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def t6_unknown_recipient_raises():
+    """C1-d：收件人名字对不上装配时必须**当场抛**，不许静默丢。
+
+    静默的代价早就被实测记进文档：LangGraph 对未知节点只打一行
+    `Ignoring unknown node name PM`，然后**整场零次 LLM 调用**（会话看起来"正常跑完"，
+    什么产物都没有）。五格：①具名投给不存在的角色；②SOP 订阅表指向不存在的角色；
+    ③`<self>` 的 sent_from 不在册；④**阳性对照**：合法具名投递照常送达（证明不是一律抛）；
+    ⑤`<all>` 不炸——它是路由标记不是角色名，把它当错误会把所有默认值消息全炸掉。"""
+    def expect_unknown(thread, msg, agents, sop=None):
+        # sop 传 None 用默认 SOP；传 {} 是"没有订阅表"——两者语义不同，别拿真值判断合并
+        graph = build_team(agents, sop=sop if sop is not None else None)
+        try:
+            _ainvoke(graph, _init(msg), thread)
+        except Exception as e:
+            got = _unwrap_unknown(e)
+            assert got is not None, f"抛的不是 UnknownRecipient，而是 {type(e).__name__}: {e}"
+            return got
+        raise AssertionError("收件人不存在竟然没抛——又回到静默丢 + 整场零模型调用那条老路")
+
+    # ①具名投递给不存在的角色（空 SOP 隔离这一条：默认表里 USER_REQUIREMENT→PM 会先命中）
+    ghost = Message(content="派给幽灵", role="assistant", cause_by=RequirementTag.USER_REQUIREMENT,
+                    sent_from="Leader", send_to={"Ghost"})
+    got = expect_unknown("s16-ghost", ghost, {"Leader": _Emitter(RequirementTag.USER_REQUIREMENT, {"Ghost"})},
+                         sop={})
+    assert "Ghost" in got, f"①错误里没带上那个名字：{got}"
+
+    # ②SOP 订阅表把 USER_REQUIREMENT 派给 PM，但装配里没有 PM（正是"整场零模型调用"那一格）
+    got = expect_unknown("s16-sop",
+                         Message(content="开工", role="user", cause_by=RequirementTag.USER_REQUIREMENT,
+                                 sent_from="user", send_to=set()),
+                         {"Boss": _Emitter(RequirementTag.USER_REQUIREMENT, set())},
+                         sop={RequirementTag.USER_REQUIREMENT: ["PM"]})
+    assert "PM" in got, f"②错误里没带上订阅表那个名字：{got}"
+
+    got = expect_unknown("s16-self", Message(content="回喂", role="assistant",
+                                             cause_by=RequirementTag.RUN_CODE,
+                                             sent_from="Ghost", send_to={MESSAGE_ROUTE_TO_SELF}),
+                         {"QA": _Emitter(RequirementTag.RUN_CODE, {MESSAGE_ROUTE_TO_SELF})})
+    assert "Ghost" in got, f"③<self> 的 sent_from 不在册却没说清：{got}"
+
+    b = _Emitter(RequirementTag.USER_REQUIREMENT, set())
+    graph = build_team({"A": _Emitter(RequirementTag.USER_REQUIREMENT, {"B"}), "B": b}, sop={})
+    out = _ainvoke(graph, _init(Message(content="正常指名", role="assistant",
+                                        cause_by=RequirementTag.USER_REQUIREMENT,
+                                        sent_from="A", send_to={"B"})), "s16-nominal")
+    assert b.hits >= 1, f"④阳性对照失败：合法具名投递没送达，B 被激活 {b.hits} 次（判据怕是变成一律抛）"
+
+    # ⑤`<all>` 是路由标记不是角色名：既不抛（否则所有默认值消息全炸），也不广播（本仓刻意不广播）
+    graph = build_team({"A": _Emitter(RequirementTag.USER_REQUIREMENT, {MESSAGE_ROUTE_TO_ALL})}, sop={})
+    out = _ainvoke(graph, _init(Message(content="默认值", role="assistant",
+                                        cause_by=RequirementTag.USER_REQUIREMENT,
+                                        sent_from="A", send_to={MESSAGE_ROUTE_TO_ALL})), "s16-all")
+    assert len(out["messages"]) == 1, \
+        f"⑤<all> 被当成广播了（应当谁都不唤醒）：{[m.content for m in out['messages']]}"
+    assert out["messages"][0].content == "默认值", f"⑤读数不对：{out['messages'][0].content}"
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
-              t5_approval_reject_does_not_run_action]
+              t5_approval_reject_does_not_run_action, t6_unknown_recipient_raises]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS16 门禁通过：{len(checks)} 组（langgraph {LANGGRAPH_VERSION}）—— "
           f"条件边写 state 不持久化 1 组（含节点写入对照组）+ 真图刹车 2 组（<self> 自环 / DEBUG_ERROR 广播）"
-          f"+ B9 自愈回喂 2 组（Action 抛错 / 审批拒绝，都要再激活角色且 3 轮内收尾）")
+          f"+ B9 自愈回喂 2 组（Action 抛错 / 审批拒绝，都要再激活角色且 3 轮内收尾）"
+          f"+ C1 未知收件人当场抛 1 组（含合法指名与 <all> 两格对照）")
 
 
 if __name__ == "__main__":

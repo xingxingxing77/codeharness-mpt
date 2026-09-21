@@ -7,13 +7,25 @@ from typing import Annotated, TypedDict
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
-from codeharness.const import MESSAGE_ROUTE_TO_SELF, RequirementTag
+from codeharness.const import MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_NONE, MESSAGE_ROUTE_TO_SELF, RequirementTag
 from codeharness.schema import Message
 
 
 def merge_dicts(a: dict, b: dict) -> dict:
     """并行 Send 时 dict 合并 reducer（memories 按角色名合并，防覆盖）"""
     return {**a, **b}
+
+
+class UnknownRecipient(ValueError):
+    """委派/路由指向一个不在装配里的收件人——**当场抛，不再静默丢**（C1-d 拍板）。
+
+    为什么必须抛：LangGraph 对未知节点只打一行 `Ignoring unknown node name PM` 然后
+    **整场零次 LLM 调用**（docs/对照5:95 与本仓 `_default_agents` 的注释都记过），
+    表现是"会话正常跑完、什么都没产出"——静默比报错贵得多：用户等到结束才发现没结果，
+    而日志里只有一行别人家的 warning。抛出去会走 runner 的 `_fail`，会话标 failed、
+    error 文本可读，门禁也终于能断言这一格。
+    `<all>` / `<none>` / `<self>` 是路由标记不是角色名，不在此列（`<all>` 本仓刻意不广播，
+    见 route 里的注释；把它当错误会把所有默认值消息全炸掉）。"""
 
 
 class TeamState(TypedDict):
@@ -93,22 +105,36 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
 
         # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播；B9 的错误/拒绝回喂同路）
         if MESSAGE_ROUTE_TO_SELF in last.send_to:
-            if last.sent_from in agents:
-                # 自环一律计数、不挑 cause_by：B9 回喂的错误/拒绝消息 cause_by=action.name，
-                # 挑白名单会漏掉它——实测同一失败动作激活 12 次打到 recursion_limit
-                # （log/b9_probe.py）。**只读**：条件边里写 state 会被丢弃，计数在 router 节点。
-                if state.get("debug_rounds", 0) >= 3:
-                    return END
-                return [Send(last.sent_from, {"_inbox": [last]})]
-            # 目标节点不存在时绝不能发 Send——LangGraph 会直接抛 Unknown node
+            if last.sent_from not in agents:
+                raise UnknownRecipient(
+                    f"<self> 回喂的目标节点 {last.sent_from!r} 不在装配里（在册：{sorted(agents)}）")
+            # 自环一律计数、不挑 cause_by：B9 回喂的错误/拒绝消息 cause_by=action.name，
+            # 挑白名单会漏掉它——实测同一失败动作激活 12 次打到 recursion_limit
+            # （log/b9_probe.py）。**只读**：条件边里写 state 会被丢弃，计数在 router 节点。
+            if state.get("debug_rounds", 0) >= 3:
+                return END
+            return [Send(last.sent_from, {"_inbox": [last]})]
 
-        # 目标 = 订阅表命中的角色 ∪ 消息里显式指名的角色
+        # 目标 = 订阅表命中的角色 ∪ 消息里显式指名的角色。两边**都要求收件人真在装配里**，
+        # 对不上就地抛 UnknownRecipient（C1-d；静默丢掉就是 LangGraph 那句
+        # "Ignoring unknown node name" + 整场零模型调用）。
         # ⚠ send_to 的默认值是 <all>，这里**刻意不做广播**：多数 Action 不显式设 send_to，
         # 一旦把 <all> 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活。
-        # 要广播请显式列出收件人，或走插话通道。
-        targets = list(sop.get(last.cause_by, []))
+        # 路由标记（<all>/<none>/<self>）不是角色名，不参与"存不存在"的判定。
+        markers = (MESSAGE_ROUTE_TO_SELF, MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_NONE)
+        targets = []
+        for name in sop.get(last.cause_by, []):
+            if name not in agents:
+                raise UnknownRecipient(f"SOP 订阅表把 {last.cause_by} 派给不在装配里的角色 "
+                                       f"{name!r}（在册：{sorted(agents)}）")
+            targets.append(name)
         for name in sorted(last.send_to):
-            if name in agents and name != last.sent_from and name not in targets:
+            if name in markers or name == last.sent_from:
+                continue
+            if name not in agents:
+                raise UnknownRecipient(f"消息具名投递给不存在的角色 {name!r}"
+                                       f"（发件人 {last.sent_from!r}，在册：{sorted(agents)}）")
+            if name not in targets:
                 targets.append(name)
 
         w = wiring or CONTEXT_WIRING                    # 别名：route 内赋值会遮蔽闭包变量
@@ -122,9 +148,20 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
         if chat:
             for content, send_to in chat.drain():
                 recv = send_to or chat.default_target
-                if recv in agents:
-                    sends.append(Send(recv, {"_inbox": [Message(
-                        content=content, cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")]}))
+                if not recv:
+                    continue                      # 压根没目标（会话还没有 entry_role）——不是"名字写错"，另一回事
+                if recv not in agents:
+                    # 插话与委派**不同判**（用户 2026-09-21 定的档位）：这里丢那一条消息，
+                    # 不抛——为一根错名字的角色赔上整场已烧的用量不划算，且端点早就按
+                    # `session.roles` 422 过，走到这一步只可能是跨 worker 的陈旧队列或 ext_api 直投。
+                    # 但不许静默：loguru 一条 WARNING + stats 里记一笔（门禁据此断言"丢了且留了痕"）。
+                    from codeharness.logs import logger
+                    logger.warning(f"插话指名投给不存在的角色 {recv!r}，该条已丢弃（在册：{sorted(agents)}）")
+                    if stats is not None:
+                        stats.append({"cause_by": "chat-dropped", "activated": 0, "roles": recv})
+                    continue
+                sends.append(Send(recv, {"_inbox": [Message(
+                    content=content, cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")]}))
 
         if stats is not None:
             stats.append({"cause_by": last.cause_by, "activated": len({s.node for s in sends}),
@@ -144,7 +181,9 @@ def build_team(agents: dict, checkpointer=None, sop: dict | None = None, stats: 
     ⚠ 默认 checkpointer 是内存型：内核自测不落盘。持久化断点由调用方（server runner）
     经 `environment/checkpoint.py::make_checkpointer` 显式注入。
     `stats` 传一个列表即可拿到每轮实际激活的节点数（见 make_route）。"""
-    route = make_route(sop or SOP, agents, stats=stats)
+    # ⚠ `sop or SOP` 会把「显式传空表」（= 这场没有订阅，只靠具名投递）吃成 falsy、
+    # 悄悄退回经典表——两个不同的东西共用一个 falsy 值，判据想隔离具名路时会中这个坑。
+    route = make_route(SOP if sop is None else sop, agents, stats=stats)
     g = StateGraph(TeamState)
 
     async def router(state: TeamState):

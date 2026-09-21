@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from codeharness.base.action import BaseAction
 from codeharness.const import MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_SELF, RequirementTag
 from codeharness.environment.checkpoint import close_all, default_checkpoint_path, make_checkpointer
-from codeharness.environment.team_graph import SOP, TeamState, build_team, make_route
+from codeharness.environment.team_graph import UnknownRecipient, SOP, TeamState, build_team, make_route
 from codeharness.roles.agent import Agent
 from codeharness.runtime import CHAT_SINK, CURRENT_PROJECT, REPORT_SINK
 from codeharness.schema import Message
@@ -120,17 +120,51 @@ def t3_explicit_send_to():
         _fail(f"3. 显式指名的 send_to 未被路由: {sends}")
 
 
-# ---------- 4. <self> 目标不存在时绝不能发 Send ----------
+# ---------- 3b. 插话指名不存在的角色：丢那一条 + 留痕，但不把整场打成 failed ----------
+def t3b_chat_to_unknown_role_is_dropped():
+    """委派与插话**不同判**（用户 2026-09-21 定的档位）：具名委派指错人当场抛（见 t4），
+    插话指错人只丢那一条并留痕——为一根错名字赔上整场已烧的用量不划算，
+    且端点早已按 `session.roles` 422 过，能走到这里只剩跨 worker 陈旧队列与 ext_api 直投。"""
+    from codeharness.runtime import CHAT_SINK, ChatQueue
+    wraps = {n: _Wrap(n) for n in ("PM", "QA")}
+    stats = []
+    route = make_route({}, wraps, wiring={}, stats=stats)
+    q = ChatQueue()
+    q.enqueue("给幽灵的插话", "Ghost")
+    q.enqueue("给 QA 的插话", "QA")
+    tok = CHAT_SINK.set(q)
+    state = TeamState(messages=[Message(content="c", cause_by="UnregisteredTag", sent_from="PM",
+                                        send_to=set())],
+                      memories={}, round=0, debug_rounds=0, finished=False)
+    try:
+        sends = route(state)
+    finally:
+        CHAT_SINK.reset(tok)
+    nodes = [s.node for s in sends] if sends != END else []
+    if nodes != ["QA"]:
+        _fail(f"3b. 插话路由不对（Ghost 那条该丢、QA 那条该送达）：{nodes}")
+    drops = [x for x in stats if x.get("cause_by") == "chat-dropped"]
+    if not drops or drops[0]["roles"] != "Ghost":
+        _fail(f"3b. 丢弃没留痕（stats 里没有 chat-dropped/Ghost，就是静默丢）：{stats}")
+    if q.drain():
+        _fail("3b. 两条插话没被消费干净（丢一条也要把它从队列里取走，否则每轮重投）")
+
+
+# ---------- 4. <self> 目标不存在：当场抛，绝不发 Send（C1-d 改判） ----------
 def t4_self_to_unknown_node():
+    """旧行为是「静默落到 END」——那条静默正是 docs 记的 `Ignoring unknown node name`
+    + 整场零 LLM 调用。现在必须抛 UnknownRecipient，且错误里要点名那个不存在的收件人。"""
     route = make_route({}, {"PM": _Wrap("PM")}, wiring={})
     state = TeamState(messages=[Message(content="c", cause_by="t", sent_from="Ghost",
                                         send_to={MESSAGE_ROUTE_TO_SELF})],
                       memories={}, round=0, debug_rounds=0, finished=False)
-    got = route(state)
-    if got == END:
+    try:
+        got = route(state)
+    except UnknownRecipient as e:
+        if "Ghost" not in str(e):
+            _fail(f"4. 抛是抛了，但没点名那个不存在的收件人：{e}")
         return
-    if any(getattr(s, "node", None) == "Ghost" for s in got):
-        _fail("4. 向不存在的节点发 Send，LangGraph 会直接抛 Unknown node")
+    _fail(f"4. <self> 指向不存在的节点却只回 {got!r}——静默丢就是「整场零模型调用」那条老路")
 
 
 # ---------- 5. 订阅关系可证伪：改 cause_by 后下游必须收不到 ----------
@@ -557,6 +591,7 @@ def t16_run_code_named_delivery():
 
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
+              t3b_chat_to_unknown_role_is_dropped,
               t4_self_to_unknown_node, t5_subscribe_is_falsifiable, t6_all_is_not_broadcast,
               t7_checkpointer_persists, t8_interrupt_resume_across_restart,
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
