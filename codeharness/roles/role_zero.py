@@ -42,8 +42,6 @@ class RoleZeroState(TypedDict):
 
 
 class RoleZero:
-    SPECIAL = {"end", "End", "RoleZero.ask_human", "RoleZero.reply_to_human"}
-
     def __init__(self, profile: dict, tools: list, llm, system_prompt: str = SYSTEM_PROMPT,
                  instruction: str = ROLE_INSTRUCTION, max_loops: int = 15, env_desc: str = "",
                  longterm_memory=None, memory: Memory | None = None,
@@ -72,11 +70,40 @@ class RoleZero:
         # 同一层已知债，S7 落盘时一起收）。
         self.plan: Plan | None = None
         self._plan_goal = ""
+        # 委派名册（C1-②）：{成员名: "profile, goal"}。由装配方（team.default_team）在组队后填，
+        # 空名册=这角色没进过队，publish_team_message 直接拒（否则 route 的 UnknownRecipient
+        # 会把整场已烧的用量陪葬——模型写错名字是常态，不是编程错误）。
+        self.teammates: dict[str, str] = {}
+        self._outbox: list[tuple[str, str]] = []    # [(任务指令, 成员名)]，as_node 收口时发成 Send
 
     PLAN_COMMANDS = {   # 源 :121-124 的 Plan 命令面
         "Plan.append_task": "append_task", "Plan.reset_task": "reset_task",
         "Plan.replace_task": "replace_task", "Plan.finish_current_task": "finish_current_task",
     }
+    # 源 TeamLeader._update_tool_execution(:41-47)：真名 + publish_message 别名，两个键同一个实现
+    PUBLISH_COMMANDS = {"TeamLeader.publish_team_message", "TeamLeader.publish_message"}
+
+    def team_info(self) -> str:
+        """源 TeamLeader._get_team_info(:50-57)：`名字: profile, goal` 一行一个。
+        模型照这份名册填 `send_to`，名字对不上才有的可纠。"""
+        return "".join(f"{n}: {desc}\n" for n, desc in sorted(self.teammates.items()))
+
+    def _publish_team_message(self, args: dict) -> str:
+        """源 team_leader.py:81-91：把任务交给某个成员，成员就此开工。
+
+        源在命令里直接 `env.publish_message`；本仓的投递边界是团队图的 `route()`，
+        所以这里只把 (指令, 成员) 记进 outbox，由 `as_node` 在节点收口时发成消息。"""
+        if not self.teammates:
+            return "[已忽略] 本角色不在任何团队里（没有队友名册），无法委派"
+        raw = args.get("send_to", "")
+        members = raw if isinstance(raw, (list, tuple, set)) else [raw]
+        unknown = [str(m) for m in members if str(m) not in self.teammates]
+        if unknown:
+            # 当场拒不当场抛：这条文本经 _observe 回喂下一轮，模型自己改名字重发（B9 同一条自愈路）
+            return f"[已拒绝] 成员 {unknown} 不在团队（在册: {sorted(self.teammates)}）"
+        content = str(args.get("content", "") or "")
+        self._outbox.extend((content, str(m)) for m in members)
+        return f"[已委派] → {', '.join(str(m) for m in members)}"
 
     def _run_plan_command(self, name: str, args: dict) -> str:
         """真身 schema.Plan：拓扑排序/级联 reset/游标推进都在里面。参数错（缺 task_id、
@@ -292,6 +319,8 @@ class RoleZero:
                         results.append({"name": name, "result": answer})
                     elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
                         results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
+                    elif name in self.PUBLISH_COMMANDS:           # 源 TeamLeader.publish_team_message(:81)
+                        results.append({"name": name, "result": self._publish_team_message(args)})
                     elif name in self.PLAN_COMMANDS:            # 台账 #10：真 Plan 状态机（源 :121-124）
                         results.append({"name": name, "result": self._run_plan_command(name, args)})
                     elif name in self.tools:
@@ -355,7 +384,20 @@ class RoleZero:
             results = sub["history"][-1]["results"] if sub["history"] else []
             reply = next((r["result"] for r in results if r["name"] == "RoleZero.reply_to_human"), None)
             content = reply or (sub["history"][-1]["thought"] if sub["history"] else "done")
-            return {"messages": [Message(content=content, role="assistant",
-                                         cause_by=RequirementTag.RUN_COMMAND, sent_from=name)]}
+            msgs = [Message(content=content, role="assistant",
+                            cause_by=RequirementTag.RUN_COMMAND, sent_from=name)]
+            # ---- 委派聚合件（C1-②）：源 publish_team_message 一次一发，本仓一次节点运行攒一摞，
+            # 交给 team_graph 的 `_wire_delegation` 拆成「一人一条」再 Send。投给自己不算委派（源同）。
+            deleg = [(c, m) for c, m in self._outbox if m != name]
+            self._outbox = []
+            if deleg:
+                # 顺序有讲究：route() 只读 state["messages"][-1]，聚合件必须排在最后一条。
+                msgs.append(Message(content="\n".join(f"→ {m}: {c[:120]}" for c, m in deleg),
+                                    role="user", cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                                    send_to={m for _, m in deleg},
+                                    instruct_content={"delegations": [{"member": m, "instruction": c}
+                                                                      for c, m in deleg]},
+                                    instruct_schema="TeamDelegation"))
+            return {"messages": msgs}
 
         return name, _run

@@ -7,12 +7,13 @@
 
 ## 结论速览
 
-**实现度：约 65%。经典线的订阅式路由是等价迁移（过滤条件逐字一致，且比源多了「每轮激活数」自证）；多 worker 一致性、前端事件流、插话与跨 worker 停止是源没有的增量。丢的是动态线——严格意义上，本项目目前只有少数几处 agent→agent 具名投递（QA↔Engineer 一条回路 + debug 回流），且动态线仍没有 agent 间通信。**
+**实现度：约 65%。经典线的订阅式路由是等价迁移（过滤条件逐字一致，且比源多了「每轮激活数」自证）；多 worker 一致性、前端事件流、插话与跨 worker 停止是源没有的增量。丢的是动态线——严格意义上，本项目目前只有少数几处 agent→agent 具名投递（QA↔Engineer 一条回路 + debug 回流），动态线到 **2026-09-21 C1-②** 才第一次有了 agent→agent 的出站（队长点名成员，单向）。**
 
 四条最要紧的缺口：
 
-1. **agent→agent 具名通信极少**：`actions/run_code.py:98-109`——QA 测试失败且分诊判定该回开发时 `send_to={"Engineer"}`，经 `team_graph.py:112-114` 具名分支 + `agent.py:80`（`s["name"] in m.send_to`）双侧闭环；`actions/debug_error.py` 回流带 `send_to`。除此之外全部靠 `cause_by`→SOP 表路由。动态线（对应源 MGXEnv 那条线）**没有** agent 间通信。
+1. **agent→agent 具名通信极少**：`actions/run_code.py:98-109`——QA 测试失败且分诊判定该回开发时 `send_to={"Engineer"}`，经 `team_graph.py:112-114` 具名分支 + `agent.py:80`（`s["name"] in m.send_to`）双侧闭环；`actions/debug_error.py` 回流带 `send_to`。除此之外全部靠 `cause_by`→SOP 表路由。动态线（对应源 MGXEnv 那条线）此前**没有** agent 间通信，2026-09-21 C1-② 起有出站（见下条）。
 2. **动态线委派未实现**（与对照 5 §结论-2 同一条，从通信视角看）：源 `TeamLeader.publish_team_message`（`roles/di/team_leader.py:75-86`）可点名唤醒任意队友；本仓 `team.py:65-71` 注释自认「需求只喂队长（`TEAMLEADER_NAME`=源逐字 "Mike"）、Alice/Bob 空转」，`Command.assignee` 只是展示字段（`role_zero.py:165`）。本轮未动。
+   → **✅ 已实现出站（2026-09-21 C1-②）**：队长调 `TeamLeader.publish_team_message(content, send_to)` → `as_node` 收口发聚合消息（`cause_by=RunCommand`）→ `team_graph._wire_delegation` 一人一条 → `route()` 按载荷 `send_to` 定向 `Send`。第 1 条那句「动态线没有 agent 间通信」到此作废（回报通路仍是单向：成员不回报队长）。门禁 `tests/s22_delegate_route.py` 五组，含「一次点名两名不许互串任务」与「错名字被 `[已拒绝]` 回喂、不赔整场用量」。
 3. **`<all>` 不再是广播**（有意，代价需记清）：源 `is_send_to`（`utils/common.py:411-418`）见 `<all>` 即投全员，而 `send_to` 的默认值就是 `{<all>}`（`schema.py:241`）；本仓 `team_graph.py:108-110` 明确否决——「多数 Action 不显式设 send_to，一旦把 `<all>` 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活」。判断成立且 `s3b t6` 钉死了它，但结果是**源里"任何角色都能被指名广播触达"这个能力在本仓没有对等物**（要广播必须显式列出收件人）。
 4. ~~**产物文档的 state 通道是假的**~~ → **已删干净（2026-09-21 C2）**：`TeamState.docs`（原 `team_graph.py:22`，注释「filename -> Document（产物仓）」）在三处 init 写 `{}` 后**零读零写**，交接实际全走磁盘 `ArtifactStore`（`actions/import_repo.py:121` 的 `save(subdir="docs")` 就是证据）。处置：字段从 TypedDict 删、`team.py:42,61` 与 `sop/builder.py:34` 三处 `"docs": {}` 一并撤、msgpack 白名单里为它挂的 `Document`/`Documents` 两登记项同批摘掉（摘后跑整套 `s3b`，含真落断点的 t7/t8 → langgraph 侧 **0 条 unregistered 告警**，证明确实无人用它），`tests/s3b_runtime` 新增 **t15** 正向钉住不复燃。**为什么必须留断言而不是靠运行期报错**：实测 LangGraph 对未知状态键**静默丢弃**（删掉字段后 `tests/s16_route_state.py` 五组仍全绿、exit 0），写者不会自己炸。文档交接的唯一真通道 = 磁盘 `ArtifactStore` + `CONTEXT_WIRING` 装配进消息。
 
@@ -85,7 +86,7 @@
 **零断言**：
 - **`send_to={"Engineer"}` 这条唯一的生产级具名投递**——`s3b t3` 用的是合成的 `"QA"`，`run_code.py:104` 的真实分支没有专门断言；
 - `CONTEXT_WIRING` 的文档装配路径（`TeamState.docs` 已随 C2 删除并由 `s3b t15` 钉住，此项不再适用；但**装配本身**仍零断言）；
-- **动态线多角色委派**（`s3b t14:398` 只断单队长图）；
+- ~~**动态线多角色委派**（`s3b t14:398` 只断单队长图）~~ → **已补（2026-09-21 C1-②）**：`tests/s22_delegate_route.py` 五组——真图队长→Alice 激活且指令原文进了她的模型请求、一次点名两名不互串、错名字被 `[已拒绝]` 回喂且零唤醒、无名册不委派、拆包后的载荷才收窄。**成员→队长的回报通路仍是零断言，因为那条通路本身还没接（②b）**；
 - `talk_action.py` 无任何测试引用；
 - 「一条消息被哪几个角色收到」的回放/审计面。
 

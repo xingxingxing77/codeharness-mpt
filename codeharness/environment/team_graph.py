@@ -84,9 +84,23 @@ def _wire_summarize_code(msg: Message, state: dict) -> list[Message]:
                     instruct_content={"code_doc": code_doc}, instruct_schema="TestingContext")]
 
 
+def _wire_delegation(msg: Message, state: dict) -> list[Message]:
+    """队长的委派聚合件 → 每个成员一条载荷（C1-②，源 publish_team_message 的「一发一投」）。
+
+    RoleZero 的正常产出也是 cause_by=RunCommand，靠 `instruct_schema` 认委派，其余原样透传。
+    每条载荷自带 `send_to={成员}`，route 据此定向投递——否则两名成员会互相收到对方的任务。"""
+    if msg.instruct_schema != "TeamDelegation":
+        return [msg]
+    delegations = (msg.instruct_content or {}).get("delegations") or []
+    return [Message(content=d.get("instruction", ""), role="user", cause_by=msg.cause_by,
+                    sent_from=msg.sent_from, send_to={d.get("member", "")})
+            for d in delegations] or [msg]
+
+
 CONTEXT_WIRING = {
     RequirementTag.WRITE_TASKS: _wire_write_tasks,
     RequirementTag.SUMMARIZE_CODE: _wire_summarize_code,
+    RequirementTag.RUN_COMMAND: _wire_delegation,
 }
 
 
@@ -140,7 +154,14 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
         w = wiring or CONTEXT_WIRING                    # 别名：route 内赋值会遮蔽闭包变量
         # 上下文装配按 cause_by 只做一次，多目标共用（装配要读产物仓，别按目标重复读盘）
         payload_msgs = w.get(last.cause_by, lambda m, s: [m])(last, state) if targets else []
-        sends = [Send(t, {"_inbox": [m]}) for t in targets for m in payload_msgs]
+        # 装配器产出的载荷可以自带收件人（委派的「一人一条、各投各的」）；原始消息与非具名载荷
+        # 仍按 targets 全发。**收件人只从 targets 里收窄、不新增**，所以 C1-① 的 UnknownRecipient
+        # 判定绕不过去；收窄后为空 = 这条只发给发件人自己（源 publish_team_message 里就是直接 return）。
+        sends = []
+        for m in payload_msgs:
+            named = set() if m is last else m.send_to.difference(markers)
+            tgts = [t for t in targets if t in named] if named else targets
+            sends.extend(Send(t, {"_inbox": [m]}) for t in tgts)
 
         # ---- 运行中插话（前端 InputCard "追问"；空目标 = TeamLeader） ----
         from codeharness.runtime import CHAT_SINK

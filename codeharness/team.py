@@ -24,10 +24,23 @@ def default_team(llm, env_desc: str = "a software company"):
         "Bob":   ("Architect", "design a concise, usable, complete software system"),
     }
     # 每角色一个 brain：key 按角色名分（RoleZero._brain_key），Redis 挂了也只是不摘要，不影响跑
-    return {name: RoleZero({"name": name, "profile": prof, "goal": goal},
-                           REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
-                           brain=BrainMemory(), longterm_memory=ltm)
-            for name, (prof, goal) in profiles.items()}
+    agents = {name: RoleZero({"name": name, "profile": prof, "goal": goal},
+                             REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
+                             brain=BrainMemory(), longterm_memory=ltm)
+              for name, (prof, goal) in profiles.items()}
+    # 委派名册（C1-②）：源 `_get_team_info`(:50-57) 的等价。缺了它模型无从知道成员叫什么，
+    # 只能编名字——编出来的名字在 `publish_team_message` 处被拒（有 roster 才校验），
+    # 侥幸投出去也会在 route 抛 UnknownRecipient。名册先于委派存在。
+    roster = {n: f"{r.profile.get('profile', '')}, {r.profile.get('goal', '')}"
+                for n, r in agents.items()}
+    for r in agents.values():
+        r.teammates = roster
+    if TEAMLEADER_NAME in agents:
+        # 源 TeamLeader._think(:66-67) 每轮重算 instruction=TL_INSTRUCTION；本仓走 instruction_provider
+        from codeharness.prompts.di.team_leader import TL_INSTRUCTION
+        leader = agents[TEAMLEADER_NAME]
+        leader.instruction_provider = lambda: TL_INSTRUCTION.format(team_info=leader.team_info())
+    return agents
 
 
 async def run_project(idea: str, project_id: str, agents: dict | None = None,
@@ -64,9 +77,9 @@ def prepare_project(idea: str, project_id: str, agents: dict | None = None,
 
 def dynamic_assembly(llm):
     """S9.1 同范式对照·本仓侧装配（台账 #19①）：default_team 三角色 + 动态路由表。
-    本仓动态形态=单 RoleZero 工具循环（Command.assignee 只是展示字段，无委派路由），
-    需求只喂队长（TEAMLEADER_NAME=源逐字 "Mike"）、Alice/Bob 空转——与源 MGX 的多角色委派
-    差在这里，对照表如实记。"""
+    需求只喂队长（TEAMLEADER_NAME=源逐字 "Mike"）；队长再按 `TeamLeader.publish_team_message`
+    把任务定向投给 Alice/Bob（C1-②，`route` 的具名投递通路）。仍差源的一半：成员干完不回报队长，
+    所以队长看不到"谁做完了"，源 MGX 的"跟踪进度并 finish_current_task"还没接上（②b）。"""
     from codeharness.const import RequirementTag, TEAMLEADER_NAME
     return default_team(llm), {RequirementTag.USER_REQUIREMENT: [TEAMLEADER_NAME]}
 

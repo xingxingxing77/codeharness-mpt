@@ -37,6 +37,9 @@ class Task(BaseModel):
 Special Command: Use {{"command_name": "end"}} to do nothing or indicate completion of all requirements and the end of actions.
 Human Interaction: Use {{"command_name": "RoleZero.ask_human", "args": {{"question": "..."}}}} when blocked;
 use {{"command_name": "RoleZero.reply_to_human", "args": {{"content": "..."}}}} to report progress or final results.
+Team Delegation: If you lead a team, use {{"command_name": "TeamLeader.publish_team_message",
+"args": {{"content": "the full task instruction", "send_to": "one member name from your team info"}}}}
+to hand a task to that member — the member starts working as soon as the message is delivered.
 
 # Example
 {example}
