@@ -33,16 +33,41 @@ _USERS_LOCK = threading.Lock()
 
 
 def _load_users() -> dict:
-    if USERS_FILE.exists():
-        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
-    return {}
+    """读用户表。Windows 上 rename 在飞的那几毫秒读目标文件会撞 `PermissionError`
+    （EACCES / WinError 5）——写侧 `_save_users` 已经在 replace 上重试，读侧不一起等就成了
+    「有人注册时别人登不进」。重试三档共 ~170ms，还不行就照实抛，不静默返回空表
+    （空表 = 所有人都不存在，那是比 500 更坏的答复）。"""
+    def read():
+        return json.loads(USERS_FILE.read_text(encoding="utf-8")) if USERS_FILE.exists() else {}
+
+    for backoff in (0.02, 0.05, 0.1, None):
+        try:
+            return read()
+        except PermissionError:
+            if backoff is None:
+                raise
+            time.sleep(backoff)
 
 
 def _save_users(users: dict):
     USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = USERS_FILE.with_suffix(".tmp")
+    # 临时名必须一次性（F-D，治理 §3 第 5 条）：原先写死 `users.tmp`，两笔并发 save 共用一支
+    # scratch——各自 truncate、各自从 0 覆写，短的那笔盖不掉长的那笔的尾巴，落盘的就是
+    # 半新半旧的坏 JSON（本机实测见 `tests/s20::t1b①`），从此 `_load_users` 一调就炸。
+    # 今天只有 register 一个写入方且在 `_USERS_LOCK` 内所以不显形，但前提一破（多 worker、
+    # 或以后开一个改密码的写口）就复现。
+    tmp = USERS_FILE.with_suffix(f".{secrets.token_hex(8)}.tmp")
     tmp.write_text(json.dumps(users, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(USERS_FILE)
+    # rename 目标正被别人开着时 Windows 回 WinError 5（拒绝访问）——**这条今天就能发生**：
+    # `verify()` 读表不加锁，登录与注册同时发生即撞。重试几次；每次用不同的 scratch，
+    # 所以最坏情况是留一支没人认领的 .tmp 在盘上，而不是丢账号或写坏表。
+    for backoff in (0.02, 0.05, 0.1, 0.2):
+        try:
+            tmp.replace(USERS_FILE)
+            return
+        except PermissionError:
+            time.sleep(backoff)
+    tmp.replace(USERS_FILE)          # 第五次还不行就照实抛，别静默当成功
 
 
 def _hash(password: str, salt: str) -> str:
