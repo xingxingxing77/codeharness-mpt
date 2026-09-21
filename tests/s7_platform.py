@@ -334,7 +334,11 @@ async def t12_sse_reconnect_continuity():
         q = bus.subscribe("sR")                                          # 补完后从流尾续推
         bus.publish("sR", kind="report", block="Thought", value="live")
         await bus.flush_now()
-        ev = await asyncio.wait_for(q.get(), timeout=3)
+        try:
+            ev = await asyncio.wait_for(q.get(), timeout=3)
+        except asyncio.TimeoutError:
+            # 内层超时别冒到外层，否则报的是「60s 卡死」，把方向整个带偏成挂死
+            raise AssertionError("subscribe 后 3s 内没收到续推事件——流尾游标竞态？") from None
         assert ev.value == "live" and ev.seq > catchup[-1].seq, ev
         _ok("t12", "SSE 断线重连：XRANGE 补洞 + 流尾续推，seq 游标不重不漏")
     finally:

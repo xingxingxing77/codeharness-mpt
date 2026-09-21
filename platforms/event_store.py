@@ -44,6 +44,15 @@ def dec_id(sid_str: str) -> int:
     return int(ms) * 10**6 + int(cnt)
 
 
+def _ev_from(eid: str, fields: dict) -> Event:
+    """stream 条目 → Event。**seq/cursor 一律以 eid 为准**（落库的 d 里那份是 publish 时的
+    占位 0，XADD 之后才由服务端承接）。"""
+    ev = Event(**json.loads(dict(fields)["d"]))
+    ev.seq = dec_id(eid)
+    ev.cursor = pad_eid(eid)
+    return ev
+
+
 class RedisEventBus:
     def __init__(self, config: RedisConfig | None = None, max_events: int = MAX_EVENTS_PER_SESSION):
         cfg = config or settings.redis
@@ -104,26 +113,39 @@ class RedisEventBus:
                 return
             await asyncio.sleep(0.03)
 
-    def history(self, sid: str, after: Union[str, int] = "") -> list:
+    def history(self, sid: str, after: Union[str, int] = "", before: Union[str, int] = "",
+                limit: int = 0) -> list:
+        """游标窗口回放，语义与进程内 bus 一致（`server/events.py`）：after 开下界、
+        before 开上界（往回翻）、limit>0 取窗口一侧的 limit 条、返回始终升序。
+        XRANGE 的 COUNT 截的是**头部**，所以给了 before 要改走 XREVRANGE 取最近
+        limit 条再翻回来，否则「加载更早」会拿到整条流最老的 N 条。"""
         key = STREAM.format(sid)
-        a = norm_cursor(after)
+        a, b = norm_cursor(after), norm_cursor(before)
         lo = f"({a}" if a and a != "0" else "-"
-        out = []
-        for eid, fields in self._sync.xrange(key, min=lo):
-            ev = Event(**json.loads(dict(fields)["d"]))
-            ev.seq = dec_id(eid)
-            ev.cursor = pad_eid(eid)
-            out.append(ev)
-        return out
+        hi = f"({b}" if b and b != "0" else "+"
+        take = limit if limit and limit > 0 else None
+        if take and b:
+            rows = list(self._sync.xrevrange(key, max=hi, min=lo, count=take))
+            rows.reverse()
+        else:
+            rows = self._sync.xrange(key, min=lo, max=hi, count=take)
+        return [_ev_from(eid, fields) for eid, fields in rows]
 
     def subscribe(self, sid: str) -> asyncio.Queue:
-        """从**当前流尾**开始收（历史由调用方自己走 history()，与进程内 bus 同一分工）。"""
+        """从**当前流尾**开始收（历史由调用方自己走 history()，与进程内 bus 同一分工）。
+
+        流尾游标必须**在返回前**钉死：留给 reader 首次被调度时才取，则 `subscribe()` 与
+        那次取尾之间落库的事件会被算进「流尾」而永久跳过。`/events` 的走法正是
+        subscribe → history → 续推，那批事件既不在已取的历史里、XREAD 又从它之后开始读
+        → SSE 静默丢事件（t12 偶发红的真因，不是测试独有的问题）。钉在返回后，语义是
+        「至少一次」，重复由前端按 cursor 去重。"""
         q: asyncio.Queue = asyncio.Queue()
         key = STREAM.format(sid)
+        tail = self._sync.xrevrange(key, count=1)     # 与 history 同一个同步出口，亚毫秒
+        start = tail[0][0] if tail else "0-0"
 
         async def _reader():
-            tail = await self.client.xrevrange(key, count=1)   # 从当前流尾开始续推
-            start = tail[0][0] if tail else "0-0"
+            nonlocal start
             while True:
                 try:
                     resp = await self.client.xread({key: start}, block=5000, count=64)
@@ -133,11 +155,7 @@ class RedisEventBus:
                 for _, entries in resp:
                     for eid, fields in entries:
                         start = eid
-                        d = dict(fields)
-                        ev = Event(**json.loads(d["d"]))
-                        ev.seq = dec_id(eid)
-                        ev.cursor = pad_eid(eid)
-                        q.put_nowait(ev)
+                        q.put_nowait(_ev_from(eid, fields))
 
         self._readers[q] = asyncio.get_running_loop().create_task(_reader())
         return q

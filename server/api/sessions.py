@@ -3,7 +3,7 @@ auth 关恒 "default"（现状行为），开时校验 Bearer 并按 user 隔离
 import asyncio
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from server.auth import current_user
@@ -295,11 +295,16 @@ def session_trace(sid: str, request: Request, user: str = Depends(current_user))
 
 
 @router.get("/{sid}/events/history")
-def events_history(sid: str, request: Request, after: str = "", user: str = Depends(current_user)):
+def events_history(sid: str, request: Request, after: str = "", before: str = "",
+                   limit: int = Query(0, ge=0, le=1000), user: str = Depends(current_user)):
     """有界 JSON 回放：`/events` 是给浏览器 EventSource 的无界活流，**任何要读完再走的
     消费方都必须用这条**——冒烟脚本挂死两场的根因就是拿普通 GET 读无限流（TestClient 的
     transport 会把应用跑到底才返回，`while True` 永不返回）。事后审计、S9 采集、断线重连
-    补历史，证据都从这里拿。"""
-    bus, store = _get(request, "bus"), _get(request, "store")
+    补历史，证据都从这里拿。
+
+    翻页（B2）：`after`=往前追增量、`before`=往回翻（「加载更早」，**开区间**上界）、
+    `limit`=一屏条数（0=不限，即老调用方语义）。返回**始终升序**，下一页的 before 就用
+    本页首条的 cursor，取到空页即翻到头——所以响应不需要额外的游标字段。"""
+    bus = _get(request, "bus")
     _owned(request, sid, user)
-    return {"events": [e.model_dump() for e in bus.history(sid, after)]}
+    return {"events": [e.model_dump() for e in bus.history(sid, after, before, limit)]}

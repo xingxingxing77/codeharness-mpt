@@ -18,9 +18,11 @@
   t9 F2：req() 的 fetch 必须真带 AbortSignal.timeout（否则服务端挂起=前端永久 pending、按钮焊死）。
   t10 F3：respondApproval 的 catch 必须「快照回滚 + 服务端重取」两句都在
      （只回滚会复活别处已决议的卡，只重取则断网时卡片再也回不来）。
+  t11 B2：/events/history 的 before/limit 反向分页——两台 bus 同签名 + 窗口语义同判 + 路由传参与值域。
 
-跑法：
-  cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_frontend_contract.py
+跑法（PYTHONPATH 必须带 logs 那截，少了会撞本机 WMI 永久卡死，看着像代码挂死）：
+  cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \
+    PYTHONDONTWRITEBYTECODE=1 F:/anaconda/python.exe -B tests/s8_frontend_contract.py
 """
 import re
 import tempfile
@@ -502,6 +504,147 @@ def t10_approval_rollback_realign():
     _ok("t10", "F3 catch 里回滚与服务端重取都在，且顺序是先回滚后对齐")
 
 
+def _redis_up():
+    """探活（s7 同姿势）：db=15 才碰，6379 不通则返回 None 让 Redis 段明说跳过。"""
+    import redis
+    from codeharness.configs.settings import RedisConfig, settings
+    try:
+        cfg = RedisConfig(host=settings.redis.host, port=settings.redis.port, db=15)
+        return cfg if redis.Redis.from_url(cfg.to_url()).ping() else None
+    except Exception:
+        return None
+
+
+def t11_events_history_window():
+    """B2：`/events/history` 反向分页（撑「加载更早」胶囊的那条后端面）。钉三个洞：
+    ① **两个 bus 实现同签名**——`settings.platform.use_redis` 默认 True，生产走
+       RedisEventBus；只给进程内那台加分页，Redis 模式下就是 TypeError（批次36
+       「每个用例都显式传 permission」留盲区同族，门禁必须按生产调用形状覆盖两条路）。
+    ② 窗口语义（两台共用一份断言）：before 是**开区间**上界、limit 取靠近 before 的
+       **尾部**、始终升序、limit=0 保持老「全给」语义、翻到头 = 短页后空页（客户端停止条件）。
+       外加判据 B2 第二条的正向读数：45 块（>40）的流按 20 一块往回翻，两页拼回全 45 条
+       不重不漏——不拿「逻辑上应该能翻」充数。
+    ③ 路由真把 before/limit 传下去，且 limit 值域在入口夹住。"""
+    import inspect
+    from platforms.event_store import RedisEventBus, STREAM
+    from server.events import SessionEventBus
+
+    sig_mem, sig_rds = inspect.signature(SessionEventBus.history), inspect.signature(RedisEventBus.history)
+    assert list(sig_mem.parameters) == list(sig_rds.parameters), \
+        f"两台 bus 的 history 参数表漂移 进程内={list(sig_mem.parameters)} redis={list(sig_rds.parameters)}"
+    assert [p.default for p in sig_mem.parameters.values()] == \
+        [p.default for p in sig_rds.parameters.values()], "默认值漂移：limit=0 的老语义在其中一台不成立"
+
+    SID, SID45 = "win", "win45"
+
+    def _seed(bus):
+        """两台 bus 喂同一份剧本：12 条窗口样本 + 45 条「>40 块」长会话样本。"""
+        for i in range(12):
+            bus.publish(SID, kind="report", value=f"m{i}", uuid=f"u{i}")
+        for i in range(45):
+            bus.publish(SID45, kind="report", block="Docs", value=f"b{i}", uuid=f"v{i}")
+
+    def _check(bus, label):
+        cur = [e.cursor for e in bus.history(SID)]
+        assert [e.value for e in bus.history(SID)] == [f"m{i}" for i in range(12)], label
+        assert cur == sorted(cur) and all(len(x) == len(cur[0]) for x in cur), f"{label} 游标非定宽升序"
+        # 往回翻：不含 before 本身，取最靠近它的 3 条，且回给升序
+        p1 = bus.history(SID, before=cur[7], limit=3)
+        assert [e.value for e in p1] == ["m4", "m5", "m6"], (label, [e.value for e in p1])
+        # 翻页协议：下一页 before = 本页首条 cursor ⇒ 与上一页零重叠、零缺口
+        p2 = bus.history(SID, before=p1[0].cursor, limit=3)
+        assert [e.value for e in p2] == ["m1", "m2", "m3"], (label, [e.value for e in p2])
+        p3 = bus.history(SID, before=p2[0].cursor, limit=3)      # 短页=到底前最后一屏
+        assert [e.value for e in p3] == ["m0"], (label, [e.value for e in p3])
+        assert bus.history(SID, before=p3[0].cursor, limit=3) == [], f"{label} 到底了还给数据"
+        assert [e.value for e in p3 + p2 + p1] == [f"m{i}" for i in range(7)], \
+            f"{label} 反向翻页拼接与全量不符（重叠或漏条）"
+        # 上下界叠加；窗口尾部不许越过 after
+        assert [e.value for e in bus.history(SID, after=cur[2], before=cur[8])] == \
+            [f"m{i}" for i in range(3, 8)], label
+        assert [e.value for e in bus.history(SID, after=cur[4], before=cur[9], limit=3)] == \
+            ["m6", "m7", "m8"], f"{label} 尾部窗口越过了 after 下界"
+        # 老语义零回归：只给 after 仍是「之后的全部」；什么都不给仍是全量
+        assert [e.value for e in bus.history(SID, after=cur[5])] == [f"m{i}" for i in range(6, 12)], label
+        assert len(bus.history(SID, after=cur[5], limit=0)) == 6, f"{label} limit=0 应视为不限"
+        # 「>40 块的会话能翻页」（判据 B2 第二条的正向读数）：按界面真实走法——
+        # 首屏渲染尾部 20 块，胶囊用**已渲染最老一条**的 cursor 往回按 20 一块逐页取。
+        big = bus.history(SID45)
+        assert len(big) == 45, (label, len(big))
+        rendered, pages, oldest = big[-20:], [], big[-20].cursor
+        while True:
+            grp = bus.history(SID45, before=oldest, limit=20)
+            if not grp:
+                break
+            pages.append(grp)
+            oldest = grp[0].cursor
+            assert len(pages) < 5, f"{label} 翻页不到头（停止条件失效）"
+        assert [len(p) for p in pages] == [20, 5], (label, [len(p) for p in pages])   # 满页 + 短页
+        assert [e.value for e in pages[1] + pages[0] + rendered] == [f"b{i}" for i in range(45)], \
+            f"{label} 45 块会话翻页拼不回全量"
+
+    _seed(b := SessionEventBus())
+    _check(b, "进程内")
+
+    cfg = _redis_up()
+    if cfg is None:
+        print("⚠️ t11: db=15 Redis 不可达——窗口语义只验了进程内那台（Redis 段跳过，"
+              "门禁不挂在外部服务上）")
+    else:
+        import asyncio
+
+        async def _redis_window():
+            bus = RedisEventBus(cfg)
+            bus.start()                             # flusher 要在运行中的 loop 里建
+            try:
+                _seed(bus)
+                await bus.flush_now()               # seq/cursor 由 XADD 承接，未刷完读不到
+                _check(bus, "redis")
+            finally:
+                await bus.aclose()
+
+        asyncio.run(_redis_window())
+        import redis
+        r = redis.Redis.from_url(cfg.to_url())
+        r.delete(STREAM.format(SID), STREAM.format(SID45))       # db15 不留测试流
+
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        import time
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "窗口", "project_name": "s8win"}).json()["id"]
+            bus = c.app.state.bus
+            for i in range(6):
+                bus.publish(sid, kind="log", value=f"h{i}")
+            for _ in range(60):                     # redis 模式 seq/cursor 由 flusher 承接，等它
+                evs = c.get(f"/api/sessions/{sid}/events/history").json()["events"]
+                if len(evs) >= 7:
+                    break
+                time.sleep(0.05)
+            assert len(evs) == 7, f"路由回放只拿到 {len(evs)} 条（created 状态事件 + 6 条 log）"
+            url = f"/api/sessions/{sid}/events/history"
+            assert [e["value"] for e in evs[1:]] == [f"h{i}" for i in range(6)], evs
+            # 老写法（只有 after）行为一字不变
+            assert [e["cursor"] for e in c.get(url, params={"after": evs[0]["cursor"]}).json()["events"]] == \
+                [e["cursor"] for e in evs[1:]], "after 老语义被改坏"
+            # 新参真的进到了 bus：before=末条 + limit=2 → 倒数第 2、3 条（升序）
+            page = c.get(url, params={"before": evs[-1]["cursor"], "limit": 2}).json()["events"]
+            assert [e["cursor"] for e in page] == [e["cursor"] for e in evs[-3:-1]], page
+            assert c.get(url, params={"before": evs[0]["cursor"], "limit": 5}).json()["events"] == [], \
+                "第一条之前还有数据？反向翻页的到头条件不成立"
+            # 值域在入口夹住（查询参数是不可信输入，负数/超大不能靠下游兜）
+            assert c.get(url, params={"limit": -1}).status_code == 422
+            assert c.get(url, params={"limit": 1001}).status_code == 422
+            c.delete(f"/api/sessions/{sid}")
+        _ok("t11", "B2 反向分页：两台 bus 同签名 + 窗口语义逐条同判（before 开区间/取尾/升序/"
+                   "短页后空页）+ 路由传参落地、limit 值域 422")
+    finally:
+        ss.SESSIONS_FILE = keep
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -517,7 +660,8 @@ def main():
     t8_tool_approval_gate()
     t9_request_deadline()
     t10_approval_rollback_realign()
-    print("\ns8_frontend_contract: 10/10 全绿")
+    t11_events_history_window()
+    print("\ns8_frontend_contract: 11/11 全绿")
 
 
 if __name__ == "__main__":

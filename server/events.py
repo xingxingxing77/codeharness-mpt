@@ -69,11 +69,18 @@ class SessionEventBus:
             q.put_nowait(ev)
         return ev
 
-    def history(self, sid: str, after: Union[str, int] = "") -> list:
-        """after 是上一次交付的游标（旧调用方传 int 也吃）。空 = 全给。"""
+    def history(self, sid: str, after: Union[str, int] = "", before: Union[str, int] = "",
+                limit: int = 0) -> list:
+        """游标窗口回放。after=上次交付的游标（旧调用方传 int 也吃），空 = 不设下界；
+        before=**开区间的上界游标**，给它就是往回翻（「加载更早」）；limit>0 时
+        带 before 取窗口尾（最靠近 before 的 limit 条）、否则取窗口头，limit=0 不限。
+        返回始终升序——翻页靠「本页首条 cursor 当下一次 before」，不需要额外游标字段。"""
         events, _ = self._ensure(sid)
-        a = norm_cursor(after)
-        return [ev for ev in events if not a or ev.cursor > a]
+        a, b = norm_cursor(after), norm_cursor(before)
+        out = [ev for ev in events if (not a or ev.cursor > a) and (not b or ev.cursor < b)]
+        if limit and limit > 0:
+            out = out[-limit:] if b else out[:limit]
+        return out
 
     def subscribe(self, sid: str) -> asyncio.Queue:
         _, subs = self._ensure(sid)
