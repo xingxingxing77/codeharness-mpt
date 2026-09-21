@@ -83,6 +83,12 @@ docker compose up -d          # qdrant + redis，tag 必须 pin 死
 pip install -e .
 ```
 `.env`（不进 git）：`LLM__API_KEY` `LLM__MODEL` `LLM__BASE_URL` `QDRANT__URL` `REDIS__HOST` `EMBEDDING__BASE_URL`（bge-m3）
+> 网关的**上下文压缩**（C5）也在 `.env` 开：`LLM__CONTEXT_LENGTH=<整数>` 就是那道门的开关
+> （不设=永不压缩，与源 `LLMConfig.context_length=None` 同档），另配 `LLM__COMPRESS_TYPE`
+> （`pre_cut_by_token` / `post_cut_by_token` / `pre_cut_by_msg` / `post_cut_by_msg`，留空=按 token 尾裁）
+> 与 `LLM__COMPRESS_THRESHOLD`（(0,1]，默认 0.8 = 超 80% 预算才裁）。`settings.llm` 就是
+> `LLMConfig` 本身，所以这三个键自动解析；值域由 `configs/llm_config.py` 的两个 validator 守
+> （非正 `context_length` 当没设、越界阈值直接拒），读数见 `tests/s13_compress.py` t10–t12。
 
 **自测跑法**（本机实测唯一可用姿势）：
 ```bash

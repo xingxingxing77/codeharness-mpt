@@ -113,3 +113,23 @@ class LLMConfig(BaseModel):
     def check_max_token(cls, v):
         """源 :118 起的校验语义保留：非正值一律回落 4096。"""
         return v if v and v > 0 else 4096
+
+    @field_validator("context_length")
+    @classmethod
+    def check_context_length(cls, v):
+        """C5：`.env` 把压缩门开没开就只看这一个数，所以它的非正值不能是「一个能跑的坏值」。
+
+        网关那侧的门条件是 `if self.cfg.context_length and ...`（`provider/gateway.py:207`），
+        写 `LLM__CONTEXT_LENGTH=0` 恰好落进 falsy = 关，但 **-1 是 truthy**：
+        `keep_token = int(-1 * 0.8) = 0` 起步、更负就是「每次调用都把上下文裁到只剩一条」，
+        会话跑得完、答案全失忆，现场只看得见「模型答非所问」。非正值一律当「没设」，与 None 同档。"""
+        return v if v and v > 0 else None
+
+    @field_validator("compress_threshold")
+    @classmethod
+    def check_compress_threshold(cls, v):
+        """阈值语义是「保留比例」，值域 (0,1]：1.0 = 刻意不触发（s13 t1 就靠它），
+        越界是配置写错，当场拒——静默夹到边界会让「以为开了压缩」这件事继续骗人。"""
+        if not 0 < v <= 1:
+            raise ValueError(f"compress_threshold 必须在 (0, 1] 区间，收到 {v}")
+        return v

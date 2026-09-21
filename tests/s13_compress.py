@@ -156,6 +156,103 @@ def t9_config_helpers():
     print("✅")
 
 
+
+def t10_env_entry_arms_the_gate():
+    """C5 的本体：门能不能被**配置**打开（此前 `context_length` 全仓零设置点=没人推得开门）。
+
+    链路是 `LLM__CONTEXT_LENGTH` → `Settings.llm`（它就是 `LLMConfig` 本身，所以键自动解析）
+    → `LLMGateway(cfg=None)` 缺省吃 `settings.llm`（`provider/gateway.py:47` 那句 `cfg or settings.llm`）。
+    第二格是这里最容易悄悄断的一环：会话换模型走 `_make_llm(override)`，
+    它 `model_copy(update={"model": ...})` —— 若改成「新建一个 LLMConfig」，用户改个模型名就把压缩关了。
+    """
+    import os
+
+    from codeharness.configs.compress_msg_config import CompressType as CT
+    from codeharness.configs.settings import Settings
+    import codeharness.configs.settings as settings_mod
+    from codeharness.provider.gateway import LLMGateway
+    from codeharness.team import _make_llm
+
+    print("t10: env → settings → gateway 门开...", end=" ", flush=True)
+    keys = ("LLM__CONTEXT_LENGTH", "LLM__COMPRESS_TYPE")
+    keep = {k: os.environ.get(k) for k in keys}
+    try:
+        # 对照必须在改 env **之前**取：`Settings(_env_file=None)` 挡不住进程环境，
+        # 先设后取会读到自己刚写进去的 3000，那格对照就成了假阳性（本门禁第一次跑就中过）。
+        for k in keys:
+            os.environ.pop(k, None)
+        assert Settings().llm.context_length is None, "默认档必须是「没设=门不开」（配置入口的基线）"
+        os.environ["LLM__CONTEXT_LENGTH"] = "3000"
+        os.environ["LLM__COMPRESS_TYPE"] = "pre_cut_by_token"
+        armed = Settings()
+        assert armed.llm.context_length == 3000 and armed.llm.compress_type == CT.PRE_CUT_BY_TOKEN,             f"env 没落到 settings.llm：{armed.llm.context_length} / {armed.llm.compress_type}"
+        with patch.object(settings_mod, "settings", armed):
+            assert LLMGateway(cfg=None, cost_manager=None).cfg.context_length == 3000,                 "网关没吃 settings.llm——配置写在 .env 里也白写"
+            swapped = _make_llm(None, {"model": "some-other-model"})
+            assert swapped.cfg.model == "some-other-model" and swapped.cfg.context_length == 3000,                 "会话换模型把压缩配置丢了（override 必须只改 model，其余原样带过去）"
+        print(f"✅（3000/pre_cut_by_token 开门；换成 {swapped.cfg.model} 后预算仍是 "
+              f"{swapped.cfg.context_length}）")
+    finally:
+        for k, v in keep.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+
+async def t11_config_value_range():
+    """C5 值域：`context_length` 非正当「没设」，`compress_threshold` 越界直接拒。
+
+    第二格（真跑一遍）不是冗余：负数在网关那边是 **truthy**，门会开着算出负的 keep_token，
+    表现是「会话跑得完、每轮上下文都被裁到只剩一条」——现场只会看到模型失忆，看不到配置错了。
+    """
+    from pydantic import ValidationError
+
+    print("t11: 配置值域...", end=" ", flush=True)
+    for bad in (0, -1):
+        got = LLMConfig(model="fake", context_length=bad).context_length
+        assert got is None, f"context_length={bad} 该当「没设」，实际 {got!r}（validator 被摘掉了？）"
+    assert LLMConfig(model="fake", context_length=8192).context_length == 8192, "合法值不许被改动"
+    for bad in (0, 1.5, -0.2):
+        try:
+            LLMConfig(model="fake", compress_threshold=bad)
+            raise AssertionError(f"t11 阈值 {bad} 竟然收下了（越界必须当场拒，别静默夹边界）")
+        except ValidationError:
+            pass
+    gw, cap = _mk_gateway(LLMConfig(model="fake", context_length=-1, compress_threshold=0.8))
+    await gw.ainvoke([f"m{i}" for i in range(20)], tag="t11")
+    assert len(cap[0]) == 20, f"负数 context_length 把 20 条裁成 {len(cap[0])} 条 = validator 没拦住"
+    gw2, cap2 = _mk_gateway(LLMConfig(model="fake", context_length=100, compress_threshold=1.0))
+    await gw2.ainvoke(["a"] * 5, tag="t11b")
+    assert len(cap2[0]) == 5, "threshold=1.0「刻意不触发」那一档被改坏了（s13 t1 同一口径）"
+    print("✅（非正当未设、0/1.5/-0.2 当场拒、-1 真跑一遍不裁）")
+
+
+async def t12_long_conversation_reading():
+    """真实长会话的一手读数：RoleZero 那种「system + 知识库片段 + 交替人机」的历史超预算时裁什么。
+
+    t2/t3 吃的是合成分布（`message number i`），这一格吃**中文真文本**并带知识库段：
+    要的不是「裁了没有」，而是裁完之后**人设与刚灌进知识库的那段还在**（`pre_cut` 的语义=从头往后保），
+    且出口确实落进预算。末行印裁前/裁后的条数与 token 数，读数进 PLAN。
+    """
+    print("t12: 长会话真读数...", end=" ", flush=True)
+    cfg = LLMConfig(model="fake", context_length=900, compress_threshold=0.8)   # 预算 720
+    gw, cap = _mk_gateway(cfg)
+    hist = [SystemMessage(content="You are a Team Leader, manage a team to assist users.")]
+    hist.append(SystemMessage(content="[知识库片段] 重置密码：登录页点设置-安全-重置，验证码通过后生效。"))
+    for i in range(24):
+        hist.append(HumanMessage(content=f"第 {i} 轮需求：给待办清单加优先级、到期提醒与本地存档，"
+                                        f"并要求导出 csv 与 markdown 两种格式"))
+        hist.append(AIMessage(content=f"第 {i} 轮答复：已写入 src/todo.py，priority 字段用枚举，"
+                                      f"提醒走 APScheduler，导出用 csv 标准库与手写 markdown 表格"))
+    before = gw._count_tokens_direct(hist)
+    await gw.ainvoke(hist, tag="t12")
+    out = cap[0]
+    after = gw._count_tokens_direct(out)
+    assert len(out) < len(hist), f"{len(hist)} 条一条没裁=门没开（预算 720，裁前 {before} token）"
+    assert after <= 720, f"出口 {after} token 超预算 720"
+    assert out[0].content.startswith("You are a Team Leader"), "system 人设必须恒留（照源语义）"
+    assert any("[知识库片段]" in m.content for m in out),         "pre_cut 从头保，刚灌进知识库那段却被裁掉 = C3 那条链在超窗时先丢资料"
+    print(f"  {len(hist)} 条/{before} token → {len(out)} 条/{after} token（预算 720），人设与知识库段都在")
+
+
 async def main():
     print("=" * 60)
     print("批次0/5: 网关 token 压缩门禁（token 口径 + 四策略）")
@@ -170,8 +267,11 @@ async def main():
         t7_pre_by_msg_and_token()
         t8_no_compress_passthrough()
         t9_config_helpers()
+        t10_env_entry_arms_the_gate()
+        await t11_config_value_range()
+        await t12_long_conversation_reading()
         print("\n" + "=" * 60)
-        print("✅ 全部通过 (9/9)")
+        print("✅ 全部通过 (12/12)")
         print("=" * 60)
         return 0
     except AssertionError as e:
