@@ -71,7 +71,23 @@ const SEL = {
   '台账.表': '.tbl',
   '台账.表头': '.tbl th',
   '台账.单元格': '.tbl td',
-  '台账.数字列': '.num'
+  '台账.数字列': '.num',
+  /* markdown 层级（正文块里才有） */
+  'md.h1': '[data-chat-flow] .prose h1',
+  'md.h2': '[data-chat-flow] .prose h2',
+  'md.h3': '[data-chat-flow] .prose h3',
+  'md.p': '[data-chat-flow] .prose p',
+  'md.ul': '[data-chat-flow] .prose ul',
+  'md.li': '[data-chat-flow] .prose li',
+  'md.inlineCode': '[data-chat-flow] .prose :not(pre) > code',
+  'md.pre': '[data-chat-flow] .prose pre',
+  'md.blockquote': '[data-chat-flow] .prose blockquote',
+  'md.root': '[data-chat-flow] .prose',
+  /* Generic IN/OUT 卡 */
+  'io.卡': '.inOut',
+  'io.标签': '.ioLabel',
+  'io.正文': '.ioBody',
+  'io.行': '.ioRow'
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -162,6 +178,22 @@ if (tt) { document.querySelector('.tab').click(); await sleep(800) }
 const panelBtn = [...document.querySelectorAll('.header .iconBtn')].at(-1)
 if (panelBtn) { panelBtn.click(); await sleep(900) }
 measure('右栏')
+
+/* markdown 层级只有 Docs 块才有，而上面那个会话只有 Thought/Terminal/Editor。
+   改点 MetaGPT 组（7c8bcd93，9 个 Docs 块）再量一次。 */
+const g2 = [...document.querySelectorAll('.groupSection')].find((e) =>
+  e.textContent.includes('MetaGPT')
+)
+const r2 = g2 && g2.querySelector('.sessionRow')
+if (r2) {
+  r2.click()
+  for (let i = 0; i < 120; i++) {
+    await sleep(250)
+    if (document.querySelectorAll('.prose').length) break
+  }
+  await sleep(1200)
+  measure('md会话')
+}
 
 /* 设置弹窗 */
 const st = document.querySelector('.settingsTrigger')

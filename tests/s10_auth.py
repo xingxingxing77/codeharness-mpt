@@ -151,7 +151,7 @@ def t6_frontend_contract():
     assert 'v-if="auth.needLogin"' in app and "LoginPage" in app, "登录页接管必须在 App 根"
     assert "auth.init()" in app and "!auth.needLogin) store.init()" in app, "init 顺序：先 auth 后会话"
     assert (fe / "components" / "LoginPage.vue").exists()
-    sb = (fe / "components" / "SessionSidebar.vue").read_text(encoding="utf-8")
+    sb = (fe / "components" / "sidebar" / "SidebarRoot.vue").read_text(encoding="utf-8")
     assert "doLogout" in sb and "auth.user" in sb, "侧栏必须有用户行+退出"
     types = (fe / "types.ts").read_text(encoding="utf-8")
     assert "auth_enabled" in types and "user_id" in types, "契约字段进 types"
