@@ -12,6 +12,9 @@
      `stop()` 就地落 stopped（不是钉死在 stopping）、`start` 回 409 且文案说清去路；
      正常收口（无 interrupt）→ 照旧 finished。对照组用修复前那三行原样跑，读数必须是
      finished——证明这条判据抓得住复发。
+  t5/t6 真图真 gate（A4 之后新增，零花费）：审批卡驻留四格 + 批准真写盘/拒绝零副作用。
+  t7 C15：审批面只 police `self.tools` 里的真工具——`end`/`RoleZero.*` 这类零副作用特殊命令
+     不许挂起（真跑台账里那张 `tool:'end'` 的卡），同时**正向对照** `write_file` 照旧挂起。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -272,12 +275,13 @@ def t4_breakpoint_settles_and_stops():
           f"对照组旧写法 {clobbered!r}、start 409 detail={detail!r}）")
 
 
-def _gate_runner(project: str):
+def _gate_runner(project: str, leader_script=None):
     """真图 + 真 gate：FakeLLM 让队长只调一次需要审批的 `write_file`（零花费、零外网）。
 
     为什么必须有这两组：t1–t4 全打在替身图上，而 A4 真模型那批实测出
     **`astream_events(v2)` 里没有 `on_interrupt` 这条事件**——替身喂得出的事件，生产发不出来，
     于是「停在待批处被写成 finished、审批卡进不了活流」这个缺陷带着 s17 全绿活了很久（§0 硬约定 4）。
+    `leader_script` 换队长的剧本（C15 要用「一上来就 end」那一格），默认就是 write_file → end。
     """
     import json
     import shutil
@@ -289,11 +293,12 @@ def _gate_runner(project: str):
     s_call = json.dumps({"thought": "写文件", "commands": [
         {"command_name": "write_file", "args": {"path": "probe.txt", "content": "hello-from-gate"}}]},
         ensure_ascii=False)
+    script = leader_script if leader_script is not None else [s_call, s_end]
     orig = team.dynamic_assembly
 
     def patched(llm):
         agents, sop = orig(llm)
-        agents[TEAMLEADER_NAME].llm = FakeLLM([s_call, s_end])
+        agents[TEAMLEADER_NAME].llm = FakeLLM(script)
         agents[TEAMLEADER_NAME].ltm = None
         for n in ("Alice", "Bob"):
             agents[n].llm = FakeLLM([s_end])
@@ -395,14 +400,97 @@ def t6_real_approve_and_reject():
             cleanup()
 
 
+def t7_special_commands_never_park():
+    """C15：审批面只管 `self.tools` 里的真工具，`end`/`RoleZero.*` 这类零副作用特殊命令不许挂起。
+
+    A4 真模型那批的读数就是这条：台账里出现 `tool:'end'`、`args_preview="end: {}"` 的待批项。
+    根因是 `_gate_commands` 对模型给的每条命令**无差别**送 `gate_decide`，而 `TOOL_TIER` 没登记
+    它们 → fail-closed 判成 `full_access`。`_act` 里 `end`/`RoleZero.*`/`Plan.*`/`publish_*`
+    全走特殊分支、根本不进 `self.tools`，一次副作用都不会发生。
+    两格都打在真图真台账上（不许合成事件，理由见 `_gate_runner` 的注释）：
+      格①**阳性对照**：`write_file` 照旧挂起，批完之后队长第二轮的 `end` **不再冒第二张卡**、
+        会话正常收口（修复前：批完 write_file → `end` 又挂一张 → 状态停在 awaiting_human，
+        这一格就是 t6 批准格踩完文件就 break、没看状态而漏掉的那半张脸）；
+      格②队长一上来就 `reply_to_human` + `end` → 零张卡、直接 finished。
+    """
+    from platforms.approval_store import ApprovalStore
+
+    def cards(st):
+        return [it["tool"] for it in st.pending() + st.settled()]
+
+    def drop(*sts):
+        """台账落在共享 db0（`ApprovalStore` 只有 Redis 一台，t5/t6 同路），
+        键名带随机 sid 不会撞别人的数据，但自起的东西自己收口。"""
+        for st in sts:
+            st.r.delete(st.key, st.dkey)
+
+    # 格①：真工具仍挂起，批完到 end 不再挂
+    project = "s17_c15_tool_then_end"
+    store, runner, s, cleanup = _gate_runner(project)
+    st = None
+    try:
+        parked, _ = _settle_parked(store, runner, s)
+        st = ApprovalStore(s.id)
+        assert parked == "awaiting_human" and cards(st) == ["write_file"], \
+            f"格①前置失配（真工具不挂起就没资格谈豁免）：status={parked!r} cards={cards(st)}"
+        aid = st.pending()[0]["id"]
+        st.decide(aid, "allowed-once")
+
+        async def resume_and_finish():
+            runner.answer_human(s.id, aid)
+            end = asyncio.get_running_loop().time() + 30
+            while asyncio.get_running_loop().time() < end:
+                if store.get(s.id).status.value in ("finished", "failed", "stopped"):
+                    break
+                await asyncio.sleep(0.1)
+            return store.get(s.id).status.value, cards(st)
+
+        status, after = asyncio.run(resume_and_finish())
+        assert status == "finished", \
+            f"格①失效：批完 write_file 后停在 {status!r}（cards={after}）——" \
+            f"`end` 又被送去审批了，这就是 A4 台账里那张 `tool:'end'` 的卡"
+        assert after == ["write_file"], f"格①失效：冒出了第二张卡 {after}"
+        print(f"  ok  t7 格①真工具照挂、批完不再为 end 挂卡（cards={after}、status={status}）")
+    finally:
+        for t in list(runner.tasks.values()):
+            t.cancel()
+        if st:
+            drop(st)
+        cleanup()
+
+    # 格②：特殊命令整族不挂起
+    import json
+    s_special = json.dumps({"thought": "回一句就收工", "commands": [
+        {"command_name": "RoleZero.reply_to_human", "args": {"content": "已经写好了"}},
+        {"command_name": "end", "args": {}}]}, ensure_ascii=False)
+    project2 = "s17_c15_special_only"
+    store2, runner2, s2, cleanup2 = _gate_runner(project2, leader_script=[s_special])
+    st2 = None
+    try:
+        status2, _ = _settle_parked(store2, runner2, s2)
+        st2 = ApprovalStore(s2.id)
+        got2 = cards(st2)
+        assert status2 == "finished" and got2 == [], \
+            f"格②失效：只回话+收口竟然挂起 {got2}、状态 {status2!r}"
+        print(f"  ok  t7 格②reply_to_human+end 零张卡直接收口（status={status2}）")
+    finally:
+        for t in list(runner2.tasks.values()):
+            t.cancel()
+        if st2:
+            drop(st2)
+        cleanup2()
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
-              t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject]
+              t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
+              t7_special_commands_never_park]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
           f"不抢槽/连点幂等 1 组 + human-input 409 端点半边 1 组 + 断点落态/停止/start 1 组 + "
-          f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组")
+          f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
+          f"特殊命令不进审批面 1 组（真工具照挂、批完不再为 end 挂卡）")
 
 
 if __name__ == "__main__":

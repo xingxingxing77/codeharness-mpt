@@ -235,6 +235,12 @@ class RoleZero:
         reason = str(last.get("thought", ""))[:200]
         for cmd in last.get("commands", []):
             name, args = cmd["command_name"], cmd.get("args", {})
+            # 只 police `self.tools` 里真有的工具（C15）：`end`/`RoleZero.*`/`Plan.*`/`publish_*`
+            # 在 `_act` 里走特殊分支、一次副作用都不发生，而 `_approval.TOOL_TIER` 没登记它们，
+            # fail-closed 就把它们判成 `full_access` 要批 —— A4 真跑实测 readonly 会话里
+            # 队长每次收口都被问一次「批准 end？」，审批面被空操作刷满。
+            if name not in self.tools:
+                continue
             decision, item = gate_decide(name, args, node="gate", io_=io_, reason=reason)
             while decision is None:
                 io_.request(item)                          # HSETNX：重放不会冒出第二张卡
