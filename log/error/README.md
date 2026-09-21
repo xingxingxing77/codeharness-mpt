@@ -27,14 +27,15 @@
 | `evaluate_script` 返回对象时少几个键（数值/字符串都可能丢） | MCP 桥的序列化行为，**原因未查**。判据一律在页内拼成**一个字符串**再返回，别指望对象键齐全 |
 | 页内 `elementFromPoint(滚动区左边缘+8, …)` 永远命中不到行 | 正文列有 **32px 左内边距**，+8px 落在 padding 上（`useFollowScroll.captureAnchor` 就因此恒回 null，见 `log/2026-09-21-B2…` 段 4）。打点取水平中心 |
 | HoverCard 点了卡但「复制成功」不出现 | **不是代码问题**：`doCopy` 刻意只在 `clipboard.writeText` resolve 后才置回执。内置面板 `clipboard-write=denied`；无头 Chrome 显示 `granted` 但 `writeText` 仍抛 `NotAllowedError`（headless 没有剪贴板后端）。要验就起**真窗口 Chrome + `Browser.grantPermissions` + `Input.dispatchMouseEvent`**，见 `log/2026-09-21-A3复制回执可信点击.md` |
-| ~~真模型验收全跑不了~~（**已推翻**） | 2026-09-21 06:14 实测本机 ollama 推理可用（`/api/generate` 真回内容，模型 `qcwind/qwen2.5-7B-instruct-Q4_K_M`）→ 旧「CUDA 坏」那条是 serve 没起造成的误判。**边界仍在**：7B 能否产出合法 tool call 未验（A4 用户已批「先用本机 7B 试一轮」）；云端额度只剩约 3 元，花钱前必须先问 |
+| ~~真模型验收全跑不了~~（**已推翻**） | 2026-09-21 06:14 实测本机 ollama 推理可用（`/api/generate` 真回内容，模型 `qcwind/qwen2.5-7B-instruct-Q4_K_M`）→ 旧「CUDA 坏」那条是 serve 没起造成的误判。**边界仍在**：7B 能否产出合法 tool call 未验（A4 的口径 2026-09-21 18:3x 已改：**走 StepFun 云端、验收跑到「批准→真执行」**，见 `plan/PLAN.md` §9 第 2 条；本机 7B 退为备选，且它不在价表里→记 token 不记钱）；云端额度只剩约 3 元，花钱前必须先问 |
 | 自动化作业「没报错但再也不跑了」 | `qoder_cron` action=update 的 patch 不带 `expiresAt` → **被静默重置成约 10 小时默认**（2026-09-20 23:50 实测：09-25 变 09-21 09:50）。改配置一律 `schedule` + `expiresAt` 同带，并在返回里核对 `nextRunAt`/`expiresAt`；治理侧 23:32 那起「擅自改 expiresAt」是同一陷阱 |
 | 从 `evtSource.readyState` 派生的 computed 值**永远不变**（B1 横幅：后端活着也亮、再也不会消失） | **不是代码问题**：`EventSource` 实例不是 plain object，Vue `getTargetType` 判 INVALID → 不 proxy → `readyState` 变化不进依赖，computed 的依赖只剩「被赋值那一次」，值停在首帧。要按连接状态渲染只能在 `onopen`/`onerror` 回调里写 store 字段（本仓现值 `stream: idle\|open\|down`，`s8` t12 禁了两种错写法）。见 `log/2026-09-21-B1断线横幅与轮内error行.md` 段 2.3 |
 | 页内量到 `grid-template-columns: 10px 0px`、正文列宽 64、`.scroller 0x0` | **内置浏览器面板不可见时布局是 0 宽**（同一条行在 `shot.mjs --width 1286` 下是 `10px 666px`、`flowW=748`）。DOM 存在性可以在面板上读，**几何/源值类判据一律走 `frontend/scripts/shot.mjs`** |
 | 反向验证「把断言拆了门禁仍绿」，于是判它是空转 | 先怀疑**反向验证自己**：锚点在文件里不唯一，`replace(count=1)` 打中了另一处（本轮 `b.closed = true` 在 `sessions.ts` 就有两处：report 的 `end_marker` 与 error 分支）。反向验证也要有阳性对照：改之前先 `assert old in src` |
+| 云端 LLM 端点回 401 `invalid_api_key`，第一反应是「我们网关没把凭据发对」 | 先用 `urllib` **裸调用**同端点同 key（绕开 `codeharness/provider/*`）分离两边：裸调也 401 ⇒ 拒的是凭据本身，与本仓实现无关；再换一次 base_url——回 **404** 是路径不存在，回 **401 话术** 是路径对而 key 失效。`/api/health` 的 `api_key_masked`（前 6…后 4）可以拿来和自己读到的 key 做指纹比对，但它只证明「配置读进来了」，不证明「服务端认这把 key」。全文 `2026-09-21-A4-云端端点401.md` |
 
 ## 索引
 
 | 文件 | 阶段 | 状态 |
 |---|---|---|
-| （暂无） | | |
+| `2026-09-21-A4-云端端点401.md` | A4（真模型审批链端到端） | **未解决**：StepFun 端点对用户 18:3x 给的 key 回 `401 invalid_api_key`，三格判据一格没取到（花费 0）。已排除：网关发错凭据（裸调用同形失败）、base_url 路径（换路径回 404）、key 读错（两处独立指纹一致）、dotenv 压过 env（health 回的就是新值）。待用户换新 key 或改走本机 7B；续跑载体四步已写在文档末段 |
