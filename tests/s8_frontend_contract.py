@@ -733,9 +733,12 @@ def t13_size_cap_and_truncation_reach_the_user():
     assert re.search(r"err\.status = rsp\.status", req_body), \
         "F-E 回归：req() 抛的 Error 没挂 status——调用方只能拿 message 猜状态码"
 
-    assert re.search(r"\.status === 413", dp), \
-        "F-E 回归：DetailsPanel 不再按 413 分流（点开大文件只剩一条两秒半就消失的报错 toast）"
-    body = dp.split("=== 413", 1)[-1].split("else {", 1)[0]
+    # 锚点必须落在 openFile 这个函数体上：C11 之后文件里有了第二处 `=== 413`（回放详情也按码分流），
+    # 拿全文第一次出现去切会打错地方（本仓清单：反向验证与形状判据的锚点要唯一）。
+    fn = re.search(r"async function openFile\(.*?\n\}", dp, re.S)
+    assert fn, "F-E 回归：openFile 没了"
+    assert "=== 413" in fn.group(0), "F-E 回归：DetailsPanel 不再按 413 分流（点开大文件只剩一条会消失的报错 toast）"
+    body = fn.group(0).split("=== 413", 1)[-1].split("else {", 1)[0]
     assert "preview.value" in body and "'warn'" in body, \
         f"F-E：413 分支要在预览面板里留话 + 用 warn 语气，实际只有\n{body.strip()[:160]}"
     assert "5MB" not in dp and "5 MB" not in dp, "F-E：前端把预览阈值抄成了第二份数字（会漂）"
@@ -749,6 +752,75 @@ def t13_size_cap_and_truncation_reach_the_user():
                "前端按状态码分流 + 预览面板留话 + 上限处截断换 warn），阈值不在前端重抄")
 
 
+def t14_checkpoint_replay_surface():
+    """C11 回放面的**两侧同判**（与 t6/t13 同一手法：只钉一边就等于没钉）。
+
+    ① 后端两个路由在（列表 + 单份详情）；② 前端两个方法在，且路径与后端一致
+       ——t3 钉的是「前端消费的后端有」，这一格补反向：**后端新开的只读面前端有消费者**，
+       否则路由就是死面（C3 那条 UploadKB 的教训形状）；
+    ③ 列表页项字段集 runner == 前端声明，**不许含 values/state**（整份黑板不进列表）；
+    ④ 界面有 回放 tab、点行取详情、413 按**状态码**分流（F-E 立的那条规矩）、
+       换会话清分页游标（不清会把 A 场的超步显示在 B 场名下）。"""
+    api_src = (ROOT / "server" / "api" / "sessions.py").read_text(encoding="utf-8")
+    runner_src = (ROOT / "server" / "runner.py").read_text(encoding="utf-8")
+    fe = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    dp = (FE / "components" / "DetailsPanel.vue").read_text(encoding="utf-8")
+
+    assert '@router.get("/{sid}/checkpoints")' in api_src, "C11 回归：超步列表路由没了"
+    assert '@router.get("/{sid}/checkpoints/{checkpoint_id}")' in api_src, "C11 回归：单份超步详情路由没了"
+    for call, path in (("api.checkpoints(", "/checkpoints?before="),
+                       ("api.checkpointState(", "/checkpoints/${")):
+        assert call in dp, f"C11 回归：界面不再消费 {call}——后端那条只读路由成了死面"
+        assert path in fe, f"C11：client.ts 里 {call} 的路径形状变了（{path}），与后端路由不同判"
+
+    page_body = re.search(r"out\.append\(\{(.*?)\}\)", runner_src, re.S).group(1)
+    be_keys = set(re.findall(r'"(\w+)":', page_body))
+    fe_keys = set(re.findall(r"(\w+):", re.search(
+        r"checkpoints: \{ (.*?)\}\[\]", fe, re.S).group(1)))
+    assert be_keys == fe_keys, f"超步摘要字段漂移 runner={sorted(be_keys)} fe={sorted(fe_keys)}"
+    assert not (be_keys & {"values", "state"}), f"列表页混进了整份黑板：{sorted(be_keys)}"
+    assert "before=before" in runner_src and "limit=limit + 1" in runner_src, \
+        "C11 回归：翻页不再是 before 关键字（塞进 config 是闭区间，会重复吐边界那一条）"
+
+    assert "{ key: 'replay', label: '回放' }" in dp, "C11 回归：右栏没有 回放 tab"
+    assert "openCp(cp)" in dp, "C11 回归：超步行不再点开单份 state"
+    assert "err.status === 413" in dp, "C11 回归：413 又回到猜文案（应按状态码分流，见 F-E）"
+    assert re.search(r"watch\(\(\) => store\.currentId, \(\) => \{\s*Object\.assign\(replay", dp), \
+        "C11 回归：换会话没清回放游标——会把上一场的超步显示在当前场名下"
+
+    # 样式必须有参照系出处：E:\deepseek-harness 是唯一前端参照系，参照系没有的界面
+    # 也要按它的形状设计（用户 2026-09-21 定的口径）。本格钉的是**具体源值**，不是"用了 token"：
+    # ui-trajectory/src/client/TrajectoryTable.module.css 的 `.table th`/`.table td`/
+    # `[data-selected='true']`/`.historyLoadButton`。
+    css = dp.split("<style", 1)[-1]
+    tbl = re.search(r"\.cpTable th,?\s*\.cpTable td \{([^}]*)\}", css)
+    assert tbl and "height: 30px" in tbl.group(1) and "padding: 0 8px" in tbl.group(1), \
+        "C11 回归：回放表格不再是参照系的 30px 行 / 0 8px 内距"
+    assert "--dsw-alias-interactive-bg-active" in css, \
+        "C11 回归：选中行用的不是参照系表格的 selected token（interactive-bg-active；hover 才是 -hover）"
+    assert "border-bottom: 1px solid var(--dsw-alias-border-l1)" in css, \
+        "C11 回归：行线不是参照系表格的 border-l1（面板/条线才用 l2）"
+    assert re.search(r"\.cpTable th \{[^}]*position: sticky", css), "C11 回归：表头不跟随滚动"
+    more = re.search(r"\.cpMore \{([^}]*)\}", css)
+    assert more and "height: 29px" in more.group(1) and "border: none" in more.group(1), \
+        "C11 回归：「加载更早」不是参照系表格里的整行按钮 `.historyLoadButton`（29px、无框）"
+    assert "14px" not in (more.group(0) if more else "") and "999px" not in css, \
+        "C11：表格里的加载开关用了对话流那颗圆角按钮（`.older` 的 14px / 自造的 999px），选错族"
+    assert 'class="code stateBox"' in dp, \
+        "C11 回归：展开的 state 没复用同文件的 `.code`（参照系右栏代码块 pad16/r12/13-22）"
+    # 界面词汇跟参照系走：它 UI 层没有 superstep/checkpoint 这两个词，用的是 trajectory/turn/request/step。
+    # 判据只能钉"看得见的文案"（模板里的属性名如 `cp.checkpoint_id` 是代码不是文案），
+    # 所以这里取三条已知用户可见串 + 列头，而不是全文扫词——覆盖面有限这件事写在注释里，别当全防。
+    tpl = re.sub(r"<!--[\s\S]*?-->", "", dp.split("<script")[0])     # 模板区，剥掉 HTML 注释
+    for copy in ("这个会话还没有步", "加载更早", "看第 ${cp.step} 步的状态", "<th class=\"num\">步</th>"):
+        assert copy in tpl, f"C11 回归：界面文案「{copy}」没了（参照系词汇是 step/步，别改回 superstep/checkpoint）"
+    assert "superstep" not in tpl and "Checkpoint" not in tpl, \
+        "C11：模板正文里出现了 superstep/Checkpoint 字样——界面层该说「步」"
+    _ok("t14", "C11 回放面两侧同判：两路由+两消费者+摘要字段集 runner==fe（无 values）+ before 走关键字"
+               "（开区间）+ 413 按码分流 + 换场清游标 + 样式钉参照系源值（30px 行/selected token/"
+               "l1 行线/sticky 表头/29px 整行加载按钮/复用 .code），界面只说「步」")
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -758,7 +830,8 @@ def main():
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
               t7_chat_target_from_assembly, t8_tool_approval_gate, t9_request_deadline,
               t10_approval_rollback_realign, t11_events_history_window,
-              t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user)
+              t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
+              t14_checkpoint_replay_surface)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

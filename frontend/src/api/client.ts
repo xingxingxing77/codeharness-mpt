@@ -129,5 +129,20 @@ export const api = {
       // 成本两桶（C12）：一笔调用只有一个币种在动，字段集必须与 runner 的 span 完全一致
       spans: { node: string; pt: number; ct: number; cost_usd: number; cost_cny: number;
                ts: number; t0: number | null; ft: number | null }[]
-    }>('GET', `/api/sessions/${sid}/trace`)
+    }>('GET', `/api/sessions/${sid}/trace`),
+  /** C11 时间旅行·列表：按 superstep 的历史快照摘要，新→旧。
+   *  `before` 传上一页末条的 checkpoint_id（**开区间**上界），与 B2 的事件回放同一套翻页语义。 */
+  checkpoints: (sid: string, before = '', limit = 80) =>
+    req<{ checkpoints: { checkpoint_id: string; step: number; source: string; ts: string;
+                         next: string[]; writes: string[]; tasks: string[] }[];
+         has_more: boolean; next_before: string; reason?: string }>(
+      'GET', `/api/sessions/${sid}/checkpoints?before=${encodeURIComponent(before)}&limit=${limit}`),
+  /** 单份超步的完整 state。超过后端上限回 413（调用方按 status 分流，别猜文案）。
+   *  参数名刻意写成 `checkpoint_id`（不是 `cid`）：s8 t3 是按「模板段名 ≡ FastAPI 占位符名」比对形状的，
+   *  名字对不上就报"前端消费了一条后端没有的路由"——这是它该管的。cid 也不 encode：
+   *  它是 saver 给的 uuid7 串（只有 hex 与 `-`）。 */
+  checkpointState: (sid: string, checkpoint_id: string) =>
+    req<{ checkpoint_id: string; step: number; source: string; ts: string; next: string[];
+         state: Record<string, unknown> }>(
+      'GET', `/api/sessions/${sid}/checkpoints/${checkpoint_id}`)
 }

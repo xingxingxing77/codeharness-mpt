@@ -299,6 +299,81 @@ def session_trace(sid: str, request: Request, user: str = Depends(current_user))
     return {"spans": tr.spans(sid) if tr else []}
 
 
+MAX_STATE_BYTES = 4 * 1024 * 1024     # 单份超步状态的响应上限（实测真会话最大一份 62 KB，留足余量）
+DEFAULT_CHECKPOINT_PAGE = 80
+
+
+def _cfg_at(config: dict, checkpoint_id: str = "") -> dict:
+    """把 checkpoint_id 打进 config 的 configurable——回放面全部走 langgraph 的这一个入口。
+    ⚠ `checkpoint_id` 是**不透明串**（uuid7 形状），不能当数字排序或比较大小：
+    真正的顺序由 saver 按插入序给，接口一律回「新→旧」。"""
+    c = dict(config)
+    conf = dict(c.get("configurable") or {})
+    if checkpoint_id:
+        conf["checkpoint_id"] = checkpoint_id
+    c["configurable"] = conf
+    return c
+
+
+@router.get("/{sid}/checkpoints")
+async def session_checkpoints(sid: str, request: Request, before: str = "",
+                              limit: int = Query(DEFAULT_CHECKPOINT_PAGE, ge=1, le=500),
+                              user: str = Depends(current_user)):
+    """C11 时间旅行·列表：**按 superstep 的历史快照**，新→旧的窗口。
+
+    采集是免费的：AsyncSqliteSaver 每个 superstep 本来就落一份 checkpoint（实测两节点小图
+    跑 4 场 ainvoke 出 12 条，`metadata.step` 单调、`source∈{input,loop}`、`next` 给下一步是谁），
+    所以这条只读不写、不动 runner 的落盘路径。
+
+    为什么只回摘要不回全量：真数据层实测最单个 thread 有 **711 条**、全库 3513 条 / 32.4 MB，
+    整份 state 是黑板 messages 的全量（单份最大 62 KB，且随会话长度线性涨）。列表页把
+    每份都反序列化出来就等于把那个库读进内存一遍——`limit+1` 探 `has_more`，
+    正文留给 `/{sid}/checkpoints/{checkpoint_id}` 按需取。翻页口径与 B2 的
+    `/events/history` 一致：`before`=更早一侧的**开区间**上界（传上一页末条的 checkpoint_id）。
+    """
+    _owned(request, sid, user)
+    packed = await _get(request, "runner")._ensure_graph(sid)
+    if not packed:
+        # 图重建不出来（会话没装配过 / LLM 未配）。回空但不装死：reason 让界面说清为什么是空的
+        return {"checkpoints": [], "has_more": False, "next_before": "", "reason": "无法重建图，读不到超步"}
+    graph, config = packed
+    before_cfg = _cfg_at(config, before) if before else None   # 只当**上界**用，走 before 关键字（开区间）
+    return await _get(request, "runner")._ckpt_page(graph, config, limit, before_cfg)
+
+
+@router.get("/{sid}/checkpoints/{checkpoint_id}")
+async def session_checkpoint_detail(sid: str, checkpoint_id: str, request: Request,
+                                    user: str = Depends(current_user)):
+    """C11 时间旅行·详情：某一份超步的完整 state（点节点看当时黑板）。
+
+    超过 `MAX_STATE_BYTES` 直接 413 而不是硬塞——前端已按状态码分流（F-E），
+    这条的形状与 `/workspace/file` 的预览上限是同一族判据。"""
+    import json
+
+    from fastapi.responses import Response
+
+    _owned(request, sid, user)
+    packed = await _get(request, "runner")._ensure_graph(sid)
+    if not packed:
+        raise HTTPException(409, "无法重建图，读不到超步")
+    graph, config = packed
+    snap = await graph.aget_state(_cfg_at(config, checkpoint_id))
+    if getattr(snap, "created_at", None) is None and not (snap.values or {}):
+        raise HTTPException(404, "该会话没有这个超步")
+    md = snap.metadata or {}
+    body = {"checkpoint_id": checkpoint_id, "step": md.get("step"), "source": md.get("source"),
+            "ts": str(snap.created_at or ""), "next": list(snap.next or ()),
+            "state": snap.values}
+    try:
+        s = json.dumps(body, ensure_ascii=False, default=str)
+    except (TypeError, ValueError) as exc:      # 状态里混进不可序列化对象时别 500
+        raise HTTPException(500, f"超步状态序列化失败：{type(exc).__name__}: {exc}") from exc
+    if len(s.encode("utf-8")) > MAX_STATE_BYTES:
+        raise HTTPException(413, f"这份超步状态超过 {MAX_STATE_BYTES // 1048576}MB 回放上限，"
+                                 f"只保留在列表页的摘要里")
+    return Response(content=s, media_type="application/json")
+
+
 @router.get("/{sid}/events/history")
 def events_history(sid: str, request: Request, after: str = "", before: str = "",
                    limit: int = Query(0, ge=0, le=1000), user: str = Depends(current_user)):

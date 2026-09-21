@@ -208,6 +208,30 @@ class SessionRunner:
         config["callbacks"] = callbacks()
         return team, config, init
 
+    async def _ckpt_page(self, graph, config: dict, limit: int, before: dict | None = None) -> dict:
+        """取一页超步摘要（新→旧），多取一条探 `has_more`——翻页口径与 B2 的事件回放同判。
+
+        ⚠ `before` 必须走 **关键字参数**（开区间上界）。把 `checkpoint_id` 塞进 config 是另一个
+        语义：「从那个点往回看，**含它自己**」（闭区间），翻页会重复吐同一条——B2 那轮踩过同族形状。
+        这一层刻意**不带 values**：`aget_state_history` 会把每份 state 反序列化出来
+        （langgraph 的接口就这样），但只在这一格内存里活着，出页即丢。真数据层实测最单个
+        thread 有 711 份、单份最大 62 KB，整份跟着列表回给浏览器等于一次请求搬几十 MB。
+        `writes` 只留**键名**（谁产出了什么，节点级够用），值走详情端点按需取。"""
+        out: list[dict] = []
+        async for snap in graph.aget_state_history(config, before=before, limit=limit + 1):
+            md = snap.metadata or {}
+            conf = (snap.config or {}).get("configurable") or {}
+            writes = md.get("writes")
+            out.append({"checkpoint_id": conf.get("checkpoint_id") or "",
+                        "step": md.get("step"), "source": md.get("source"),
+                        "ts": str(snap.created_at or ""), "next": list(snap.next or ()),
+                        "writes": sorted(writes) if isinstance(writes, dict) else [],
+                        "tasks": [getattr(t, "name", "") for t in (snap.tasks or ())]})
+        has_more = len(out) > limit
+        page = out[:limit]
+        return {"checkpoints": page, "has_more": has_more,
+                "next_before": page[-1]["checkpoint_id"] if (page and has_more) else ""}
+
     def answer_human(self, sid: str, content: str) -> bool:
         if not self.store.get(sid):
             return False

@@ -68,6 +68,36 @@
       </template>
     </div>
 
+    <div v-else-if="ui.rightView === 'replay'" class="body">
+      <!-- C11 时间旅行：后端每个 superstep 本来就落一份 checkpoint（AsyncSqliteSaver），
+           这里只读不写。列表只回摘要，state 点一行才取一份（实测最单个会话 711 份、单份最大 62 KB）。
+           界面文案说「步」不说 superstep/checkpoint：参照系的词汇是 trajectory/turn/request/step，
+           它 UI 层根本没有 superstep 这个词（出处见本文件 style 段的引用注释）。 -->
+      <div v-if="replay.reason" class="dim">{{ replay.reason }}</div>
+      <template v-else>
+        <table v-if="replay.rows.length" class="cpTable">
+          <thead><tr><th class="num">步</th><th>来源</th><th>下一步</th><th>产出</th><th class="num">时刻</th></tr></thead>
+          <tbody>
+            <tr v-for="cp in replay.rows" :key="cp.checkpoint_id"
+                class="cpRow" :class="{ on: cp.checkpoint_id === replay.open }"
+                role="button" tabindex="0" :aria-label="`看第 ${cp.step} 步的状态`"
+                @click="openCp(cp)" @keydown.enter="openCp(cp)">
+              <td class="num">{{ cp.step }}</td>
+              <td>{{ cp.source }}</td>
+              <td>{{ cp.next.join('、') || '—' }}</td>
+              <td><span class="cpWrites">{{ (cp.writes.length ? cp.writes : cp.tasks).join(' ') || '—' }}</span></td>
+              <td class="num">{{ cpClock(cp.ts) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="dim">这个会话还没有步——跑一轮再来看。</div>
+        <button v-if="replay.hasMore" class="cpMore" :disabled="replay.busy" @click="loadCp(replay.nextBefore)">
+          {{ replay.busy ? '加载中…' : '加载更早' }}
+        </button>
+        <pre v-if="replay.state" class="code stateBox">{{ replay.state }}</pre>
+      </template>
+    </div>
+
     <div v-else class="body">
       <div v-if="!spans.length" class="dim">trace 仅在 Redis 模式下有数据</div>
       <table v-else class="trace">
@@ -95,9 +125,9 @@
 </template>
 
 <script setup lang="ts">
-/** 右栏 detailsCol：日志 / 文件 / 变更 / 编排 / trace。
+/** 右栏 detailsCol：日志 / 检视 / 文件 / 变更 / 编排 / trace / 回放。
  *  替掉原 ToolsPanel + 底部 TerminalPanel 抽屉（参考项目没有底部抽屉）。 */
-import { computed, h, defineComponent, onMounted, ref, watch } from 'vue'
+import { computed, h, defineComponent, onMounted, reactive, ref, watch } from 'vue'
 import MarkdownText from './conversation/MarkdownText.vue'
 import MermaidView from './MermaidView.vue'
 import ToolCard from './conversation/ToolCard.vue'
@@ -120,7 +150,8 @@ const VIEWS = [
   { key: 'files', label: '文件' },
   { key: 'review', label: '变更' },
   { key: 'graph', label: '编排' },
-  { key: 'trace', label: 'trace' }
+  { key: 'trace', label: 'trace' },
+  { key: 'replay', label: '回放' }
 ] as const
 
 const tree = ref<FileNodeT[]>([])
@@ -151,9 +182,58 @@ const totals = computed(() => ({
   ...sumCosts(spans.value)        // 分桶累加，不相加（C12）
 }))
 
+/** C11 时间旅行：这一屏是本地态（分页游标 + 展开的那一份），不进 pinia——
+ *  它不像 spans 那样被对话流共享，塞进 store 只是多一处要同步的记账。 */
+interface CpRow { checkpoint_id: string; step: number; source: string; ts: string;
+  next: string[]; writes: string[]; tasks: string[] }
+const replay = reactive({
+  rows: [] as CpRow[], hasMore: false, nextBefore: '', reason: '', open: '', state: '', busy: false
+})
+const cpClock = (ts: string) => (ts || '').slice(11, 19)
+
+async function loadCp(before = '') {
+  if (!store.currentId || replay.busy) return
+  replay.busy = true
+  try {
+    const p = await api.checkpoints(store.currentId, before)
+    replay.rows = before ? [...replay.rows, ...p.checkpoints] : p.checkpoints
+    replay.hasMore = p.has_more
+    replay.nextBefore = p.next_before
+    replay.reason = p.reason || ''
+    if (!before) {
+      replay.open = ''
+      replay.state = ''
+    }
+  } catch (e) {
+    replay.reason = `读不到超步：${(e as Error).message}`      // 拉不到就说，别摆一张空表当"没有历史"
+  } finally {
+    replay.busy = false
+  }
+}
+
+async function openCp(cp: CpRow) {
+  if (replay.open === cp.checkpoint_id) {
+    replay.open = ''
+    replay.state = ''
+    return
+  }
+  replay.open = cp.checkpoint_id
+  replay.state = '读取中…'
+  try {
+    const d = await api.checkpointState(store.currentId!, cp.checkpoint_id)
+    replay.state = JSON.stringify(d.state, null, 2)
+  } catch (e) {
+    const err = e as Error & { status?: number }
+    // 413 是"这份太大不在浏览器里展开"，不是出错——与 /workspace/file 同一族，按状态码分流
+    replay.state = err.status === 413 ? err.message : `读取失败：${err.message}`
+  }
+}
+
 function pick(k: string) {
   ui.rightView = k as typeof ui.rightView
   if (k === 'trace' && store.currentId) void store.loadTrace(store.currentId)
+  // 切到回放且这一场还没拉过：拉第一页。切走再回来不重复请求（分页游标在本地态里）
+  if (k === 'replay' && store.currentId && !replay.rows.length && !replay.reason) void loadCp()
 }
 
 const importPath = ref('')
@@ -228,6 +308,11 @@ async function openFile(n: FileNodeT) {
 }
 
 watch(() => [store.currentId, ui.rightView], load)
+/** 换会话必须把回放清干净：分页游标和已展开的那一份都属于上一场，
+ *  不清就会把 A 场的超步显示在 B 场名下——和本仓「第二个游标」那族洞同形。 */
+watch(() => store.currentId, () => {
+  Object.assign(replay, { rows: [], hasMore: false, nextBefore: '', reason: '', open: '', state: '', busy: false })
+})
 onMounted(load)
 
 /** 文件树用原生 <details> 递归：深度个位数，不值得为它写虚拟滚动 */
@@ -470,6 +555,112 @@ const FileNode = defineComponent({
 .num {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── C11 回放视图：样式一律取 E:\deepseek-harness 的既有形状（用户 2026-09-21 定的口径：
+      参照系有的照抄源值，没有的也要按它的风格设计）。逐处出处：
+   · 表格骨架 / 行高 / sticky 表头 / 行线 = packages/client/ui-trajectory/src/client/
+       TrajectoryTable.module.css 的 `.table th`+`.table td`（30px 行、0 8px 内距、
+       th 底边 border-l2 + sidebar-fill + tertiary + 500、td 底边 border-l1、整表 bg-layer-1、
+       12/18 = --dsw-font-xxs-12、overflow+ellipsis+nowrap 在 td 上）
+   · 可点行 hover / 选中 / 键盘焦点 = 同一文件：hover 用 `interactive-bg-hover`、
+       **选中用 `interactive-bg-active`**（我前两版误用了 hover 那枚）、
+       focus-visible 走 `inset 0 0 0 1px state-business-primary`，transition 120ms --ds-ease-in-out
+   · 「加载更早」= 同一文件的 `.historyLoadButton`（表格里的同类是**整行按钮**：29px 高、12/18、
+       bg-layer-1、hover 换 interactive-bg-hover + label-primary、focus-visible outline 2px offset -2px、
+       disabled 只收 cursor）。**不是** ChatView.module.css `.older` 那颗 14px 圆角按钮——
+       那是对话流的同类；参照系里这类开关本来就有两族，选错族也算没照它设计。
+   · 展开的 state = 复用本文件已有的 `.code`（其值来自参照系 ui-conversation/.../DetailsPanel.module.css
+       :79-94 的右栏代码块：pad 16 / r12 / 13-22 / pre-wrap+break-word），这里只加高度上限
+   · tab 条没动：本文件 `.tab`/`.tab.on` 已是参照系 `.detailTab`/`.detailTabActive` 那一族   */
+.cpTable {
+  width: 100%;
+  table-layout: fixed;
+  border-spacing: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.cpTable th,
+.cpTable td {
+  height: 30px;
+  padding: 0 8px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cpTable th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--dsw-specific-sidebar-fill);
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+.cpTable td {
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.cpRow {
+  cursor: pointer;
+  transition: background 120ms var(--ds-ease-in-out);
+}
+
+.cpRow:hover td {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.cpRow.on td {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.cpRow:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--dsw-alias-state-business-primary);
+  outline: none;
+}
+
+.cpWrites {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.cpMore {
+  display: block;
+  width: 100%;
+  height: 29px;
+  border: none;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-1);
+  cursor: pointer;
+}
+
+.cpMore:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.cpMore:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -2px;
+}
+
+.cpMore:disabled {
+  cursor: default;
+}
+
+.stateBox {
+  /* 只补高度与滚动，字号/圆角/底色全交给 `.code` */
+  max-height: 42vh;
+  overflow: auto;
+  margin-top: 8px;
 }
 
 tfoot td {
