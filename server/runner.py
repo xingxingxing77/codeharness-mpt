@@ -179,6 +179,14 @@ class SessionRunner:
             if paradigm == "dynamic":
                 from codeharness.team import dynamic_assembly
                 agents, sop = dynamic_assembly(llm)
+                # C1-③ 现场招的成员在**建图之前**并进装配：LangGraph 的节点集 compile 时就定死，
+                # 所以生效点是「下一次起跑/续跑」，不是运行中热插（API 侧同判：只有 dynamic 线能招人，
+                # classic/react 线没人会点名新节点，招进来就是个醒不过来的死节点）。
+                for d in getattr(session, "role_defs", None) or []:
+                    from codeharness.team import build_hired_role
+                    agents[d["name"]] = build_hired_role(d, llm)
+                from codeharness.team import sync_roster
+                sync_roster(agents)           # 队长的 {team_info} 得看见新成员，否则点名点不到
             elif paradigm == "react":                     # 9.2 策略曲线第三腿：经典队形×REACT 循环
                 from codeharness.team import react_assembly
                 agents = react_assembly(llm)

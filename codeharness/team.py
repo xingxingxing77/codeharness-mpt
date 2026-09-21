@@ -1,5 +1,7 @@
 """项目入口：源 team.py 的 run_project(:102) + run(:123) 合体。
 run_project = 脚本场景的 async generator；prepare_project = runner 专用的三件套。"""
+import re
+from pydantic import BaseModel, Field
 from codeharness.schema import Message
 from codeharness.const import RequirementTag, TEAMLEADER_NAME
 
@@ -28,19 +30,29 @@ def default_team(llm, env_desc: str = "a software company"):
                              REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
                              brain=BrainMemory(), longterm_memory=ltm)
               for name, (prof, goal) in profiles.items()}
-    # 委派名册（C1-②）：源 `_get_team_info`(:50-57) 的等价。缺了它模型无从知道成员叫什么，
-    # 只能编名字——编出来的名字在 `publish_team_message` 处被拒（有 roster 才校验），
-    # 侥幸投出去也会在 route 抛 UnknownRecipient。名册先于委派存在。
-    roster = {n: f"{r.profile.get('profile', '')}, {r.profile.get('goal', '')}"
-                for n, r in agents.items()}
-    for r in agents.values():
-        r.teammates = roster
+    sync_roster(agents)
     if TEAMLEADER_NAME in agents:
         # 源 TeamLeader._think(:66-67) 每轮重算 instruction=TL_INSTRUCTION；本仓走 instruction_provider
         from codeharness.prompts.di.team_leader import TL_INSTRUCTION
         leader = agents[TEAMLEADER_NAME]
         leader.instruction_provider = lambda: TL_INSTRUCTION.format(team_info=leader.team_info())
     return agents
+
+
+def sync_roster(agents: dict) -> dict:
+    """把「谁在队里」刷进每个 RoleZero 的 `teammates`（C1-②/③ 的共用出口）。
+
+    两件事靠它：队长的 `{team_info}` 才有成员名可填（没有名册模型只能编名字），
+    以及 `publish_team_message` 才有校验依据（在册才投）。**招人之后必须再调一次**，
+    否则队长看不见新成员，委派永远到不了他。"""
+    roster = {}
+    for name, agent in agents.items():
+        prof = getattr(agent, "profile", None) or {}
+        roster[name] = f"{prof.get('profile', '')}, {prof.get('goal', '')}"
+    for agent in agents.values():
+        if hasattr(agent, "teammates"):
+            agent.teammates = dict(roster)
+    return roster
 
 
 async def run_project(idea: str, project_id: str, agents: dict | None = None,
@@ -166,3 +178,103 @@ def classic_team(llm):
                            react_mode="REACT", max_loops=5,
                            watch={RequirementTag.SUMMARIZE_CODE}),
     }
+
+
+# ---------------- C1-③：现场招人（源无此能力，用户 2026-09-21 决策 #4 自建） ----------------
+# 源只有装配期 `Team.hire(roles)`（metagpt/team.py:83），跑起来之后不再造人。
+# 本仓按决策做「会话期内招人」：档案 = name/profile/goal/constraints + 从注册表选的工具名，
+# 生效点是下一次起跑/续跑的装配（`runner._prepare`），不做图中热插——LangGraph 的节点集在
+# compile 时就定了，热插只能整图重建 + 换 checkpointer 线程，代价远大于「下一跑生效」。
+
+_NAME_OK = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,31}\Z")
+
+
+class RoleDraft(BaseModel):
+    """`draft_role_profile` 的输出契约（structured 强约束，与 ZeroThought 同一做法）。"""
+    name: str = ""
+    profile: str = ""
+    goal: str = ""
+    constraints: str = ""
+    tools: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+HIRE_SYSTEM = """You are a team composer for an autonomous software team. Design exactly ONE new team member.
+Fields: name = one short capitalized English identifier; profile = job title; goal = what it must achieve;
+constraints = rules it must obey; tools = ONLY names copied from the registry given below;
+reason = why this member is needed. Keep name/profile/goal/constraints in the requirement's language
+except the identifier `name`. Do not invent tools."""
+
+HIRE_PROMPT = """# Requirement
+{idea}
+
+# Members already on the team
+{teammates}
+
+# Tool registry (copy these names verbatim into `tools`, or use none)
+{tools}
+
+Design the ONE member that the existing team cannot cover. Prefer few tools; prefer a narrow role."""
+
+
+def check_role_def(defn: dict, taken=()) -> dict:
+    """招人档案的**唯一**校验口（端点与装配都走它，别在第二处再写一遍规则）。
+
+    不合法一律抛 ValueError（端点转 422），文本里带原因与可选项——「不合规」和「不知道为什么不合」
+    是两件事，前者对用户没用。"""
+    from codeharness.tools.tool_registry import TOOL_REGISTRY
+    name = str(defn.get("name", "")).strip()
+    if not _NAME_OK.match(name):
+        raise ValueError("name 必须是字母开头、≤32 字符的标识符（不能含空格/中文/标点）——"
+                         f"它同时是 LangGraph 的节点名，实收 {name!r}")
+    if name in set(taken):
+        raise ValueError(f"角色名 {name!r} 已在装配里，换一个或先删掉原成员")
+    for field in ("profile", "goal"):
+        if not str(defn.get(field, "")).strip():
+            raise ValueError(f"{field} 不能为空（缺 profile/goal 的角色没有可判的行为）")
+    known = [t.name for t in TOOL_REGISTRY.all()]
+    tools = [str(t).strip() for t in (defn.get("tools") or []) if str(t).strip()]
+    unknown = [t for t in tools if t not in known]
+    if unknown:
+        # 未注册的名字被静默丢掉 = 装配出来的角色不是请求的那个角色，比报错更糟
+        raise ValueError(f"未注册的工具名 {unknown}（注册表共 {len(known)} 个，可选如 {known[:6]}…）")
+    return {**defn, "name": name, "profile": str(defn["profile"]).strip(),
+            "goal": str(defn["goal"]).strip(), "constraints": str(defn.get("constraints", "")).strip(),
+            "tools": sorted(set(tools))}
+
+
+def required_tier(tools: list[str]) -> str:
+    """这批声明里最高的审批档。**不另立口径**：直接查执行期那张表（`_approval.TOOL_TIER`），
+    表里没有的动作按 `full_access` 判——与那条表的 fail-closed 同一条规则。"""
+    from codeharness.tools._approval import TIER_RANK, TOOL_TIER
+    tiers = {TOOL_TIER.get(t, "full_access") for t in tools} or {"readonly"}
+    return max(tiers, key=lambda t: TIER_RANK[t])
+
+
+def build_hired_role(defn: dict, llm):
+    """档案 → 一个可进图的 RoleZero。工具集走 `TOOL_REGISTRY.select`（名字已校验过）。
+
+    空工具集是合法形态：纯思考型成员（评审、总结）不碰任何工具。"""
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.tools.tool_registry import TOOL_REGISTRY
+    return RoleZero({"name": defn["name"], "profile": defn.get("profile", ""),
+                     "goal": defn.get("goal", ""), "constraints": defn.get("constraints", "")},
+                    TOOL_REGISTRY.select(*defn.get("tools", [])), llm,
+                    max_loops=int(defn.get("max_loops", 8)))
+
+
+async def draft_role_profile(llm, idea: str, teammates=None) -> dict:
+    """让模型现场写一份档案（决策 #4 的「profile 现场写」）。**只回草案，不落库**——
+    落库要走 `POST /roles`，那里才有档位审批与去重。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from codeharness.tools.tool_registry import TOOL_REGISTRY
+    names = [t.name for t in TOOL_REGISTRY.all()]
+    prompt = HIRE_PROMPT.format(idea=idea[:2000], teammates=", ".join(teammates or []) or "(none)",
+                                tools=", ".join(names))
+    draft = await llm.structured(RoleDraft).ainvoke([SystemMessage(content=HIRE_SYSTEM),
+                                                     HumanMessage(content=prompt)])
+    out = draft.model_dump()
+    unknown = [t for t in out["tools"] if t not in names]
+    if unknown:
+        raise ValueError(f"模型声明了未注册的工具 {unknown}，草案不作数（别把没登记的工具当成有）")
+    return out

@@ -22,7 +22,7 @@ KEY = "ch:sess:{}"
 INDEX = "ch:index"
 # 存进 Redis 哈希时一切都被 str() 过，这些字段要走 JSON；兜底值按类型给（列表字段
 # 用 "{}" 会反序列化成 dict，pydantic 直接炸）。
-_JSON_FIELDS = {"llm_override": {}, "cost": {}, "roles": []}
+_JSON_FIELDS = {"llm_override": {}, "cost": {}, "roles": [], "role_defs": []}
 
 
 def _dump_fields(fields: dict) -> dict:

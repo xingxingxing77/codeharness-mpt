@@ -31,6 +31,11 @@ class Session(BaseModel):
     # 装配出口回填（runner._prepare）：roles=这场次真实的角色节点名，entry_role=插话空目标时给谁。
     # 前端直聊下拉只渲染这两个值——原先硬编码的名单与装配对不上，追问会被 route 静默丢掉。
     roles: list[str] = Field(default_factory=list)
+    # 现场招进来的成员（C1-③）：[{name, profile, goal, constraints, tools[]}]。
+    # `roles` 只是节点名清单（前端下拉/校验吃它），装配要吃**完整 profile**，所以另开一个字段。
+    # ⚠ 新增这个字段必须同批登记 `platforms/session_store.py::_JSON_FIELDS`，
+    # 否则 Redis 那台 store 会 `str(list)` 落库、回读成字符串，两台 store 从此不同形。
+    role_defs: list[dict] = Field(default_factory=list)
     entry_role: str = ""
     # 工具审批的会话级免审档：readonly | workspace_write | full_access（判定表见
     # codeharness/tools/_approval.py）。新建默认最保守的 readonly——只读面免审，

@@ -73,6 +73,16 @@ class HumanInputReq(BaseModel):
     content: str = Field(min_length=1)
 
 
+class RoleReq(BaseModel):
+    """C1-③ 招人档案。这里只做**形状**校验（少字段就 422，不进内核），
+    语义校验（名字合法、工具已注册、档位够不够）在 `codeharness.team.check_role_def` 那一个出口里做。"""
+    name: str = Field(min_length=1, max_length=32)
+    profile: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    constraints: str = ""
+    tools: list[str] = Field(default_factory=list)
+
+
 class PatchSessionReq(BaseModel):
     """四个都可选：不传的字段保持原值，所以取消归档要显式发 archived=false。"""
     idea: Optional[str] = Field(default=None, min_length=1)
@@ -252,6 +262,55 @@ async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(cur
     if not runner.enqueue_chat(sid, req.content, target):
         raise HTTPException(409, "session chat queue unavailable")
     return {"ok": True}
+
+
+@router.post("/{sid}/roles")
+def hire_role(sid: str, req: RoleReq, request: Request, user: str = Depends(current_user)):
+    """C1-③ 现场招人。**生效点是下一次起跑/续跑**（不是运行中热插）：
+    LangGraph 的节点集在 compile 时就固定，热插只能重建图 + 换线程，代价大于「等这一跑完」。"""
+    s = _owned(request, sid, user)
+    if s.sop or s.paradigm != "dynamic":
+        # 只有动态线有「队长点名」这条通路。classic/react 线里没有任何边或命令会指向新节点，
+        # 招进来就是个醒不过来的死成员——那种节点宁可直接拒绝，也不静默收下。
+        raise HTTPException(422, f"只有 paradigm=dynamic 的会话能招人（当前 {s.paradigm!r}"
+                                f"{'，且走 sop 模板线' if s.sop else ''}）")
+    if s.status == SessionStatus.running:
+        raise HTTPException(409, "会话在跑：等它收口或先点停止，再招人（生效点是下一次装配）")
+    from codeharness.team import check_role_def, required_tier
+    from codeharness.tools._approval import PERMISSION_DEFAULT, TIER_RANK
+    try:
+        defn = check_role_def(req.model_dump(),
+                              taken=[*s.roles, *(str(d.get("name", "")) for d in s.role_defs)])
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    need = required_tier(defn["tools"])
+    have = s.permission if s.permission in TIER_RANK else PERMISSION_DEFAULT
+    if TIER_RANK[need] > TIER_RANK[have]:
+        # 声明工具走的就是执行期那一条审批门（同一张表 `_approval.TOOL_TIER`），这里不开后门
+        raise HTTPException(422, f"这些工具需要 {need} 档，会话现在是 {have} 档："
+                                f"{'、'.join(defn['tools'])}。要招就先在 composer 上把档位切到 {need}")
+    updated = _get(request, "store").update(sid, role_defs=[*s.role_defs, defn])
+    _get(request, "bus").publish(s.id, kind="status",
+                                 value={"status": updated.status, "message": f"已招募 {defn['name']}（下一次起跑生效）"})
+    return {"ok": True, "role": defn, "takes_effect": "next_start", "roles": updated.roles}
+
+
+@router.get("/{sid}/roles/draft")
+async def draft_role(sid: str, request: Request, user: str = Depends(current_user)):
+    """让模型现场写一份档案（决策 #4「profile 现场写」）。**只回草案、不落库**——
+    落库必须走 `POST /{sid}/roles`，那里才有重名、工具注册表与档位三道闸。"""
+    s = _owned(request, sid, user)
+    from codeharness.team import _make_llm, draft_role_profile
+    llm = _make_llm(None, getattr(s, "llm_override", None))
+    try:
+        draft = await draft_role_profile(llm, s.idea, teammates=s.roles)
+    except ValueError as e:
+        raise HTTPException(502, f"草案不合规矩（模型声明了注册表里没有的工具）：{e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(503, f"模型没答上：{type(e).__name__}: {e}")
+    return draft
 
 
 @router.post("/{sid}/human-input")
