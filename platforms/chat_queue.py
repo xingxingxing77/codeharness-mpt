@@ -1,7 +1,7 @@
 """插话队列 Redis 化（施工4 目标结构第 3 行）：`LIST ch:chat:{sid}`。
 
-投递方（HTTP worker）与消费方（跑图的 worker）可能不是同一个进程——进程内
-`defaultdict(deque)` 的洞就在这。drain 用逐条 LPOP：单条原子，两个 worker 同时
+投递方（HTTP worker）与消费方（跑图的 worker）可能不是同一个进程——进程内那个
+`runtime.ChatQueue` 再快也只救单进程，跨 worker 投进来的插话它根本看不见。drain 用逐条 LPOP：单条原子，两个 worker 同时
 drain 也不会把同一条插话喂两遍（LRANGE+DEL 会）。
 接口与 codeharness.runtime.ChatQueue 同名同签名（enqueue/drain，同步）。
 """
