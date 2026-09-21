@@ -453,11 +453,24 @@ class SessionRunner:
 
     # ---- 主流程 -------------------------------------------------------------
     def _make_chat(self, sid: str):
-        """插话队列的装配出口：进程内 ChatQueue（默认）或 RedisChatQueue（S7 flag 开时注入工厂）。"""
+        """插话队列的装配出口：进程内 ChatQueue（默认）或 RedisChatQueue（S7 flag 开时注入工厂）。
+
+        B6：装一个 `on_change` 接缝再交出去——「谁在队列里」只有队列自己知道
+        （HTTP 线程投、图里 route 每轮取），别处猜都只能猜成第二个游标（§9 第 5 条当年写的
+        「若需界面可见，接缝应做在 ChatQueue」就是这个口子）。工厂签名不动（它只认 sid），
+        所以在这里补装属性，两台同名同属性。"""
         if self.chat_factory:
-            return self.chat_factory(sid)
-        from codeharness.runtime import ChatQueue
-        return ChatQueue()
+            chat = self.chat_factory(sid)
+        else:
+            from codeharness.runtime import ChatQueue
+            chat = ChatQueue()
+        chat.on_change = self._chat_notifier(sid)
+        return chat
+
+    def _chat_notifier(self, sid: str):
+        def notify(action: str, items: list):        # 普通函数（桥接铁律，同 _make_sink）
+            self.bus.publish(sid, kind="queue", name=action, value={"items": items})
+        return notify
 
     async def _run(self, session: Session):
         sid = session.id

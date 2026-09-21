@@ -92,8 +92,10 @@ def t1_inproc_roundtrip():
             f"插话通道丢/重了：投 500 收 {len(got)}（两步 drain 的窗口就是这里，别改回去）")
         # 结构判据兜底：行为那格再密也不是 100%，而「快照 + 清空」这个形状本身可以直接禁。
         # 只看 `drain` 的函数体——类 docstring 里就抄着旧写法长什么样，拿整类源码判会自己判自己。
+        # B6 起 drain 在锁里逐条 `popleft`（要同一台支持 pending/remove，Queue 摘不掉中间那条），
+        # 所以这条从「必须写 get_nowait」改成「必须逐条取走且体内无 clear」——旧的两步写法照样红。
         src = inspect.getsource(ChatQueue.drain)
-        assert "get_nowait" in src and "clear" not in src, (
+        assert ("get_nowait" in src or "popleft" in src) and "clear" not in src, (
             "ChatQueue.drain 又退回「先快照再 clear」的两步写法了——那正是 C7 修的丢消息")
         _ok("t1", "进程内 store/bus/chatqueue 往返正常 + 插话边投边取不丢（feature flag 关=默认路）")
     finally:
@@ -233,7 +235,15 @@ async def t4_cross_worker_chat():
     got = b.drain()
     assert sorted(got) == [("再一条", ""), ("投一条", "PM")], got
     assert b.drain() == [] and a.drain() == []                # 逐条 LPOP：不重不漏不双喂
-    _ok("t4", "跨 worker 插话：RPUSH/LPOP，投递方与消费方可以不是同一个进程")
+    # B6：跨 worker 也要能「看见 + 撤回这一条」。撤回按整条值 LREM，所以次序天生不动——
+    # 这一格钉的是「摘掉中间那条，前后两条的相对次序原样」（进程内那台的同判据在 s8 t18）。
+    ids = [a.enqueue(f"插话{i}", "PM") for i in range(3)]
+    assert [p["id"] for p in a.pending()] == ids, f"pending 的次序不是 FIFO：{a.pending()}"
+    assert a.remove(ids[1]) is True and a.remove("deadbeef") is False
+    assert [p["content"] for p in a.pending()] == ["插话0", "插话2"], a.pending()
+    assert b.drain() == [("插话0", "PM"), ("插话2", "PM")], "撤回一条之后剩下的被重排/丢了"
+    _ok("t4", "跨 worker 插话：RPUSH/LPOP，投递方与消费方可以不是同一个进程"
+              " + B6 pending/remove 平价（撤中间那条不重排）")
 
 
 async def t5_quota_no_oversell():

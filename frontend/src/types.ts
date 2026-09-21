@@ -56,6 +56,13 @@ export interface WEvent {
   extra: any
 }
 
+/** B6 排队中的插话。`id` 只为「撤回这一条」存在（route 取走后就不再出现在队列里）。 */
+export interface QueueItem {
+  id: string
+  content: string
+  send_to: string
+}
+
 export interface Block {
   key: string
   type: string // Thought | Docs | Editor | Terminal | Task | Gallery | Browser | Notebook | ...

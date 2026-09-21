@@ -318,6 +318,28 @@ async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(cur
     return {"ok": True}
 
 
+@router.get("/{sid}/queue")
+def get_queue(sid: str, request: Request, user: str = Depends(current_user)):
+    """B6：看这场此刻排着哪些**还没被取走**的插话（route 每轮取一次，取走就不再出现在这里）。
+    队列只在有活任务时存在（`_run` 建、`_forget` 收），所以停着的会话回空列表——
+    这不是「队列被清空」的假话，是确实没有下一刻会取走它的图。"""
+    s = _owned(request, sid, user)
+    chat = _get(request, "runner").chats.get(s.id)
+    return {"items": chat.pending() if chat else []}
+
+
+@router.delete("/{sid}/queue/{qid}")
+def drop_queued(sid: str, qid: str, request: Request, user: str = Depends(current_user)):
+    """撤回一条（**不重排**：只把那个位置剔掉，后面的次序原样）。
+    不在队列里就 404——已经被 route 取走的也 404，那种情况该点是停止或再插一条，
+    而不是假装还撤得回来。"""
+    s = _owned(request, sid, user)
+    chat = _get(request, "runner").chats.get(s.id)
+    if not chat or not chat.remove(qid):
+        raise HTTPException(404, f"队列里没有 {qid}（可能已被投递，或这场没有在跑）")
+    return {"ok": True, "removed": qid}
+
+
 @router.post("/{sid}/roles")
 def hire_role(sid: str, req: RoleReq, request: Request, user: str = Depends(current_user)):
     """C1-③ 现场招人。**生效点是下一次起跑/续跑**（不是运行中热插）：

@@ -1118,6 +1118,73 @@ def t17_goal_surface():
                "+ 全仓只有 complete 一处写 goal_done_at + 前端三路由与 GoalBar 源值文案在位")
 
 
+def t18_steer_queue():
+    """B6：跑图途中投进来的插话要**看得见、撤得回**，而且撤一条不许把其余的重排。
+
+    接缝做在队列本身（PLAN §9 第 5 条当年指的就是这个位置）：runner 建队时装上 `on_change`，
+    add / remove / drain 三个动作的留痕因此与「谁投的、谁取走的」同源——不在前端另起一份列表
+    （那是本仓反复出事的「第二个游标」形状）。Redis 那台的跨 worker 平价在 `s7 t4`。
+    """
+    from codeharness.runtime import ChatQueue
+    from platforms.chat_queue import RedisChatQueue
+
+    for m in ("enqueue", "drain", "pending", "remove"):
+        assert m in vars(ChatQueue) and m in vars(RedisChatQueue), \
+            f"B6：两台插话通道接口不再同名同签名（缺 {m}）——route 只认一套，前端也只消费一套事件"
+
+    fired = []
+    q = ChatQueue(on_change=lambda a, it: fired.append((a, it)))
+    ids = [q.enqueue(f"插话{i}", "PM") for i in range(3)]
+    assert [p["id"] for p in q.pending()] == ids, f"B6：pending 不是 FIFO，实为 {q.pending()}"
+    assert q.remove(ids[1]) is True, "B6：撤回一条存在的插话回了 False"
+    assert q.remove("deadbeef") is False, "B6：撤回不存在的 id 竟然成功（前端会以为撤掉了）"
+    assert q.drain() == [("插话0", "PM"), ("插话2", "PM")], \
+        "B6：撤掉中间那条之后，剩下的被重排或丢了（口径是「可撤回不重排」）"
+    assert [f[0] for f in fired] == ["add", "add", "add", "remove", "drain"], \
+        f"B6：队列留痕的动作序列不对 {fired}"
+    assert fired[3][1] == [{"id": ids[1]}] and fired[4][1][0]["content"] == "插话0", \
+        "B6：remove/drain 事件不再带得出「是哪几条」——界面只能整份猜着刷新"
+    assert q.pending() == [], "B6：drain 之后还挂着 pending，胶囊永远撤不掉"
+
+    import server.sessions as ss
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    from codeharness.configs.settings import settings
+    keep_file, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    keep_redis = settings.platform.use_redis
+    settings.platform.use_redis = False
+    try:
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "队列门禁", "project_name": "s8queue"}).json()["id"]
+            empty = c.get(f"/api/sessions/{sid}/queue")
+            assert empty.status_code == 200 and empty.json() == {"items": []}, \
+                f"B6：没在跑的会话该回空队列，实回 {empty.status_code} {empty.text[:80]}"
+            gone = c.delete(f"/api/sessions/{sid}/queue/abc12345")
+            assert gone.status_code == 404, f"B6：没有队列时撤回该 404，实回 {gone.status_code}"
+            c.app.state.store.update(sid, roles=["PM"], entry_role="PM")   # 目标校验吃装配名册
+            chat = c.post(f"/api/sessions/{sid}/chat", json={"content": "hi", "send_to": "Ghost"})
+            assert chat.status_code == 422, "B6：插话目标校验被绕过（加队列端点时把这条弄丢了）"
+    finally:
+        settings.platform.use_redis = keep_redis
+        ss.SESSIONS_FILE = keep_file
+
+    fe_api = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    assert "/api/sessions/${sid}/queue" in fe_api and "dropQueued" in fe_api, \
+        "B6 回归：前端不再消费队列两条路由"
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    assert "ev.kind === 'queue'" in st, "B6 回归：applyEvent 不接 kind=queue"
+    assert "queue: [] as QueueItem[]" in st, "B6 回归：队列投影不再是唯一那一份 store 状态"
+    assert "this.queue = []" in st, "B6 回归：切会话不清队列胶囊（上一场排着的会挂在下一场名下）"
+    assert "!this.queue.some((q) => q.id === it.id)" in st and "filter((q) => !items.some" in st, \
+        "B6 回归：queue 分支改成整份覆盖了——add 与 GET 竞态会把刚投的那条吞掉"
+    dock = (FE / "components" / "composer" / "QueueDock.vue").read_text(encoding="utf-8")
+    assert "store.queue" in dock and "api.dropQueued" in dock, "B6 回归：QueueDock 不再读队列/不再会撤回"
+    assert "(e as Error).message" in dock, "B6 回归：撤回失败又去猜文案（404 原文就写着为什么撤不掉）"
+    assert "store.loadQueue(" in dock,         "B6 回归：撤回拿到 404 之后不向服务端对齐——胶囊会挂在一条已经不存在的插话上，"+         "让人点第二下（活体实测过这一格：drain 事件落在活流断档期间，按游标被丢掉）"
+    _ok("t18", "B6 三面同判：两台通道接口平价 + FIFO/撤中间不重排/留痕序列 add×3→remove→drain"
+               " + 端点（空队列 200、无队列撤回 404、目标校验仍在）+ 前端按 id 增删不整份覆盖")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1125,7 +1192,7 @@ def main():
               t10_approval_rollback_realign, t11_events_history_window,
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
-              t17_goal_surface)
+              t17_goal_surface, t18_steer_queue)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

@@ -138,6 +138,10 @@ export const api = {
     req<Session>('POST', `/api/sessions/${sid}/goal`, { objective }),
   completeGoal: (sid: string) => req<Session>('POST', `/api/sessions/${sid}/goal/complete`),
   clearGoal: (sid: string) => req<Session>('POST', `/api/sessions/${sid}/goal/clear`),
+  /** B6 中途 steer 的面：看排着什么、撤回哪一条（不重排）。 */
+  queue: (sid: string) => req<{ items: any[] }>('GET', `/api/sessions/${sid}/queue`),
+  dropQueued: (sid: string, qid: string) =>
+    req<{ ok: boolean; removed: string }>('DELETE', `/api/sessions/${sid}/queue/${qid}`),
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>

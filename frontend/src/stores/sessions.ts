@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { api, getToken } from '../api/client'
-import type { ApprovalItem, Block, Health, Session, TraceSpan, WEvent } from '../types'
+import type { ApprovalItem, Block, Health, QueueItem, Session, TraceSpan, WEvent } from '../types'
 
 const MAX_LOGS = 800
 /** 一屏的事件条数（B2）。单位是**事件**不是块——一块会合并整个流式节点的几十上百条
@@ -41,6 +41,9 @@ export const useSessionStore = defineStore('sessions', {
     /** 当前会话的待批项（批次36）。SSE `approval` 事件驱动，切会话时 GET 补一次——
      *  刷新页面不该把已经挂着的审批弄没。 */
     approvals: [] as ApprovalItem[],
+    /** B6：排着还没被 route 取走的插话。唯一真值仍是服务端队列，这里只是投影
+     *  （开/切会话从 GET /queue 取一次，之后靠 kind=queue 事件跟着走）。 */
+    queue: [] as QueueItem[],
     status: '',
     cost: {} as Record<string, number>,
     /** 活流三态（B1 断线横幅的唯一状态源）。刻意只有三值：参考项目 ConnectionBanner 的原子
@@ -160,6 +163,17 @@ export const useSessionStore = defineStore('sessions', {
       void this.loadFirstPage(sid)
       void this.loadTrace(sid)
       void this.loadApprovals(sid)
+      this.queue = []            // 上一场的排队胶囊不许挂在这一场名下（同「第二个游标」那族洞）
+      void this.loadQueue(sid)
+    },
+
+    async loadQueue(sid: string) {
+      try {
+        const r = await api.queue(sid)
+        if (sid === this.currentId) this.queue = (r.items || []) as QueueItem[]
+      } catch {
+        /* 停着的会话没有队列：留空就是正确答案，不拿假数据填 */
+      }
     },
 
     /** 拉最新一屏历史。成功后 lastCursor 落在页尾，connect() 从那儿只收增量。 */
@@ -460,6 +474,14 @@ export const useSessionStore = defineStore('sessions', {
             this.blockOrder.push(key)
           }
         }
+      } else if (ev.kind === 'queue') {
+        // B6：队列变更。三个动作都只**按 id 增删**这一份投影，绝不整份覆盖——
+        // 覆盖会把「add 到一半、GET 还没回来」的中间态抹掉，那就是第二个游标的老病。
+        const items = ((ev.value as any)?.items || []) as QueueItem[]
+        if (ev.name === 'add')
+          for (const it of items) if (!this.queue.some((q) => q.id === it.id)) this.queue.push(it)
+        else if (ev.name === 'drain' || ev.name === 'remove')
+          this.queue = this.queue.filter((q) => !items.some((i) => i.id === q.id))
       } else if (ev.kind === 'goal') {
         // B5：目标变更。真值在 Session 记录里（GET 就拿得到），这条事件只让**活流**立刻跟上；
         // 回放走同一处落点，所以不另开第二份状态（`clear` 的 objective 是空串，必须照收）。

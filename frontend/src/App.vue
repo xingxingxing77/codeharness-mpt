@@ -8,6 +8,7 @@
     <main class="center">
       <ConversationRoot v-if="store.current">
         <template #composer>
+          <QueueDock />
           <GoalBar />
           <ComposerCard @stop="store.stop()" />
         </template>
@@ -41,6 +42,7 @@ import { useAuthStore } from './stores/auth'
 import AppFrame from './components/frame/AppFrame.vue'
 import ComposerCard from './components/composer/ComposerCard.vue'
 import GoalBar from './components/composer/GoalBar.vue'
+import QueueDock from './components/composer/QueueDock.vue'
 import ConversationRoot from './components/conversation/ConversationRoot.vue'
 import DetailsPanel from './components/DetailsPanel.vue'
 import EmptyHero from './components/composer/EmptyHero.vue'
