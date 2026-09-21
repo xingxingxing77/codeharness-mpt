@@ -165,4 +165,63 @@ watch(
 .md :deep(pre) {
   margin: 0;
 }
+
+/* 代码块卡片（A2 实测补的）：`utils/render.ts:35` 一直只发 markup，这四个类在全仓**零 CSS**，
+   所以源值「banner 9px 14px」根本没有落点、`pre` 量出来 padding=0 / 字号继承 16px。
+   规格逐条取自参照系 `ui-primitives/lib/markdown/CodeBlock.module.css` 的 .block/.banner/.infostring/.copyButton。
+   参照系的 banner 字号是 `--dsw-font-xs-13`，本仓没这个 token——也不补：语言位用现成的
+   `--dsw-font-markdown-code-block-small`(12/18 等宽)，按钮 `font: inherit`，渲染出来的字阶与参照系一致。 */
+.md :deep(.md-code-block) {
+  margin: 16px 0;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-markdown-code-block);
+  border-radius: 12px;
+}
+
+.md :deep(.md-code-banner) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  background: var(--dsw-alias-markdown-code-block-banner);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+.md :deep(.md-code-lang) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--dsw-font-markdown-code-block-small);
+  color: var(--dsw-alias-label-primary);
+}
+
+.md :deep(.md-code-copy) {
+  flex: none;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background-color: transparent;
+  color: inherit;
+  /* 参照系这里是 `font: inherit`，靠 banner 的 --dsw-font-xs-13 落到 13px；本仓没有那个 token，
+     直接 inherit 会继承到正文的 16/28，比旁边的语言标签高一号。改成与标签同档（12/18，
+     中文实际走系统字面），banner 那一行才像一行。 */
+  font: var(--dsw-font-markdown-code-block-small);
+  cursor: pointer;
+}
+
+/* 下圆角挂在 pre 上而不是给容器 overflow:hidden——参照系同一条注释：卡片底色不透明，
+   裁在 wrapper 上会把 banner 的 sticky 一起废掉（我们暂时没 sticky，但保持同构）。 */
+.md :deep(.md-code-block > pre) {
+  font: var(--dsw-font-markdown-code-block);
+  padding: 16px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--dsw-alias-markdown-code-block);
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
 </style>
