@@ -40,22 +40,23 @@ async def t2_exp_tenant_isolation():
     print("✅")
 
 
-async def t3_kb_producer_exists():
-    """t3: UploadKB Action 存在且正确实现。"""
-    print("t3: kb producer exists...", end=" ", flush=True)
-    
-    from codeharness.actions.upload_kb import UploadKB
-    
-    # 验证类存在
-    assert hasattr(UploadKB, "_call"), "应有_call 方法"
-    
-    # 验证签名
-    import inspect
-    sig = inspect.signature(UploadKB._call)
-    params = list(sig.parameters.keys())
-    assert "params" in params, "应有 params 参数"
-    
-    print("✅")
+async def t3_kb_producer_wired():
+    """t3: 知识库生产者**有真调用点**（C3）。
+
+    这格原先只断 `hasattr(UploadKB, "_call")` + 参数名叫 `params`——类的存在性与签名证明不了链路接通，
+    正是 PLAN §2 C3 点名的病（端到端那道在 `tests/s15_kb_upload.py`）。现在钉三件真事实：
+    注入口在位（门禁才不必挂真 embedding 服务）、收 .md（用户最常传的文档）、`server/` 里有调用者。"""
+    print("t3: kb producer wired...", end=" ", flush=True)
+
+    from codeharness.actions.upload_kb import SUPPORTED, UploadKB
+
+    assert {"store", "embeddings"} <= set(UploadKB.model_fields),         "UploadKB 没有注入口 = 端到端门禁只能挂真 embedding 服务，那条链就测不到"
+    assert ".md" in SUPPORTED, f"知识库不收 .md，用户最常传的文档进不去：{sorted(SUPPORTED)}"
+    root = Path(__file__).resolve().parent.parent
+    callers = [str(p.relative_to(root)) for p in (root / "server").rglob("*.py")
+               if "UploadKB" in p.read_text(encoding="utf-8")]
+    assert callers, "UploadKB 又回到零生产调用者（C3 判据原文要的就是这一格）"
+    print(f"✅（调用者 {callers}）")
 
 
 async def main():
@@ -67,7 +68,7 @@ async def main():
     try:
         await t1_agent_memory_feed()
         await t2_exp_tenant_isolation()
-        await t3_kb_producer_exists()
+        await t3_kb_producer_wired()
         
         print("\n" + "=" * 60)
         print("✅ 全部通过 (3/3)")
