@@ -40,6 +40,24 @@
         </VButton>
       </div>
       <div v-if="importErr" class="importErr">{{ importErr }}</div>
+      <!-- upload_kb 的唯一入口（B12）：C3 把这条链接通了，此前灌一份文档只能 curl。
+           刻意不设后缀白名单、也不把后端那两个上限写成数字——三条判据只住后端一份，
+           拒因照原文显示（复用 F-E 那条「阈值不重抄第二份」的口径）。 -->
+      <div v-if="store.currentId" class="importRow">
+        <input
+          ref="kbInput"
+          type="file"
+          multiple
+          class="kbInput"
+          aria-label="要加入知识库的文档"
+          :disabled="kbBusy"
+          @change="pickKb"
+        />
+        <VButton variant="ghost" size="s" :disabled="kbBusy || !kbChosen.length" @click="doUploadKb">
+          {{ kbBusy ? '摄取中…' : '加入知识库' }}
+        </VButton>
+      </div>
+      <div v-if="kbMsg.text" class="kbMsg" :class="{ err: kbMsg.err }">{{ kbMsg.text }}</div>
       <div v-if="!tree.length" class="dim">{{ store.current ? '工作区为空' : '未选择会话' }}</div>
       <FileNode v-for="n in tree" :key="n.path" :n="n" :depth="0" @open="openFile" />
     </div>
@@ -281,6 +299,38 @@ async function doImport() {
   }
 }
 
+const kbInput = ref<HTMLInputElement>()
+const kbChosen = ref<File[]>([])
+const kbBusy = ref(false)
+const kbMsg = ref<{ text: string; err: boolean }>({ text: '', err: false })
+
+function pickKb(e: Event) {
+  kbChosen.value = Array.from((e.target as HTMLInputElement).files || [])
+  kbMsg.value = { text: '', err: false }
+}
+
+/** 后端把「拒了哪几条」和「摄入了多少」一起回（部分成功是合法结局），所以两条都得说：
+ *  只报成功数=悄悄吞掉坏文件，只报错=明明进去了一半还说成一笔没成。原件落在 `kb/`，
+ *  所以下一次 load() 会把它带进文件树——用户据此能看见传上去的东西。 */
+async function doUploadKb() {
+  if (!store.currentId || kbBusy.value || !kbChosen.value.length) return
+  kbBusy.value = true
+  try {
+    const r = await api.uploadKb(store.currentId, kbChosen.value)
+    const errs = r.errors || []
+    const head = `已摄取 ${r.written?.length ?? 0} 份文档 / ${r.chunk_count} 条切片`
+    kbMsg.value = { text: errs.length ? `${head}\n被拒 ${errs.length} 条：\n${errs.join('\n')}` : head,
+                    err: errs.length > 0 }
+    kbChosen.value = []
+    if (kbInput.value) kbInput.value.value = ''    // 不清 value，同名文件第二次选不中（change 不再触发）
+    await load()
+  } catch (e) {
+    kbMsg.value = { text: (e as Error).message, err: true }
+  } finally {
+    kbBusy.value = false
+  }
+}
+
 async function openFile(n: FileNodeT) {
   if (n.type !== 'file') return
   try {
@@ -312,6 +362,10 @@ watch(() => [store.currentId, ui.rightView], load)
  *  不清就会把 A 场的超步显示在 B 场名下——和本仓「第二个游标」那族洞同形。 */
 watch(() => store.currentId, () => {
   Object.assign(replay, { rows: [], hasMore: false, nextBefore: '', reason: '', open: '', state: '', busy: false })
+  // 上传的结局与已选文件都属于上一场：不清就把 A 场「被拒 3 条」显示在 B 场名下（同一族洞）
+  kbChosen.value = []
+  kbMsg.value = { text: '', err: false }
+  if (kbInput.value) kbInput.value.value = ''
 })
 onMounted(load)
 
@@ -443,6 +497,33 @@ const FileNode = defineComponent({
   margin-bottom: 8px;
   font-size: 12px;
   line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+}
+/* B12 上传那一行：参照系没有「选本地文件灌知识库」这一面，最近的是
+   packages/client/ui-attachment/src/AttachmentRail.module.css 里那族 12px/18px、0~8px 内距的
+   动作按钮行；这里不另造一档字号，直接落进本文件 `.importInput` 的 26px / 12px-18px 同一族，
+   让它和上面「导入仓库」那行长得是一家人。 */
+.kbInput {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-specific-menu);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+.kbMsg {
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-line;          /* errors[] 是一条一行，不换行会糊成一串 */
+  color: var(--dsw-alias-label-secondary);
+}
+.kbMsg.err {
   color: var(--dsw-alias-state-error-primary);
 }
 

@@ -477,6 +477,10 @@ def t9_request_deadline():
     sig = re.search(r"signal:\s*AbortSignal\.timeout\((\w+|'\d+')\)", req_body)
     assert sig, "F2 回归：req() 的 fetch 选项里没有 AbortSignal.timeout——服务端挂起=前端永久 pending"
     ref = sig.group(1).strip("'")
+    if ref == "timeoutMs":
+        # B12：deadline 从常量变成 req() 的入参（上传那一档要更长）。这里必须跟着解到**默认值**上，
+        # 否则「每条请求都有 deadline」这条判据会因为换了写法而空转。
+        ref = re.search(r"timeoutMs\s*=\s*([A-Za-z_]\w*)", req_body).group(1)
     ms = int(ref) if ref.isdigit() else int(re.search(rf"const {ref} = (\d+)", fe).group(1))
     assert 5000 <= ms <= 60000, f"F2 超时取值不合理：{ms}ms（导入实测 0.71s 封顶，15s 是同步返回的余量）"
     assert "TimeoutError" in req_body, "F2：AbortSignal.timeout 抛的是 DOMException，没改名直接进 toast 用户看不懂"
@@ -825,13 +829,63 @@ def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
 
+def t15_kb_upload_entry():
+    """B12（C3 那条链的界面入口）：后端在 `c21b881` 就通了，缺的是「用户点得着」。三侧同判。
+
+    ① 后端门口三判还在（basename / 白名单 import 自摄取件 / 两个上限），响应四字段齐；
+    ② `client.ts` 走 multipart——**手设 Content-Type 会把 boundary 打掉**，所以那条分支必须
+       是「有 body 且不是 FormData 才设 JSON」；并且这条路由进了前端消费集（t3 自动覆盖形状）；
+    ③ `DetailsPanel` 把 `errors[]` 与成功数**一起**说出去（部分成功是合法结局：只报成功数=悄悄
+       吞掉坏文件，只报错=进去一半还说成一笔没成），且传完刷新文件树（原件落 `kb/`，看得见才算传上）。
+    另钉一条「不重抄」：前端不许出现第二份后缀白名单或 20MB/20 个的数字——同 F-E 的阈值口径。
+    上传那一档 deadline 也钉在这里：它比默认档长是**语义**（摄取在请求内跑），不是随手调大。"""
+    ws = (ROOT / "server" / "api" / "workspace.py").read_text(encoding="utf-8")
+    act = (ROOT / "codeharness" / "actions" / "upload_kb.py").read_text(encoding="utf-8")
+    fe = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    dp = (FE / "components" / "DetailsPanel.vue").read_text(encoding="utf-8")
+
+    # ① 后端
+    assert 'Path(f.filename or "").name' in ws and "is_relative_to(root)" in ws, \
+        "C3 回归：upload_kb 的文件名判据没了（`../../` 会穿出 kb/ 目录）"
+    assert "from codeharness.actions.upload_kb import SUPPORTED as KB_SUFFIXES" in ws, \
+        "C3 回归：端点自己抄了一份后缀白名单（白名单应当只住在摄取件里）"
+    assert re.search(r"SUPPORTED\s*[:=]", act), "摄取件里的 SUPPORTED 没了"
+    for field in ("uploaded_count", "chunk_count", "errors", "written"):
+        assert field in ws, f"C3 回归：响应体不再带 {field}（前端按这四个字段显示）"
+
+    # ② client.ts
+    req_body = re.search(r"async function req<.*?\n\}", fe, re.S).group(0)
+    assert "body instanceof FormData" in req_body and "if (body && !form)" in req_body, \
+        "B12 回归：req() 对 FormData 也会设 Content-Type——boundary 会被打掉，后端收不到文件"
+    up = re.search(r"uploadKb: \(.*?\n  \},", fe, re.S)
+    assert up and "/workspace/upload_kb" in up.group(0), "B12 回归：client.ts 不再消费 upload_kb"
+    assert "fd.append('files', f)" in up.group(0), "B12：字段名必须叫 files（后端签名是 files: list[UploadFile]）"
+    default_ms = int(re.search(r"const REQUEST_TIMEOUT_MS = (\d+)", fe).group(1))
+    up_ms = int(re.search(r"const KB_UPLOAD_TIMEOUT_MS = (\d+)", fe).group(1))
+    assert up_ms > default_ms, f"上传档({up_ms})不该短于/等于默认档({default_ms})：摄取在请求内跑"
+    assert re.search(r"KB_UPLOAD_TIMEOUT_MS\)", up.group(0)), "B12：uploadKb 没把长档传给 req()"
+
+    # ③ DetailsPanel
+    fn = re.search(r"async function doUploadKb\(.*?\n\}", dp, re.S)
+    assert fn, "B12 回归：DetailsPanel 里没有 doUploadKb（后端那条链又没有入口了）"
+    body = fn.group(0)
+    assert "r.errors" in body and "errs.length" in body and "head" in body, \
+        "B12 回归：上传结果不再同时报「摄入了多少」与「被拒哪几条」（部分成功被说成全成/全败）"
+    assert "await load()" in body, "B12 回归：传完不刷新文件树（原件就在 kb/ 里，看不见等于没传）"
+    assert "kbInput.value.value = ''" in body, "B12 回归：不清 input.value，同名文件第二次选不中"
+    assert 'accept=' not in dp and ".docx" not in dp and "20MB" not in dp, \
+        "B12：前端把后缀白名单或大小上限抄成了第二份（会漂），拒因照后端原文显示就够"
+    _ok("t15", "B12：upload_kb 三侧同判（后端门口三判+四字段 → client.ts multipart+长档 → "
+               "界面 errors 与成功数一起说 + 传完刷新树），白名单不在前端重抄")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
               t7_chat_target_from_assembly, t8_tool_approval_gate, t9_request_deadline,
               t10_approval_rollback_realign, t11_events_history_window,
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
-              t14_checkpoint_replay_surface)
+              t14_checkpoint_replay_surface, t15_kb_upload_entry)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

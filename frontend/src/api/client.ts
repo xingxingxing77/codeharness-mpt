@@ -19,16 +19,24 @@ export function setToken(t: string) {
  *  最重的 import_repo 实测 12287 文件 0.71s（log/probe_import_timing.py）。 */
 export const REQUEST_TIMEOUT_MS = 15000
 
-async function req<T = any>(method: string, url: string, body?: any): Promise<T> {
+/** B12 知识库上传另给一档：`upload_kb` 在**同一个请求里**落盘 + 切块 + 向量化
+ *  （`server/api/workspace.py` 里 `await UploadKB(...)._call(...)`），20MB×20 的上限摆在那儿，
+ *  15s 那档是给「同步返回」那批端点算的余量，套到摄取上只会把「还在跑」报成「后端可能卡住」。 */
+export const KB_UPLOAD_TIMEOUT_MS = 120000
+
+async function req<T = any>(method: string, url: string, body?: any,
+                            timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = {}
-  if (body) headers['Content-Type'] = 'application/json'
+  // FormData 必须由浏览器自己带 `multipart/form-data; boundary=…`，这里设 Content-Type 会把 boundary 打掉
+  const form = body instanceof FormData
+  if (body && !form) headers['Content-Type'] = 'application/json'
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
   let rsp: Response
   try {
     rsp = await fetch(url, {
-      method, headers, body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      method, headers, body: body ? (form ? body : JSON.stringify(body)) : undefined,
+      signal: AbortSignal.timeout(timeoutMs)
     })
   } catch (e) {
     // 超时抛的是 DOMException('TimeoutError')，文案既没 url 也不说人话；调用方直接把
@@ -115,6 +123,16 @@ export const api = {
   },
   importRepo: (sid: string, payload: { repo_path: string; save_name?: string; include_files?: boolean }) =>
     req<Record<string, any>>('POST', `/api/sessions/${sid}/workspace/import_repo`, payload),
+  /** B12 知识库摄取（C3 那条链的界面入口）：字段名固定 `files`，可多个。
+   *  **部分成功是合法结局**——`errors[]` 与 `uploaded_count` 会同时非零，调用方两条都得说出去。
+   *  后缀/大小/件数三条判据只住在后端一份（`upload_kb.py::SUPPORTED` + 两个 MAX_ 常量），
+   *  这里不 `accept=` 也不在前端重抄数字：抄一份就有第二处会漂，拒因照原文显示。 */
+  uploadKb: (sid: string, files: File[]) => {
+    const fd = new FormData()
+    for (const f of files) fd.append('files', f)
+    return req<{ uploaded_count: number; chunk_count: number; errors: string[]; written: string[] }>(
+      'POST', `/api/sessions/${sid}/workspace/upload_kb`, fd, KB_UPLOAD_TIMEOUT_MS)
+  },
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>
