@@ -116,19 +116,18 @@ class RedisEventBus:
     def history(self, sid: str, after: Union[str, int] = "", before: Union[str, int] = "",
                 limit: int = 0) -> list:
         """游标窗口回放，语义与进程内 bus 一致（`server/events.py`）：after 开下界、
-        before 开上界（往回翻）、limit>0 取窗口一侧的 limit 条、返回始终升序。
-        XRANGE 的 COUNT 截的是**头部**，所以给了 before 要改走 XREVRANGE 取最近
-        limit 条再翻回来，否则「加载更早」会拿到整条流最老的 N 条。"""
+        before 开上界（往回翻）、limit>0 取**窗口尾部** N 条（无 before 即「最新一屏」）、
+        返回始终升序。XRANGE 的 COUNT 截的是**头部**，所以只要带 limit 就得走
+        XREVRANGE 取最近 N 条再翻回来——否则「加载更早」与首屏都会拿到整条流最老的 N 条。"""
         key = STREAM.format(sid)
         a, b = norm_cursor(after), norm_cursor(before)
         lo = f"({a}" if a and a != "0" else "-"
         hi = f"({b}" if b and b != "0" else "+"
-        take = limit if limit and limit > 0 else None
-        if take and b:
-            rows = list(self._sync.xrevrange(key, max=hi, min=lo, count=take))
+        if limit and limit > 0:
+            rows = list(self._sync.xrevrange(key, max=hi, min=lo, count=limit))
             rows.reverse()
         else:
-            rows = self._sync.xrange(key, min=lo, max=hi, count=take)
+            rows = self._sync.xrange(key, min=lo, max=hi)
         return [_ev_from(eid, fields) for eid, fields in rows]
 
     def subscribe(self, sid: str) -> asyncio.Queue:

@@ -44,6 +44,12 @@
           {{ store.isRunning ? '等待智能体输出…' : '暂无事件' }}
         </div>
 
+        <!-- 加载更早（B2）：服务端 has_more 说前面还有事件才现身，所以它不是一颗永远点不动的假钮 -->
+        <button v-if="store.hasMoreEarlier" class="earlier" :disabled="store.loadingEarlier"
+                @click="loadEarlier">
+          {{ store.loadingEarlier ? '加载中…' : '加载更早' }}
+        </button>
+
         <template v-for="r in rows" :key="r.kind === 'node' ? r.b.key : r.turn.key">
           <ChatNode
             v-if="r.kind === 'node'"
@@ -155,6 +161,16 @@ const followSig = computed(() => {
 })
 
 const follow = useFollowScroll(scrollEl, flowEl, seatEl, () => followSig.value)
+
+/** 「加载更早」（B2）：整页往前拼会改变内容高度，读者那一屏必须原地不动——
+ *  先抓视觉锚点，DOM 更新后按锚点补回差值。captureAnchor/restoreAnchor 就是为这一步留的。 */
+const anchorKeyOf = (el: Element) => el.getAttribute('data-chat-anchor-key')
+async function loadEarlier() {
+  const anchor = follow.captureAnchor(anchorKeyOf)
+  await store.loadEarlier()
+  await nextTick()
+  follow.restoreAnchor(anchor, anchorKeyOf)
+}
 
 function onScroll() {
   const el = scrollEl.value
@@ -399,6 +415,30 @@ onBeforeUnmount(() => clearInterval(tick))
   text-align: center;
   font-size: 13px;
   color: var(--dsw-alias-label-tertiary);
+}
+
+/* 加载更早（B2）：沿用本仓的披露行家族（FoldToggle `.fold`：无框无底、三级字、
+   hover 提到二级），不另造一颗胶囊——同一类「点开才有下文」的开关只该有一种长相。
+   居中是因为它领着整条流，而披露行领着一张卡。 */
+.earlier {
+  display: block;
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 13px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.earlier:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.earlier:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 /* composer 座位：sticky 在滚动容器底部，上方 36px 渐变把正文淡掉 */

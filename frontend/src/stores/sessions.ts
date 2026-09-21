@@ -3,6 +3,9 @@ import { api, getToken } from '../api/client'
 import type { ApprovalItem, Block, Health, Session, TraceSpan, WEvent } from '../types'
 
 const MAX_LOGS = 800
+/** 一屏的事件条数（B2）。单位是**事件**不是块——一块会合并整个流式节点的几十上百条
+ *  token 事件，按块定页数就会把首屏撑回「一次吞完整条流」。 */
+const HISTORY_PAGE = 400
 
 function newBlock(ev: WEvent): Block {
   return {
@@ -44,6 +47,11 @@ export const useSessionStore = defineStore('sessions', {
     evtSource: null as EventSource | null,
     /** 主游标：定宽补零串，字典序==到达序。 */
     lastCursor: '',
+    /** B2 反向分页：`earliestCursor`=已加载的最老一条事件游标（下一次「加载更早」的 before），
+     *  `hasMoreEarlier` 由服务端 has_more 给（决定胶囊显隐），`loadingEarlier` 只防连点。 */
+    earliestCursor: '',
+    hasMoreEarlier: false,
+    loadingEarlier: false,
     /** 退化路径：后端未带 cursor 时才用 seq。Redis 总线的 seq≈1.79e18 过 JSON.parse
      *  会舍入到 ulp=256，同毫秒内上千事件塌缩成几个值，拿它去重会吞事件。 */
     lastSeq: 0,
@@ -141,9 +149,95 @@ export const useSessionStore = defineStore('sessions', {
       const s = this.sessions.find((x) => x.id === sid)
       this.status = s?.status || ''
       this.cost = s?.cost || {}
-      this.connect()
+      // B2：首屏只拉「最新一屏」再开活流。原先直接 connect()，服务端会把保留窗口里
+      // 那 5000 条整段回放完才活推——首屏时间与事件数成正比，且「加载更早」永远没内容。
+      void this.loadFirstPage(sid)
       void this.loadTrace(sid)
       void this.loadApprovals(sid)
+    },
+
+    /** 拉最新一屏历史。成功后 lastCursor 落在页尾，connect() 从那儿只收增量。 */
+    async loadFirstPage(sid: string) {
+      try {
+        const r = await api.eventHistory(sid, { limit: HISTORY_PAGE })
+        if (sid !== this.currentId) return          // 连点两个会话：慢的那次不许把别人的块画进来
+        for (const ev of r.events) this.applyEvent(ev)
+        this.earliestCursor = r.events.length ? r.events[0].cursor : ''
+        this.hasMoreEarlier = !!r.has_more
+      } catch {
+        /* 历史拉不到就退回老行为：connect() 里 after='' 会让服务端整段回放 */
+      }
+      if (sid === this.currentId) this.connect()
+    },
+
+    /** 「加载更早」：取 earliestCursor 之前的一屏拼到最前，返回**新出现**的块数
+     *  （0 = 没动静，视图据此决定要不要补滚动锚点）。失败静默：has_more 保持原样，
+     *  胶囊留在原地，用户能再点一次。 */
+    async loadEarlier(): Promise<number> {
+      if (!this.hasMoreEarlier || this.loadingEarlier || !this.earliestCursor) return 0
+      this.loadingEarlier = true
+      const sid = this.currentId
+      try {
+        const r = await api.eventHistory(sid, { before: this.earliestCursor, limit: HISTORY_PAGE })
+        if (sid !== this.currentId) return 0
+        this.hasMoreEarlier = !!r.has_more
+        if (!r.events.length) return 0
+        const beforeCount = this.blockOrder.length
+        this.mergeEarlierPage(r.events)
+        this.earliestCursor = r.events[0].cursor
+        return this.blockOrder.length - beforeCount
+      } catch {
+        return 0
+      } finally {
+        this.loadingEarlier = false
+      }
+    },
+
+    /** 整页往前拼（B2）。借道 applyEvent：先把这一页在**临时状态**里合成块（页内升序合并
+     *  走的就是原来那份 switch），再拼到正片最前。两个坑：
+     *  ① 被页边界切开的那一块，早半截必须排在已有的晚半截**前面**——直接 applyEvent 到正片
+     *     会变成 `tokens.push`，把这块的文字顺序颠倒；
+     *  ② lastCursor / lastSeq 不许往回走：SSE 续推位与 seq 去重都靠单调，回退会让活流重播整页。 */
+    mergeEarlierPage(evs: WEvent[]) {
+      const liveBlocks = this.blocks
+      const liveOrder = this.blockOrder
+      const liveCursor = this.lastCursor
+      const liveSeq = this.lastSeq
+      const liveLogs = this.logs
+      this.blocks = {}
+      this.blockOrder = []
+      this.logs = []
+      this.lastCursor = ''
+      this.lastSeq = 0
+      for (const ev of evs) this.applyEvent(ev)
+      const pageBlocks = this.blocks
+      const pageOrder = this.blockOrder
+      const pageLogs = this.logs
+      this.blocks = liveBlocks
+      this.blockOrder = liveOrder
+      this.logs = liveLogs
+      this.lastCursor = liveCursor
+      this.lastSeq = liveSeq
+
+      const fresh: string[] = []
+      for (const k of pageOrder) {
+        const head = pageBlocks[k]
+        const tail = liveBlocks[k]
+        if (!tail) {
+          liveBlocks[k] = head
+          fresh.push(k)
+          continue
+        }
+        tail.tokens = head.tokens.concat(tail.tokens)
+        tail.lines = head.lines.concat(tail.lines)
+        tail.raw = head.raw.concat(tail.raw)
+        if (head.ts !== undefined) tail.ts = head.ts
+        if (head.fts !== undefined) tail.fts = head.fts
+        tail.closed = tail.closed || head.closed
+        // 单值字段（meta/doc/obj/cmd/path/url/page）留正片那份：晚半截更接近最终态
+      }
+      this.blockOrder = [...fresh, ...liveOrder]
+      if (pageLogs.length) this.logs = [...pageLogs, ...liveLogs].slice(-MAX_LOGS)
     },
 
     /** 待批列表拉一次（切会话 / 刷新页面）。失败静默：审批是旁路信息，不该把首屏拖挂。 */
@@ -178,6 +272,9 @@ export const useSessionStore = defineStore('sessions', {
       this.approvals = []
       this.lastSeq = 0
       this.lastCursor = ''
+      this.earliestCursor = ''
+      this.hasMoreEarlier = false
+      this.loadingEarlier = false
       // 缓冲里可能还压着上一个会话的事件
       if (this.flushHandle !== undefined) this.flushHandle = undefined
       this.pending = []

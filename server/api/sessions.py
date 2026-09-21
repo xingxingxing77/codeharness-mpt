@@ -303,8 +303,12 @@ def events_history(sid: str, request: Request, after: str = "", before: str = ""
     补历史，证据都从这里拿。
 
     翻页（B2）：`after`=往前追增量、`before`=往回翻（「加载更早」，**开区间**上界）、
-    `limit`=一屏条数（0=不限，即老调用方语义）。返回**始终升序**，下一页的 before 就用
-    本页首条的 cursor，取到空页即翻到头——所以响应不需要额外的游标字段。"""
+    `limit`=一屏条数（0=不限，即老调用方语义），**始终取窗口尾部** N 条——不给 before
+    就是「最新一屏」，首屏因此不必吞下保留窗口里那 5000 条。响应带 `has_more`：
+    给了 limit 就多取一条用它判「前面还有没有」，省掉前端为胶囊显隐再打一次请求。
+    返回**始终升序**，下一页的 before 用本页首条的 cursor。"""
     bus = _get(request, "bus")
     _owned(request, sid, user)
-    return {"events": [e.model_dump() for e in bus.history(sid, after, before, limit)]}
+    evs = bus.history(sid, after, before, limit + 1 if limit else 0)
+    has_more = bool(limit) and len(evs) > limit
+    return {"events": [e.model_dump() for e in (evs[1:] if has_more else evs)], "has_more": has_more}

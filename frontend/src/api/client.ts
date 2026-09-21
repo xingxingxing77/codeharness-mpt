@@ -1,4 +1,4 @@
-import type { ApprovalItem, Health, Session } from '../types'
+import type { ApprovalItem, Health, Session, WEvent } from '../types'
 
 /* N1：token 存 localStorage；带 Authorization 出请求；401 即清票（App 层据 needLogin 切登录页）。
    auth 关闭（PLATFORM__AUTH_ENABLED=0，默认值）时服务端不校验，这里带不带都行——header 只在有票时附加。 */
@@ -97,9 +97,19 @@ export const api = {
   respondApproval: (sid: string, aid: string, outcome: 'allowed-once' | 'rejected') =>
     req<{ ok: boolean; outcome: string }>('POST', `/api/sessions/${sid}/approvals/${aid}/respond`,
                                           { outcome }),
-  /** 有界回放：活流 /events 读不完，要「读完再走」的消费方必须走这条 */
-  eventHistory: (sid: string, after = '') =>
-    req<{ events: any[] }>('GET', `/api/sessions/${sid}/events/history?after=${encodeURIComponent(after)}`),
+  /** 有界回放 + 游标分页（B2）：`limit` 取**窗口尾部**＝「最新一屏」，`before` 往回翻，
+   *  `has_more` 说前面还有没有（胶囊显隐靠它，不必再打一次请求）。
+   *  query 必须另拼：`tests/s8_frontend_contract.py` 的 t3 按「`/api` 起、遇空白或 `?` 止」
+   *  抠前端消费的路径，把 `${qs}` 写进同一个模板串会被抠成非法路径、门禁判红。 */
+  eventHistory: (sid: string, q: { after?: string; before?: string; limit?: number } = {}) => {
+    const p = new URLSearchParams()
+    if (q.after) p.set('after', q.after)
+    if (q.before) p.set('before', q.before)
+    if (q.limit) p.set('limit', String(q.limit))
+    const qs = p.toString()
+    const path = `/api/sessions/${sid}/events/history` + (qs ? `?${qs}` : '')
+    return req<{ events: WEvent[]; has_more: boolean }>('GET', path)
+  },
   importRepo: (sid: string, payload: { repo_path: string; save_name?: string; include_files?: boolean }) =>
     req<Record<string, any>>('POST', `/api/sessions/${sid}/workspace/import_repo`, payload),
   sendChat: (sid: string, content: string, sendTo = '') =>

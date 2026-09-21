@@ -567,6 +567,12 @@ def t11_events_history_window():
         # 老语义零回归：只给 after 仍是「之后的全部」；什么都不给仍是全量
         assert [e.value for e in bus.history(SID, after=cur[5])] == [f"m{i}" for i in range(6, 12)], label
         assert len(bus.history(SID, after=cur[5], limit=0)) == 6, f"{label} limit=0 应视为不限"
+        # **limit 始终取窗口尾部**：不给 before 就是「最新一屏」——这是首屏只吞一屏的正解。
+        # 若退化成取头部，打开会话看到的是最老几条，且「加载更早」永远没有下一页。
+        assert [e.value for e in bus.history(SID, limit=3)] == ["m9", "m10", "m11"], \
+            f"{label} 首屏取的不是最新一屏"
+        assert [e.value for e in bus.history(SID, after=cur[2], limit=2)] == ["m10", "m11"], \
+            f"{label} after+limit 取成了头部"
         # 「>40 块的会话能翻页」（判据 B2 第二条的正向读数）：按界面真实走法——
         # 首屏渲染尾部 20 块，胶囊用**已渲染最老一条**的 cursor 往回按 20 一块逐页取。
         big = bus.history(SID45)
@@ -633,6 +639,16 @@ def t11_events_history_window():
             # 新参真的进到了 bus：before=末条 + limit=2 → 倒数第 2、3 条（升序）
             page = c.get(url, params={"before": evs[-1]["cursor"], "limit": 2}).json()["events"]
             assert [e["cursor"] for e in page] == [e["cursor"] for e in evs[-3:-1]], page
+            # has_more：服务端多取一条判「前面还有没有」，那条不回给前端（前端不必为显隐再打一次）
+            r1 = c.get(url, params={"limit": 3}).json()
+            assert [e["cursor"] for e in r1["events"]] == [e["cursor"] for e in evs[-3:]], \
+                f"首屏 limit=3 取的不是最新三条：{r1}"
+            assert r1["has_more"] is True, r1
+            r2 = c.get(url, params={"before": r1["events"][0]["cursor"], "limit": 20}).json()
+            assert r2["has_more"] is False and \
+                [e["cursor"] for e in r2["events"]] == [e["cursor"] for e in evs[:4]], \
+                f"翻到头还报 has_more 或多取那条漏进响应了：{r2}"
+            assert c.get(url, params={"limit": 0}).json()["has_more"] is False, "不限即全给，不该报还有更早"
             assert c.get(url, params={"before": evs[0]["cursor"], "limit": 5}).json()["events"] == [], \
                 "第一条之前还有数据？反向翻页的到头条件不成立"
             # 值域在入口夹住（查询参数是不可信输入，负数/超大不能靠下游兜）

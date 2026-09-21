@@ -82,10 +82,14 @@ export function useFollowScroll(
     const el = scrollEl.value
     const flow = flowEl.value
     if (!el || !flow) return null
+    // x 取滚动区水平中心。原先写的是「左边缘 +8px」，而正文列有 32px 左内边距——
+    // 打点永远落在列的 padding 上，四次探测全空 → captureAnchor 恒回 null、
+    // restoreAnchor 空转，prepend 一页就把读者那一屏整屏推走（B2 首次接上才发现）。
+    const x = el.getBoundingClientRect().left + el.clientWidth / 2
     // 取视觉上第一个稳定行做锚点，而不是硬算行数
     const probes = [0.02, 0.12, 0.3, 0.5]
     for (const p of probes) {
-      const hit = document.elementFromPoint(el.getBoundingClientRect().left + 8, el.getBoundingClientRect().top + el.clientHeight * p)
+      const hit = document.elementFromPoint(x, el.getBoundingClientRect().top + el.clientHeight * p)
       const row = hit?.closest('[data-chat-anchor-key]')
       const key = row ? keyOf(row) : null
       if (key && row) {
@@ -103,7 +107,7 @@ export function useFollowScroll(
     const el = scrollEl.value
     const flow = flowEl.value
     if (!el || !flow || !anchor) return
-    const rows = [...flow.querySelectorAll('[data-chat-anchor-key]')]
+    const rows = Array.from(flow.querySelectorAll('[data-chat-anchor-key]'))
     const row = rows.find((r) => keyOf(r) === anchor.key)
     if (!row) return
     const delta = row.getBoundingClientRect().top - flow.getBoundingClientRect().top - anchor.top

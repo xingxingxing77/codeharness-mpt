@@ -71,16 +71,14 @@ class SessionEventBus:
 
     def history(self, sid: str, after: Union[str, int] = "", before: Union[str, int] = "",
                 limit: int = 0) -> list:
-        """游标窗口回放。after=上次交付的游标（旧调用方传 int 也吃），空 = 不设下界；
-        before=**开区间的上界游标**，给它就是往回翻（「加载更早」）；limit>0 时
-        带 before 取窗口尾（最靠近 before 的 limit 条）、否则取窗口头，limit=0 不限。
-        返回始终升序——翻页靠「本页首条 cursor 当下一次 before」，不需要额外游标字段。"""
+        """游标窗口回放。after=下界（不含）、before=**开区间上界**（「加载更早」往回翻用），
+        两者都不给就是全量；limit>0 取**窗口尾部** limit 条——不给 before 时上界即流尾，
+        也就是「最新一屏」（首屏只吞一屏而不是保留窗口里那 5000 条）。limit=0 不限＝老语义。
+        返回始终升序：下一页的 before 用本页首条 cursor，取到空页即到头。"""
         events, _ = self._ensure(sid)
         a, b = norm_cursor(after), norm_cursor(before)
         out = [ev for ev in events if (not a or ev.cursor > a) and (not b or ev.cursor < b)]
-        if limit and limit > 0:
-            out = out[-limit:] if b else out[:limit]
-        return out
+        return out[-limit:] if limit and limit > 0 else out
 
     def subscribe(self, sid: str) -> asyncio.Queue:
         _, subs = self._ensure(sid)
