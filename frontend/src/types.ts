@@ -105,6 +105,6 @@ export interface Health {
   model: string
   base_url: string
   api_key_masked: string
-  auth_enabled: boolean // N1：PLATFORM__AUTH 开时登录页接管
+  auth_enabled: boolean // N1：PLATFORM__AUTH_ENABLED 开时登录页接管
   workspace_root: string
 }

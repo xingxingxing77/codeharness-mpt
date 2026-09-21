@@ -17,7 +17,7 @@ async function reqMe(): Promise<{ user: string }> {
  *  票状态在 store 里（localStorage 非响应式，getter 追不到变化）。 */
 export const useAuthStore = defineStore('auth', {
   state: () => ({
-    enabled: false,       // 服务端 PLATFORM__AUTH
+    enabled: false,       // 服务端 PLATFORM__AUTH_ENABLED（默认真名，见接口契约 §5）
     ready: false,         // health 已回（避免登录页闪现）
     hasToken: !!getToken(),
     user: '' as string

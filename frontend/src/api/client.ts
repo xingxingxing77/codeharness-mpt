@@ -1,7 +1,7 @@
 import type { ApprovalItem, Health, Session } from '../types'
 
 /* N1：token 存 localStorage；带 Authorization 出请求；401 即清票（App 层据 needLogin 切登录页）。
-   auth 关闭（PLATFORM__AUTH=0）时服务端不校验，这里带不带都行——header 只在有票时附加。 */
+   auth 关闭（PLATFORM__AUTH_ENABLED=0，默认值）时服务端不校验，这里带不带都行——header 只在有票时附加。 */
 const TOKEN_KEY = 'ch_token'
 
 export function getToken(): string {
