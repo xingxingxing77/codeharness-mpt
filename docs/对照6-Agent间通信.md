@@ -56,7 +56,7 @@
 |---|---|---|---|---|
 | 消息模型与载荷 | `schema.py:232-242` | `schema.py:166-214` | 已复刻 | `instruct_content` 改 dict + `instruct_schema`，语义等价 |
 | 发布/订阅精准路由 | `base_env.py:176-191` + `role.py:413-416` | `team_graph.py:107-119` | 现代化替换 | SOP 表 + `Send`；`stats` 自证「4 角色激活 1」 |
-| 按角色消息缓冲与隔离 | `role.py:100,453-456` | `agent.py:17 inbox` + `TeamState.memories:21` | 已复刻 | `Send` 载荷取代 `put_message`；`MessageQueue` 复制件未接线（对照 1 §五-1） |
+| 按角色消息缓冲与隔离 | `role.py:100,453-456` | `agent.py:17 inbox` + `TeamState.memories:21` | 已复刻 | `Send` 载荷取代 `put_message`；源那台 `MessageQueue` **已删**，本栈只有「图内 LangGraph 状态 + 跨进程 Redis LIST」两条通道（对照 1 §五-1） |
 | 自投递 `<self>`（内环） | `const.py:85` + `run_code` mappings | `team_graph.py:96-104`; `run_code.py:98` | 已复刻 | 含 `debug_rounds>=3` 硬闸（源靠 test_round 语义） |
 | 具名跨角色投递 | `role.py:415` + `base_env.py:176-191` | `run_code.py:104` + `debug_error.py` + `team_graph.py:112` + `agent.py:80` | **部分实现** | 全仓仅 QA↔Engineer 一例回路（§结论-1）；本轮新增 action 无一设 `send_to` |
 | 广播 `<all>` | `common.py:411-418`；`schema.py:241` 默认值 | 刻意不实现（`team_graph.py:108-110`） | 有意不做 | `t6` 钉；副作用：`is_send_to` 在本仓**零调用者**成死码（本轮复核仍零） |
