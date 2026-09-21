@@ -9,7 +9,7 @@
       <div class="u-cell"><b>{{ rows.length }}</b><span>会话</span></div>
       <div class="u-cell"><b>{{ fmt(total.pt) }}</b><span>输入 tokens</span></div>
       <div class="u-cell"><b>{{ fmt(total.ct) }}</b><span>输出 tokens</span></div>
-      <div class="u-cell"><b>¥{{ total.cost.toFixed(3) }}</b><span>总成本（人民币价目）</span></div>
+      <div class="u-cell"><b>{{ moneyBoth(total) }}</b><span>总成本（分币种·不换算）</span></div>
     </div>
 
     <div v-if="rows.length" class="sgroup u-table">
@@ -24,7 +24,7 @@
         <span class="u-st">{{ STATUS[r.status] || r.status }}</span>
         <span class="n">{{ fmt(r.cost?.total_prompt_tokens ?? 0) }}</span>
         <span class="n">{{ fmt(r.cost?.total_completion_tokens ?? 0) }}</span>
-        <span class="n">¥{{ (r.cost?.total_cost ?? 0).toFixed(3) }}</span>
+        <span class="n">{{ moneyBoth(r.cost) }}</span>
         <span class="n u-d">{{ (r.created_at || '').slice(5, 16) }}</span>
       </div>
     </div>
@@ -38,6 +38,7 @@
 import { computed, onMounted } from 'vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
+import { moneyBoth, sumCosts } from '../../utils/money'
 import type { Session } from '../../types'
 
 const store = useSessionStore()
@@ -54,16 +55,18 @@ const rows = computed(() =>
   [...store.sessions].sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
 )
 
-const total = computed(() =>
-  rows.value.reduce(
+const total = computed(() => ({
+  ...rows.value.reduce(
     (p, r) => ({
       pt: p.pt + (r.cost?.total_prompt_tokens ?? 0),
-      ct: p.ct + (r.cost?.total_completion_tokens ?? 0),
-      cost: p.cost + (r.cost?.total_cost ?? 0)
+      ct: p.ct + (r.cost?.total_completion_tokens ?? 0)
     }),
-    { pt: 0, ct: 0, cost: 0 }
-  )
-)
+    { pt: 0, ct: 0 }
+  ),
+  // 成本分桶累加。原来这里是 `cost: p.cost + r.cost.total_cost`——把两种币价加成一个数，
+  // 而标签写着「人民币价目」，等于每一行美元模型都在给人民币计数（C12 修的就是这个）。
+  ...sumCosts(rows.value.map(r => r.cost))
+}))
 
 function fmt(n: number): string {
   return n >= 10000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString('en-US')

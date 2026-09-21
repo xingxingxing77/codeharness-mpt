@@ -20,13 +20,27 @@ def _now() -> str:
 
 def _seeded_ledger(saved: dict):
     """进程重启后的 resume 路径：账本从会话记录里上次落盘的快照起算。
-    不播种的话新账本从 0 起，终态快照会把历史用量整段覆盖掉（合流断点之二）。"""
+    不播种的话新账本从 0 起，终态快照会把历史用量整段覆盖掉（合流断点之二）。
+
+    ⚠ 只读 `cost_usd`/`cost_cny` 两个键。老记录里那个单一 `total_cost` 是**混币种脏数**
+    （美元行与人民币行加在同一个 float 上），C12 拍板不留兼容字段，所以这里直接不读——
+    读它等于把错口径继续带进新快照。"""
     from codeharness.provider.cost import CostManager
     cm = CostManager()
     cm.total_prompt_tokens = int(saved.get("total_prompt_tokens", 0) or 0)
     cm.total_completion_tokens = int(saved.get("total_completion_tokens", 0) or 0)
-    cm.total_cost = float(saved.get("total_cost", 0) or 0)
+    cm.cost_usd = float(saved.get("cost_usd", 0) or 0)
+    cm.cost_cny = float(saved.get("cost_cny", 0) or 0)
     return cm
+
+
+def cost_snapshot(cm) -> dict:
+    """成本快照的唯一出口（`_sync_cost` 与 `_publish_status` 两处必须同形，
+    否则 SSE 那一路与 GET 那一路读到的字段集会漂）。币种分两桶，**不相加**。"""
+    c = cm.get_costs()
+    return {"cost_usd": round(c.cost_usd, 6), "cost_cny": round(c.cost_cny, 6),
+            "total_prompt_tokens": c.total_prompt_tokens,
+            "total_completion_tokens": c.total_completion_tokens}
 
 
 class SessionRunner:
@@ -44,7 +58,7 @@ class SessionRunner:
         self.trace = None                          # platforms.trace.TraceStore；on_chat_model_end 记 span
         self._ctl = None                           # 跨 worker stop 的发布端（redis 模式才有）
         self._ctl_task = None
-        self._last_span: dict[str, tuple] = {}     # sid -> (pt, ct, cost) 上次累计值，span 取增量
+        self._last_span: dict[str, tuple] = {}     # sid -> (pt, ct, cost_usd, cost_cny) 上次累计值，span 取增量
         # (sid, run_id) -> [派发时刻, 首 token 时刻]。键用 run_id 不用节点名：同一节点在一跑里
         # 会被调多次（n_round 循环），按节点名会把复用/并发的调用串成一条。
         self._call_t0: dict[tuple[str, str], list] = {}
@@ -397,10 +411,7 @@ class SessionRunner:
         session = self.store.get(sid)
         if cm is None or session is None:
             return
-        c = cm.get_costs()
-        cost = {"total_cost": round(c.total_cost, 4),
-                "total_prompt_tokens": c.total_prompt_tokens,
-                "total_completion_tokens": c.total_completion_tokens}
+        cost = cost_snapshot(cm)
         self.store.set_cost(sid, cost, persist=True)
         status = str(session.status.value if hasattr(session.status, "value") else session.status)
         self.bus.publish(sid, kind="status",
@@ -408,7 +419,7 @@ class SessionRunner:
                                 "cost": cost, "message": ""})
 
     def _trace_span(self, sid: str, node: str, slot=None):
-        """N4 数据层：每笔 LLM 调用记一条 span（节点/token 增量/时刻）→ ch:trace:{sid}。
+        """N4 数据层：每笔 LLM 调用记一条 span（节点/token 增量/两桶成本增量/时刻）→ ch:trace:{sid}。
         `t0` 是派发时刻、`ft` 是首 token 时刻，来自 `_translate` 按 run_id 攒的在途表；
         采不到就是 null——前端据此**不显示**读数，而不是显示一个假的 0。
         trace 未注入（进程内默认）= 零开销直通。"""
@@ -418,11 +429,15 @@ class SessionRunner:
         if cm is None:
             return
         t0, ft = slot if slot else (None, None)
-        cur = (cm.total_prompt_tokens, cm.total_completion_tokens, round(cm.total_cost, 6))
-        prev = self._last_span.get(sid, (0, 0, 0.0))
+        cur = (cm.total_prompt_tokens, cm.total_completion_tokens,
+               round(cm.cost_usd, 6), round(cm.cost_cny, 6))
+        prev = self._last_span.get(sid, (0, 0, 0.0, 0.0))
         self._last_span[sid] = cur
+        # 一笔调用只会有一个币种在动（一个模型一套价），但两桶都发出去：
+        # 前端据此各标各符号，而不是把两个数加回一列「成本」——那正是 C12 修掉的形状。
         self.trace.record(sid, {"node": node, "pt": cur[0] - prev[0], "ct": cur[1] - prev[1],
-                                "cost": round(cur[2] - prev[2], 6), "ts": time.time(),
+                                "cost_usd": round(cur[2] - prev[2], 6),
+                                "cost_cny": round(cur[3] - prev[3], 6), "ts": time.time(),
                                 "t0": t0, "ft": ft})
 
     # ---- astream_events 翻译（LLM 用量合流与打字机、interrupt，其余块走报道槽） ----
@@ -469,10 +484,7 @@ class SessionRunner:
         cost = {}
         cm = self.costs.get(session.id)
         if cm is not None:
-            c = cm.get_costs()
-            cost = {"total_cost": round(c.total_cost, 4),
-                    "total_prompt_tokens": c.total_prompt_tokens,
-                    "total_completion_tokens": c.total_completion_tokens}
+            cost = cost_snapshot(cm)
             self.store.set_cost(session.id, cost, persist=True)
         self.bus.publish(session.id, kind="status",
                          value={"status": str(session.status.value if hasattr(session.status, "value")

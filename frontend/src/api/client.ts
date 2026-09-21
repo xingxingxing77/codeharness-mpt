@@ -126,6 +126,8 @@ export const api = {
   sessionGraph: (sid: string) => req<{ mermaid: string }>('GET', `/api/sessions/${sid}/graph`),
   sessionTrace: (sid: string) =>
     req<{
-      spans: { node: string; pt: number; ct: number; cost: number; ts: number; t0: number | null; ft: number | null }[]
+      // 成本两桶（C12）：一笔调用只有一个币种在动，字段集必须与 runner 的 span 完全一致
+      spans: { node: string; pt: number; ct: number; cost_usd: number; cost_cny: number;
+               ts: number; t0: number | null; ft: number | null }[]
     }>('GET', `/api/sessions/${sid}/trace`)
 }

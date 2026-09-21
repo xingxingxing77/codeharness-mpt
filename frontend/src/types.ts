@@ -76,12 +76,15 @@ export interface Block {
   lastTs?: number
 }
 
-/** `/trace` 一行 = 一笔 LLM 调用的节点名与 token/成本增量。 */
+/** `/trace` 一行 = 一笔 LLM 调用的节点名与 token/成本增量。
+ *  成本是**两桶**（C12）：一笔调用只会有一个币种在动，但两桶都发——把它们加成一个是
+ *  这次修掉的口径错误，前端也就没处判断该印 ¥ 还是 $。 */
 export interface TraceSpan {
   node: string
   pt: number
   ct: number
-  cost: number
+  cost_usd: number
+  cost_cny: number
   ts: number
   /** 派发时刻（unix 秒）。老 span 没有这个字段——缺就不显示 TTFT/耗时，不给 0。 */
   t0?: number | null

@@ -11,38 +11,55 @@ from typing import NamedTuple
 from pydantic import BaseModel
 
 from codeharness.logs import logger
-from codeharness.provider.token_costs import TOKEN_COSTS
+from codeharness.provider.token_costs import CNY_MODELS, TOKEN_COSTS
 
 
 class Costs(NamedTuple):
+    """用量快照。**没有单一 total_cost 字段**——那是 C12 修掉的口径错误：两种币价的数字
+    加在一个无单位 float 上，报出来的数既不是美元也不是人民币。要总额请先各看各的桶。"""
     total_prompt_tokens: int
     total_completion_tokens: int
-    total_cost: float
+    cost_usd: float
+    cost_cny: float
 
 
 class CostManager(BaseModel):
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
-    total_cost: float = 0
+    cost_usd: float = 0
+    cost_cny: float = 0
     token_costs: dict = TOKEN_COSTS
+    cny_models: frozenset = CNY_MODELS        # 可注入，门禁靠它造「同场混两种币种」的读数
     records: list = []
+
+    def currency_of(self, model: str) -> str:
+        """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""
+        if model not in self.token_costs:
+            return ""
+        return "CNY" if model in self.cny_models else "USD"
 
     def update_cost(self, prompt_tokens, completion_tokens, model):
         if prompt_tokens + completion_tokens == 0 or not model:
             return
         self.total_prompt_tokens += prompt_tokens
         self.total_completion_tokens += completion_tokens
-        if model not in self.token_costs:
+        cc = self.currency_of(model)
+        if not cc:
             logger.warning(f"Model {model} not found in TOKEN_COSTS, cost not counted.")
             return
-        cost = (prompt_tokens * self.token_costs[model]["prompt"]
-                + completion_tokens * self.token_costs[model]["completion"]) / 1000
-        self.total_cost += cost
-        logger.info(f"Total running cost: ${self.total_cost:.3f} | "
-                    f"Current: ${cost:.3f}, pt={prompt_tokens}, ct={completion_tokens}")
+        rate = self.token_costs[model]
+        cost = (prompt_tokens * rate["prompt"] + completion_tokens * rate["completion"]) / 1000
+        if cc == "CNY":
+            self.cost_cny += cost
+        else:
+            self.cost_usd += cost
+        # 日志也分符号：这一行原先硬写 `$`（`Total running cost: $…`），而表里本来就有人民币行
+        logger.info(f"Total running cost: ${self.cost_usd:.3f} / ¥{self.cost_cny:.3f} | "
+                    f"Current: {cost:.6f} {cc}, pt={prompt_tokens}, ct={completion_tokens}")
 
     def get_costs(self) -> Costs:
-        return Costs(self.total_prompt_tokens, self.total_completion_tokens, self.total_cost)
+        return Costs(self.total_prompt_tokens, self.total_completion_tokens,
+                     self.cost_usd, self.cost_cny)
 
     def add_usage(self, resp, model: str = "", tag: str = ""):
         """取一次响应的用量，两个来源按新栈口径排优先级：
@@ -64,7 +81,10 @@ class CostManager(BaseModel):
             # 只有零星几笔入账时无从分辨"哪条路没回执"（2026-09-15）。有 warning 才有可 grep 的账差。
             logger.warning(f"add_usage: response 无 usage，本笔不进账 (model={model}, tag={tag})")
         self.update_cost(pt, ct, model)
-        self.records.append({"tag": tag, "model": model, "pt": pt, "ct": ct})
+        # cc 是这一笔的币种（"" = 未计价模型）。逐笔留痕是给 trace 与对账用的：
+        # 只有合计的话，混币种这件事在数据里就看不见了——正是 C12 的根因形状。
+        self.records.append({"tag": tag, "model": model, "pt": pt, "ct": ct,
+                             "cc": self.currency_of(model)})
 
 
 class TokenCostManager(CostManager):

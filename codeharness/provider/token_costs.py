@@ -2,15 +2,26 @@
 
 来源：E:/MetaGPT/metagpt/utils/token_counter.py:18-120 整段提取（sed -n '/^TOKEN_COSTS/,/^}/p'）。
 纯字面量字典，无任何依赖；消费方：codeharness/provider/cost.py 的 CostManager.update_cost。
-新增模型时在此追加 {"model": {"prompt": 单价, "completion": 单价}}（单位：美元/千 token）。
+新增模型时在此追加 {"model": {"prompt": 单价, "completion": 单价}}（单位：美元/千 token），
+人民币计价的模型**同时**把名字加进下面的 `CNY_MODELS`。
+
+⚠ 两条边界，都别当已解决：
+1. 本表数值沿用源表录入，**没有逐行对过厂商现价**（doubao 几行的量级看着就不对，
+   但没有报价原件不敢改）。C12 分桶只解决「两种币种相加」这一条记账口径错误，
+   不修单价——单价错是另一条账，要修得拿厂商页面逐行核。
+2. 缓存命中/未命中两档价（如 step-3.5-flash 的 ¥0.14 / ¥0.7）本表**不区分**：
+   usage 里没有可用的 cache_read 信号（MaaS 与 OpenAI 兼容端点都取证过），
+   所以一律按未命中的高档记，宁可高估花费。升级路径=网关把 `input_token_details`
+   透出来再拆两档。
 """
 
 TOKEN_COSTS = {
-    # ⚠ 本表其余行是美元/千 token；这一行是**人民币/千 token**（用户 2026-09-16 报价：
-    # 输入 0.8 元/百万、输出 2.7 元/百万；缓存命中输入 0.1 元/百万，本行不区分——
-    # usage 里的 cache_read 字段 MaaS 没回传，缓存口径记账归 S9 双跑对齐时处理）。
-    # 前端 "$已用" 的货币符号是展示层问题，按行记账不跨币种换算。
-    "qwen3.8-flash": {"prompt": 0.0008, "completion": 0.0027},
+    # ⚠ 本表**混着两种币种**：默认每行是美元/千 token，下面这些行是人民币/千 token——
+    # 名单在文件末尾的 `CNY_MODELS`，记账端按名单分桶、**不换算**（C12 拍板：分桶那一支）。
+    "qwen3.8-flash": {"prompt": 0.0008, "completion": 0.0027},   # CNY：用户 2026-09-16 报价
+    # CNY：用户 2026-09-21 报价（输入 0.7 元/百万、缓存命中 0.14 元/百万、输出 2.1 元/百万）。
+    # 记未命中那档，理由见文件头边界 2。
+    "step-3.5-flash": {"prompt": 0.0007, "completion": 0.0021},
     "anthropic/claude-3.5-sonnet": {"prompt": 0.003, "completion": 0.015},
     "gpt-3.5-turbo": {"prompt": 0.0015, "completion": 0.002},
     "gpt-3.5-turbo-0301": {"prompt": 0.0015, "completion": 0.002},
@@ -113,3 +124,21 @@ TOKEN_COSTS = {
     "llama-3.3-8B-Instruct": {"prompt": 0.0, "completion": 0.0},
     "llama-3.3-70B-Instruct": {"prompt": 0.0, "completion": 0.0},  # end, for Llama API
 }
+
+# 人民币计价的行（C12 分桶依据）。分两挡来源，逐行可查：
+# ① 行内注释本来就写着 ￥ 的；② 厂商官方报价就是人民币的（智谱/月暗/DeepSeek/火山方舟/零一万物）。
+# 不在名单里的行一律按美元记。**这里只做归类，不换算汇率**——已明确不做预算管理，
+# 为展示引一个外部汇率源不值，且掺进换算就等于把「不知道兑换率」这件事藏起来。
+CNY_MODELS = frozenset({
+    # ① 本表自带人民币证据的行
+    "qwen3.8-flash", "step-3.5-flash",
+    "glm-3-turbo", "glm-4", "glm-4-flash", "glm-4-plus",
+    "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k",
+    # ② 厂商官方即人民币报价的行
+    "deepseek-chat", "deepseek-coder", "deepseek-reasoner",
+    "doubao-lite-4k-240515", "doubao-lite-32k-240515", "doubao-lite-128k-240515",
+    "doubao-pro-4k-240515", "doubao-pro-32k-240515", "doubao-pro-128k-240515",
+    "yi-large", "yi-34b-chat-0205", "yi-34b-chat-200k",
+    # 注意：**不带** "deepseek/deepseek-chat"、"deepseek/deepseek-coder" 那两个带斜杠的键——
+    # 那是 OpenRouter 路由价，报价单位是美元，和直连 DeepSeek 的人民币价不是一回事。
+})

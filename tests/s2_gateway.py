@@ -117,8 +117,8 @@ def t4_single_accounting():
     if len(g.cost_manager.records) != 1:
         _fail(f"4. aask 一次却记了 {len(g.cost_manager.records)} 笔 —— 出现重复计数")
     c = g.cost_manager.get_costs()
-    if c.total_prompt_tokens <= 0 or c.total_completion_tokens <= 0 or c.total_cost <= 0:
-        _fail(f"4. 三字段必须都非零: {c}")
+    if c.total_prompt_tokens <= 0 or c.total_completion_tokens <= 0 or (c.cost_usd + c.cost_cny) <= 0:
+        _fail(f"4. pt/ct 与成本桶（两桶之一非零）必须都有值: {c}")
     # 结构化路径不得再记一笔
     g2 = _gw(structured_result=None)
     if len(g2.cost_manager.records) != 0:
@@ -149,7 +149,7 @@ def t5_fake_llm_accounts():
     f = FakeLLM(responses=["hi"])
     asyncio.run(f.aask("问", tag="t"))
     c = f.cost_manager.get_costs()
-    if not (c.total_prompt_tokens and c.total_completion_tokens and c.total_cost):
+    if not (c.total_prompt_tokens and c.total_completion_tokens and (c.cost_usd + c.cost_cny)):
         _fail(f"5. FakeLLM 未记账: {c}")
     # aask 必须经 ainvoke，否则又回到不记账的老路
     if not f.calls:
@@ -299,20 +299,21 @@ def t10_settings():
 def t11_usage():
     cm = CostManager()
     cm.update_cost(1000, 1000, "gpt-4o")
-    if cm.total_prompt_tokens != 1000 or cm.total_completion_tokens != 1000 or cm.total_cost <= 0:
+    if cm.total_prompt_tokens != 1000 or cm.total_completion_tokens != 1000 or cm.cost_usd <= 0:
         _fail(f"11. update_cost 累计不对: {cm.get_costs()}")
     c = cm.get_costs()
-    if len(c) != 3:
-        _fail(f"11. Costs 应只有 pt/ct/cost 三个只读字段: {c}")
-    # 未知模型：记 token 但不算钱（价目表缺项不得污染成本）
+    if len(c) != 4:
+        # C12：Costs 是 pt/ct + 两桶成本四个只读字段。多出一个"合计"就是混币种相加回潮。
+        _fail(f"11. Costs 应只有 pt/ct/cost_usd/cost_cny 四个只读字段: {c._fields}")
+    # 未知模型：记 token 但不算钱（价目表缺项不得污染成本，也不得冒充 USD 桶）
     cm2 = CostManager()
     cm2.update_cost(10, 10, "no-such-model-xyz")
-    if cm2.total_prompt_tokens != 10 or cm2.total_cost != 0:
+    if cm2.total_prompt_tokens != 10 or (cm2.cost_usd, cm2.cost_cny) != (0, 0):
         _fail(f"11. 未知模型应记 token 不计成本: {cm2.get_costs()}")
     # 免费模型走 TokenCostManager
     cm3 = TokenCostManager()
     cm3.update_cost(5, 5, "gpt-4o")
-    if cm3.total_cost != 0 or cm3.total_prompt_tokens != 5:
+    if (cm3.cost_usd, cm3.cost_cny) != (0, 0) or cm3.total_prompt_tokens != 5:
         _fail("11. TokenCostManager 不该算钱")
     # 预算强制已作废：这些符号存在即为回潮
     for name in ("max_budget", "total_budget", "check_budget", "is_within_budget", "update_budget"):

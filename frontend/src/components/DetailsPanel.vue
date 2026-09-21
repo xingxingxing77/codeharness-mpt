@@ -75,10 +75,10 @@
         <tbody>
           <tr v-for="(s, i) in spans" :key="i">
             <td>{{ s.node }}</td><td class="num">{{ s.pt }}</td><td class="num">{{ s.ct }}</td>
-            <td class="num">{{ s.cost.toFixed(4) }}</td>
+            <td class="num">{{ moneyBoth(s, 4) }}</td>
           </tr>
         </tbody>
-        <tfoot><tr><td>合计</td><td class="num">{{ totals.pt }}</td><td class="num">{{ totals.ct }}</td><td class="num">{{ totals.cost.toFixed(4) }}</td></tr></tfoot>
+        <tfoot><tr><td>合计</td><td class="num">{{ totals.pt }}</td><td class="num">{{ totals.ct }}</td><td class="num">{{ moneyBoth(totals, 4) }}</td></tr></tfoot>
       </table>
     </div>
 
@@ -108,6 +108,7 @@ import { useSessionStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 import { useToastStore } from '../stores/toast'
 import type { FileNode as FileNodeT } from '../types'
+import { moneyBoth, sumCosts } from '../utils/money'
 
 const store = useSessionStore()
 const ui = useUiStore()
@@ -145,9 +146,10 @@ const inspectInput = computed(() => {
   if (b.doc) args.document = b.doc
   return Object.keys(args).length ? JSON.stringify(args, null, 2) : ''
 })
-const totals = computed(() =>
-  spans.value.reduce((a, s) => ({ pt: a.pt + s.pt, ct: a.ct + s.ct, cost: a.cost + s.cost }), { pt: 0, ct: 0, cost: 0 })
-)
+const totals = computed(() => ({
+  ...spans.value.reduce((a, s) => ({ pt: a.pt + s.pt, ct: a.ct + s.ct }), { pt: 0, ct: 0 }),
+  ...sumCosts(spans.value)        // 分桶累加，不相加（C12）
+}))
 
 function pick(k: string) {
   ui.rightView = k as typeof ui.rightView

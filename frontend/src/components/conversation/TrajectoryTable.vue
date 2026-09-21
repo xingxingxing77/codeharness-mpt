@@ -27,7 +27,7 @@
           <td class="num">{{ r.durMs === undefined ? '—' : dur(r.durMs) }}</td>
           <td class="num">{{ r.pt }}</td>
           <td class="num">{{ r.ct }}</td>
-          <td class="num">{{ r.cost.toFixed(4) }}</td>
+          <td class="num">{{ moneyBoth(r, 4) }}</td>
           <td class="produced">{{ producedLabel(r.blocks) }}</td>
         </tr>
       </tbody>
@@ -36,7 +36,7 @@
           <td colspan="4">合计 {{ rows.length }} 次调用</td>
           <td class="num">{{ totals.pt }}</td>
           <td class="num">{{ totals.ct }}</td>
-          <td class="num">{{ totals.cost.toFixed(4) }}</td>
+          <td class="num">{{ moneyBoth(totals, 4) }}</td>
           <td />
         </tr>
       </tfoot>
@@ -50,16 +50,19 @@
 import { computed } from 'vue'
 import { producedLabel, type TrajRow } from '../../utils/trajectory'
 import { formatLatencySeconds, formatMessageClock } from '../../utils/messageChrome'
+import { moneyBoth, sumCosts } from '../../utils/money'
 
 const emit = defineEmits<{ jump: [key: string] }>()
 const props = defineProps<{ rows: TrajRow[] }>()
 
 const clock = (sec: number) => formatMessageClock(sec * 1000)
 const dur = (ms: number) => `${formatLatencySeconds(ms)}秒`
-/** 台账一次跑几十到几百行，够不上虚拟化的门槛；真到了再照参考项目那套上。 */
-const totals = computed(() =>
-  props.rows.reduce((a, r) => ({ pt: a.pt + r.pt, ct: a.ct + r.ct, cost: a.cost + r.cost }), { pt: 0, ct: 0, cost: 0 })
-)
+/** 台账一次跑几十到几百行，够不上虚拟化的门槛；真到了再照参考项目那套上。
+ *  成本用 sumCosts 分桶累加——把 ¥ 和 $ 加成一个是 C12 修掉的口径错误。 */
+const totals = computed(() => ({
+  ...props.rows.reduce((a, r) => ({ pt: a.pt + r.pt, ct: a.ct + r.ct }), { pt: 0, ct: 0 }),
+  ...sumCosts(props.rows)
+}))
 const jumpKey = (r: TrajRow) => r.blocks.at(-1)?.key || ''
 
 function jump(r: TrajRow) {

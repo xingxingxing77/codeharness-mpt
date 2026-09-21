@@ -15,7 +15,9 @@ export interface TrajRow {
   durMs?: number
   pt: number
   ct: number
-  cost: number
+  /** C12：两桶分开带，展示侧按桶选符号（utils/money.ts），不相加。 */
+  cost_usd: number
+  cost_cny: number
   /** 产出块：块首事件 ts 落在「上一次调用结束 ~ 本次调用结束」窗口内。 */
   blocks: Block[]
 }
@@ -39,7 +41,8 @@ export function buildTrajectory(spans: TraceSpan[], blocks: Block[]): TrajRow[] 
       ...(s.t0 ? { durMs: Math.max(0, (s.ts - s.t0) * 1000) } : {}),
       pt: s.pt,
       ct: s.ct,
-      cost: s.cost,
+      cost_usd: s.cost_usd,
+      cost_cny: s.cost_cny,
       blocks: produced,
     })
   })

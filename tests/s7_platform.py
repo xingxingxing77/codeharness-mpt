@@ -241,8 +241,9 @@ async def t6_metering_over_redis_bus():
 async def t7_trace_spans():
     from platforms.trace import KEY, MAX_SPANS, TraceStore
     tr = TraceStore(TEST_DB)
-    tr.record("s7tr", {"node": "PM", "pt": 100, "ct": 20, "cost": 0.001, "ts": 1.0})
-    tr.record("s7tr", {"node": "Engineer", "pt": 50, "ct": 10, "cost": 0.0005, "ts": 2.0})
+    # span 的形状与 runner._trace_span 一致：成本是**两桶**（C12），一笔调用只会有一个币种在动
+    tr.record("s7tr", {"node": "PM", "pt": 100, "ct": 20, "cost_usd": 0.001, "cost_cny": 0, "ts": 1.0})
+    tr.record("s7tr", {"node": "Engineer", "pt": 50, "ct": 10, "cost_usd": 0, "cost_cny": 0.0005, "ts": 2.0})
     spans = tr.spans("s7tr")
     assert [s["node"] for s in spans] == ["PM", "Engineer"], spans
     # B11：只加不裁 → 长跑会话的 trace 无界增长。验收 = 记 6000 条后 ZCARD==5000 且最新条在。

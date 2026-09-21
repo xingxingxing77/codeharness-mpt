@@ -8,7 +8,7 @@
       </nav>
       <span class="modeChip">{{ paradigmLabel }}</span>
       <span class="grow" />
-      <span class="cost">¥{{ (store.cost?.total_cost ?? 0).toFixed(3) }}</span>
+      <span class="cost">{{ moneyBoth(store.cost) }}</span>
       <button
         class="iconBtn"
         :class="{ on: ui.rightPanel && ui.rightView === 'cards' }"
@@ -96,6 +96,7 @@ import TurnTail from './TurnTail.vue'
 import StatsLine from './StatsLine.vue'
 import TrajectoryTable from './TrajectoryTable.vue'
 import QuestionCard from '../composer/QuestionCard.vue'
+import { moneyBoth } from '../../utils/money'
 import ApprovalCard from '../composer/ApprovalCard.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'

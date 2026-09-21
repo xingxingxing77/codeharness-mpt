@@ -8,6 +8,8 @@
       「跑动中 GET /sessions/{sid} 的 cost 恒 0」到此为止。断言打在**同一个 CostManager 实例**上。
   t4  _ensure_graph 重建路径：传给 prepare_project 的 cost_manager 必须就是 runner.costs[sid] 那个
       实例（双账本防回归，docs 第 0 步的教训）。
+（后续各加一格：**t7** span 的 t0/ft 计时；**t8** C12 跨币种分桶——两种币价各记各的、
+ 快照与 `Costs` 里不存在混币种合计字段、未知模型不入桶，并带「清空 CNY 名单」的对照组。）
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_runner_meter.py
@@ -63,13 +65,20 @@ def t1_add_usage_visible():
 
 
 def t2_seeded_ledger():
-    cm = _seeded_ledger({"total_prompt_tokens": 490, "total_completion_tokens": 21, "total_cost": 0.0123})
-    assert (cm.total_prompt_tokens, cm.total_completion_tokens, cm.total_cost) == (490, 21, 0.0123)
+    cm = _seeded_ledger({"total_prompt_tokens": 490, "total_completion_tokens": 21,
+                         "cost_usd": 0.0123, "cost_cny": 0.045})
+    assert (cm.total_prompt_tokens, cm.total_completion_tokens, cm.cost_usd, cm.cost_cny) \
+        == (490, 21, 0.0123, 0.045)
     empty = _seeded_ledger({})
     assert empty.total_prompt_tokens == 0
-    broken = _seeded_ledger({"total_prompt_tokens": None, "total_cost": ""})
-    assert (broken.total_prompt_tokens, broken.total_cost) == (0, 0.0)
-    _ok("t2", "_seeded_ledger 从落盘快照续算，缺项/坏项退 0 不炸")
+    broken = _seeded_ledger({"total_prompt_tokens": None, "cost_usd": ""})
+    assert (broken.total_prompt_tokens, broken.cost_usd) == (0, 0.0)
+    # C12：老记录里那个「两种币价加在一个 float 上」的 total_cost 必须**不读**——
+    # 读它等于把错口径继续带进新快照（用户拍板：不留兼容字段）。
+    legacy = _seeded_ledger({"total_cost": 9.99})
+    assert (legacy.cost_usd, legacy.cost_cny) == (0.0, 0.0), \
+        f"C12 回归：又去读老的混币种 total_cost 了：{legacy.cost_usd} / {legacy.cost_cny}"
+    _ok("t2", "_seeded_ledger 从落盘快照续算两桶，缺项/坏项退 0 不炸，且不回读混币种 total_cost")
 
 
 async def _make_runner():
@@ -111,7 +120,8 @@ async def t3_midrun_sync():
 async def t4_ensure_graph_single_ledger():
     tmp, store, bus, runner, s = await _make_runner()
     store.update(s.id, status=SessionStatus.awaiting_human,
-                 cost={"total_prompt_tokens": 490, "total_completion_tokens": 21, "total_cost": 0.05})
+                 cost={"total_prompt_tokens": 490, "total_completion_tokens": 21,
+                       "cost_usd": 0.05, "cost_cny": 0.3})
     captured = {}
 
     def fake_prepare(idea, project, agents=None, checkpointer=None, cost_manager=None, sop=None):
@@ -129,8 +139,8 @@ async def t4_ensure_graph_single_ledger():
         assert packed is not None
         cm = runner.costs[s.id]
         assert captured["cost_manager"] is cm, "双账本：传给图的实例 ≠ runner 手上那个"
-        assert (cm.total_prompt_tokens, cm.total_completion_tokens, cm.total_cost) == (490, 21, 0.05), \
-            "重启路径没从快照续算"
+        assert (cm.total_prompt_tokens, cm.total_completion_tokens, cm.cost_usd, cm.cost_cny) \
+            == (490, 21, 0.05, 0.3), "重启路径没从快照续算两桶"
         cm.update_cost(10, 2, "gpt-4o")
         assert cm.total_prompt_tokens == 500                         # 续算后累加正确
     finally:
@@ -224,6 +234,59 @@ async def t7_span_timing():
     _ok("t7", "span 带 t0/ft 且 ft≥t0，收口清在途表；无 run_id 的老路落 null 而不是 0")
 
 
+def t8_two_currency_buckets():
+    """C12 判据本体：同场会话混两种币价的模型时，两桶各记各的、**不相加**。
+
+    ① 两个桶分别对上单价算出的数（USD 行 gpt-4o、CNY 行 step-3.5-flash，各 1000/500 token）；
+    ② `Costs` 里不存在任何"合计"字段（有合计就等于把混加换了个名字留下）；
+    ③ 快照 dict（GET 的 cost、SSE status 里那份、落盘的 `cost` 列）**两桶都在且没有 total_cost 键**；
+    ④ 未登记模型不进任何桶（未知模型不许冒充 USD，那是第二种静默错账）；
+    ⑤ **对照组**：把 CNY 名单换成空集，step-3.5-flash 就必须落进 USD 桶——
+       证明分桶真按 `CNY_MODELS` 走，而不是代码里写死了两个名字。
+    """
+    from codeharness.provider.cost import Costs
+    from codeharness.provider.token_costs import CNY_MODELS, TOKEN_COSTS
+    from server.runner import cost_snapshot
+
+    pt, ct = 1000, 500
+    usd_expect = (pt * TOKEN_COSTS["gpt-4o"]["prompt"] + ct * TOKEN_COSTS["gpt-4o"]["completion"]) / 1000
+    cny_expect = (pt * TOKEN_COSTS["step-3.5-flash"]["prompt"]
+                  + ct * TOKEN_COSTS["step-3.5-flash"]["completion"]) / 1000
+
+    cm = CostManager()
+    # usage_metadata 走「构造后赋值」（与 t1 同法）：AIMessage 的 pydantic 校验要求
+    # total_tokens 等一整套字段，直接传 dict 进构造器会先被校验拦掉。
+    m_usd, m_cny = AIMessage(content="a"), AIMessage(content="b")
+    m_usd.usage_metadata = {"input_tokens": pt, "output_tokens": ct}
+    m_cny.usage_metadata = {"input_tokens": pt, "output_tokens": ct}
+    cm.add_usage(m_usd, model="gpt-4o", tag="usd")
+    cm.add_usage(m_cny, model="step-3.5-flash", tag="cny")
+    c = cm.get_costs()
+    assert abs(c.cost_usd - usd_expect) < 1e-12 and abs(c.cost_cny - cny_expect) < 1e-12, \
+        f"两桶没各记各的：{c}"
+    assert c.cost_usd != c.cost_cny, "两组单价恰好相等，这条判据分不出桶（换个模型或 token 数）"
+
+    assert "total_cost" not in Costs._fields and set(Costs._fields) == {
+        "total_prompt_tokens", "total_completion_tokens", "cost_usd", "cost_cny"}, Costs._fields
+    snap = cost_snapshot(cm)
+    assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens"}, snap
+
+    unknown = CostManager()
+    unknown.update_cost(10, 10, "no-such-model-xyz")
+    assert (unknown.cost_usd, unknown.cost_cny) == (0.0, 0.0), \
+        f"未知模型污染了成本桶：{unknown.get_costs()}"
+    assert unknown.total_prompt_tokens == 10, "未知模型该记 token（用量可见）只是不算钱"
+
+    assert "step-3.5-flash" in CNY_MODELS and CNY_MODELS <= set(TOKEN_COSTS), \
+        "名单里有价表没有的键 = 那一行永远不进桶（静默零记账）"
+    ctrl = CostManager(cny_models=frozenset())        # 对照组：名单清空
+    ctrl.update_cost(pt, ct, "step-3.5-flash")
+    assert ctrl.cost_cny == 0 and abs(ctrl.cost_usd - cny_expect) < 1e-12, \
+        f"对照组不成立（说明分桶不是按名单走的）：{ctrl.get_costs()}"
+    _ok("t8", f"C12 分桶：$ {c.cost_usd:.6f} / ¥ {c.cost_cny:.6f} 各记各的；"
+              "Costs 与快照都没有混币种合计字段；未知模型不入桶；对照组证明确实按 CNY_MODELS 分流")
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -232,7 +295,8 @@ def main():
     t5_lifespan_unwires_seams()
     t6_events_history_bounded()
     asyncio.run(t7_span_timing())
-    print("\ns8_runner_meter: 7/7 全绿")
+    t8_two_currency_buckets()
+    print("\ns8_runner_meter: 8/8 全绿")
 
 
 if __name__ == "__main__":
