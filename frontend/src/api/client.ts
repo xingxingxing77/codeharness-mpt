@@ -44,7 +44,10 @@ async function req<T = any>(method: string, url: string, body?: any): Promise<T>
     try {
       detail = (await rsp.json()).detail || detail
     } catch {}
-    throw new Error(flattenDetail(detail))
+    const err: Error & { status?: number } = new Error(flattenDetail(detail))
+    err.status = rsp.status       // 调用方要按状态分流（413 不是"出错"，是"不在浏览器里预览"）。
+                                  // 给状态码而不是让调用方去猜 message 里的字面词。
+    throw err
   }
   return rsp.json()
 }

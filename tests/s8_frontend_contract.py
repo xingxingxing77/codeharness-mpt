@@ -709,24 +709,59 @@ def t12_offline_banner_and_turn_error_row():
                "fixed 顶条源值 + error 走块管线（type/closed/入序/台账并存）+ ChatNode 显式分支与 .errRow 源值")
 
 
+def t13_size_cap_and_truncation_reach_the_user():
+    """F-E（治理 §3 第 2 条）：阶段三 B10/B7 只落了服务端，这两个信号必须在**两侧同判**下才算接上。
+
+    ① 后端仍回这两个信号：`/workspace/file` 超上限回 413（且是先判大小、**不读字节**），
+       import 的返回体带 `truncated`；
+    ② 状态码穿得过 `client.ts`：抛出的 Error 上必须挂 `status`——不然调用方只能去猜文案；
+    ③ 前端按**状态码**分流（`=== 413`），并按 `truncated` 换 toast 语气。
+       文案由服务端给（「超过预览上限」那句里带真实大小与阈值），前端**不重抄数字**——
+       两处各写一份 5MB 就是等它改上限那天漂移。
+    少任何一边这格都该红：只钉前端=后端哪天不回 truncated 也没人知道；只钉后端=界面照样静默。"""
+    ws = (ROOT / "server" / "api" / "workspace.py").read_text(encoding="utf-8")
+    act = (ROOT / "codeharness" / "actions" / "import_repo.py").read_text(encoding="utf-8")
+    fe = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    dp = (FE / "components" / "DetailsPanel.vue").read_text(encoding="utf-8")
+
+    cap = re.search(r"if size > MAX_PREVIEW_BYTES:\s*(?:#[^\n]*\n\s*)*raise HTTPException\(413", ws)
+    assert cap, "B10 回归：/workspace/file 的大小上限分支没了（超上限会被整份读进内存）"
+    assert '"truncated": truncated' in act and "MAX_IMPORT_NODES" in act, \
+        "B7 回归：import_repo 不再回 truncated，或扫描上限没了"
+
+    req_body = re.search(r"async function req<.*?\n\}", fe, re.S).group(0)
+    assert re.search(r"err\.status = rsp\.status", req_body), \
+        "F-E 回归：req() 抛的 Error 没挂 status——调用方只能拿 message 猜状态码"
+
+    assert re.search(r"\.status === 413", dp), \
+        "F-E 回归：DetailsPanel 不再按 413 分流（点开大文件只剩一条两秒半就消失的报错 toast）"
+    body = dp.split("=== 413", 1)[-1].split("else {", 1)[0]
+    assert "preview.value" in body and "'warn'" in body, \
+        f"F-E：413 分支要在预览面板里留话 + 用 warn 语气，实际只有\n{body.strip()[:160]}"
+    assert "5MB" not in dp and "5 MB" not in dp, "F-E：前端把预览阈值抄成了第二份数字（会漂）"
+
+    imp = re.search(r"const capped = (.*?)\n(.*?)await load\(\)", dp, re.S)
+    assert imp and "Boolean(r.truncated)" in imp.group(1), \
+        "F-E 回归：导入结果不再看 truncated（撞上限的导入与完整导入长得一模一样）"
+    assert "'warn'" in imp.group(2) and "截断" in imp.group(2), \
+        f"F-E：撞上限时 toast 语气/文案没到位\n{imp.group(2).strip()[:200]}"
+    _ok("t13", "F-E：413 与 truncated 两侧同判（后端仍回信号 → Error 挂 status → "
+               "前端按状态码分流 + 预览面板留话 + 上限处截断换 warn），阈值不在前端重抄")
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
 
 def main():
-    t1_blocktype_vocabulary()
-    t2_envelope_and_kinds()
-    t3_routes_exist()
-    t4_graph_endpoint()
-    t5_workspace_file_response_shape()
-    t6_trace_span_vocabulary()
-    t7_chat_target_from_assembly()
-    t8_tool_approval_gate()
-    t9_request_deadline()
-    t10_approval_rollback_realign()
-    t11_events_history_window()
-    t12_offline_banner_and_turn_error_row()
-    print("\ns8_frontend_contract: 12/12 全绿")
+    checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
+              t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
+              t7_chat_target_from_assembly, t8_tool_approval_gate, t9_request_deadline,
+              t10_approval_rollback_realign, t11_events_history_window,
+              t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user)
+    for fn in checks:
+        fn()
+    print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")
 
 
 if __name__ == "__main__":

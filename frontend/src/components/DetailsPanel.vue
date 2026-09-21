@@ -185,7 +185,11 @@ async function doImport() {
     if (r.error) {
       importErr.value = String(r.error)
     } else {
-      toast.push(`已导入 ${r.node_count} 节点 / ${r.edge_count} 边`, 'success')
+      // B7 的规模护栏把 `truncated` 回在响应里，此前前端只看 node_count →
+      // 撞到上限的导入和完整导入长得一模一样，图不完整没人知道。
+      const capped = Boolean(r.truncated)
+      toast.push(`已导入 ${r.node_count} 节点 / ${r.edge_count} 边` +
+        (capped ? '（目录过大，扫描在上限处截断，图不完整）' : ''), capped ? 'warn' : 'success')
       await load()
     }
   } catch (e) {
@@ -208,7 +212,16 @@ async function openFile(n: FileNodeT) {
       text: rsp.content
     }
   } catch (e) {
-    toast.push((e as Error).message, 'error')
+    const msg = (e as Error).message
+    if ((e as { status?: number }).status === 413) {
+      // B10：超过预览上限不是"出错"，是"这个文件不在浏览器里预览"。
+      // 只弹一条两秒半就消失的 toast 等于什么都没发生——点开文件的人要在**落点**上看到话，
+      // 所以面板里也留一句（照后端原文，不在前端重抄一遍大小阈值，两处会漂）。
+      preview.value = { name: n.name, kind: 'code', text: msg }
+      toast.push(msg, 'warn')
+    } else {
+      toast.push(msg, 'error')
+    }
   }
 }
 
