@@ -20,6 +20,7 @@ class CreateSessionReq(BaseModel):
     sop: str = ""                   # N7 模板名（9.3 扩展线入口）；非空时 create 即校验，别让拼错拖到 start 才炸
     llm: dict = Field(default_factory=dict)
     permission: str = "readonly"    # 工具审批的免审档（判定表 codeharness/tools/_approval.py）；其余值 422
+    goal: str = ""                 # B5：建会话时用户填的目标（口径：只有用户能点完成）
 
     @field_validator("permission")
     @classmethod
@@ -133,7 +134,7 @@ async def create_session(req: CreateSessionReq, request: Request, user: str = De
     s = _get(request, "store").create(idea=req.idea, n_round=req.n_round,
                                       project_name=name, llm_override=req.llm,
                                       paradigm=req.paradigm, sop=req.sop, user_id=user,
-                                      permission=req.permission)
+                                      permission=req.permission, goal=req.goal.strip())
     _get(request, "bus").publish(s.id, kind="status", value={"status": s.status, "message": "created"})
     return s.model_dump()
 
@@ -152,6 +153,59 @@ def patch_session(sid: str, req: PatchSessionReq, request: Request, user: str = 
     if not fields:
         return s.model_dump()
     return _get(request, "store").update(s.id, **fields).model_dump()
+
+
+class GoalReq(BaseModel):
+    objective: str = Field(min_length=1, max_length=200)
+
+    @field_validator("objective")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        # 只 `min_length=1` 挡不住两个空格：那样会存进一条「有目标但看不见」的目标。
+        v = v.strip()
+        if not v:
+            raise ValueError("目标不能是空白")
+        return v
+
+
+def _goal_changed(request: Request, s, operation: str) -> dict:
+    """B5：目标的每次变更进事件流（口径里「变更进新 `kind`」那一格）。
+    事件不是真相源——`Session.goal` / `goal_done_at` 才是；这条只让活流与回放看得见「目标变了」，
+    形状照参照系 `goal/change`（`operation` ∈ create|edit|complete|clear，
+    `packages/goal/goal/src/domain.ts:14-21`；它没有的 paused/blocked 我们也没有生产者）。"""
+    _get(request, "bus").publish(s.id, kind="goal", name=operation,
+                                value={"objective": s.goal, "done_at": s.goal_done_at})
+    return s.model_dump()
+
+
+@router.post("/{sid}/goal")
+def set_goal(sid: str, req: GoalReq, request: Request, user: str = Depends(current_user)):
+    """设/改这一场要达成的目标（单条字符串）。改目标会把「已完成」清回去——
+    完成是针对**那条**目标点的，换了目标还挂着已完成就是假状态。"""
+    s = _owned(request, sid, user)
+    updated = _get(request, "store").update(s.id, goal=req.objective, goal_done_at="")
+    return _goal_changed(request, updated, "create" if not s.goal else "edit")
+
+
+@router.post("/{sid}/goal/complete")
+def complete_goal(sid: str, request: Request, user: str = Depends(current_user)):
+    """完成**只有用户点确认这一条路**（口径 2026-09-20）：内核、模型、runner 都没有写
+    `goal_done_at` 的出口，所以这里也不需要防谁。重复点幂等——不刷新时间戳，也不重发事件。"""
+    s = _owned(request, sid, user)
+    if not s.goal:
+        raise HTTPException(422, "这场没有目标可确认完成")
+    if s.goal_done_at:
+        return s.model_dump()
+    from server.sessions import _now
+    updated = _get(request, "store").update(s.id, goal_done_at=_now())
+    return _goal_changed(request, updated, "complete")
+
+
+@router.post("/{sid}/goal/clear")
+def clear_goal(sid: str, request: Request, user: str = Depends(current_user)):
+    s = _owned(request, sid, user)
+    updated = _get(request, "store").update(s.id, goal="", goal_done_at="")
+    return _goal_changed(request, updated, "clear")
 
 
 @router.delete("/{sid}")

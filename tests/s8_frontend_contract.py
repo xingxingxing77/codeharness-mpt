@@ -1025,13 +1025,107 @@ def t16_max_tokens_notice():
                "→ ChatNode warn 行与参照系两句文案逐字在位")
 
 
+def t17_goal_surface():
+    """B5：会话目标——单条字符串、只有用户能改与完成、变更进事件流。
+
+    三侧同判：
+    ① 端点语义（**真 TestClient**，不碰共享 dev Redis：这一格里把 `use_redis` 关掉、
+       注册表指向临时文件，否则门禁每跑一次就往 db0 塞一条会话）；
+    ② 「完成只由用户点确认」这条口径钉成**可执行的不复燃守卫**——除 `Session` 模型与那三条路由
+       之外，全仓不许出现写 `goal_done_at` 的代码（内核/runner/角色一旦能写，口径当场失效）；
+    ③ 前端：三条路由都在消费集里、`kind='goal'` 有分支、`GoalBar.vue` 的文案与几何取参照系源值。
+    """
+    fe_api = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    fe_store = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    bar = (FE / "components" / "composer" / "GoalBar.vue").read_text(encoding="utf-8")
+
+    for route in ("/goal", "/goal/complete", "/goal/clear"):
+        assert f"/api/sessions/${{sid}}{route}" in fe_api, f"B5 回归：client.ts 不再消费 {route}"
+    assert "ev.kind === 'goal'" in fe_store and "v.objective" in fe_store, \
+        "B5 回归：applyEvent 不接 kind=goal（活流里改了目标要刷新才看得见）"
+
+    # ② 「完成只由用户点确认」钉成可执行的不复燃守卫：
+    #    内核一侧（codeharness/**）一个字都不许出现 goal_done_at；
+    #    HTTP 一侧只有 complete 那一处写**非空**值（set/clear 写的是空串复位，不算确认）。
+    kernel = [f"{p.relative_to(ROOT)}" for p in (ROOT / "codeharness").rglob("*.py")
+              if "goal_done_at" in p.read_text(encoding="utf-8")]
+    assert not kernel, f"B5 回归：内核侧出现了 goal_done_at {kernel}——完成态只能由 HTTP 侧的用户动作写"
+    api_py = (ROOT / "server" / "api" / "sessions.py").read_text(encoding="utf-8")
+    others = len(re.findall(r"goal_done_at=_now\(\)", api_py))
+    outside = sum(len(re.findall(r"goal_done_at=_now\(\)", p.read_text(encoding="utf-8")))
+                  for p in list((ROOT / "server").rglob("*.py")) + list((ROOT / "codeharness").rglob("*.py"))
+                  if p != ROOT / "server" / "api" / "sessions.py")
+    complete_fn = re.search(r"def complete_goal\(.*?\n(?=\n@|\ndef )", api_py, re.S).group(0)
+    assert others == 1 and outside == 0 and "goal_done_at=_now()" in complete_fn, \
+        (f"B5 回归：写「已完成」时间戳的语句应恰好一条且就在 complete_goal 里，"
+         f"实到 api={others} 其它={outside}")
+
+    # ① 端点语义
+    import server.sessions as ss
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    from codeharness.configs.settings import settings
+    keep_file, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    keep_redis = settings.platform.use_redis
+    settings.platform.use_redis = False          # 不把测试会话写进共享 dev Redis（db0）
+    try:
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "目标门禁", "project_name": "s8goal"}).json()["id"]
+            bad = c.post(f"/api/sessions/{sid}/goal", json={"objective": "  "})
+            assert bad.status_code == 422, f"空白目标该被值域拒掉，实回 {bad.status_code}"
+            early = c.post(f"/api/sessions/{sid}/goal/complete")
+            assert early.status_code == 422, f"没有目标就点完成该 422，实回 {early.status_code}"
+
+            first = c.post(f"/api/sessions/{sid}/goal", json={"objective": "做一个 2048"}).json()
+            assert first["goal"] == "做一个 2048" and first["goal_done_at"] == "", first
+            second = c.post(f"/api/sessions/{sid}/goal", json={"objective": "改成 2048 + 排行榜"}).json()
+            assert second["goal"].startswith("改成") and second["goal_done_at"] == ""
+
+            done = c.post(f"/api/sessions/{sid}/goal/complete").json()
+            assert done["goal_done_at"], f"完成没落时间戳：{done}"
+            again = c.post(f"/api/sessions/{sid}/goal/complete").json()
+            assert again["goal_done_at"] == done["goal_done_at"], "重复点完成刷新了时间戳（幂等破了）"
+
+            hist = c.get(f"/api/sessions/{sid}/events/history").json()["events"]
+            goal_evs = [e for e in hist if e["kind"] == "goal"]
+            ops = [e["name"] for e in goal_evs]
+            assert ops == ["create", "edit", "complete"], \
+                f"B5：goal 事件的 operation 序列应是 create/edit/complete，实为 {ops}"
+            assert sum(1 for e in goal_evs if e["name"] == "complete") == 1, \
+                "B5：重复点完成又发了一条事件（幂等要在事件流上也成立）"
+            assert goal_evs[-1]["value"]["objective"].startswith("改成"), \
+                f"B5：complete 事件没带上当前目标：{goal_evs[-1]}"
+
+            cleared = c.post(f"/api/sessions/{sid}/goal/clear").json()
+            assert cleared["goal"] == "" and cleared["goal_done_at"] == "", cleared
+            assert [e["name"] for e in hist if e["kind"] == "goal"] == ops, "回放里多了/少了 goal 事件"
+    finally:
+        settings.platform.use_redis = keep_redis
+        ss.SESSIONS_FILE = keep_file
+
+    # ③ 界面源值：文案与几何（GoalBar.module.css 的 .bar/.label/.objective/.objectiveInput）
+    css = bar.split("<style", 1)[-1]
+    for copy in ("进行中的目标", "保存目标", "取消编辑", "编辑目标", "清除目标", "输入目标，智能体将持续执行"):
+        assert copy in bar, f"B5 回归：目标条少了参照系那句文案「{copy}」（locales.ts:5-15 / :15-16）"
+    bar_blk = re.search(r"\.bar \{([^}]*)\}", css)
+    assert bar_blk and "height: 36px" in bar_blk.group(1) and "padding: 4px 5px 4px 12px" in bar_blk.group(1), \
+        "B5 回归：目标条不再是参照系的 36px 高 / 4px 5px 4px 12px 内距"
+    assert "border-radius: 12px" in bar_blk.group(1) and "--dsw-alias-border-l1" in bar_blk.group(1), \
+        "B5 回归：目标条的圆角/边线不再是参照系那份（12px + border-l1）"
+    assert re.search(r"\.objective \{[^}]*text-overflow: ellipsis", css), "B5：目标文本不截断就会把条撑破"
+    assert "--dsw-specific-tip" in css, "B5 回归：底色不再用参照系目标条的 tip token"
+    _ok("t17", "B5 目标三面同判：端点值域/幂等/事件序列 create→edit→complete（clear 后回放条数不变）"
+               "+ 全仓只有 complete 一处写 goal_done_at + 前端三路由与 GoalBar 源值文案在位")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
               t7_chat_target_from_assembly, t8_tool_approval_gate, t9_request_deadline,
               t10_approval_rollback_realign, t11_events_history_window,
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
-              t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice)
+              t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
+              t17_goal_surface)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

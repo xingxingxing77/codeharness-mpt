@@ -15,6 +15,9 @@ export interface Session {
   permission?: string
   workspace: string
   error: string
+  // B5 会话目标：单条、由用户在建会话/目标条里填；完成只由用户点确认（模型无写入口）
+  goal?: string
+  goal_done_at?: string
   cost: Record<string, number>
   created_at: string
   started_at: string

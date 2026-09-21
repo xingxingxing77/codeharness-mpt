@@ -65,11 +65,12 @@ class RedisSessionStore:
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: dict | None = None,
                paradigm: str = "classic", sop: str = "", user_id: str = "default",
-               permission: str = "readonly") -> Session:
+               permission: str = "readonly", goal: str = "") -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
         s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
-                    paradigm=paradigm, sop=sop, user_id=user_id, permission=permission,
+                    paradigm=paradigm, sop=sop, user_id=user_id, permission=permission,  # B5：goal 走同一条 create 通路（建会话时就带上），默认空串=没有目标
+                    goal=goal,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name), created_at=_now())
         pipe = self.r.pipeline()

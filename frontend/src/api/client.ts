@@ -133,6 +133,11 @@ export const api = {
     return req<{ uploaded_count: number; chunk_count: number; errors: string[]; written: string[] }>(
       'POST', `/api/sessions/${sid}/workspace/upload_kb`, fd, KB_UPLOAD_TIMEOUT_MS)
   },
+  /** B5 目标三动作（`setGoal` 兼作 create/edit：后端按「原来有没有目标」分）。 */
+  setGoal: (sid: string, objective: string) =>
+    req<Session>('POST', `/api/sessions/${sid}/goal`, { objective }),
+  completeGoal: (sid: string) => req<Session>('POST', `/api/sessions/${sid}/goal/complete`),
+  clearGoal: (sid: string) => req<Session>('POST', `/api/sessions/${sid}/goal/clear`),
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>

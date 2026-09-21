@@ -43,6 +43,13 @@ class Session(BaseModel):
     permission: str = "readonly"
     workspace: str = ""
     error: str = ""
+    # B5 会话目标（口径 2026-09-20 定）：**单条**目标、由用户在建会话时填。
+    # 完成**只有用户点确认这一条路**（`goal_done_at` 非空＝已确认），模型没有任何写它的出口。
+    # 两次变更都进事件流（`kind:"goal"`，见 `server/api/sessions.py`），这样活流与回放同源。
+    # 参照系那套 phase（active/paused/blocked/complete）里 paused/blocked 需要轮次驱动与
+    # 受阻判定，本仓没有生产者 → 按「口径只要求进行中/已完成」落，不预先摆两个死值。
+    goal: str = ""
+    goal_done_at: str = ""
     cost: dict = Field(default_factory=dict)
     created_at: str = ""
     started_at: str = ""
@@ -77,11 +84,12 @@ class SessionStore:
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: Optional[dict] = None,
                paradigm: str = "classic", sop: str = "", user_id: str = "default",
-               permission: str = "readonly") -> Session:
+               permission: str = "readonly", goal: str = "") -> Session:
         sid = uuid.uuid4().hex[:8]
         name = project_name or sid
         s = Session(id=sid, idea=idea, project_name=name, n_round=n_round,
-                    paradigm=paradigm, sop=sop, user_id=user_id, permission=permission,
+                    paradigm=paradigm, sop=sop, user_id=user_id, permission=permission,  # B5：goal 走同一条 create 通路（建会话时就带上），默认空串=没有目标
+                    goal=goal,
                     llm_override=llm_override or {},
                     workspace=str(WORKSPACE_ROOT / name),      # 产物目录=会话目录（前端文件树读这里）
                     created_at=_now())

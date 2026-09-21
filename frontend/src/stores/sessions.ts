@@ -460,6 +460,13 @@ export const useSessionStore = defineStore('sessions', {
             this.blockOrder.push(key)
           }
         }
+      } else if (ev.kind === 'goal') {
+        // B5：目标变更。真值在 Session 记录里（GET 就拿得到），这条事件只让**活流**立刻跟上；
+        // 回放走同一处落点，所以不另开第二份状态（`clear` 的 objective 是空串，必须照收）。
+        const v = (ev.value || {}) as { objective?: string; done_at?: string }
+        if (this.current)
+          this.mergeSessionLocal(this.current.id,
+                                 { goal: v.objective || '', goal_done_at: v.done_at || '' })
       } else if (ev.kind === 'status') {
         const v = ev.value || {}
         if (v.cost) this.cost = v.cost
