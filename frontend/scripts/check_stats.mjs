@@ -1,5 +1,6 @@
 /** StatsLine 算术的自测：node --experimental-strip-types frontend/scripts/check_stats.mjs
- *  纯函数 + 断言，无框架。守两条：① 取不到的数不许变成 0 顶上去；② 紧凑格式化不吞量级。 */
+ *  纯函数 + 断言，无框架。守三条：① 取不到的数不许变成 0 顶上去；② 紧凑格式化不吞量级；
+ *  ③ 分位数（C12 的 P95 半边）与均值共用同一批样本，缺端点的调用不进样本集。 */
 import { deriveStats, formatDuration, formatTokens, statsGroups, tokenTotals } from '../src/utils/stats.ts'
 
 let failed = 0
@@ -43,11 +44,32 @@ eq('ttftSteps 只算双端齐的', mix.ttftSteps, 1)
 eq('平均 TTFT 0.5 秒', mix.ttftMs / mix.ttftSteps, 500)
 eq('解码 token 累计', mix.decodeTokens, 80)
 
+// 4b) 分位数（C12 的 P95 半边）：样本集与均值同一批，缺端点的调用根本不进样本
+const mk = (n) => Array.from({ length: n }, (_, k) => {
+  const i = k + 1
+  const t0 = 1000 + i * 16
+  // 增量取 1/8 秒：二进制里精确，读数不会漂成 1900.0000000000002
+  return span(t0, t0 + i * 0.125, t0 + i * 0.125 + 0.25, 10, 10)
+})   // 第 i 笔的首 token 延迟 = i*125ms
+const twenty = deriveStats([], mk(20))                    // 样本 125..2500ms
+eq('20 笔都进样本', twenty.ttftSteps, 20)
+eq('P95 = 第 19 小（2375ms），不是最大值 2500', twenty.ttftP95Ms, 2375)
+eq('乱序输入照样分位（打过排序）', deriveStats([], [...mk(20)].reverse()).ttftP95Ms, 2375)
+eq('单笔样本：任何分位都落在那一笔上', deriveStats([], mk(1)).ttftP95Ms, 125)
+const clamp = deriveStats([], [span(10, 9.5, 12)])
+eq('ft 早于 t0 钳到 0 而不是负数（样本仍在：n=1）', [clamp.ttftSteps, clamp.ttftP95Ms], [1, 0])
+eq('双端缺一端 → 没样本 → P95 不假装', deriveStats([], [span(null, 10.5, 12), span(10, null, 12)]).ttftP95Ms, 0)
+eq('均值与 P95 说的是同一批', twenty.ttftMs / twenty.ttftSteps, 1312.5)
+
 // 5) 分组：没数据的整组消失
 eq('零调用不画计数组', statsGroups(deriveStats([], []), { input: 0, output: 0 }), [])
 const full = statsGroups(mix, { input: 200, output: 80 })
 eq('计数组在最前', full[0], '0 轮 · 2 步')
 eq('速度组含平均 TTFT 与 tok/s', /首 token 平均 0\.5s · .* tok\/s/.test(full[2]), true)
+eq('速度组含 P95 与采样数（1/2 笔）', full[2].includes('P95 0.5s（1/2 笔）'), true)
+eq('没采到首 token 就不许出现 P95 字样',
+  statsGroups(deriveStats([], [span(null, 1, 2, 5, 5)]), { input: 5, output: 5 })
+    .some((g) => g.includes('P95')), false)
 eq('账单组', full.at(-1), '输入 200 tok · 输出 80 tok')
 eq('无 LLM 耗时的组不出现', statsGroups(deriveStats([], [span(null, 1, 2, 5, 5)]), { input: 5, output: 5 })
   .some((g) => g.includes('LLM')), false)

@@ -8,7 +8,11 @@ import { formatTokensPerSecond } from './messageChrome.ts'
  *
  *  与参考项目的口径差（数据面决定的，不是偷懒）：
  *  - `steps` = span 条数：我们一笔 span 就是一次 LLM 调用，与它的 step 同义。
- *  - `toolMs` 只从 Terminal 取，理由见 toolWallMs。 */
+ *  - `toolMs` 只从 Terminal 取，理由见 toolWallMs。
+ *  - 参考项目只折算**窗口平均**（`ui-conversation/src/client/chat/turn-metrics.ts` 与
+ *    `StatsLine` 那套：持久投影必须 O(1)，只能存均值存不了分位数；窗口外的历史不计）。
+ *    我们这边 `/trace` 一次把全量 span（≤5000 条）下发完，样本就在手边，所以多折一个 P95——
+ *    尾部延迟恰是「平均 0.4s」那种读数藏住的缺陷。缺样本的口径照它：整组不出现，不顶 0。 */
 export interface WindowStats {
   turns: number
   steps: number
@@ -16,6 +20,8 @@ export interface WindowStats {
   toolMs: number
   ttftMs: number
   ttftSteps: number
+  /** 首 token 延迟的 P95（nearest-rank，样本集与 `ttftMs/ttftSteps` 同一批）。 */
+  ttftP95Ms: number
   decodeMs: number
   decodeTokens: number
 }
@@ -46,20 +52,28 @@ function countTurns(blocks: Block[]): number {
   return turns + (hasOutput ? 1 : 0)
 }
 
+/** nearest-rank 分位数（样本须升序）：n=1 时任何分位都落在那唯一一条上；空样本回 0，
+ *  渲染侧靠 `ttftSteps > 0` 决定画不画（参考项目口径：取不到的数整组不出现，不拿 0 顶）。 */
+function quantileAsc(asc: number[], q: number): number {
+  return asc.length ? asc[Math.max(0, Math.ceil(q * asc.length) - 1)] : 0
+}
+
 export function deriveStats(blocks: Block[], spans: TraceSpan[]): WindowStats {
   let llmMs = 0
   let toolMs = 0
   let ttftMs = 0
-  let ttftSteps = 0
   let decodeMs = 0
   let decodeTokens = 0
+  const ttfts: number[] = []
   for (const b of blocks) toolMs += toolWallMs(b)
   for (const s of spans) {
     if (s.t0) llmMs += Math.max(0, (s.ts - s.t0) * 1000)
     // TTFT 的分子与分母必须同一批：只有一端就计进 ttftSteps 会把平均值算小。
+    // 同一批也是 P95 的样本集——两个数才能并排读（均值 0.4s / P95 1.2s 说的是同一 17 笔）。
     if (s.t0 && s.ft) {
-      ttftSteps += 1
-      ttftMs += Math.max(0, (s.ft - s.t0) * 1000)
+      const ms = Math.max(0, (s.ft - s.t0) * 1000)
+      ttfts.push(ms)
+      ttftMs += ms
     }
     if (s.ft) {
       decodeMs += Math.max(0, (s.ts - s.ft) * 1000)
@@ -72,7 +86,8 @@ export function deriveStats(blocks: Block[], spans: TraceSpan[]): WindowStats {
     llmMs,
     toolMs,
     ttftMs,
-    ttftSteps,
+    ttftSteps: ttfts.length,
+    ttftP95Ms: quantileAsc(ttfts.sort((a, b) => a - b), 0.95),
     decodeMs,
     decodeTokens,
   }
@@ -119,7 +134,12 @@ export function statsGroups(stats: WindowStats, usage: { input: number; output: 
     if (stats.toolMs > 0) durations.push(`工具调用 ${formatDuration(stats.toolMs)}`)
     if (durations.length) groups.push(durations.join(' · '))
     const speeds: string[] = []
-    if (stats.ttftSteps > 0) speeds.push(`首 token 平均 ${formatDuration(stats.ttftMs / stats.ttftSteps)}`)
+    if (stats.ttftSteps > 0) {
+      // 采样数一起报：十几笔的会话上 P95 ≈ 最大值，不标 n 会被读成稳态值；
+      // 分母是总步数，读者一眼看出「有 3/20 笔没采到首 token」。
+      speeds.push(`首 token 平均 ${formatDuration(stats.ttftMs / stats.ttftSteps)}`
+        + ` · P95 ${formatDuration(stats.ttftP95Ms)}（${stats.ttftSteps}/${stats.steps} 笔）`)
+    }
     if (stats.decodeMs > 0) {
       speeds.push(`${formatTokensPerSecond(stats.decodeTokens / (stats.decodeMs / 1000))} tok/s`)
     }
