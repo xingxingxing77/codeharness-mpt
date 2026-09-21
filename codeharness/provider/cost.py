@@ -31,6 +31,11 @@ class CostManager(BaseModel):
     token_costs: dict = TOKEN_COSTS
     cny_models: frozenset = CNY_MODELS        # 可注入，门禁靠它造「同场混两种币种」的读数
     records: list = []
+    # B8：被输出上限截断了几笔调用。**只是计数**，不参与任何计量口径。
+    # 为什么记在账本上而不是记在事件翻译里：每笔调用落账时都把自己的 `response_metadata` 带到这里，
+    # 而 `_translate` 的 `on_chat_model_end` 在最伤的那种截断上（JSON 被切半→解析失败→走 repair）
+    # 拿不到 finish_reason——活体实测三次 length 收尾零条提示。截断要说话就得站在不漏的口上。
+    truncated_calls: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""
@@ -71,6 +76,8 @@ class CostManager(BaseModel):
         只读第 2 条会让整条线跑完账上是 0（2026-09-15 真模型实测）。
         流式还须给底层带 `stream_usage=True`，否则末块连 usage 都不回。"""
         um = getattr(resp, "usage_metadata", None) or {}
+        if str((getattr(resp, "response_metadata", None) or {}).get("finish_reason") or "") == "length":
+            self.truncated_calls += 1                 # B8：截断计数，与钱/token 口径无关
         if um:
             pt, ct = um.get("input_tokens", 0) or 0, um.get("output_tokens", 0) or 0
         else:

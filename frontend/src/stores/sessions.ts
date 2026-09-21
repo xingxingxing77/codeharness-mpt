@@ -442,6 +442,24 @@ export const useSessionStore = defineStore('sessions', {
           this.blocks[key] = b
           this.blockOrder.push(key)
         }
+      } else if (ev.kind === 'turn') {
+        // B8：这一跑里有步被输出 token 上限截断（后端在收口时按记账出口的次数发这一条）。
+        // 口径与参照系一致：它是轮级聚合、锚在轮尾，不是贴在截断那一步后面——参照系自己也
+        // 把提示放在 closing Assistant 与 turn-tail 之间（turn-max-tokens.ts:29-40）。
+        if ((ev.value as any)?.reason?.kind === 'max-tokens') {
+          const key = ev.uuid || `e${ev.cursor || ev.seq}`
+          if (!(key in this.blocks)) {
+            const b = newBlock(ev)
+            b.type = 'MaxTokens'      // 不是 BlockType：t1 查不到，靠 s8 t16 钉住
+            b.closed = true            // 同 error 行：不给 closed 就不发尾行，见上面那条注释
+            if (typeof ev.ts === 'number') {
+              b.ts = ev.ts
+              b.lastTs = ev.ts
+            }
+            this.blocks[key] = b
+            this.blockOrder.push(key)
+          }
+        }
       } else if (ev.kind === 'status') {
         const v = ev.value || {}
         if (v.cost) this.cost = v.cost

@@ -32,6 +32,19 @@
     </div>
   </div>
 
+  <!-- MaxTokens：轮内黄点行（B8）。后端 `_translate` 读出 finish_reason=length 才发 kind=turn，
+       形状与文案取参照系：事件 `turn/end` + `reason.kind==='max-tokens'`
+       （conversation-nodes/turn-max-tokens.ts:42）、文案 locales.ts:132-133。
+       几何刻意与上面的 error 行同族（同一份 .errRow），只有点的状态色不同。 -->
+  <div v-else-if="b.type === 'MaxTokens'" class="errRow" role="status"
+       :data-chat-anchor-key="b.key">
+    <VStateDot state="warning" class="errDot" />
+    <div class="errCopy">
+      <span class="warnTitle">已达到输出 token 上限</span>
+      <span class="errMsg">回答被截断，已有输出保留在对话中。发送“继续”可让模型接着输出。</span>
+    </div>
+  </div>
+
   <!-- 其余：24px 折叠行 + 展开卡 -->
   <VDisclosureRow
     v-else
@@ -176,6 +189,13 @@ const row = computed(() => {
 .errTitle {
   margin-right: 6px;
   color: var(--dsw-alias-state-error-primary);
+  font-weight: 600;
+}
+
+/* 同一族，只换强调色：截断不是失败，是「这段少了尾巴」（参照系给的就是 warn 档） */
+.warnTitle {
+  margin-right: 6px;
+  color: var(--dsw-alias-state-warn-primary);
   font-weight: 600;
 }
 

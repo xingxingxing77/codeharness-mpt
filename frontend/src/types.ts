@@ -44,7 +44,7 @@ export interface WEvent {
   seq: number
   cursor: string // 去重/续传唯一依据；seq 只做展示——Redis 总线上它超出 2^53
   ts: number
-  kind: string // report | log | status | ask_human | approval | error
+  kind: string // report | log | status | ask_human | approval | error | turn
   block: string | null
   uuid: string | null
   name: string | null

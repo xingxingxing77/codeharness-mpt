@@ -879,13 +879,159 @@ def t15_kb_upload_entry():
                "界面 errors 与成功数一起说 + 传完刷新树），白名单不在前端重抄")
 
 
+def t16_max_tokens_notice():
+    """B8：`finish_reason=='length'` 是一条**静默**信号——半截回答看不出自己是半截
+    （`.env:13` 那句 LengthFinishReasonError 只在空 content 上抛，非空就默默返回半截）。
+    后端必须把它说出去，前端才有东西可渲染。
+
+    两半各自取证，都不打合成事件（A4 那轮 s17 拿 `{"event":"on_interrupt"}` 喂判据、而生产里那条
+    分支从不触发——「断言打在构造/合成上」正是本仓点名的病）：
+    ① **计数**：发真 HTTP 流式调用（本机桩 OpenAI 端点，零花费）→ 真 `LLMGateway` 落账 →
+       `CostManager.truncated_calls`。同一根桩按提示词决定收尾原因，`stop` 那一发是**特异性对照**：
+       判定写成无条件计数也照样过的判据不算判据。
+    ② **发出去**：真 `SessionRunner._settle` 在收口时按这条计数发 `turn/end`；同一跑再收口一次
+       不许冒第二条（长跑会 resume 多次）。"""
+    import asyncio
+    import json as j
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from types import SimpleNamespace
+
+    from codeharness.configs.llm_config import LLMConfig, LLMType
+    from codeharness.provider.cost import CostManager
+    from codeharness.provider.gateway import LLMGateway
+    from server.runner import SessionRunner
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length") or 0)
+            req = j.loads(self.rfile.read(n) or b"{}")
+            fin = "length" if "trunc" in str(req.get("messages", {})) else "stop"
+            self.send_response(200)
+            # 不发 Connection: close 的话 httpx 那条异步生成器会在连接被复用时「didn't stop after
+            # athrow()」——判据不红但门禁输出刷一片 traceback，看着像代码坏了。
+            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            seq = {"i": 0}
+
+            def chunk(delta, reason=None, usage=None):
+                # OpenAI 的 chunk 必须自带 id/object/created/model：少了这些，openai SDK 的
+                # `_process_chunk` 一片都不收，`get_final_completion()` 在 snapshot is None 上断言
+                # （本门建的桩第一版就中在这儿）。
+                seq["i"] += 1
+                body = {"id": f"chatcmpl-s8-{seq['i']}", "object": "chat.completion.chunk",
+                        "created": 1790000000, "model": "stub-model",
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": reason}]}
+                if usage is not None:
+                    body["choices"] = []
+                    body["usage"] = usage
+                self.wfile.write(("data: " + j.dumps(body, ensure_ascii=False) + "\n\n").encode())
+
+            chunk({"role": "assistant", "content": ""})
+            chunk({"content": "前半段"})
+            chunk({}, fin)
+            chunk({}, None, {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11})
+            self.wfile.write(b"data: [DONE]\n\n")
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Stub)          # 端口 0：不跟别人抢固定口
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    async def one_call(prompt: str) -> CostManager:
+        cm = CostManager()
+        cfg = LLMConfig(api_type=LLMType.OPENAI, base_url=f"http://127.0.0.1:{port}/v1",
+                        api_key="stub", model="stub-model", max_token=64)
+        gw = LLMGateway(cfg=cfg, cost_manager=cm)
+        await gw.ainvoke(prompt, stream=True)
+        return cm
+
+    class _Ev:
+        """Session 的最小形状：_settle/_publish_status 只读这四个属性。"""
+
+        def __init__(self, sid):
+            self.id, self.status, self.error, self.cost = sid, "running", "", {}
+
+    class _Store:
+        def __init__(self):
+            self.writes = []
+
+        def update(self, sid, **kw):
+            self.writes.append(kw)
+            return _Ev(sid)
+
+        def get(self, sid):
+            return _Ev(sid)
+
+        def set_cost(self, sid, cost, persist=False):
+            pass
+
+    class _Bus:
+        def __init__(self):
+            self.events = []
+
+        def publish(self, sid, kind="report", **fields):
+            self.events.append(SimpleNamespace(kind=kind, **fields))
+            return None
+
+    try:
+        cm_trunc = asyncio.run(one_call("这一次要被截断 trunc"))
+        cm_whole = asyncio.run(one_call("这一次正常收尾"))
+        assert cm_trunc.total_completion_tokens > 0, "桩没被真调用（token 零入账），下面的计数判据就是空转"
+        assert cm_trunc.truncated_calls == 1, \
+            f"B8：真流式调用以 length 收尾，账本却没数到截断（truncated_calls={cm_trunc.truncated_calls}）"
+        assert cm_whole.truncated_calls == 0, \
+            "B8 对照失效：finish_reason=stop 那一发也被计成截断——这条判定等于无条件计数"
+
+        store, bus = _Store(), _Bus()
+        runner = SessionRunner(store, bus)
+        runner.costs["s8b8"] = cm_trunc
+        asyncio.run(runner._settle("s8b8"))
+        turns = [e for e in bus.events if e.kind == "turn"]
+        assert len(turns) == 1, f"B8：收口应发且只发一条 turn，实发 {len(turns)}（总线 {[e.kind for e in bus.events]}）"
+        assert turns[0].name == "end" and turns[0].value == {"reason": {"kind": "max-tokens"}}, \
+            f"B8：turn/end 的 reason 不再是参照系那个形状 {{'reason': {{'kind': 'max-tokens'}}}}，实际 {turns[0].value}"
+        kinds = [e.kind for e in bus.events]
+        assert kinds.index("turn") == len(kinds) - 2 and kinds[-1] == "status", \
+            f"B8：提示不在终态 status 前面一格（顺序 {kinds}）——前端按事件顺序建行，" \
+            "跑完了才冒行就是「已完成」旁边挂着一条截断提示"
+        bus.events.clear()
+        asyncio.run(runner._settle("s8b8"))
+        assert not [e for e in bus.events if e.kind == "turn"], \
+            "B8：同一跑重复收口又冒了一条（长跑 resume 会把同一次截断刷成 N 条提示）"
+    finally:
+        srv.shutdown()
+
+    ss = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    assert "ev.kind === 'turn'" in ss, "B8 回归：applyEvent 不接 kind=turn（后端说出去了但没人听）"
+    assert "b.type = 'MaxTokens'" in ss and 'reason?.kind === \'max-tokens\'' in ss, \
+        "B8 回归：turn 分支不再按 reason.kind 建 MaxTokens 块（提示行会消失或不分原因乱发）"
+
+    cn = (FE / "components" / "conversation" / "ChatNode.vue").read_text(encoding="utf-8")
+    assert 'v-else-if="b.type === \'MaxTokens\'" class="errRow"' in cn, \
+        "B8 回归：MaxTokens 行不再复用 .errRow 那一族几何（B1 已钉过源值，别另造一档）"
+    # 文案逐字取参照系 packages/client/ui-conversation/src/client/locales.ts:132-133
+    for copy in ("已达到输出 token 上限",
+                 "回答被截断，已有输出保留在对话中。发送“继续”可让模型接着输出。"):
+        assert copy in cn, f"B8 回归：界面少了参照系那句文案「{copy}」"
+    css = cn.split("<style", 1)[-1]
+    assert 'state="warning"' in cn and "--dsw-alias-state-warn-primary" in css, \
+        "B8 回归：截断行用的是 error 档的红（截断不是失败，参照系给的是 warn 档）"
+    _ok("t16", "B8：真 HTTP 流式 length 收尾 → 记账口数到截断（stop 对照零计）→ `_settle` 发一条 "
+               "turn/end+reason（重复收口不第二条、发在终态 status 之前）→ applyEvent 建 MaxTokens 块 "
+               "→ ChatNode warn 行与参照系两句文案逐字在位")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
               t7_chat_target_from_assembly, t8_tool_approval_gate, t9_request_deadline,
               t10_approval_rollback_realign, t11_events_history_window,
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
-              t14_checkpoint_replay_surface, t15_kb_upload_entry)
+              t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

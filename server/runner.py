@@ -59,6 +59,7 @@ class SessionRunner:
         self._ctl = None                           # 跨 worker stop 的发布端（redis 模式才有）
         self._ctl_task = None
         self._last_span: dict[str, tuple] = {}     # sid -> (pt, ct, cost_usd, cost_cny) 上次累计值，span 取增量
+        self._trunc_reported: dict[str, int] = {}   # sid -> 已报过的截断笔数（B8），防长跑 resume 刷同一条提示
         # (sid, run_id) -> [派发时刻, 首 token 时刻]。键用 run_id 不用节点名：同一节点在一跑里
         # 会被调多次（n_round 循环），按节点名会把复用/并发的调用串成一条。
         self._call_t0: dict[tuple[str, str], list] = {}
@@ -355,6 +356,7 @@ class SessionRunner:
         self.chats.pop(sid, None)
         self.costs.pop(sid, None)
         self._last_span.pop(sid, None)
+        self._trunc_reported.pop(sid, None)
         # 中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净，否则永久留着
         for k in [k for k in self._call_t0 if k[0] == sid]:
             self._call_t0.pop(k, None)
@@ -418,8 +420,29 @@ class SessionRunner:
             self._park(sid, payload)
             return
         session = self.store.update(sid, status=SessionStatus.finished, finished_at=_now())
+        self._publish_max_tokens(sid)
         self._publish_status(session, "run completed")
         self._forget(sid, terminal=True)
+
+    def _publish_max_tokens(self, sid: str):
+        """B8：这一跑里有几步被输出上限截断——有就发一条 `turn/end`，形状照参照系
+        （`conversation-nodes/turn-max-tokens.ts:42` 读的是 `turn/end` 的 `reason.kind==='max-tokens'`）。
+
+        两个口径差写清楚，别当成「和参照系一模一样」：
+        ① 位置：参照系也是把提示锚在轮尾（closing Assistant 与 turn-tail 之间），不是贴在截断那一步；
+        ② 计数：它是「这一轮至少有一步撞了上限」的聚合，我们这里是一跑收口说一次——resume 过的长跑
+           靠 `_trunc_reported` 记「上次报到第几笔」，新增的截断才会再冒一条，不会三跑刷三条。
+
+        为什么不在 `_translate` 的 `on_chat_model_end` 上顺手发：那条钩子在**最伤的那种截断**上收不到信号
+        （JSON 被切半→解析失败→走 repair，`data.output` 里没有 finish_reason；活体 classic 线三次
+        length 收尾，零条提示）。每笔调用落账时都带着自己的 response_metadata，记账口是唯一不漏的形状。
+        空 content 的 length 收尾走的是另一条已可见的路：`gateway.structured` 抛 ValueError → `_fail`
+        发 error 行，文案自己写着「模型输出被 max_token=… 截断」。"""
+        cm = self.costs.get(sid)
+        n = getattr(cm, "truncated_calls", 0) or 0
+        if n > self._trunc_reported.get(sid, 0):
+            self._trunc_reported[sid] = n
+            self.bus.publish(sid, kind="turn", name="end", value={"reason": {"kind": "max-tokens"}})
 
     def _fail(self, sid: str, exc: Exception):
         message = f"{type(exc).__name__}: {exc}"
