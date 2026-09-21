@@ -1268,6 +1268,42 @@ def t19_fork_surface():
                "（文件内容逐字对）+ 未知游标 422 + 前端 forkFrom/branch 钮在位")
 
 
+def t21_icon_names_resolve():
+    """F-G：活组件按名字要的图标，必须真能在 `GLYPHS` 里取到。
+
+    `DsIcon.vue` 的解法是 `ALIAS[name] || name` → `GLYPHS[key]`，取不到就走 FALLBACK
+    画一个**空 svg**——图标位空白，不是豆腐块，所以只有人对着眼看才发现（`file` 就是这么藏着的：
+    ChatNode 的产物链接与 ToolCard 都在用它，别名表里从来没这个名字）。
+    本门建那台一次性对账脚本（`log/tidy_icon_audit.py`，随开发记录停写已删）的账，并且更严：
+    别名表**指向不存在的字形**同样算红——那只把空白挪后一格。
+    只收字面量 `name="x"`；`:name="x"` 是绑定值，静态判不了（`settingsGlyph`/`icon` 那两处）。
+    """
+    ds = (FE / "components" / "ui" / "DsIcon.vue").read_text(encoding="utf-8")
+    gl = (FE / "components" / "ui" / "glyphs.ts").read_text(encoding="utf-8")
+    block = ds[ds.index("const ALIAS"):ds.index("const FALLBACK")]
+    alias = dict(re.findall(r"^\s{2}'?([a-z0-9-]+)'?:\s*'([A-Za-z0-9]+)'", block, re.M))
+    glyphs = set(re.findall(r'^\s*"([A-Za-z0-9]+)":', gl, re.M))
+    assert len(glyphs) >= 50, f"GLYPHS 只解出 {len(glyphs)} 个键——本门自己的解析器先失效了"
+
+    used = {}
+    for p in sorted((FE / "components").rglob("*.vue")):
+        for tag in re.findall(r"<DsIcon\b[^>]*>", p.read_text(encoding="utf-8"), re.S):
+            m = re.search(r"(?<![:\w])name=\"([a-z0-9-]+)\"", tag)
+            if m:
+                used.setdefault(m.group(1), str(p.relative_to(FE)))
+    missing = {n: u for n, u in used.items() if n not in alias and n not in glyphs}
+    assert not missing, (f"F-G 回归：这些图标名取不到字形、会画成空白 {missing}"
+                         "（要么接进 ALIAS 的已有字形，要么改 extract_glyphs.py 的清单重跑，别手改 glyphs.ts）")
+    dangling = {k: v for k, v in alias.items() if v not in glyphs}
+    assert not dangling, f"F-G 回归：别名指向不存在的字形 {dangling}——空白只是挪后了一格"
+    assert alias.get("file") == "IconPaperclipOutline16", \
+        f"F-G 回归：`file` 又没接上字形（现值 {alias.get('file')!r}）"
+    # 阳性对照：一个压根不在表里的名字必须判不出来，否则上面两条断言是空转
+    assert "no-such-glyph-xyz" not in alias and "no-such-glyph-xyz" not in glyphs
+    _ok("t21", f"F-G：活组件用到 {len(used)} 个图标名，逐个能在别名表或 GLYPHS（{len(glyphs)} 键）里取到；"
+               "`file`→IconPaperclipOutline16 已接上，别名表无悬空指向")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1275,7 +1311,8 @@ def main():
               t10_approval_rollback_realign, t11_events_history_window,
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
-              t17_goal_surface, t18_steer_queue, t19_fork_surface)
+              t17_goal_surface, t18_steer_queue, t19_fork_surface,
+              t21_icon_names_resolve)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

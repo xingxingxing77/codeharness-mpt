@@ -61,6 +61,11 @@ const ALIAS: Record<string, string> = {
   download: 'IconDownloadOutline16',
   fullscreen: 'IconFullscreenOutline16',
   paperclip: 'IconPaperclipOutline16',
+  // F-G：`file` 被 ChatNode 的产物链接与 ToolCard 用着，但字形集里从来没有这个名字
+  // ——`ALIAS[name] || name` 取不到就走 FALLBACK，渲染成**空 svg**（图标位空白，不是豆腐块）。
+  // 不新增字形（`ui/glyphs.ts` 是 extract_glyphs.py 自动生成的，抽取清单在参照系那一侧），
+  // 先把名字接到已有的回形针字形上：产物在界面上的语义就是「这场带出来的附件」。
+  file: 'IconPaperclipOutline16',
   refresh: 'IconRefreshOutline16',
   sparkle: 'IconSparkle16',
   browse: 'IconBrowseOutline16',
