@@ -70,8 +70,16 @@ class SessionRunner:
         # ⚠ 只在 store 说「可能在跑」时才转发——否则对 created/finished 会话点停止会把它
         # 误标 stopping 卡死（多 worker 冒烟实测：stopped:true 但没人会来收尾）。
         s = self.store.get(sid)
-        if self._ctl is not None and s is not None and s.status in (
-                SessionStatus.running, SessionStatus.awaiting_human):
+        if s is not None and s.status == SessionStatus.awaiting_human:
+            # 停在断点时**全集群都没有活任务**：`_run` 已收尾，`_resume` 一旦起来状态就变
+            # running 了（:226）。这条分支原先走下面的转发，而转发的结果是把会话钉死在
+            # stopping——没有任何 worker 会有任务去取消它。就地落 stopped，并散会
+            # （terminal=True：收 graphs/shell/editor，放弃这个断点就是放弃这场）。
+            session = self.store.update(sid, status=SessionStatus.stopped, finished_at=_now())
+            self._publish_status(session, "stopped by user")
+            self._forget(sid, terminal=True)
+            return True
+        if self._ctl is not None and s is not None and s.status == SessionStatus.running:
             self.store.update(sid, status=SessionStatus.stopping)
             await self._ctl.publish("ch:ctl", json.dumps({"cmd": "stop", "sid": sid}))
             return True
@@ -228,9 +236,7 @@ class SessionRunner:
             with self._session_ctx(sid):
                 async for ev in graph.astream_events(Command(resume=content), config, version="v2"):
                     self._translate(sid, ev)
-            session = self.store.update(sid, status=SessionStatus.finished, finished_at=_now())
-            self._publish_status(session, "run completed")
-            self._forget(sid, terminal=True)
+            self._settle(sid)
         except asyncio.CancelledError:
             session = self.store.update(sid, status=SessionStatus.stopped, finished_at=_now())
             self._publish_status(session, "stopped by user")
@@ -320,6 +326,25 @@ class SessionRunner:
                 from codeharness.tools.libs.editor_tools import close_editor
                 close_editor(project)
 
+    def _settle(self, sid: str):
+        """事件流收口时的落态——**停在待人工处就不许写 finished**。
+
+        `_translate` 在 `on_interrupt` 里置了 `awaiting_human`（:434），而中断后
+        `astream_events` 是**正常结束**的，旧写法在 `_run`/`_resume` 两处各写一遍无条件
+        finished 把它抹掉（实测读数 `tests/s17::t1`）。界面靠 SSE 事件本地补一刀
+        （`stores/sessions.ts:414`）才没露馅，刷新一次 GET 就变「已完成」；而
+        `stop()` 的转发分支、`delete_session`/`start_session` 的 409 前提全建在这个字段上。
+        两条teardown 共用本出口，不再各写一遍。"""
+        cur = self.store.get(sid)
+        if cur is not None and cur.status == SessionStatus.awaiting_human:
+            # 断点在 checkpointer 里，graph 必须留着供 resume（_forget 的 docstring 同口径）
+            self._publish_status(cur, "awaiting human input")
+            self._forget(sid, terminal=False)
+            return
+        session = self.store.update(sid, status=SessionStatus.finished, finished_at=_now())
+        self._publish_status(session, "run completed")
+        self._forget(sid, terminal=True)
+
     def _fail(self, sid: str, exc: Exception):
         message = f"{type(exc).__name__}: {exc}"
         session = self.store.update(sid, status=SessionStatus.failed, error=message, finished_at=_now())
@@ -353,9 +378,7 @@ class SessionRunner:
                 async for ev in team.astream_events(init, config, version="v2"):
                     self._translate(sid, ev)
 
-            session = self.store.update(sid, status=SessionStatus.finished, finished_at=_now())
-            self._publish_status(session, "run completed")
-            self._forget(sid, terminal=True)
+            self._settle(sid)
         except asyncio.CancelledError:                    # 必须 re-raise，否则僵尸协程
             session = self.store.update(sid, status=SessionStatus.stopped, finished_at=_now())
             self._publish_status(session, "stopped by user")

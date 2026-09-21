@@ -210,9 +210,14 @@ async def start_session(sid: str, request: Request, user: str = Depends(current_
     store, runner = _get(request, "store"), _get(request, "runner")
     s = _owned(request, sid, user)
     # is_running 是 worker 本地视角；多进程部署下「已在跑」的真源是 store 状态
-    # （启动残态由 heal_running 自愈，running/awaiting_human 必有人在跑）。
-    if runner.is_running(sid) or s.status in (SessionStatus.running, SessionStatus.awaiting_human):
+    # （启动残态由 heal_running 自愈，running 必有人在跑）。
+    if runner.is_running(sid) or s.status == SessionStatus.running:
         raise HTTPException(409, "session already running")
+    # awaiting_human 自 09-21 起是**可信的驻留态**（原先被 runner 收尾那句覆写成 finished，
+    # 于是这里放行重开、把 checkpointer 里等人回答的那个断点冲掉）。要往前走只有两条：
+    # 回答（human-input）或放弃（stop → stopped），都不是「再 start 一次」。
+    if s.status == SessionStatus.awaiting_human:
+        raise HTTPException(409, "会话停在待人工处：请先回答，或点停止放弃这场")
     if not (_get(request, "llm_defaults") or {}).get("api_key"):
         raise HTTPException(400, f"LLM 未配置：{_get(request, 'llm_problem') or '缺少 api_key'}")
     q = getattr(request.app.state, "quota", None)
