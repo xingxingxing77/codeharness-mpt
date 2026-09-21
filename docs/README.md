@@ -219,7 +219,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - **第十五处（真浏览器现形，已修+钉门禁 t5）**：`/workspace/file` 响应一直没有 `ext`/`type` 字段，前端 `ToolsPanel.onSelect` 的 markdown/image/.mmd 三类预览分支**从未命中过**——`.md` 一直显示成高亮代码。FakeLLM 门禁与路由核对都查不出「路由在但形状错」，浏览器点开才炸（陷阱 #2 第四次应验）。
 - 验收方式：真浏览器（应用内）逐屏 DOM 验收——编排图 7 节点+8 SOP 边全标签、象限图（s9_dualrun3 产物 `competitive_analysis.mmd`）title/四象限/7 坐标全渲染、围栏水合 1 图 0 残留、用量页 22 会话与顶栏 ¥2.103/299.5k/690k 互洽、行点击跳转、币种。**视觉判据全部打在 DOM 几何与文本上**（本会话模型不收图）。
 - **S8-B 终验当日过（真模型+真浏览器）**：专用块上屏（一场收口 29 块）/插话/stop/文件树+下载 全过；块事件序列快照存 `storage/benchmark/s8_events_snapshot.json`（295 events，Thought/Docs/Editor 三族）。**人工回答**一项经典线无 interrupt 点，UI 接线在位、图级门禁已钉，活体验收挂 S9 的 DI 策略会话。顺带修两处收口观感：stream 块 end_marker 收口（s8 t3 钉）+ 光标仅运行态。真模型两笔实测费：¥0.133（收口场）+ ~¥0.03（stop 场）。
-- **S8 未闭合项**：N6 时间旅行回放（~~等 S7 checkpointer 快照采集~~ → **2026-09-21 改准（D1）**：S7 已收口切默认、`environment/checkpoint.py:80 make_checkpointer` 早在位，缺的是「按 superstep 采快照 + 回放读取口」这件活本身，做/判 ⛔ 见 `plan/PLAN.md` §4 C11）；~~N4 trace 面板（等 S7 trace 存储）~~（2026-09-18 前端面板落地，见当日 N4 段）；~~登录/多租户 UI（等 N1 服务端）~~（2026-09-18 N1 全栈落地，见当日 N1 段）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
+- **S8 未闭合项**：N6 时间旅行回放（~~等 S7 checkpointer 快照采集~~ → **2026-09-21 改准（D1）**：S7 已收口切默认、`environment/checkpoint.py:82 make_checkpointer` 早在位，缺的是「按 superstep 采快照 + 回放读取口」这件活本身，做/判 ⛔ 见 `plan/PLAN.md` §4 C11）；~~N4 trace 面板（等 S7 trace 存储）~~（2026-09-18 前端面板落地，见当日 N4 段）；~~登录/多租户 UI（等 N1 服务端）~~（2026-09-18 N1 全栈落地，见当日 N1 段）；插话气泡 reload 后不回显（client 本地伪块，非契约项）。
 - 门禁基线：**十二个不花钱脚本全 exit 0**（十一件套 + s8_frontend_contract 5 组）。
 
 ### 2026-09-17 · S7 双实现落地（feature flag 默认关，未切默认）
