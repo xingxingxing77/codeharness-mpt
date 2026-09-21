@@ -13,6 +13,8 @@
      ValueError（用替换 subprocess 的缝注入 rc=3）。对照组用修复前的 `f"pyreverse {path} -o dot"`
      + `shell=True` + `check=True` 打同一个含空格路径 → 实测 rc=1 且抛的是 CalledProcessError，
      正好同时证否两件事：路径被 shell 拆词、以及紧随的 `if result.returncode != 0` 是死代码。
+  t5 F-C（治理 §3 第 3 条）：B6 换来的另一半——可执行文件不在场时 shell=False 抛裸
+     FileNotFoundError，调用方零 `except`。归一成 ValueError，且只咬 FileNotFoundError。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -162,12 +164,64 @@ def t4_rebuild_class_views_spaced_and_failure():
           f"对照组（旧 f-string+check=True）实测 rc={ctl_rc} 且不产出 classes.dot（旧 returncode 判断是死代码）")
 
 
+def t5_missing_pyreverse_normalizes_to_value_error():
+    """F-C：B6 把 argv 交回 shell=False 之后，**可执行文件不在场**从「shell 回 rc=127 /
+    CalledProcessError」变成裸 `FileNotFoundError` 出环，而唯一调用方
+    `actions/rebuild_class_view.py` 全文零 `except`——它在图里跑时只被 `agent.py:201`
+    那个泛 `except Exception` 兜住，于是"没装 pylint"会走成一次自愈重跑而不是可读的动作失败。
+
+    三格：① 前提（异常类型从哪来）用**真** shell=False 打一个不存在的命令，必须是
+    FileNotFoundError；② 修复后同一形状在共享出口归一成 ValueError 且消息说人话；
+    ③ 收紧只咬 FileNotFoundError——换成 PermissionError 必须原样出环（否则这条 guard
+    就成了 `except Exception`，把别的 OSError 静默改成"没装 pylint"）。"""
+    pkg = _spaced_pkg()
+
+    class _Raises:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def run(self, argv, **kw):
+            raise self.exc
+
+    # ① 前提
+    try:
+        subprocess.run(["pyreverse-not-installed-here", str(pkg), "-o", "dot"],
+                       shell=False, capture_output=True, text=True)
+        raise AssertionError("①前提不成立：shell=False 打不存在的命令竟然没抛 FileNotFoundError")
+    except FileNotFoundError:
+        pass
+
+    # ② 归一
+    keep = R.subprocess
+    R.subprocess = _Raises(FileNotFoundError(2, "系统找不到指定的文件", "pyreverse"))
+    try:
+        asyncio.run(R.RepoParser(base_directory=pkg).rebuild_class_views(path=pkg))
+        raise AssertionError("②失效：pyreverse 不在场竟然没抛")
+    except ValueError as e:
+        assert "pyreverse 不在 PATH" in str(e), f"②消息没说是缺可执行文件：{e}"
+    finally:
+        R.subprocess = keep
+
+    # ③ 不放宽
+    R.subprocess = _Raises(PermissionError(13, "另一个程序正在使用此文件"))
+    try:
+        asyncio.run(R.RepoParser(base_directory=pkg).rebuild_class_views(path=pkg))
+        raise AssertionError("③失效：别的 OSError 被一起吞成了 ValueError")
+    except PermissionError:
+        pass
+    finally:
+        R.subprocess = keep
+    print("  t5 前提（shell=False 打不存在的命令）实测 FileNotFoundError；修复后归一成 "
+          "ValueError 含「pyreverse 不在 PATH」；PermissionError 原样出环（guard 没放宽成 except Exception）")
+
+
 def main():
     print("=" * 60)
     print("S19: shell 系三条（B4 阻塞壳 / B5 注入 / B6 pyreverse）")
     print("=" * 60)
     fns = (t1_loop_stays_responsive, t2_tree_degrades_instead_of_raising,
-           t3_mime_type_passes_filename_as_one_argv, t4_rebuild_class_views_spaced_and_failure)
+           t3_mime_type_passes_filename_as_one_argv, t4_rebuild_class_views_spaced_and_failure,
+           t5_missing_pyreverse_normalizes_to_value_error)
     fails = []
     try:
         for fn in fns:
@@ -184,7 +238,7 @@ def main():
     if fails:
         print(f"\n❌ 失败 {len(fails)}/{len(fns)} 条")
         return 1
-    print("\n" + "=" * 60 + f"\n✅ 全部通过 (t1–t4 {len(fns)}/{len(fns)} 全绿)\n" + "=" * 60)
+    print("\n" + "=" * 60 + f"\n✅ 全部通过 ({len(fns)}/{len(fns)} 全绿，编号见 fns)\n" + "=" * 60)
     return 0
 
 

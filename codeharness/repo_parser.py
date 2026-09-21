@@ -732,8 +732,15 @@ class RepoParser(BaseModel):
         # list 形态走 shell=False：路径带空格/元字符不再被 shell 拆词；阻塞调用丢线程池（同 B4）。
         # 不用 check=True：它会让紧随的 returncode 判断变成死代码（非零先抛 CalledProcessError），
         # 而 ValueError 带 stderr 文本才是调用方（RebuildClassView action）看得懂的东西。
-        result = await asyncio.to_thread(
-            subprocess.run, command, cwd=str(output_dir), capture_output=True, text=True)
+        # ⚠ 但 shell=False 换了个代价（F-C）：可执行文件不在场时不再由 shell 回 rc=127，
+        # 而是**本地抛 FileNotFoundError 出环**。调用方只认 ValueError，且它外面还有一层
+        # `except Exception` 的自愈回喂（B9）——那条路径会把"没装 pylint"当成动作异常重跑一轮。
+        # 在共享出口归一成同一个类型，比在每个调用者各补 except 小，且 ext_api 直连同样受益。
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run, command, cwd=str(output_dir), capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise ValueError(f"pyreverse 不在 PATH（未安装 pylint？）：{exc}") from exc
         if result.returncode != 0:
             raise ValueError(f"pyreverse 失败 rc={result.returncode}: {result.stderr[:500]}")
         class_view_pathname = output_dir / "classes.dot"
