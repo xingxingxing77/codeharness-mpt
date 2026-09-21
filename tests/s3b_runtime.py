@@ -531,7 +531,7 @@ def t14_dynamic_paradigm_assembly():
     idea = "实现一个命令行工具 tinycli"
     asyncio.run(gdyn.ainvoke(
         {"messages": [Message(content=idea, role="user", cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "round": 0, "debug_rounds": 0, "finished": False},
+         "memories": {}, "debug_rounds": 0, "finished": False},
         {"configurable": {"thread_id": "t14dyn"}}))
     flat = [m for call in leader_llm.calls for m in (call if isinstance(call, list) else [call])]
     assert any(idea in getattr(m, "content", str(m)) for m in flat), \
@@ -553,11 +553,25 @@ def t15_no_dead_state_channels():
 
     assert "docs" not in TeamState.__annotations__, \
         f"docs 假通道长回来了：TeamState 键集 {sorted(TeamState.__annotations__)}"
+    # C14：`round` 同族（三处 init 写 0、全仓零读零写），C13 落了真游标 `seen` 之后它就纯剩死重，
+    # 一起摘掉并钉同一层守卫。判据吃的是 `TeamState.__annotations__`，不看运行期——
+    # LangGraph 对未知状态键静默丢弃，写者残留永远炸不出来（本函数开头那条实测）。
+    assert "round" not in TeamState.__annotations__, \
+        f"round 死键长回来了：TeamState 键集 {sorted(TeamState.__annotations__)}"
+    assert "seen" in TeamState.__annotations__ and "undelivered" in TeamState.__annotations__, \
+        "C13 的路由游标不见了（同超步多条产出会退回「只投最后一条」的老毛病）"
     root = Path(codeharness.__file__).parent
     for rel in ("team.py", "sop/builder.py", "environment/team_graph.py"):
         src = (root / rel).read_text(encoding="utf-8")
         assert '"docs"' not in src and "docs=" not in src, \
             f"{rel} 里又出现往图状态写 docs 的地方——产物通道是磁盘 ArtifactStore，不是 TeamState"
+        assert '"round"' not in src, f"{rel} 里又出现往图状态写 round 初值的地方"
+    # 游标刻意不进 init：跑完的会话再 start 时 messages 是追加，init 里带 seen=0 会把整条历史重投一遍
+    for rel in ("team.py", "sop/builder.py"):
+        src = (root / rel).read_text(encoding="utf-8")
+        assert '"seen"' not in src and '"undelivered"' not in src, \
+            f"{rel} 的 init 里写进了路由游标——那会让复用的 thread 把历史全量重投"
+    print("  t15 docs/round 两个死键都没复燃、C13 游标在位且没被写进 init")
 
 
 def t16_run_code_named_delivery():

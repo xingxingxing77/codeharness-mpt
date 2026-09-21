@@ -26,7 +26,8 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel
 
 from codeharness.base.action import BaseAction
-from codeharness.const import MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_SELF, RequirementTag
+from codeharness.const import (MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_NONE, MESSAGE_ROUTE_TO_SELF,
+                                RequirementTag)
 from codeharness.environment.team_graph import build_team
 from codeharness.roles.agent import Agent
 from codeharness.schema import Message
@@ -117,7 +118,7 @@ class _Emitter:
 
 
 def _init(msg: Message):
-    return {"messages": [msg], "memories": {}, "round": 0,
+    return {"messages": [msg], "memories": {},
             "debug_rounds": 0, "finished": False}
 
 
@@ -292,17 +293,100 @@ def t6_unknown_recipient_raises():
     assert out["messages"][0].content == "默认值", f"⑤读数不对：{out['messages'][0].content}"
 
 
+def t7_superstep_batch_all_delivered():
+    """C13：同一超步里多条产出**必须全投**。旧写法只看 `messages[-1]`，其余消息留在黑板上永不路由。
+    真跑里这不是理论场景——A4 那批队长一轮攒 15 条委派 → 15 个并发 Send → 14 条回报没人收。"""
+
+    class _TwoOut:
+        """一个节点一轮产两条消息，分别指名两个目标"""
+        def as_node(self, name):
+            async def _run(state: dict):
+                return {"messages": [
+                    Message(content="给 X", role="user", cause_by=RequirementTag.RUN_COMMAND,
+                            sent_from=name, send_to={"X"}),
+                    Message(content="给 Y", role="user", cause_by=RequirementTag.RUN_COMMAND,
+                            sent_from=name, send_to={"Y"})]}
+            return name, _run
+
+    class _Hub:
+        """队长替身：一轮里把 N 件任务发给同一成员（一条聚合件 → 拆成 N 个并发 Send）"""
+        def __init__(self, member: str, n: int):
+            self.member, self.n = member, n
+
+        def as_node(self, name):
+            async def _run(state: dict):
+                return {"messages": [Message(
+                    content="派发中", role="user", cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                    send_to={self.member},
+                    instruct_content={"delegations": [{"member": self.member,
+                                                       "instruction": f"任务 {i}"} for i in range(self.n)]},
+                    instruct_schema="TeamDelegation")]}
+            return name, _run
+
+    class _Member:
+        """成员替身：每次被激活回一条 TeamReport 给队长"""
+        def __init__(self, leader: str):
+            self.leader, self.hits = leader, 0
+
+        def as_node(self, name):
+            async def _run(state: dict):
+                self.hits += 1
+                inbox = state.get("_inbox") or []
+                return {"messages": [Message(content=f"完成-{inbox[-1].content if inbox else ''}",
+                                             role="assistant", cause_by=RequirementTag.RUN_COMMAND,
+                                             sent_from=name, send_to={self.leader},
+                                             instruct_schema="TeamReport")]}
+            return name, _run
+
+    class _Sink:
+        """收件方替身：记下每次收到的那条内容，然后不再往外投（避免多节点续跑）"""
+        def __init__(self):
+            self.seen = []
+
+        def as_node(self, name):
+            async def _run(state: dict):
+                self.seen.append(((state.get("_inbox") or [Message(content="")])[-1]).content)
+                return {"messages": [Message(content="收口", role="assistant",
+                                             cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                                             send_to={MESSAGE_ROUTE_TO_NONE})]}
+            return name, _run
+
+    # 格①：同批两条、两个目标 → 都得投出去
+    x, y = _Sink(), _Sink()
+    g1 = build_team({"Hub": _TwoOut(), "X": x, "Y": y},
+                    sop={RequirementTag.USER_REQUIREMENT: ["Hub"]})
+    asyncio.run(g1.ainvoke(_init(Message(content="开工", role="user",
+                                        cause_by=RequirementTag.USER_REQUIREMENT)),
+                            {"configurable": {"thread_id": "s16-t7a"}}))
+    assert x.seen == ["给 X"] and y.seen == ["给 Y"], f"同批两条只投出了一条：X={x.seen} Y={y.seen}"
+
+    # 格②：聚合件拆成 3 条给同一成员 → 3 次并发激活的 3 条回报都要回到队长
+    leader, member = _Sink(), _Member("Mike")
+    g2 = build_team({"Hub": _Hub("Alice", 3), "Alice": member, "Mike": leader},
+                    sop={RequirementTag.USER_REQUIREMENT: ["Hub"]})
+    asyncio.run(g2.ainvoke(_init(Message(content="派三件", role="user",
+                                         cause_by=RequirementTag.USER_REQUIREMENT)),
+                            {"configurable": {"thread_id": "s16-t7b"}}))
+    assert member.hits == 3, f"三条委派没都送达成员：Alice 被激活 {member.hits} 次"
+    assert len(leader.seen) == 3, f"队长只收到 {len(leader.seen)} 条回报（旧写法只会收到 1 条）"
+    assert sorted(leader.seen) == ["完成-任务 0", "完成-任务 1", "完成-任务 2"], leader.seen
+    print(f"  ok  t7 同批全投：两条各投各的 + 三条并发激活的回报三条都回队长（{leader.seen}）")
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
-              t5_approval_reject_does_not_run_action, t6_unknown_recipient_raises]
+              t5_approval_reject_does_not_run_action, t6_unknown_recipient_raises,
+              t7_superstep_batch_all_delivered]
     for c in checks:
         c()
-        print(f"  ok  {c.__name__}")
+        if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
+            print(f"  ok  {c.__name__}")
     print(f"\nS16 门禁通过：{len(checks)} 组（langgraph {LANGGRAPH_VERSION}）—— "
           f"条件边写 state 不持久化 1 组（含节点写入对照组）+ 真图刹车 2 组（<self> 自环 / DEBUG_ERROR 广播）"
           f"+ B9 自愈回喂 2 组（Action 抛错 / 审批拒绝，都要再激活角色且 3 轮内收尾）"
-          f"+ C1 未知收件人当场抛 1 组（含合法指名与 <all> 两格对照）")
+          f"+ C1 未知收件人当场抛 1 组（含合法指名与 <all> 两格对照）"
+          f"+ C13 同超步多条产出全投递 1 组（两目标两条 + 一成员三条）")
 
 
 if __name__ == "__main__":

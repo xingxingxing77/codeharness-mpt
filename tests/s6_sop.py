@@ -789,7 +789,7 @@ def t19_ext_api_acceptance():
         team = build_team({"Poet": build_role("Poet", FakeLLM(["-"]))},   # ④ 新订阅表+整场会话
                           sop={RequirementTag.USER_REQUIREMENT: ["Poet"]})
         init = {"messages": [Message(content="春眠不觉晓", cause_by=RequirementTag.USER_REQUIREMENT)],
-                "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
+                "memories": {}, "debug_rounds": 0, "finished": False}
         out = A.run(team.ainvoke(init, {"configurable": {"thread_id": "t19ext"},
                                         "recursion_limit": 12}))
         assert out["messages"][-1].content.startswith("[haiku]"), out["messages"][-1].content

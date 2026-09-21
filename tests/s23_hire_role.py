@@ -186,7 +186,7 @@ def t5_real_graph_hire_reachable():
     out = asyncio.run(build_team(agents, sop=sop).ainvoke(
         {"messages": [Message(content="分析销售数据", role="user",
                               cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False},
+         "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False},
         {"configurable": {"thread_id": "s23t5"}}))
 
     reports = [m for m in out["messages"] if m.instruct_schema == "TeamReport"]

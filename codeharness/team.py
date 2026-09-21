@@ -64,7 +64,7 @@ async def run_project(idea: str, project_id: str, agents: dict | None = None,
     team = build_team(agents, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False}
+            "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}
     async for ev in team.astream_events(init, config, version="v2"):
         yield ev
 
@@ -83,7 +83,7 @@ def prepare_project(idea: str, project_id: str, agents: dict | None = None,
     team = build_team(agents, checkpointer=checkpointer, sop=sop)
     config = {"configurable": {"thread_id": project_id}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False}
+            "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}
     return team, config, init
 
 

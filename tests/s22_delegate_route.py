@@ -55,7 +55,7 @@ def _delegation(members: dict) -> Message:
 
 
 def _run_route(route, msgs):
-    return route({"messages": msgs, "memories": {}, "round": 0, "debug_rounds": 0, "finished": False})
+    return route({"messages": msgs, "memories": {}, "debug_rounds": 0, "finished": False})
 
 
 def t1_split_and_target():
@@ -107,7 +107,7 @@ def t2_real_graph():
     out = asyncio.run(graph.ainvoke(
         {"messages": [Message(content="做一个命令行待办工具", role="user",
                               cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "round": 0, "debug_rounds": 0, "finished": False},
+         "memories": {}, "debug_rounds": 0, "finished": False},
         {"configurable": {"thread_id": "s22t2"}}))
 
     aggs = [m for m in out["messages"] if m.instruct_schema == "TeamDelegation"]
@@ -144,7 +144,7 @@ def t2_real_graph():
     asyncio.run(build_team(agents2, sop=sop2).ainvoke(
         {"messages": [Message(content="需求", role="user",
                               cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "round": 0, "debug_rounds": 0, "finished": False},
+         "memories": {}, "debug_rounds": 0, "finished": False},
         {"configurable": {"thread_id": "s22t2b"}}))
 
     def _task_of(llm):
@@ -171,7 +171,7 @@ def _leader_only(send_to: str):
     out = asyncio.run(graph.ainvoke(
         {"messages": [Message(content="需求", role="user",
                               cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "round": 0, "debug_rounds": 0, "finished": False},
+         "memories": {}, "debug_rounds": 0, "finished": False},
         {"configurable": {"thread_id": f"s22t3-{send_to}"}}))
     return out, agents[TEAMLEADER_NAME], len(alice_llm.calls), len(bob_llm.calls)
 
@@ -257,7 +257,7 @@ async def t6_report_path():
     out = await graph.ainvoke(
         {"messages": [Message(content="做一个命令行待办工具", role="user",
                               cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False},
+         "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False},
         {"configurable": {"thread_id": "s22t6"}})
 
     reports = [m for m in out["messages"] if m.instruct_schema == "TeamReport"]
@@ -289,7 +289,7 @@ async def t7_pingpong_brake():
     graph = build_team(agents, sop=sop)
     init = {"messages": [Message(content="做个工具", role="user",
                                  cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False}
+            "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}
     try:
         await graph.ainvoke(init, {"configurable": {"thread_id": "s22t7control"},
                                    "recursion_limit": 12})

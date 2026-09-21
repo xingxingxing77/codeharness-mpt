@@ -54,7 +54,7 @@ async def main():
            RequirementTag.WRITE_TASKS: ["Engineer"]}
     g = build_team({"PM": pm, "Architect": architect, "PMManager": pmm, "Engineer": eng}, sop=sop)
     init = {"messages": [Message(content="做个2048游戏", cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
+            "memories": {}, "debug_rounds": 0, "finished": False}
     async for _ in g.astream(init, {"configurable": {"thread_id": "e2e"}}):
         pass
     root = Path("workspace/e2e_proj")

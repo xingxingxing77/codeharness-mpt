@@ -31,10 +31,15 @@ class UnknownRecipient(ValueError):
 class TeamState(TypedDict):
     messages: Annotated[list, operator.add]        # 全局黑板 = env.history
     memories: Annotated[dict, merge_dicts]         # 每角色私有记忆（checkpointer 持久化）
-    round: int
+    seen: int                                      # 路由游标：黑板已被消费到的条数（router 写，C13）
+    undelivered: list                              # 本超步新增、还没投递的那一截（router 算，route 只读）
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）
     team_rounds: int                               # 委派↔回报来回上限（C1-②b，防队长-成员活循环）
     finished: bool
+    # ⚠ 原来的 `round: int` 已删（C14）：三处 init 写 0 后全仓零读零写，与 C2 的 `docs` 同族。
+    #    `seen`/`undelivered` **不进 init**——它们由 router 现算，且必须跟着 checkpointer 走：
+    #    跑完的会话再 start 时 messages 是「追加」而这两个键若被 init 重置成全量重投。
+    #    复燃守卫见 `tests/s3b_runtime.py::t15`。
 
 
 # ---- 真实 SOP 订阅表（= 各角色 _watch + 参考速查全图；经典线） ----
@@ -116,53 +121,79 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
             return END
         if not state["messages"]:
             return END
-        last = state["messages"][-1]
-
-        # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播；B9 的错误/拒绝回喂同路）
-        if MESSAGE_ROUTE_TO_SELF in last.send_to:
-            if last.sent_from not in agents:
-                raise UnknownRecipient(
-                    f"<self> 回喂的目标节点 {last.sent_from!r} 不在装配里（在册：{sorted(agents)}）")
-            # 自环一律计数、不挑 cause_by：B9 回喂的错误/拒绝消息 cause_by=action.name，
-            # 挑白名单会漏掉它——实测同一失败动作激活 12 次打到 recursion_limit
-            # （log/b9_probe.py）。**只读**：条件边里写 state 会被丢弃，计数在 router 节点。
-            if state.get("debug_rounds", 0) >= 3:
-                return END
-            return [Send(last.sent_from, {"_inbox": [last]})]
-
-        # 目标 = 订阅表命中的角色 ∪ 消息里显式指名的角色。两边**都要求收件人真在装配里**，
-        # 对不上就地抛 UnknownRecipient（C1-d；静默丢掉就是 LangGraph 那句
-        # "Ignoring unknown node name" + 整场零模型调用）。
-        # ⚠ send_to 的默认值是 <all>，这里**刻意不做广播**：多数 Action 不显式设 send_to，
-        # 一旦把 <all> 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活。
-        # 路由标记（<all>/<none>/<self>）不是角色名，不参与"存不存在"的判定。
+        # **本超步新增的消息全投，不止最后一条**（C13）。旧写法只看 `messages[-1]`：
+        # 一次节点运行可以产多条（RoleZero 的报告 + 委派聚合件），一个聚合件也能给同一成员
+        # 拆出多条任务，而它们都落在同一个超步里 → 只有排在最后的那条被投，其余永久卡在黑板上。
+        # A4 那批真跑实测过这条：队长一轮攒 15 条委派 → 15 个并发 Send → 14 条回报没人收。
+        # 切片由 router 节点算好写进 `undelivered`（条件边不能写状态，s16 t1 的实测口径）；
+        # 首轮（START 后第一次进 router 之前没有 undelivered）退回「只看最后一条」的旧形状。
+        batch = state.get("undelivered")
+        if batch is None:                        # 首轮/老线程没这个键：退回「只看最后一条」的旧形状
+            batch = state["messages"][-1:]
         markers = (MESSAGE_ROUTE_TO_SELF, MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_NONE)
-        targets = []
-        for name in sop.get(last.cause_by, []):
-            if name not in agents:
-                raise UnknownRecipient(f"SOP 订阅表把 {last.cause_by} 派给不在装配里的角色 "
-                                       f"{name!r}（在册：{sorted(agents)}）")
-            targets.append(name)
-        for name in sorted(last.send_to):
-            if name in markers or name == last.sent_from:
-                continue
-            if name not in agents:
-                raise UnknownRecipient(f"消息具名投递给不存在的角色 {name!r}"
-                                       f"（发件人 {last.sent_from!r}，在册：{sorted(agents)}）")
-            if name not in targets:
-                targets.append(name)
-
         w = wiring or CONTEXT_WIRING                    # 别名：route 内赋值会遮蔽闭包变量
-        # 上下文装配按 cause_by 只做一次，多目标共用（装配要读产物仓，别按目标重复读盘）
-        payload_msgs = w.get(last.cause_by, lambda m, s: [m])(last, state) if targets else []
-        # 装配器产出的载荷可以自带收件人（委派的「一人一条、各投各的」）；原始消息与非具名载荷
-        # 仍按 targets 全发。**收件人只从 targets 里收窄、不新增**，所以 C1-① 的 UnknownRecipient
-        # 判定绕不过去；收窄后为空 = 这条只发给发件人自己（源 publish_team_message 里就是直接 return）。
         sends = []
-        for m in payload_msgs:
-            named = set() if m is last else m.send_to.difference(markers)
-            tgts = [t for t in targets if t in named] if named else targets
-            sends.extend(Send(t, {"_inbox": [m]}) for t in tgts)
+
+        for last in batch:
+            # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播；B9 的错误/拒绝回喂同路）
+            if MESSAGE_ROUTE_TO_SELF in last.send_to:
+                if last.sent_from not in agents:
+                    raise UnknownRecipient(
+                        f"<self> 回喂的目标节点 {last.sent_from!r} 不在装配里（在册：{sorted(agents)}）")
+                # 自环一律计数、不挑 cause_by：B9 回喂的错误/拒绝消息 cause_by=action.name，
+                # 挑白名单会漏掉它——实测同一失败动作激活 12 次打到 recursion_limit
+                # （A4 之前那轮 b9 探针）。刹车从前的 `return END` 改成 `continue`：
+                # 一条被刹住的链不该顺带把同批其它消息与插话一起丢掉。
+                if state.get("debug_rounds", 0) >= 3:
+                    continue
+                sends.append(Send(last.sent_from, {"_inbox": [last]}))
+                if stats is not None:
+                    stats.append({"cause_by": last.cause_by, "activated": 1, "roles": len(agents)})
+                continue
+
+            # 目标 = 订阅表命中的角色 ∪ 消息里显式指名的角色。两边**都要求收件人真在装配里**，
+            # 对不上就地抛 UnknownRecipient（C1-①；静默丢掉就是 LangGraph 那句
+            # "Ignoring unknown node name" + 整场零模型调用）。
+            # ⚠ send_to 的默认值是 <all>，这里**刻意不做广播**：多数 Action 不显式设 send_to，
+            # 一旦把 `<all>` 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活。
+            # 路由标记（<all>/<none>/<self>）不是角色名，不参与"存不存在"的判定。
+            targets = []
+            for name in sop.get(last.cause_by, []):
+                if name not in agents:
+                    raise UnknownRecipient(f"SOP 订阅表把 {last.cause_by} 派给不在装配里的角色 "
+                                           f"{name!r}（在册：{sorted(agents)}）")
+                targets.append(name)
+            for name in sorted(last.send_to):
+                if name in markers or name == last.sent_from:
+                    continue
+                if name not in agents:
+                    raise UnknownRecipient(f"消息具名投递给不存在的角色 {name!r}"
+                                           f"（发件人 {last.sent_from!r}，在册：{sorted(agents)}）")
+                if name not in targets:
+                    targets.append(name)
+
+            # 死循环刹车（按消息判，不按"最后一条"判）：修复回路上限防 QA↔Engineer，
+            # 委派↔回报来回上限防队长-成员互相重派（计数都在 router 节点写）。
+            if last.cause_by == RequirementTag.DEBUG_ERROR and state.get("debug_rounds", 0) >= 3:
+                continue
+            if getattr(last, "instruct_schema", "") in ("TeamDelegation", "TeamReport") \
+                    and state.get("team_rounds", 0) >= 12:
+                continue
+
+            # 上下文装配按 cause_by 只做一次，多目标共用（装配要读产物仓，别按目标重复读盘）
+            payload_msgs = w.get(last.cause_by, lambda m, s: [m])(last, state) if targets else []
+            # 装配器产出的载荷可以自带收件人（委派的「一人一条、各投各的」）；原始消息与非具名载荷
+            # 仍按 targets 全发。**收件人只从 targets 里收窄、不新增**，所以 C1-① 的 UnknownRecipient
+            # 判定绕不过去；收窄后为空 = 这条只发给发件人自己（源 publish_team_message 里就是直接 return）。
+            msg_sends = []
+            for m in payload_msgs:
+                named = set() if m is last else m.send_to.difference(markers)
+                tgts = [t for t in targets if t in named] if named else targets
+                msg_sends.extend(Send(t, {"_inbox": [m]}) for t in tgts)
+            sends.extend(msg_sends)
+            if stats is not None:
+                stats.append({"cause_by": last.cause_by, "activated": len({s.node for s in msg_sends}),
+                              "roles": len(agents)})
 
         # ---- 运行中插话（前端 InputCard "追问"；空目标 = TeamLeader） ----
         from codeharness.runtime import CHAT_SINK
@@ -185,19 +216,10 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
                 sends.append(Send(recv, {"_inbox": [Message(
                     content=content, cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")]}))
 
-        if stats is not None:
-            stats.append({"cause_by": last.cause_by, "activated": len({s.node for s in sends}),
-                          "roles": len(agents)})
+        # 每超步一条 stat 的旧形状已改成**每条消息一条**（与 C13 同批）：门禁按 stats 数激活次数，
+        # 一批多条时旧的"只看最后一条"读数会把漏投伪装成精准。
         if not sends:
-            return END                                 # 无订阅者且无插话 = 散会
-        if last.cause_by == RequirementTag.DEBUG_ERROR and state.get("debug_rounds", 0) >= 3:
-            return END                                 # 修复回路上限，防 QA↔Engineer 死循环（计数见 router 节点）
-        # 委派↔回报来回上限（C1-②b）：模型若无视「成员已做完」反复重派同一件事，让它干净散会，
-        # 而不是烧到 recursion_limit=60 把整场会话打成 failed（debug_rounds 同一套道理）。
-        # 12 = 6 个来回，够源 TL 四步 SOP（PRD→设计→任务→代码）各走一遍还有余。
-        if getattr(last, "instruct_schema", "") in ("TeamDelegation", "TeamReport") \
-                and state.get("team_rounds", 0) >= 12:
-            return END
+            return END                                 # 全批都没订阅者、也没插话可投 = 散会
         return sends
 
     return route
@@ -215,18 +237,23 @@ def build_team(agents: dict, checkpointer=None, sop: dict | None = None, stats: 
     g = StateGraph(TeamState)
 
     async def router(state: TeamState):
-        """汇聚虚节点：所有产出流回这里再路由。
+        """汇聚虚节点：所有产出流回这里，由它算出「本超步新增了哪些消息」再交给 route 路由。
 
-        ⚠ **`debug_rounds` 的唯一写入口在这里**：节点返回值才是状态提交口，条件边函数（`route`）里
+        ⚠ **状态写入的唯一入口在这里**：节点返回值才是状态提交口，条件边函数（`route`）里
         `state[k] = v` 会被丢掉（langgraph 1.2.11 实测，见 `tests/s16_route_state.py::t1`）——
         原先写在 route 里的那道 `>= 3` 闸恒不生效，QA↔沙箱 / QA↔Engineer 的活循环只靠
         `recursion_limit=60` 兜底，撞上就把整个会话打成 failed。
-        计数判据与 route 的刹车严格一致：`<self>` 自环一律一轮，DEBUG_ERROR 广播环一轮。"""
+        计数判据与 route 的刹车严格一致：`<self>` 自环一律一轮，DEBUG_ERROR 广播环一轮。
+
+        C13 的两件也在这里：`seen`=黑板已消费的条数、`undelivered`=本次新增的那一截。
+        route 只读不算（它写不了状态），而「新增」必须有游标才能算，所以切片在这里做。
+        游标**不进 init**：跑完的会话再 start 时 `messages` 是追加，若把 seen 重置成 0，
+        整条历史会被重新投递一遍。"""
         msgs = state.get("messages") or []
+        out: dict = {"seen": len(msgs), "undelivered": msgs[state.get("seen", 0):]}
         last = msgs[-1] if msgs else None
         if last is None:
-            return {}
-        out = {}
+            return out
         if MESSAGE_ROUTE_TO_SELF in last.send_to or last.cause_by == RequirementTag.DEBUG_ERROR:
             out["debug_rounds"] = state.get("debug_rounds", 0) + 1
         # 委派与回报各算一次来回（聚合件的标记在拆包前，回报标记在消息本身上）

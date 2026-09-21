@@ -406,7 +406,7 @@ async def t13_dual_runner_fakellm_line():
                            sop={RequirementTag.USER_REQUIREMENT: ["PM"]})
             cfg = {"configurable": {"thread_id": project}}
             init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
-                    "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
+                    "memories": {}, "debug_rounds": 0, "finished": False}
             return g, cfg, init
         saved = team.prepare_project
         team.prepare_project = fake_prepare
