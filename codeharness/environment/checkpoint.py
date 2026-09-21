@@ -18,10 +18,12 @@ _cache: dict[str, object] = {}
 
 # checkpointer 的 msgpack 白名单（README 未闭合 #4：不显式配，每读一次断点都打
 # "Deserializing unregistered type codeharness.schema.Message"，官方声明未来版本将拦截）。
-# 进过 TeamState 的自定义类型只有这些：messages/memories 装 Message，docs 装 Document；
+# 进过 TeamState 的自定义类型只有 Message 系；`Document`/`Documents` 两行原本是为
+# `TeamState.docs` 那条假通道挂的（零读零写，产物实走磁盘 ArtifactStore），随 C2 删通道一并摘掉——
+# 实测证据：摘掉后跑整套 s3b（含真落断点的 t7/t8）langgraph 侧 **0 条 unregistered 告警**。
 # instruct_content 是纯 dict（schema.py:173），不需要逐个登记。
 _ALLOWED = [("codeharness.schema", n) for n in
-            ("Message", "UserMessage", "SystemMessage", "AIMessage", "Document", "Documents")]
+            ("Message", "UserMessage", "SystemMessage", "AIMessage")]
 
 
 def _serde():

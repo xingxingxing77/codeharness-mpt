@@ -117,7 +117,7 @@ class _Emitter:
 
 
 def _init(msg: Message):
-    return {"messages": [msg], "memories": {}, "docs": {}, "round": 0,
+    return {"messages": [msg], "memories": {}, "round": 0,
             "debug_rounds": 0, "finished": False}
 
 

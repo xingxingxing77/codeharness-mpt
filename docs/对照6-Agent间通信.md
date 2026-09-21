@@ -14,7 +14,7 @@
 1. **agent→agent 具名通信极少**：`actions/run_code.py:98-109`——QA 测试失败且分诊判定该回开发时 `send_to={"Engineer"}`，经 `team_graph.py:112-114` 具名分支 + `agent.py:80`（`s["name"] in m.send_to`）双侧闭环；`actions/debug_error.py` 回流带 `send_to`。除此之外全部靠 `cause_by`→SOP 表路由。动态线（对应源 MGXEnv 那条线）**没有** agent 间通信。
 2. **动态线委派未实现**（与对照 5 §结论-2 同一条，从通信视角看）：源 `TeamLeader.publish_team_message`（`roles/di/team_leader.py:75-86`）可点名唤醒任意队友；本仓 `team.py:65-71` 注释自认「需求只喂队长（`TEAMLEADER_NAME`=源逐字 "Mike"）、Alice/Bob 空转」，`Command.assignee` 只是展示字段（`role_zero.py:165`）。本轮未动。
 3. **`<all>` 不再是广播**（有意，代价需记清）：源 `is_send_to`（`utils/common.py:411-418`）见 `<all>` 即投全员，而 `send_to` 的默认值就是 `{<all>}`（`schema.py:241`）；本仓 `team_graph.py:108-110` 明确否决——「多数 Action 不显式设 send_to，一旦把 `<all>` 当广播，每个动作都会唤醒全部角色，正好毁掉订阅式路由的精准激活」。判断成立且 `s3b t6` 钉死了它，但结果是**源里"任何角色都能被指名广播触达"这个能力在本仓没有对等物**（要广播必须显式列出收件人）。
-4. **产物文档的 state 通道是假的**：`TeamState.docs`（`team_graph.py:22`，注释「filename -> Document（产物仓）」）在三处 init 写 `{}`（`team.py:42,61`、`sop/builder.py:34`）后**零读零写**，交接实际全走磁盘 `ArtifactStore`。它还在 `checkpoint.py:21` 的 msgpack 白名单里挂着——一个会让人误以为"文档经图传递"的空声明。（本轮复核：`grep "docs\[" codeharness` 仅命中 `document.py:204` 的另一个 `DocumentStore` 类，`TeamState.docs` 无读写方，结论不变。）
+4. ~~**产物文档的 state 通道是假的**~~ → **已删干净（2026-09-21 C2）**：`TeamState.docs`（原 `team_graph.py:22`，注释「filename -> Document（产物仓）」）在三处 init 写 `{}` 后**零读零写**，交接实际全走磁盘 `ArtifactStore`（`actions/import_repo.py:121` 的 `save(subdir="docs")` 就是证据）。处置：字段从 TypedDict 删、`team.py:42,61` 与 `sop/builder.py:34` 三处 `"docs": {}` 一并撤、msgpack 白名单里为它挂的 `Document`/`Documents` 两登记项同批摘掉（摘后跑整套 `s3b`，含真落断点的 t7/t8 → langgraph 侧 **0 条 unregistered 告警**，证明确实无人用它），`tests/s3b_runtime` 新增 **t15** 正向钉住不复燃。**为什么必须留断言而不是靠运行期报错**：实测 LangGraph 对未知状态键**静默丢弃**（删掉字段后 `tests/s16_route_state.py` 五组仍全绿、exit 0），写者不会自己炸。文档交接的唯一真通道 = 磁盘 `ArtifactStore` + `CONTEXT_WIRING` 装配进消息。
 
 ## 一、源项目怎么做（一条消息的完整路径）
 
@@ -60,7 +60,7 @@
 | 具名跨角色投递 | `role.py:415` + `base_env.py:176-191` | `run_code.py:104` + `debug_error.py` + `team_graph.py:112` + `agent.py:80` | **部分实现** | 全仓仅 QA↔Engineer 一例回路（§结论-1）；本轮新增 action 无一设 `send_to` |
 | 广播 `<all>` | `common.py:411-418`；`schema.py:241` 默认值 | 刻意不实现（`team_graph.py:108-110`） | 有意不做 | `t6` 钉；副作用：`is_send_to` 在本仓**零调用者**成死码（本轮复核仍零） |
 | 优先级 / 顺序调度 | 源无此机制 | `agent.py:95-101` BY_ORDER 游标 | 有意不做 | 源不存在，不算缺口 |
-| 共享文档产物交接（经典线主通道） | `software_company.py:44-66` + `document_store/` | `artifact_store.py:43-68`（磁盘）；`TeamState.docs` | 部分实现 | 磁盘是真通道；**state 里的 docs 零读写**（§结论-4） |
+| 共享文档产物交接（经典线主通道） | `software_company.py:44-66` + `document_store/` | `artifact_store.py:43-68`（磁盘）+ `team_graph.py:44-79 CONTEXT_WIRING`；~~`TeamState.docs`~~（**C2 已删**，见 §结论-4） | 已复刻（走磁盘） | state 通道不再存在，别再按"文档经图传递"理解本仓；产物的读者是 `CONTEXT_WIRING` 装配进消息那一步 |
 | 文档经消息装配 | `qa_engineer.i_context` | `team_graph.py:44-79 CONTEXT_WIRING` | 已复刻 | 读产物仓装 `CodingContext`/`TestingContext` |
 | 动态线任务分派与回收 | `team_leader.py:75-86` + `mgx_env.py:24-58` | `team.py:65-71` | **未实现** | `Command.assignee` 无路由读者 |
 | agent→用户前端通道 | `utils/report.py:1-330` | `report.py` + `events.py:34-44` + SSE | 现代化替换 | `s8 t1/t2` 钉块类型与信封词汇 |
@@ -71,7 +71,7 @@
 
 ## 四、「看着像有、其实没接线」
 
-- **A. `TeamState.docs`（`team_graph.py:22`）**：三处 init 写空 dict，零读零写（本轮复核：`grep "docs\[" codeharness` 只命中 `document.py:204` 那个**同名不同类**的 `DocumentStore`，非本字段）。真正的文档交接是磁盘 + `CONTEXT_WIRING` 装配进消息。这个字段还进了 `checkpoint.py:21` 的 msgpack 白名单——删它要同步改白名单。
+- **A. ~~`TeamState.docs`~~（原 `team_graph.py:22`）→ C2 已删干净（2026-09-21）**：原本三处 init 写空 dict、零读零写（`grep "docs\[" codeharness` 只命中 `document.py:204` 那个**同名不同类**的 `DocumentStore`）。真正的文档交接是磁盘 `ArtifactStore` + `CONTEXT_WIRING` 装配进消息。处置：字段删 + `team.py:42,61`/`sop/builder.py:34` 三处 `"docs": {}` 撤 + `checkpoint.py:23-24` 白名单里 `Document`/`Documents` 两行同批摘（摘后整套 `s3b` 含 t7/t8 真落断点 → **0 条 unregistered 告警**）+ 新增 `s3b t15` 钉不复燃。**给下一个人的实测事实**：LangGraph 对**未知的状态键静默丢弃**，所以「删了字段但还有人写 `docs=`」这种残留**不会报错**（删字段后 `s16` 五组仍全绿 exit 0）——只能靠 t15 那种正向断言守。
 - **B. `utils/common.py:411 is_send_to`**：定义完整（含 `<all>` 判断），**全仓零调用者**（本轮复核 `grep -v "def is_send_to"` 仍空）。LangGraph 靠节点名查表取代了它。同类的还有 `addresses` / `member_addrs` 概念在本仓根本不存在。
 - **C. `actions/talk_action.py` 是对人通道，不是 agent 间**（17 行全读）：`run()` 只做 `llm.aask` 并返回 `role="assistant"`、**不带 `send_to`** 的消息（`:11-17`），profile 文案明写 `reply_to_human`（`registry.py:77`）。它挂在 Sales/CustomerService 人设下面向终端用户。**别把它误认成"两个 agent 在对话"**。
 - **D. `default_team` 的三个 RoleZero 角色（Mike/Alice/Bob）名不在任何路由表**：见对照 5 §五-B。它们即便被 `dynamic_assembly` 装进图，也只能收需求、不会互发。
@@ -84,7 +84,7 @@
 
 **零断言**：
 - **`send_to={"Engineer"}` 这条唯一的生产级具名投递**——`s3b t3` 用的是合成的 `"QA"`，`run_code.py:104` 的真实分支没有专门断言；
-- `CONTEXT_WIRING` 的文档装配路径、`TeamState.docs`；
+- `CONTEXT_WIRING` 的文档装配路径（`TeamState.docs` 已随 C2 删除并由 `s3b t15` 钉住，此项不再适用；但**装配本身**仍零断言）；
 - **动态线多角色委派**（`s3b t14:398` 只断单队长图）；
 - `talk_action.py` 无任何测试引用；
 - 「一条消息被哪几个角色收到」的回放/审计面。

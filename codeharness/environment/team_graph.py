@@ -19,7 +19,6 @@ def merge_dicts(a: dict, b: dict) -> dict:
 class TeamState(TypedDict):
     messages: Annotated[list, operator.add]        # 全局黑板 = env.history
     memories: Annotated[dict, merge_dicts]         # 每角色私有记忆（checkpointer 持久化）
-    docs: dict                                     # filename -> Document（产物仓）
     round: int
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）
     finished: bool

@@ -31,5 +31,5 @@ def build_team_from_template(name: str, llm, *, checkpointer=None, extra_agents:
     team = build_team(agents, checkpointer=checkpointer, sop=tpl.edges)
     config = {"configurable": {"thread_id": thread_id or f"sop:{name}"}, "recursion_limit": 60}
     init = {"messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
-            "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False}
+            "memories": {}, "round": 0, "debug_rounds": 0, "finished": False}
     return team, config, init

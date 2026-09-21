@@ -89,10 +89,21 @@ def t10_checkpoint_msgpack_whitelist():
         assert "unregistered" in buf.getvalue(), "前置不成立：没白名单时没出 warning，本门禁会空转"
         buf.truncate(0); buf.seek(0)
         s = ck._serde()
-        back = s.loads_typed(s.dumps_typed(val))
-        assert type(back["m"]).__name__ == "Message" and back["d"].filename == "a.md", back
+        # 白名单只管真正进过 TeamState 的类型（Message 系）。C2 删掉 docs 假通道后
+        # Document/Documents 已从 _ALLOWED 摘掉，所以这一半只钉 Message——
+        # 判据仍在 warning 上，不是"序列化成功"（配前配后都成功）。
+        back = s.loads_typed(s.dumps_typed({"m": val["m"]}))
+        assert type(back["m"]).__name__ == "Message", back
         assert "unregistered" not in buf.getvalue(), buf.getvalue()
-        _ok("t10", "checkpointer msgpack 白名单：未配必警、配了静默（Message/Document 原样回读）")
+        # 反向：Document 不该进图状态（产物走磁盘 ArtifactStore），配好的 serde 遇到它必须照旧告警——
+        # 这一格防止有人把白名单放宽成"什么都放行"，也钉住 C2 的口径不反弹。
+        buf.truncate(0); buf.seek(0)
+        s.loads_typed(s.dumps_typed({"d": val["d"]}))
+        assert "codeharness.schema.Document" in buf.getvalue(), \
+            "Document 竟然不再告警——白名单被放宽，或 docs 假通道长回来了"
+        buf.truncate(0); buf.seek(0)
+        _ok("t10", "checkpointer msgpack 白名单：未配必警、配了 Message 静默、Document 照旧告警"
+                   "（C2 删 docs 通道后白名单只剩 Message 系）")
     finally:
         lg.removeHandler(h)
 

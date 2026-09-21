@@ -100,7 +100,7 @@ def t2_precise_activation():
     route = make_route(SOP, agents, wiring={}, stats=stats)
     state = TeamState(messages=[Message(content="prd", cause_by=RequirementTag.WRITE_PRD,
                                         sent_from="PM", send_to={MESSAGE_ROUTE_TO_ALL})],
-                      memories={}, docs={}, round=0, debug_rounds=0, finished=False)
+                      memories={}, round=0, debug_rounds=0, finished=False)
     sends = route(state)
     if stats[0]["roles"] != 4 or stats[0]["activated"] != 1:
         _fail(f"2. 精准激活失败：4 个角色却激活 {stats[0]['activated']} 个（应 1）")
@@ -114,7 +114,7 @@ def t3_explicit_send_to():
     route = make_route({}, wraps, wiring={})            # 订阅表空，只靠指名
     state = TeamState(messages=[Message(content="c", cause_by="UnregisteredTag", sent_from="PM",
                                         send_to={"QA"})],
-                      memories={}, docs={}, round=0, debug_rounds=0, finished=False)
+                      memories={}, round=0, debug_rounds=0, finished=False)
     sends = route(state)
     if [s.node for s in sends] != ["QA"]:
         _fail(f"3. 显式指名的 send_to 未被路由: {sends}")
@@ -125,7 +125,7 @@ def t4_self_to_unknown_node():
     route = make_route({}, {"PM": _Wrap("PM")}, wiring={})
     state = TeamState(messages=[Message(content="c", cause_by="t", sent_from="Ghost",
                                         send_to={MESSAGE_ROUTE_TO_SELF})],
-                      memories={}, docs={}, round=0, debug_rounds=0, finished=False)
+                      memories={}, round=0, debug_rounds=0, finished=False)
     got = route(state)
     if got == END:
         return
@@ -136,7 +136,7 @@ def t4_self_to_unknown_node():
 # ---------- 5. 订阅关系可证伪：改 cause_by 后下游必须收不到 ----------
 def t5_subscribe_is_falsifiable():
     route = make_route(SOP, {n: _Wrap(n) for n in ("PM", "Architect")}, wiring={})
-    base = dict(memories={}, docs={}, round=0, debug_rounds=0, finished=False)
+    base = dict(memories={}, round=0, debug_rounds=0, finished=False)
     hit = route({**base, "messages": [Message(content="c", cause_by=RequirementTag.WRITE_PRD,
                                              sent_from="PM", send_to={MESSAGE_ROUTE_TO_ALL})]})
     miss = route({**base, "messages": [Message(content="c", cause_by="RenamedTag",
@@ -151,7 +151,7 @@ def t5_subscribe_is_falsifiable():
 def t6_all_is_not_broadcast():
     route = make_route({}, {n: _Wrap(n) for n in ("A", "B", "C")}, wiring={})
     state = TeamState(messages=[Message(content="c", cause_by="t", sent_from="A")],   # 默认 send_to=<all>
-                      memories={}, docs={}, round=0, debug_rounds=0, finished=False)
+                      memories={}, round=0, debug_rounds=0, finished=False)
     if route(state) is END:
         return
     _fail("6. <all> 被当成广播了——每个动作都会唤醒全部角色，毁掉精准激活（这是刻意的设计决定）")
@@ -497,11 +497,33 @@ def t14_dynamic_paradigm_assembly():
     idea = "实现一个命令行工具 tinycli"
     asyncio.run(gdyn.ainvoke(
         {"messages": [Message(content=idea, role="user", cause_by=RequirementTag.USER_REQUIREMENT)],
-         "memories": {}, "docs": {}, "round": 0, "debug_rounds": 0, "finished": False},
+         "memories": {}, "round": 0, "debug_rounds": 0, "finished": False},
         {"configurable": {"thread_id": "t14dyn"}}))
     flat = [m for call in leader_llm.calls for m in (call if isinstance(call, list) else [call])]
     assert any(idea in getattr(m, "content", str(m)) for m in flat), \
         "任务文本没进模型请求——第十七处复发（inbox→memory 断链）"
+
+
+def t15_no_dead_state_channels():
+    """C2：`TeamState.docs` 是「看起来有其实没有」的假通道——三处 init 写 `{}` 后零读零写，
+    文档交接实际全走磁盘 `ArtifactStore`（`actions/import_repo.py:121` 的 `save(subdir="docs")` 就是证据）。
+    已连同三处写入与 msgpack 白名单里的 `Document`/`Documents` 一并删掉。
+
+    必须留正向断言，不能指望运行期炸：**实测 LangGraph 对未知的状态键是静默丢弃**
+    （删掉 TypedDict 字段后 `tests/s16_route_state.py` 五组仍全绿、exit 0），
+    所以「有人又把 docs 写回 init」会以「写了没人读」的原病复发形态悄悄长回来。两层钉：
+    ① 类型键集里不许有 docs；② 三个生产入口源码里不许再出现 "docs" 初值
+    （源码文本级反向守卫，先例同 s20 t1 的 `assert "## 历史对话" not in content`）。"""
+    from pathlib import Path
+    import codeharness
+
+    assert "docs" not in TeamState.__annotations__, \
+        f"docs 假通道长回来了：TeamState 键集 {sorted(TeamState.__annotations__)}"
+    root = Path(codeharness.__file__).parent
+    for rel in ("team.py", "sop/builder.py", "environment/team_graph.py"):
+        src = (root / rel).read_text(encoding="utf-8")
+        assert '"docs"' not in src and "docs=" not in src, \
+            f"{rel} 里又出现往图状态写 docs 的地方——产物通道是磁盘 ArtifactStore，不是 TeamState"
 
 
 def t16_run_code_named_delivery():
@@ -540,18 +562,27 @@ def main():
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
               t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
-              t16_run_code_named_delivery]
-    for c in checks:
-        c()
-        print(f"  ok  {c.__name__}")
-    # 收尾必须关连接：否则 aiosqlite 后台线程在解释器退出时报 Event loop is closed，
-    # 表现为"断言全过但退出码 1"，这样的门禁不可信。
-    asyncio.run(close_all())
+              t15_no_dead_state_channels, t16_run_code_named_delivery]
+    try:
+        for c in checks:
+            c()
+            print(f"  ok  {c.__name__}")
+        # 收尾必须关连接：否则 aiosqlite 后台线程在解释器退出时报 Event loop is closed，
+        # 表现为"断言全过但退出码 1"，这样的门禁不可信。放在成功宣言之前，关不掉就不许宣布通过。
+        asyncio.run(close_all())
+    finally:
+        # **异常路径同样要关**：中途抛错时若不关，非守护的 aiosqlite 线程会把解释器吊住永不退出，
+        # 于是「一格断言失败」看起来像「整套门禁挂死」（实测 2026-09-21：t15 抛 NameError 后进程活了
+        # 6.5 分钟；上一轮那条「s3b 管道跑 26 分钟不返回」的悬案就是这个，不是 grep 缓冲）。
+        # 两处各调一次是安全的：`close_all()` 先把 _cache 取空再逐个关（checkpoint.py:102-104），
+        # 第二次看到的是空表——幂等。别"顺手"删掉 try 里那次，否则又回到关不掉也宣布通过。
+        asyncio.run(close_all())
     print(f"\nS3(b) 门禁通过：{len(checks)} 组 —— R3 路由 5 组（BY_ORDER 全跑完/精准激活/显式指名/"
           f"<self> 目标校验/订阅可证伪）+ R4a 持久化 1 组 + R5 interrupt-resume 跨实例 1 组 + "
           f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
           f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组 + "
-          f"写→评审→摘要生产装配 1 组")
+          f"写→评审→摘要生产装配 1 组 + C2 假通道不复燃守卫 1 组（TeamState 无 docs 键 + 三处初值源码无写入）+ "
+          f"生产级具名投递两分支 1 组")
 
 
 if __name__ == "__main__":
