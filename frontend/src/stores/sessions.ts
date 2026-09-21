@@ -151,6 +151,16 @@ export const useSessionStore = defineStore('sessions', {
       return s
     },
 
+    /** B3：从某一轮分叉出新会话并**切过去**——留在源会话里看不见自己刚分出去的那场，
+     *  而分叉的意义就是接着那儿往下走。 */
+    async forkFrom(fromCursor: string) {
+      if (!this.currentId) return ''
+      const r = await api.forkSession(this.currentId, fromCursor)
+      await this.loadSessions()
+      this.select(r.id)
+      return r.id as string
+    },
+
     select(sid: string) {
       if (this.currentId === sid) return
       this.currentId = sid
@@ -384,6 +394,7 @@ export const useSessionStore = defineStore('sessions', {
         if (typeof ev.ts === 'number') {
           if (b.ts === undefined) b.ts = ev.ts
           b.lastTs = ev.ts
+          if (ev.cursor) b.endCursor = ev.cursor   // B3：分叉点要按块拿游标
           if (ev.name === 'content' && b.fts === undefined) b.fts = ev.ts
         }
         switch (ev.name) {

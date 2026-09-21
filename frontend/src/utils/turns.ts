@@ -13,6 +13,8 @@ export interface Turn {
   /** 收口轮的末块时间，秒。 */
   startTs: number
   endTs: number
+  /** B3：本轮最后一个事件的游标——分叉就切在这里（含本轮）。 */
+  endCursor?: string
   /** 最后一个有正文的块：复制取它，没有正文则尾行只剩时间读数。 */
   closing: Block | null
   runMs?: number
@@ -42,6 +44,8 @@ function summarize(blocks: Block[], spans: TraceSpan[]): Turn | null {
   const decodeMs = firstTokenTs === undefined ? 0 : (endTs - firstTokenTs) * 1000
   const timed = window.find((s) => s.t0 && s.ft)
   return {
+    // 游标是定宽补零串，字典序即到达序（SSE 那条铁律），所以直接排序取最后一个
+    endCursor: blocks.map((b) => b.endCursor).filter((x): x is string => !!x).sort().at(-1),
     key: `t:${blocks[0].key}`,
     blocks,
     startTs,

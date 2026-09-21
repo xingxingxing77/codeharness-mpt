@@ -142,6 +142,9 @@ export const api = {
   queue: (sid: string) => req<{ items: any[] }>('GET', `/api/sessions/${sid}/queue`),
   dropQueued: (sid: string, qid: string) =>
     req<{ ok: boolean; removed: string }>('DELETE', `/api/sessions/${sid}/queue/${qid}`),
+  /** B3 分叉：`from_cursor` 留空 = 全量分叉。响应是新会话的字段 + 三个分叉回执。 */
+  forkSession: (sid: string, fromCursor = '') =>
+    req<Record<string, any>>('POST', `/api/sessions/${sid}/fork`, { from_cursor: fromCursor }),
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>

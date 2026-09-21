@@ -84,6 +84,8 @@ export interface Block {
   fts?: number
   /** 最近一个事件的 unix 秒：轮次收口时刻与「用时」的右端点。 */
   lastTs?: number
+  /** B3：最后一个落到这块上的事件游标（分叉点取它）。只在内存里，不进任何接口响应。 */
+  endCursor?: string
 }
 
 /** `/trace` 一行 = 一笔 LLM 调用的节点名与 token/成本增量。

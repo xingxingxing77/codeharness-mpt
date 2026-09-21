@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from server.auth import current_user
+from server.events import norm_cursor
 from server.sessions import SessionStatus
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -316,6 +317,50 @@ async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(cur
     if not runner.enqueue_chat(sid, req.content, target):
         raise HTTPException(409, "session chat queue unavailable")
     return {"ok": True}
+
+
+class ForkReq(BaseModel):
+    from_cursor: str = Field(default="", max_length=64)
+
+
+@router.post("/{sid}/fork")
+async def fork_session(sid: str, req: ForkReq, request: Request, user: str = Depends(current_user)):
+    """B3：从某一轮分叉出一条新会话（参照系的 branch 钮 = 消息级 branch）。
+
+    两件事必须真独立，这是本项的验收本身：
+    ① **游标**——搬历史时只搬内容，`seq`/`cursor` 由新会话的总线重新发号
+       （照抄旧 seq 会让两条会话共用一份去重游标，前端 `applyEvent` 的 `cursor <= lastCursor`
+        会把新会话的头几条直接吞掉——SSE seq 精度丢事件那族洞的又一形）；
+    ② **产物目录**——新会话拿到自己的 `workspace/{新 sid}/`，原件从源目录整份拷过来
+       （不拷就是个看不见前文的假分叉；`Docs` 块里的路径按各自 workspace 解析）。
+    `from_cursor` 是**含端点**的：那一轮本身要留在分叉里，否则「从这轮之后分叉」会少一轮。
+    """
+    import shutil
+
+    s = _owned(request, sid, user)
+    bus = _get(request, "bus")
+    all_evs = bus.history(s.id)
+    cut = len(all_evs)
+    if req.from_cursor:
+        cut = next((i + 1 for i, e in enumerate(all_evs) if e.cursor == norm_cursor(req.from_cursor)), 0)
+        if cut == 0:
+            raise HTTPException(422, f"游标 {req.from_cursor!r} 不在这场会话的事件流里（不能从别场或未来分叉）")
+    store = _get(request, "store")
+    n = store.create(idea=s.idea, n_round=s.n_round, llm_override=s.llm_override,
+                     paradigm=s.paradigm, sop=s.sop, user_id=user, permission=s.permission,
+                     goal=s.goal)
+    n = store.update(n.id, role_defs=s.role_defs)
+    src, dst = Path(s.workspace), Path(n.workspace)
+    copied = 0
+    if src.is_dir():                      # 源目录可能压根没建过（只 create 没跑过的会话）
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        copied = sum(1 for _ in dst.rglob("*"))
+    for e in all_evs[:cut]:
+        bus.publish(n.id, kind=e.kind, block=e.block, uuid=e.uuid, name=e.name,
+                    value=e.value, role=e.role, extra=e.extra)
+    bus.publish(n.id, kind="status",
+                value={"status": "created", "message": f"从 {s.id} 分叉（带 {cut} 条事件与产物）"})
+    return {**n.model_dump(), "forked_from": s.id, "carried_events": cut, "copied_files": copied}
 
 
 @router.get("/{sid}/queue")

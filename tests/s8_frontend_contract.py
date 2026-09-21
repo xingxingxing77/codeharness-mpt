@@ -1185,6 +1185,89 @@ def t18_steer_queue():
                " + 端点（空队列 200、无队列撤回 404、目标校验仍在）+ 前端按 id 增删不整份覆盖")
 
 
+def t19_fork_surface():
+    """B3：从某一轮分叉。验收只有两句，但两句都必须是**真读数**而不是字段名：
+    ① 分叉出的会话有**独立游标**——所以断言的是「两条会话的 cursor 集合交集为空」，
+       而不是「响应里带了个新 id」：照抄源 seq/cursor 才是最容易写错的那种「看着能用」。
+       （前端 `applyEvent` 只认 `cursor <= lastCursor`，共用一份游标会把新会话的头几条吞掉。）
+    ② 有**独立产物目录**——断言磁盘上真有一个新的 `workspace/{新 sid}/` 且源文件确实拷进来了。
+    另钉 `from_cursor` 含本轮（切在本轮之后）与未知游标 422。
+    """
+    import server.sessions as ss
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    from codeharness.configs.settings import settings
+    from pathlib import Path as _P
+
+    keep_file, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    keep_redis = settings.platform.use_redis
+    settings.platform.use_redis = False
+    try:
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "分叉门禁", "project_name": "s8fork"}).json()["id"]
+            bus = c.app.state.bus
+            src = c.app.state.store.get(sid)
+            src_ws = _P(src.workspace)
+            src_ws.mkdir(parents=True, exist_ok=True)
+            (src_ws / "docs").mkdir(exist_ok=True)
+            (src_ws / "docs" / "requirement.md").write_text("第一轮的产物", encoding="utf-8")
+            for i in range(4):
+                bus.publish(sid, kind="report", block="Thought", uuid=f"stream-x{i}",
+                            name="content", value=f"第{i}句", role="PM")
+            cur = [e.cursor for e in bus.history(sid)]
+            # 源会话的头一条是 create 时发的 status，所以「切在第 2 条 report 之后」= 游标 cur[2]，
+            # 搬过来的是 [status, 第0句, 第1句] 三条——含端点这件事按 report 数核。
+            mid = c.post(f"/api/sessions/{sid}/fork", json={"from_cursor": cur[2]}).json()
+            kid = mid["id"]
+            assert kid != sid and mid["forked_from"] == sid, mid
+            assert mid["carried_events"] == 3, f"游标含端点应搬 3 条，实搬 {mid.get('carried_events')}"
+            kcur = [e.cursor for e in bus.history(kid)]
+            assert kcur == sorted(kcur) and len(set(kcur)) == len(kcur), \
+                f"B3：分叉会话的游标不是自洽递增的独立序列 {kcur}"
+            assert bus.history(sid) and [e.cursor for e in bus.history(sid)] == cur, \
+                "B3：分叉动了源会话的流（两条会话共用一份游标空间的形状）"
+            # 「独立游标」的行为形状：两条流各自计数，源会话再发一条不许出现在分叉里，反之亦然。
+            # （进程内那台总线每台都从 1 起号，所以「seq 不相等」在这台上是**假判据**——
+            #   真 Redis 那台是 ms 级全局号；只有这条双向断言在两台上都成立。）
+            bus.publish(sid, kind="log", value="分叉之后源会话又走了一步")
+            bus.publish(kid, kind="log", value="分叉之后新会话又走了一步")
+            tail_src = [e.value for e in bus.history(sid)]
+            tail_kid = [e.value for e in bus.history(kid)]
+            assert "分叉之后新会话又走了一步" not in tail_src, "B3：两条会话共用一份流（新会话写的会串回源会话）"
+            assert "分叉之后源会话又走了一步" not in tail_kid, "B3：两条会话共用一份流（源会话续推会顶掉分叉场的游标）"
+            assert [e.value for e in bus.history(kid) if e.kind == "report"][:2] == ["第0句", "第1句"], \
+                "搬过来的内容次序或值不对"
+            kid2 = c.post(f"/api/sessions/{sid}/fork", json={"from_cursor": ""}).json()["id"]
+            assert len([e for e in bus.history(kid2) if e.kind == "report"]) == 4, \
+                "全量分叉应带 4 条内容事件"
+
+            ks = c.get(f"/api/sessions/{kid}").json()
+            assert ks["workspace"] != src.workspace, "产物目录没独立"
+            copied = _P(ks["workspace"]) / "docs" / "requirement.md"
+            assert mid["copied_files"] >= 2 and copied.is_file() and \
+                copied.read_text(encoding="utf-8") == "第一轮的产物", \
+                f"B3：源产物没真拷进新目录（{ks['workspace']}）"
+            assert c.get(f"/api/sessions/{kid}").json()["idea"] == "分叉门禁", "分叉丢了议题"
+            bad = c.post(f"/api/sessions/{sid}/fork", json={"from_cursor": "1234567890-000009"})
+            assert bad.status_code == 422, f"未知游标该 422，实回 {bad.status_code}"
+    finally:
+        settings.platform.use_redis = keep_redis
+        ss.SESSIONS_FILE = keep_file
+
+    api_ts = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    assert "/api/sessions/${sid}/fork" in api_ts, "B3 回归：前端不再消费 fork"
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    assert "async forkFrom(" in st and "this.select(r.id)" in st, \
+        "B3 回归：分叉后不切到新会话（用户看不见自己刚分出去的那场）"
+    tt = (FE / "components" / "conversation" / "TurnTail.vue").read_text(encoding="utf-8")
+    assert "turn.endCursor" in tt and "forkFrom" in tt, "B3 回归：TurnTail 的 branch 钮没了"
+    turns = (FE / "utils" / "turns.ts").read_text(encoding="utf-8")
+    assert "b.endCursor" in turns and ".sort().at(-1)" in turns, \
+        "B3 回归：轮末游标不再取「最后一个」——分叉点会切错一轮"
+    _ok("t19", "B3 分叉三面同判：两条流各自计数（互不串台）+ 含端点切轮 + 全量分叉 + 产物目录真独立"
+               "（文件内容逐字对）+ 未知游标 422 + 前端 forkFrom/branch 钮在位")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1192,7 +1275,7 @@ def main():
               t10_approval_rollback_realign, t11_events_history_window,
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
-              t17_goal_surface, t18_steer_queue)
+              t17_goal_surface, t18_steer_queue, t19_fork_surface)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")
