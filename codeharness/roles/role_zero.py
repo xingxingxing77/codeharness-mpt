@@ -60,6 +60,7 @@ class RoleZero:
         self.env_desc = env_desc
         self.plan_fn = plan_fn              # 批次1：ToT 等外部规划器接此处；as_node 新任务时先规划再 think
         self.ltm = longterm_memory          # 第 4 步 LongTermMemory，可空
+        self.kb = None                      # C3：知识库读者（doc_type="kb"），装配期挂；None=没订阅
         self.memory = memory if memory is not None else Memory()
         self.brain = brain                  # None → 超窗直接丢，语义同源的 memory_k 截断
         self.redis_key = redis_key
@@ -171,6 +172,16 @@ class RoleZero:
                            f"{type(e).__name__}: {e}")
             return ""
 
+    async def _kb_recall(self, task: str) -> str:
+        """知识库切片召回（C3 的下半截：`UploadKB` 灌进去的东西得有读者，否则写进去就是死数据）。
+        与 `_ltm_recall` 同一档位：检索链任何一环挂了都按「没有资料」继续，不为一次召回打断这场。"""
+        try:
+            return "\n".join(m.content for m in await self.kb.recall(task, k=3))
+        except Exception as e:
+            logger.warning(f"{self.profile['name']} 知识库召回失败，按无资料继续: "
+                           f"{type(e).__name__}: {e}")
+            return ""
+
     def _context_messages(self) -> list:
         out = []
         if self.brain is not None and self.brain.historical_summary:
@@ -268,6 +279,9 @@ class RoleZero:
         experience = s.get("experience", "")
         if self.ltm and not experience:                       # 源 :213 _retrieve_experience + 第 4 步 recall
             experience = await self._ltm_recall(s["task"])
+        # 知识库单独一次召回、单独一条 system 消息：它不是「角色自己的经验」，混进 experience 槽
+        # 会让 prompt 里「经验」两个字骗人（A4 那批就是靠 prompt 文本判读写路的）。
+        kb = await self._kb_recall(s["task"]) if self.kb is not None else ""
 
         tool_info = json.dumps({n: {"description": t.description} for n, t in self.tools.items()},
                                ensure_ascii=False)
@@ -288,7 +302,9 @@ class RoleZero:
             experience = (experience + "\n" +
                           await reflect(self.llm, s["task"], s["history"], err)).strip()
         async with thought_block(role=self.profile["name"]) as rep:
-            context = [SystemMessage(content=system_prompt), *self._context_messages()]
+            context = ([SystemMessage(content=system_prompt)]
+                       + ([SystemMessage(content=f"[知识库片段]\n{kb}")] if kb else [])
+                       + self._context_messages())
             try:
                 thought = ZeroThought.model_validate_json(
                     await self.llm_cached_think(req=context + [HumanMessage(content=prompt)]))

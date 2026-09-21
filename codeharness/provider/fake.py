@@ -51,3 +51,25 @@ class FakeLLM:
                 return m
 
         return _Structured()
+
+class HashEmbeddings:
+    """确定性 bag-of-chars 假 embedding：离线、可复现，dense 只看得见字符重叠（对照实验要利用的就是这点）。
+
+    原来住在 `tests/s5_memory_rag.py`，C3 起 S5/S15 两边都要它（知识库那条链的门禁不能挂在
+    真 embedding 服务上），所以搬进 fake 与 FakeLLM 作伴——**测试替身是产品树的公共件，
+    不是一个门禁的私产**。bge-m3 那半格仍由 s5 t25 在真服务在线时补。"""
+
+    dim = 64
+
+    def _v(self, text: str) -> list[float]:
+        v = [0.0] * self.dim
+        for ch in text:
+            v[ord(ch) % self.dim] += 1.0
+        n = sum(x * x for x in v) ** 0.5 or 1.0
+        return [x / n for x in v]
+
+    async def aembed_documents(self, texts):
+        return [self._v(t) for t in texts]
+
+    async def aembed_query(self, q):
+        return self._v(q)

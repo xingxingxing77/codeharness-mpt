@@ -128,41 +128,9 @@ class QdrantStore:
         await self.client.delete(self.collection, points_selector=m.FilterSelector(
             filter=self._filters(doc_type, user_id, **scope)), wait=True)
 
-    async def aembed_documents(self, texts: list[str], doc_type: str = "kb", user_id: str = "default",
-                               session_id: str = "") -> None:
-        """B7: 批量摄取文档到向量库。
-
-        Args:
-            texts: 文本列表
-            doc_type: 文档类型（kb|exp|memory）
-            user_id: 用户 ID（多租户隔离）
-            session_id: 会话 ID（可选）
-        """
-        from codeharness.provider.gateway import LLMGateway
-        from codeharness.configs.settings import settings
-        
-        # 调用 embedding 端点
-        gateway = LLMGateway(cfg=settings.llm, cost_manager=None)
-        embeddings = gateway.embeddings()
-        
-        # 批量编码
-        dense_vectors = await embeddings.aembed_documents(texts)
-        
-        # 构造 Point 列表
-        points = []
-        for i, (text, vec) in enumerate(zip(texts, dense_vectors)):
-            point = Point(
-                id=f"{doc_type}:{user_id}:{session_id}:{i}",
-                text=text,
-                dense=vec.tolist() if hasattr(vec, 'tolist') else list(vec),
-                doc_type=doc_type,
-                user_id=user_id,
-                session_id=session_id
-            )
-            points.append(point)
-        
-        # 批量写入
-        await self.write(points)
+    # B7 那轮在这里加过一个 `aembed_documents`（自己建 embedding、自己拼 Point、自己 write），
+    # 与 `actions/upload_kb.py` 是**同一件事的两个半截实现**，且它零生产调用者、embeddings 写死在
+    # 函数体里没法注入门禁替身。C3 把摄取接成真链路时删掉它：入库只有一条路（UploadKB）。
 
     async def drop(self) -> None:
         """整表删除：只给自测与租户注销用。"""

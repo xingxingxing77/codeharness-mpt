@@ -276,23 +276,8 @@ def pid(tag: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_OID, tag))
 
 
-class HashEmbeddings:
-    """确定性 bag-of-chars 假 embedding：离线、可复现，dense 只看得见字符重叠（正是对照实验要利用的）。"""
-
-    dim = 64
-
-    def _v(self, text: str) -> list[float]:
-        v = [0.0] * self.dim
-        for ch in text:
-            v[ord(ch) % self.dim] += 1.0
-        n = sum(x * x for x in v) ** 0.5 or 1.0
-        return [x / n for x in v]
-
-    async def aembed_documents(self, texts):
-        return [self._v(t) for t in texts]
-
-    async def aembed_query(self, q):
-        return self._v(q)
+# 替身本体在 `codeharness/provider/fake.py`（C3 起 S15 的知识库门禁共用它，不再各存一份）
+from codeharness.provider.fake import HashEmbeddings   # noqa: E402
 
 
 class BoomEmbeddings(HashEmbeddings):

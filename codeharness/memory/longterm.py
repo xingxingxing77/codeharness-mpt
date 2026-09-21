@@ -19,20 +19,27 @@ from codeharness.observability import span
 from codeharness.schema import Message
 
 
-def _pid(scope: str, content: str) -> str:
+def point_id(scope: str, content: str) -> str:
     """同一作用域内同内容 = 同一个点：重复入库天然幂等，源 flush 的语义要的就是这个。
-    已知天花板：id 只由内容派生，所以"幂等"是**整点覆盖**——同内容换元数据重写，元数据以后写的为准。"""
+    已知天花板：id 只由内容派生，所以"幂等"是**整点覆盖**——同内容换元数据重写，元数据以后写的为准。
+
+    C3 起知识库摄取（`actions/upload_kb.py`）也走这一个出口：两条入库路共用一条
+    幂等规则，才不会「重新上传同一份 FAQ 就多出 N 份切片」。"""
     return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{scope}:{content}"))
 
 
 class LongTermMemory:
     def __init__(self, project_id: str = "", embeddings=None, user_id: str = "",
-                 session_id: str = "", store: QdrantStore | None = None):
+                 session_id: str = "", store: QdrantStore | None = None,
+                 doc_type: str = "memory"):
         self.store = store or QdrantStore()
         self.embeddings = embeddings
         self._project = project_id
         self._user = user_id
         self.session_id = session_id
+        # 同一个类当两条切片的读者：`memory`=角色自己的历史，`kb`=用户上传的知识库（C3）。
+        # 知识库那条只被 `recall` 读——它是人上传的文档，不是记忆溢出写进去的。
+        self.doc_type = doc_type
 
     @property
     def user_id(self) -> str:
@@ -64,7 +71,7 @@ class LongTermMemory:
         vecs = await self.embeddings.aembed_documents([m.content for m in uniq])
         scope = f"{self.user_id}/{self.project_id}"
         return await self.store.write([
-            Point(id=_pid(scope, m.content), text=m.content, dense=list(v), doc_type="memory",
+            Point(id=point_id(scope, m.content), text=m.content, dense=list(v), doc_type=self.doc_type,
                   user_id=self.user_id, session_id=self.session_id, project=self.project_id,
                   extra={"role": m.role, "cause_by": m.cause_by, "sent_from": m.sent_from})
             for m, v in zip(uniq, vecs) if v])
@@ -95,7 +102,7 @@ class LongTermMemory:
         N9：整条检索链（embedding → Qdrant hybrid → rerank）不在 LangChain callback 面内，
         由 span 装饰器手工成 span——S9「hit-rate@5」的证据来源。"""
         dense = await self.embeddings.aembed_query(query)
-        hits = await self.store.search(query, list(dense), k=k, doc_type="memory",
+        hits = await self.store.search(query, list(dense), k=k, doc_type=self.doc_type,
                                       user_id=self.user_id, project=self.project_id)
         hits = await self._rerank(query, hits, k)
         return [Message(content=h.payload["text"], role=h.payload.get("role", "user"),
@@ -103,4 +110,4 @@ class LongTermMemory:
                         sent_from=h.payload.get("sent_from", "")) for h in hits]
 
     async def drop(self):
-        await self.store.delete_scope(doc_type="memory", user_id=self.user_id, project=self.project_id)
+        await self.store.delete_scope(doc_type=self.doc_type, user_id=self.user_id, project=self.project_id)

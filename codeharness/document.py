@@ -39,7 +39,7 @@ def read_data(data_path: Path) -> Union[pd.DataFrame, list]:
     elif suffix in (".docx", ".doc"):
         from langchain_community.document_loaders import Docx2txtLoader
         data = Docx2txtLoader(str(data_path)).load()
-    elif ".txt" == suffix:
+    elif suffix in (".txt", ".md"):     # C3：知识库文档九成是 .md，原先会掉进下面的 NotImplementedError
         from langchain_community.document_loaders import TextLoader
         from langchain_text_splitters import CharacterTextSplitter
         docs = TextLoader(str(data_path), encoding="utf-8").load()

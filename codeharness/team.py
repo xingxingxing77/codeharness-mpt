@@ -15,11 +15,13 @@ def default_team(llm, env_desc: str = "a software company"):
     from codeharness.configs.settings import settings
     from codeharness.memory.brain_memory import BrainMemory
     from codeharness.tools import REGISTRY
-    ltm = None
+    ltm = kb = None
     if settings.enable_rag:                                 # 这个开关此前零读者，现在真管记忆召回
         from codeharness.memory.longterm import LongTermMemory
         from codeharness.provider.gateway import LLMGateway
-        ltm = LongTermMemory(embeddings=LLMGateway.embeddings())   # project 用时现取，三角色共用
+        emb = LLMGateway.embeddings()                       # project 用时现取，三角色共用
+        ltm = LongTermMemory(embeddings=emb)
+        kb = LongTermMemory(embeddings=emb, doc_type="kb")  # C3：`UploadKB` 灌进去的那条切片的读者
     profiles = {                                    # 字段逐字抄自 roles/ 对应文件（参考速查 §4）
         TEAMLEADER_NAME: ("Team Leader", "Manage a team to assist users"),   # t17 对账：源逐字
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
@@ -30,6 +32,8 @@ def default_team(llm, env_desc: str = "a software company"):
                              REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
                              brain=BrainMemory(), longterm_memory=ltm)
               for name, (prof, goal) in profiles.items()}
+    for a in agents.values():
+        a.kb = kb                                 # 后挂而非塞进 ctor：位置参数已经排到第 12 个，别再排第 13 个
     sync_roster(agents)
     if TEAMLEADER_NAME in agents:
         # 源 TeamLeader._think(:66-67) 每轮重算 instruction=TL_INSTRUCTION；本仓走 instruction_provider

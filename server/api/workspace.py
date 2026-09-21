@@ -1,15 +1,17 @@
-"""工作区文件树/读取。路径基准 = session.workspace = runtime.session_root()——
+"""工作区文件树/读取/知识库摄取。路径基准 = session.workspace = runtime.session_root()——
 工具层（write_file / 终端 cwd / 沙箱 scratch）与产物仓都落这里，agent 写的文件树里才看得见。
 N1：全部路由过 current_user（auth 开时按会话归属隔离，越权 404）。"""
 import mimetypes
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
 from server.auth import current_user
 
 router = APIRouter(prefix="/api/sessions", tags=["workspace"])
 
 MAX_PREVIEW_BYTES = 5 * 1024 * 1024     # 文本预览上限：超了不读，直接 413（不另做下载通道）
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024     # 单个上传文档上限（知识库摄取一次最多 20 个 × 20MB）
+MAX_UPLOAD_FILES = 20
 
 
 def _ws(request: Request, sid: str, user: str) -> Path:
@@ -98,3 +100,61 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
         })
     finally:
         CURRENT_PROJECT.reset(tok)
+
+
+@router.post("/{sid}/workspace/upload_kb")
+async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(...),
+                    user: str = Depends(current_user)):
+    """把用户上传的文档灌进知识库切片（C3：`UploadKB` 的**唯一生产调用点**）。
+
+    原件先落到 `<会话工作区>/kb/`（文件树看得见、取证留得住），摄取读的是**盘上那份文件**而不是
+    内存里的字节——门禁与生产因此走同一条路，不会再出现「测的是构造参数」那种假象。
+    门口判三件事，不进内核：文件名只取 `Path(name).name`（`../`、绝对路径在这里就被剥掉，
+    落点再 resolve 复核一次做纵深）、后缀白名单、单文件与件数上限。
+    部分成功是合法结局：`errors` 逐条给原因，`uploaded_count` 只算真写进去的点。
+    """
+    from codeharness.actions.upload_kb import SUPPORTED as KB_SUFFIXES   # 白名单住在摄取件里，不在这里另抄一份
+    workspace = _ws(request, sid, user).resolve()
+    if not files:
+        raise HTTPException(400, "至少要有一个文件")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(400, f"一次最多 {MAX_UPLOAD_FILES} 个文件，这次传了 {len(files)} 个")
+    root = workspace / "kb"
+    root.mkdir(parents=True, exist_ok=True)
+
+    written, errors = [], []
+    for f in files:
+        name = Path(f.filename or "").name          # 只认basename：`../../etc/passwd` 塌成 `passwd`
+        target = (root / name).resolve()
+        if not name or name.startswith("."):
+            errors.append(f"{f.filename!r}: 文件名为空或以点开头的隐藏文件不收")
+            continue
+        if not target.is_relative_to(root):         # basename 判据之外的第二道：真落点必须在 kb/ 里
+            errors.append(f"{name}: 落点越出 kb/ 目录，已拒")
+            continue
+        if target.suffix.lower() not in KB_SUFFIXES:
+            errors.append(f"{name}: 知识库只收 {'/'.join(sorted(KB_SUFFIXES))}，收到 "
+                          f"{target.suffix or '无后缀'}")
+            continue
+        data = await f.read()
+        if not data:
+            errors.append(f"{name}: 空文件")
+            continue
+        if len(data) > MAX_UPLOAD_BYTES:
+            errors.append(f"{name}: {len(data) / 1048576:.1f}MB 超过单文件上限 "
+                          f"{MAX_UPLOAD_BYTES // 1048576}MB")
+            continue
+        target.write_bytes(data)
+        written.append(target)
+
+    from codeharness.runtime import CURRENT_PROJECT
+    tok = CURRENT_PROJECT.set(workspace.name)       # 与 import_repo 同一接缝：切片按项目隔离
+    try:
+        from codeharness.actions.upload_kb import UploadKB
+        result = await UploadKB(llm=None)._call({"files": [str(p) for p in written]}) if written else \
+            {"uploaded_count": 0, "chunk_count": 0, "errors": []}
+    finally:
+        CURRENT_PROJECT.reset(tok)
+    result["errors"] = errors + result["errors"]
+    result["written"] = [p.name for p in written]
+    return result

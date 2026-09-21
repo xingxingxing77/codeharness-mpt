@@ -1,104 +1,288 @@
 #!/usr/bin/env python -m asyncio
-"""B7: 知识库摄取入口门禁。
+"""S15 门禁（C3 重写）：知识库那条链**端到端**——上传 → 切块入库 → 召回命中 → 进模型上下文。
 
-FakeLLM 断言 kb 切片写入与召回；真模型通道 `tests/manual_kb_upload.py`。
-依赖：embedding 已可用（B6 完成）。
+跑法（PYTHONPATH 必须带 logs 那截，少了会撞本机 WMI 永久卡死）：
+  cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
+    PYTHONDONTWRITEBYTECODE=1 F:/anaconda/python.exe tests/s15_kb_upload.py
+
+**为什么整份重写**：旧版三例全是存在性/签名断言（`hasattr`、参数名、payload 字面量），
+t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM——模型确实收到了那段字，
+但**没有任何生产代码会去填那个参数**（`UploadKB` 零调用者、kb 切片零读者）。这正是 §0 硬约定 4
+点名的「断言打在构造参数上」：门禁绿 ≠ 知识库能用（`docs/对照2:97` G 条同一句）。
+现在的五格按链路排：
+  t1 真 Qdrant（gate 专属集合）+ 确定性替身 embedding：一份 .md 切成多块灌进 `doc_type="kb"`，
+     召回**命中自己刚灌进去的切片**，且重传幂等（点数不翻倍）。
+  t2 HTTP 端点门口三判（离线，store/embeddings 换替身）：multipart 上传 → 原件真落
+     `会话工作区/kb/`、`../` 这类脏文件名被剥成 basename、非白名单后缀被拒并给原因、
+     并且**传进 action 的 files 就是盘上那份路径**（不是内存字节）。
+  t3 真图真 think：知识库读者挂在角色身上时，模型收到的 prompt 里真有 `[知识库片段]` 与那份 FAQ；
+     **对照组**同一个角色摘掉读者再跑一次，prompt 里不许出现该字样——否则这条断言没有区分力。
+  t4 摄取口径：不支持的格式与空文件明确拒（不默默灌半截），且一个点都不写。
+  t5 不复燃守卫（源码文本级，先例 `s3b t15`）：B7 那个「第二个半截实现」`QdrantStore.aembed_documents`
+     不许长回来；`UploadKB` 必须有生产调用者。
+
+t1/t3 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
+不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
+真 bge-m3 的语义改写召回不在这里（那是 s5 t25 的形状），本门禁只钉「链路通不通」。
 """
 import asyncio
+import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from codeharness.document_store.qdrant_store import QdrantStore, Point
+from codeharness.const import RequirementTag                                    # noqa: E402
+from codeharness.document_store.qdrant_store import QdrantStore                  # noqa: E402
+from codeharness.provider.fake import FakeLLM, HashEmbeddings                    # noqa: E402
+from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER                    # noqa: E402
+from codeharness.schema import Message                                           # noqa: E402
+
+GATE_COLL = "s15gate_kb"          # 自测专用集合，绝不碰生产 collection
+PROJ = "s15_kb_proj"
+# 四段、约 400 字：`read_data` 的切块器是 256 字符一块，太短就切不出第二块（t1 要的就是「切片」这个词）
+FAQ = ("# 常见问题\n\n"
+       "重置密码：在登录页点「设置 - 安全 - 重置」，填注册邮箱后系统发一次性验证码，验证通过即设新密码；"
+       "重置完成后所有已登录设备会在五分钟内被踢下线，需要重新登录。\n\n"
+       "退款政策：下单后 7 天内可全额退款，超过 7 天按剩余次数折算；退款原路返回，"
+       "银行卡渠道另有 3 个工作日处理期，第三方支付当天到账。\n\n"
+       "开票说明：企业客户在合同签署后 5 个工作日内开具增值税专用发票，抬头与税号以合同登记主体为准；"
+       "个人订单只能开普通发票，电子票与纸质票效力相同。\n\n"
+       "账号封禁：连续 3 次触发内容策略进入 24 小时冷静期，第 5 次永久封禁但保留申诉入口，"
+       "申诉邮件会在 15 个工作日内答复。")
 
 
-async def t1_kb_interface_exists():
-    """t1: QdrantStore.aembed_documents 接口存在。"""
-    print("t1: kb interface exists...", end=" ", flush=True)
-    
-    # 验证方法存在
-    assert hasattr(QdrantStore, 'aembed_documents'), "QdrantStore 应有 aembed_documents 方法"
-    
-    # 验证签名
-    import inspect
-    sig = inspect.signature(QdrantStore.aembed_documents)
-    params = list(sig.parameters.keys())
-    assert 'texts' in params, "应有 texts 参数"
-    assert 'doc_type' in params, "应有 doc_type 参数"
-    assert 'user_id' in params, "应有 user_id 参数"
-    
-    print("✅")
+def live_qdrant() -> bool:
+    import httpx
 
-
-async def t2_kb_context_in_talk_action():
-    """t2: TalkAction.kb_context 可选注入。"""
-    print("t2: talk_action kb_context...", end=" ", flush=True)
-    
-    from codeharness.actions.talk_action import TalkAction
-    from codeharness.schema import Message
-    from codeharness.provider.fake import FakeLLM
-    
-    llm = FakeLLM(responses=["基于知识库的回答"])
-    
-    # 带 kb_context
-    action_with_kb = TalkAction(llm=llm, kb_context="FAQ: 如何重置密码？答：点击设置->安全->重置")
-    msg = Message(content="我忘了密码怎么办", role="user")
-    
-    result = await action_with_kb.run(msg)
-    assert result.content, "应有回复"
-    
-    # 验证 system prompt 包含 kb_context
-    # FakeLLM 的 calls 记录了输入消息
-    assert len(llm.calls) > 0, "应调用过 LLM"
-    
-    print("✅")
-
-
-async def t3_point_doc_type():
-    """t3: Point.doc_type 支持 kb/exp/memory。"""
-    print("t3: point doc_type...", end=" ", flush=True)
-    
-    # 创建不同 doc_type 的点
-    kb_point = Point(id="kb:test:0", text="test", dense=[0.1]*1024, doc_type="kb")
-    exp_point = Point(id="exp:test:0", text="test", dense=[0.1]*1024, doc_type="exp")
-    mem_point = Point(id="mem:test:0", text="test", dense=[0.1]*1024, doc_type="memory")
-    
-    assert kb_point.payload["doc_type"] == "kb"
-    assert exp_point.payload["doc_type"] == "exp"
-    assert mem_point.payload["doc_type"] == "memory"
-    
-    print("✅")
-
-
-async def main():
-    """运行所有门禁测试。"""
-    print("=" * 60)
-    print("B7: 知识库摄取入口门禁")
-    print("=" * 60)
-    
+    from codeharness.configs.settings import settings
     try:
-        await t1_kb_interface_exists()
-        await t2_kb_context_in_talk_action()
-        await t3_point_doc_type()
-        
-        print("\n" + "=" * 60)
-        print("✅ 全部通过 (3/3)")
-        print("=" * 60)
-        return 0
-    except AssertionError as e:
-        print(f"\n❌ 失败：{e}")
-        import traceback
-        traceback.print_exc()
-        return 1
-    except Exception as e:
-        print(f"\n❌ 异常：{e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+        return httpx.get(f"{settings.qdrant.url}/healthz", timeout=3).status_code == 200
+    except Exception:
+        return False
+
+
+def _write_faq(dir_: Path, name: str = "faq.md", content: str = FAQ) -> Path:
+    p = dir_ / name
+    p.write_text(content, encoding="utf-8")
+    return p
+
+
+async def _action(store=None, embeddings=None, files=(), **kw):
+    from codeharness.actions.upload_kb import UploadKB
+    kb = UploadKB(llm=None, store=store, embeddings=embeddings)
+    return await kb._call({"files": [str(f) for f in files], **kw})
+
+
+def t1_ingest_then_recall():
+    """灌进去的切片必须能被召回——`doc_type="kb"` 非空，命中的就是自己写进去的那几块。"""
+    if not live_qdrant():
+        print("  skip t1（Qdrant 不在线）")
+        return
+    from qdrant_client import models as m
+
+    from codeharness.memory.longterm import LongTermMemory
+
+    tmp = Path(tempfile.mkdtemp())
+    store = QdrantStore(collection=GATE_COLL)
+    emb = HashEmbeddings()
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_kb")
+
+    async def total():
+        r = await store.client.count(GATE_COLL, count_filter=m.Filter(must=[
+            m.FieldCondition(key="doc_type", match=m.MatchValue(value="kb")),
+            m.FieldCondition(key="user_id", match=m.MatchValue(value="u_kb")),
+            m.FieldCondition(key="project", match=m.MatchValue(value=PROJ))]))
+        return r.count
+
+    try:
+        asyncio.run(store.drop())                       # 从干净集合起算，重复跑门禁才有可比读数
+        out = asyncio.run(_action(store, emb, [_write_faq(tmp)]))
+        assert out["errors"] == [], f"t1①摄取报错：{out['errors']}"
+        assert out["chunk_count"] >= 2, \
+            f"t1①一份四段 FAQ 只切出 {out['chunk_count']} 块 = 整篇压成一个向量，检索粒度等于没有"
+        assert out["uploaded_count"] == out["chunk_count"], out
+
+        reader = LongTermMemory(project_id=PROJ, embeddings=emb, user_id="u_kb",
+                               store=store, doc_type="kb")
+        hits = asyncio.run(reader.recall("怎么重置密码", k=3))
+        texts = [h.content for h in hits]
+        assert texts, "t1②召回空——写进去的东西读不出来，这条链还是死的"
+        assert any("重置密码" in t for t in texts), f"t1②没命中自己灌进去的切片：{texts}"
+        got = asyncio.run(store.search("怎么重置密码", emb._v("怎么重置密码"), k=3,
+                                       doc_type="kb", user_id="u_kb", project=PROJ))
+        assert got and {h.payload["doc_type"] for h in got} == {"kb"}, \
+            f"t1②切片键不对（会把记忆/经验池混进来）：{[h.payload['doc_type'] for h in got]}"
+
+        n0 = asyncio.run(total())
+        asyncio.run(_action(store, emb, [_write_faq(tmp)]))      # 原样重传
+        assert asyncio.run(total()) == n0, \
+            f"t1③重传同一份文档，kb 切片从 {n0} 点涨到 {asyncio.run(total())} 点（幂等破了）"
+        hit = next(t for t in texts if "重置密码" in t)
+        print(f"  ok  t1 切块 {out['chunk_count']} 块入库、召回命中「{' '.join(hit.split())[:16]}…」、"  # 折叠换行，读数不打乱表格
+              f"重传后仍是 {n0} 点")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t2_endpoint_door():
+    """端点只判门口三件事，且传给摄取的必须是**盘上那份文件**。"""
+    import codeharness.actions.upload_kb as mod
+    from fastapi.testclient import TestClient
+
+    written = []                          # 替身 store 收到的切片文本
+
+    class _Store:                       # 离线替身：这一格测的是门口，不是 Qdrant
+        async def write(self, points):
+            written.extend(p.text for p in points)
+            return len(points)
+
+    class _GW:
+        @staticmethod
+        def embeddings():
+            return HashEmbeddings()
+
+    saved = (mod.QdrantStore, mod.LLMGateway)
+    mod.QdrantStore, mod.LLMGateway = lambda *a, **k: _Store(), _GW
+    keep = None
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        import server.sessions as ss
+        from codeharness.configs.settings import settings
+        keep = (ss.SESSIONS_FILE, settings.platform.use_redis)
+        ss.SESSIONS_FILE = tmp_root / "sessions.json"
+        settings.platform.use_redis = False           # 端点这格不依赖 Redis（写的是替身 store）
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "kb", "project_name": "s15_kb_ep"}).json()["id"]
+            parts = [("files", ("faq.md", FAQ, "text/markdown")),
+                     ("files", ("../../evil.md", "# 越界\n内容", "text/markdown")),
+                     ("files", ("tool.exe", b"MZ\x00\x00", "application/octet-stream"))]
+            rsp = c.post(f"/api/sessions/{sid}/workspace/upload_kb", files=parts)
+            assert rsp.status_code == 200, f"t2①上传被拒：{rsp.status_code} {rsp.text[:160]}"
+            body = rsp.json()
+            assert sorted(body["written"]) == ["evil.md", "faq.md"], body["written"]
+            assert any("tool.exe" in e and "只收" in e for e in body["errors"]), \
+                f"t2①非白名单后缀没被拒或没说清：{body['errors']}"
+            ws = Path(c.get(f"/api/sessions/{sid}").json()["workspace"])
+            on_disk = sorted(p.name for p in (ws / "kb").iterdir())
+            assert on_disk == ["evil.md", "faq.md"], f"t2②落盘不对：{on_disk}"
+            assert not (ws.parent / "evil.md").exists(), "t2②脏文件名跑出了 kb/ 目录"
+            assert (ws / "kb" / "faq.md").read_text(encoding="utf-8") == FAQ, "t2②原件内容被改过"
+            assert any("重置密码" in t for t in written), f"t2③盘上有文件却没进摄取：{written[:2]}"
+        print(f"  ok  t2 门口三判（越界名剥成 basename、.exe 拒并给原因）、原件真落 kb/、"
+              f"摄取吃到的就是盘上那份（{len(written)} 块）")
+    finally:
+        mod.QdrantStore, mod.LLMGateway = saved
+        if keep is not None:
+            ss.SESSIONS_FILE, settings.platform.use_redis = keep
+        shutil.rmtree(Path("workspace") / "s15_kb_ep", ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def t3_role_thinks_with_kb():
+    """读者挂上 → 真图真 think 的 prompt 里真有那段资料；摘掉 → 不许出现（对照组）。"""
+    if not live_qdrant():
+        print("  skip t3（Qdrant 不在线）")
+        return
+    from codeharness.environment.team_graph import build_team
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.roles.role_zero import RoleZero
+
+    tmp = Path(tempfile.mkdtemp())
+    store, emb = QdrantStore(collection=GATE_COLL), HashEmbeddings()
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_kb")
+    thought = json.dumps({"thought": "按知识库答", "commands": [{"command_name": "end", "args": {}}]},
+                         ensure_ascii=False)
+
+    def run(with_kb: bool) -> str:
+        llm = FakeLLM([thought])
+        role = RoleZero({"name": "R", "profile": "p", "goal": "g"}, [], llm, max_loops=2)
+        if with_kb:
+            role.kb = LongTermMemory(project_id=PROJ, embeddings=emb, user_id="u_kb",
+                                     store=store, doc_type="kb")
+        g = build_team({"R": role}, sop={RequirementTag.USER_REQUIREMENT: ["R"]})
+        asyncio.run(g.ainvoke(
+            {"messages": [Message(content="怎么重置密码？", role="user",
+                                  cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")],
+             "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False},
+            {"configurable": {"thread_id": f"s15-t3-{with_kb}"}}))
+        return str(llm.calls[-1])
+
+    try:
+        asyncio.run(store.drop())
+        out = asyncio.run(_action(store, emb, [_write_faq(tmp)]))
+        assert out["uploaded_count"] >= 2, f"t3 前置失配（没灌进切片）：{out}"
+        with_kb = run(True)
+        assert "[知识库片段]" in with_kb and "重置密码" in with_kb, \
+            "t3①失效：知识库读者挂了但 prompt 里什么都没有——上传的文档永远不会被模型看见"
+        without = run(False)
+        assert "[知识库片段]" not in without, "t3②对照组不成立：没挂读者也出现了知识库段"
+        print("  ok  t3 真图真 think 吃到知识库片段（含「重置密码」那段），摘掉读者后当场消失")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t4_rejects_what_it_cannot_ingest():
+    """不支持的格式与空文件：明确拒、一个点都不写（别默默灌半截进知识库）。"""
+    class _Boom(QdrantStore):
+        wrote = 0
+
+        async def write(self, points):
+            _Boom.wrote += len(points)
+            return len(points)
+
+    tmp = Path(tempfile.mkdtemp())
+    store = _Boom(collection=GATE_COLL)
+    try:
+        out = asyncio.run(_action(store, HashEmbeddings(),
+                                  [_write_faq(tmp, "data.csv", "question,answer\na,b\n")]))
+        assert out["uploaded_count"] == 0 and any("只摄取文本类文档" in e for e in out["errors"]), \
+            f"t4①表格类文档没被拒：{out}"
+        assert _Boom.wrote == 0, f"t4①被拒的文档还是写了点：{_Boom.wrote}"
+        empty = asyncio.run(_action(store, HashEmbeddings(), [_write_faq(tmp, "blank.md", "   \n")]))
+        assert empty["uploaded_count"] == 0 and empty["errors"], f"t4②空文件读数不对：{empty}"
+        gone = asyncio.run(_action(store, HashEmbeddings(), [tmp / "nosuch.md"]))
+        assert any("文件不存在" in e for e in gone["errors"]), f"t4③缺文件没说清：{gone['errors']}"
+        none = asyncio.run(_action(store, HashEmbeddings(), []))
+        assert none["uploaded_count"] == 0 and none["errors"] == ["files 为空"], none
+        print(f"  ok  t4 表格/空文件/缺文件/零文件四种输入全部明确拒收，零写入")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t5_no_regression_guard():
+    """两个假通道不复燃（源码文本级，先例 `s3b t15`）：第二个半截实现、以及「定义了没人调」。"""
+    assert not hasattr(QdrantStore, "aembed_documents"), \
+        "B7 那个自己建 embedding、自己 write 的第二份实现长回来了——入库必须只有一条路（UploadKB）"
+    from codeharness.actions.upload_kb import UploadKB
+    assert {"store", "embeddings"} <= set(UploadKB.model_fields), \
+        "UploadKB 的注入口被摘掉 = 门禁只能挂到真 embedding 服务上，这条链就又测不了了"
+    root = Path(__file__).resolve().parent.parent
+    hits = [str(p.relative_to(root)) for p in (root / "server").rglob("*.py")
+            if "UploadKB" in p.read_text(encoding="utf-8")]
+    assert hits, "UploadKB 又变成零生产调用者了（C3 就是为这条而做的）"
+    src = (root / "codeharness" / "roles" / "role_zero.py").read_text(encoding="utf-8")
+    assert "_kb_recall" in src and "知识库片段" in src, "知识库读者被摘了：切片会退回只写不读"
+    print(f"  ok  t5 单一摄取出口 + 注入口在位 + 生产调用者 {hits} + 读者在位")
+
+
+def main():
+    checks = [t1_ingest_then_recall, t2_endpoint_door, t3_role_thinks_with_kb,
+              t4_rejects_what_it_cannot_ingest, t5_no_regression_guard]
+    for f in checks:
+        f()
+    print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型）——"
+          f"其中 t1/t3 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}")
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    main()
