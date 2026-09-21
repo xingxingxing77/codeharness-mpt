@@ -19,6 +19,19 @@
     </a>
   </div>
 
+  <!-- Error：轮内红点行（B1）。后端 server/runner.py 的 _fail 发 kind=error，value 是
+       整段 traceback——行里只报最后那一行「异常类型: 消息」，全段留给右栏台账。
+       几何照参考项目 MessageItem.module.css 的 .turnErrorRow 家族；源里第三列 auto 是
+       放错误码的（.turnErrorCode），我们的 error 事件不带码，所以不留空轨。 -->
+  <div v-else-if="b.type === 'Error'" class="errRow" role="status" :title="traceback"
+       :data-chat-anchor-key="b.key">
+    <VStateDot state="error" class="errDot" />
+    <div class="errCopy">
+      <span class="errTitle">本轮运行失败</span>
+      <span class="errMsg">{{ errMessage }}</span>
+    </div>
+  </div>
+
   <!-- 其余：24px 折叠行 + 展开卡 -->
   <VDisclosureRow
     v-else
@@ -40,12 +53,13 @@
 
 <script setup lang="ts">
 /** 一个节点 = 后端一个 block。分派：User→气泡、Thought→Think 披露行、
- *  Docs→全宽正文、其余→折叠行。每个 BlockType 必须有显式分支（s8 t1 守这条）。 */
+ *  Docs→全宽正文、Error→轮内红点行、其余→折叠行。每个 BlockType 必须有显式分支（s8 t1 守这条）。 */
 import { computed } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import MessageIconActions from './MessageIconActions.vue'
 import ReasoningRow from './ReasoningRow.vue'
 import ToolCard from './ToolCard.vue'
+import VStateDot from '../ui/VStateDot.vue'
 import VDisclosureRow from '../ui/VDisclosureRow.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
@@ -62,6 +76,10 @@ const b = computed(() => props.b)
 const text = computed(() => b.value.tokens.join(''))
 const open = computed(() => !b.value.closed)
 const isProse = computed(() => b.value.type === 'Docs')
+/** 轮内 error 行（B1）：store 把 traceback 按行存进 lines，行里只报最后一行非空——
+ *  `format_exc` 的末行才是「异常类型: 消息」，前面全是栈。全段挂 title，右栏台账也留了一份。 */
+const traceback = computed(() => b.value.lines.join('\n'))
+const errMessage = computed(() => b.value.lines.map((l) => l.trim()).filter(Boolean).at(-1) || '未知错误')
 /** 块与 span 都用 unix 秒（后端事件原样），只有读数组件要 ms。 */
 const timeMs = computed(() => (b.value.ts === undefined ? undefined : b.value.ts * 1000))
 
@@ -132,6 +150,37 @@ const row = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* ---- 轮内 error 红点行（B1）：源值 = 参考项目 MessageItem.module.css ---- */
+.errRow {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 2px 0;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+/* 点 10px、行 20px → 下移 5px 才和文字光学居中 */
+.errDot {
+  margin-top: 5px;
+}
+
+.errCopy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.errTitle {
+  margin-right: 6px;
+  color: var(--dsw-alias-state-error-primary);
+  font-weight: 600;
+}
+
+.errMsg {
+  color: var(--dsw-alias-label-secondary);
 }
 
 /* 参考项目 ToolRow.module.css 的 .inspectButton：常驻流内、只改 opacity，

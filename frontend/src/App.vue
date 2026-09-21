@@ -22,6 +22,14 @@
 
   <SettingsView />
   <ToastLayer />
+
+  <!-- 断线横幅（B1）。几何与配色照参考项目 ui-primitives/ConnectionBanner.module.css 的
+       .banner 逐条落（fixed 顶条 / 4px 12px / 12·18 / state-error-primary）；
+       触发权在 store.stream 那一个三态值——「open 过之后报错」才算断线，首屏握手与
+       没选会话都不是（同源原子的 null/connecting 保持安静口径）。 -->
+  <div v-if="store.stream === 'down'" class="connBanner" role="status" aria-live="polite">
+    连接已断开，正在重连…
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -70,5 +78,21 @@ watch(
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+/* 参考项目 ConnectionBanner.module.css 的 .banner，一字未改（除令牌名照本仓）。
+   100 这档在本仓上面还有 1000/1100 的 toast 与模态，所以横幅不会盖住回执。 */
+.connBanner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  padding: 4px 12px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 18px;
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary-foreground);
 }
 </style>

@@ -19,6 +19,8 @@
   t10 F3：respondApproval 的 catch 必须「快照回滚 + 服务端重取」两句都在
      （只回滚会复活别处已决议的卡，只重取则断网时卡片再也回不来）。
   t11 B2：/events/history 的 before/limit 反向分页——两台 bus 同签名 + 窗口语义同判 + 路由传参与值域。
+  t12 B1：断线横幅只有一个状态源（store.stream 三态，不从非响应式的 evtSource.readyState 派生）
+     + 轮内 error 行走块管线且 ChatNode 有显式 'Error' 分支（'Error' 不是 BlockType，t1 查不到）。
 
 跑法（PYTHONPATH 必须带 logs 那截，少了会撞本机 WMI 永久卡死，看着像代码挂死）：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \
@@ -661,6 +663,52 @@ def t11_events_history_window():
         ss.SESSIONS_FILE = keep
 
 
+def t12_offline_banner_and_turn_error_row():
+    """B1：断线横幅 + 轮内 error 红点行（施工5 档三那两格，纯前端）。钉三个洞：
+    ① 横幅只有一个状态源：store.stream 三态（idle/open/down），且**只有 open 过之后报错**
+       才进 down。两件事都不能省：拿 `!connected` 判会在首屏握手期闪假横幅；而从
+       `evtSource.readyState` 派生更糟——EventSource 实例不是 plain object，Vue 不 proxy 它，
+       readyState 变了 computed 根本不重算，本轮实测那样写横幅在活后端下也常驻不消。
+    ② error 事件必须进**块管线**（type='Error' + closed=true + 入 blockOrder）。另开一份
+       errors 数组就是第二个游标（SSE seq 精度丢事件那条洞同族）；closed 不给真是「末轮
+       永不出尾行」的形状。
+    ③ ChatNode 必须有 'Error' 显式分支——'Error' 不是 BlockType，t1 查不到漏掉的分支，
+       漏了就静默降级成灰色折叠行（t1 想防的那类洞换个入口又回来了）。"""
+    app = (FE / "App.vue").read_text(encoding="utf-8")
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    node = (FE / "components" / "conversation" / "ChatNode.vue").read_text(encoding="utf-8")
+
+    banner = re.search(r'''<div[^>]*v-if="store\.stream === 'down'"[^>]*>([\s\S]*?)</div>''', app)
+    assert banner, "B1 回归：App.vue 里没有以 store.stream==='down' 为条件的横幅节点"
+    assert "连接已断开" in banner.group(1), f"B1：横幅只剩空条，文案丢了：{banner.group(1)!r}"
+    assert "position: fixed" in app.split(".connBanner", 1)[-1][:400], \
+        "B1 回归：.connBanner 不再是 fixed 顶条（照参考项目 ConnectionBanner.module.css）"
+    assert "connected" not in app and "readyState" not in app, \
+        "B1：横幅别再引第二个状态源（connected 布尔 / readyState 派生都会与 stream 漂移）"
+    for w in ("this.stream = 'idle'", "this.stream = 'open'", "this.stream = 'down'"):
+        assert w in st, f"B1 回归：store.stream 少了 {w} 这一笔（三态缺一态=横幅要么闪要么常驻）"
+    assert "'idle' as 'idle' | 'open' | 'down'" in st, "B1：stream 的三值联合类型没了"
+    assert "connected" not in st, "B1：connected 与 stream 是同一事实的两份记账，留一份"
+    # 注释里出现 readyState 是讲解，所以禁的是**代码形状**，不是这个词
+    assert "reconnecting" not in st and "readyState !=" not in st and "readyState ===" not in st, \
+        "B1：横幅别改回从 evtSource.readyState 派生——EventSource 实例非响应式，实测横幅常驻不消"
+
+    err = re.search(r"=== 'error'\) \{(.*?)\n      \} else if", st, re.S)
+    assert err, "B1：applyEvent 的 error 分支不见了"
+    body = err.group(1)
+    assert "b.type = 'Error'" in body and "b.closed = true" in body \
+        and "this.blockOrder.push(key)" in body, \
+        f"B1 回归：error 不再走块管线（另开数组=第二个游标；closed 缺=末轮不出尾行）\n{body}"
+    assert "this.logs.push(`[error]" in body, "B1：右栏台账那份 error 行被删了（横幅/红点不替台账）"
+    assert "type === 'Error'" in node, \
+        "B1 回归：ChatNode 少了 'Error' 分支——它会静默降级成灰色折叠行，而 t1 查不到"
+    css = node.split(".errRow", 1)[-1]
+    for prop in ("grid-template-columns: 10px minmax(0, 1fr)", "font-size: 13px", "line-height: 20px"):
+        assert prop in css, f"B1 回归：.errRow 源值 {prop} 丢了"
+    _ok("t12", "B1：横幅唯一状态源=store.stream 三态（idle/open/down，readyState 派生已禁）+ "
+               "fixed 顶条源值 + error 走块管线（type/closed/入序/台账并存）+ ChatNode 显式分支与 .errRow 源值")
+
+
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
@@ -677,7 +725,8 @@ def main():
     t9_request_deadline()
     t10_approval_rollback_realign()
     t11_events_history_window()
-    print("\ns8_frontend_contract: 11/11 全绿")
+    t12_offline_banner_and_turn_error_row()
+    print("\ns8_frontend_contract: 12/12 全绿")
 
 
 if __name__ == "__main__":

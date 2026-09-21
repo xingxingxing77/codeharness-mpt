@@ -43,7 +43,13 @@ export const useSessionStore = defineStore('sessions', {
     approvals: [] as ApprovalItem[],
     status: '',
     cost: {} as Record<string, number>,
-    connected: false,
+    /** 活流三态（B1 断线横幅的唯一状态源）。刻意只有三值：参考项目 ConnectionBanner 的原子
+     *  契约是「null / 首握手中的 connecting 保持安静，只有真在退避重连才现身」，所以
+     *  idle 覆盖「没这条流」与「刚 new 出来还没 onopen」两种，open 过之后报错才进 down。
+     *  ⚠ 别改成从 `evtSource.readyState` 直接派生：EventSource 实例不是 plain object，
+     *  Vue 不 proxy 它，readyState 变了 computed 不会重算——实测那样横幅会在首屏亮起来
+     *  且再也不消失（活后端下也一样），见 log/2026-09-21-B1断线横幅与轮内error行.md 段 3。 */
+    stream: 'idle' as 'idle' | 'open' | 'down',
     evtSource: null as EventSource | null,
     /** 主游标：定宽补零串，字典序==到达序。 */
     lastCursor: '',
@@ -278,7 +284,7 @@ export const useSessionStore = defineStore('sessions', {
       // 缓冲里可能还压着上一个会话的事件
       if (this.flushHandle !== undefined) this.flushHandle = undefined
       this.pending = []
-      this.connected = false
+      this.stream = 'idle'
     },
 
     connect() {
@@ -291,11 +297,14 @@ export const useSessionStore = defineStore('sessions', {
       const after = this.lastCursor || String(this.lastSeq)
       const src = new EventSource(`/api/sessions/${sid}/events?after=${encodeURIComponent(after)}${authQ}`)
       src.onopen = () => {
-        this.connected = true
+        this.stream = 'open'
       }
       src.onerror = () => {
-        this.connected = false
+        this.stream = 'down'
         // Browser retries automatically; if the socket was closed by us, ignore.
+        // ponytail: 天花板=服务端回不可重试状态码（如鉴权 401）时 EventSource 进 CLOSED、
+        // 浏览器不再重连，横幅会停在「正在重连」。升级路径=onerror 里按 readyState===2
+        // 换文案或补一次 connect()，那才是施工5 F4 判「不做」的自造退避包装器。
       }
       src.onmessage = (e) => {
         if (this.currentId !== sid) {
@@ -416,6 +425,23 @@ export const useSessionStore = defineStore('sessions', {
         }
       } else if (ev.kind === 'error') {
         this.logs.push(`[error] ${ev.value}`)
+        // 轮内红点行（B1）：走块管线，不另开一份 errors 数组——顺序、按游标去重、
+        // 历史回放与「加载更早」的整页合并已经在 applyEvent/mergeEarlierPage/buildRows
+        // 里了，另起一份就是第二个游标（SSE seq 精度丢事件那条洞正是第二个游标的产物）。
+        const key = ev.uuid || `e${ev.cursor || ev.seq}`
+        if (!(key in this.blocks)) {
+          const b = newBlock(ev)
+          b.type = 'Error'
+          // closed 必须真：末块没收口就不发轮次尾行，而 error 事件本身就是收口信号
+          b.closed = true
+          b.lines = String(ev.value ?? '').split('\n')
+          if (typeof ev.ts === 'number') {
+            b.ts = ev.ts
+            b.lastTs = ev.ts
+          }
+          this.blocks[key] = b
+          this.blockOrder.push(key)
+        }
       } else if (ev.kind === 'status') {
         const v = ev.value || {}
         if (v.cost) this.cost = v.cost
