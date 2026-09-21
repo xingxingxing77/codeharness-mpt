@@ -78,10 +78,18 @@ async def run_python_code(code: str, timeout: int = 60) -> RunCodeResult:
 
 
 def _env_with_paths(ctx: RunCodeContext) -> dict | None:
-    """源 run_code.py 语义：additional_python_paths 进 PYTHONPATH；没配则继承环境。"""
+    """源 run_code.py 语义：additional_python_paths 进 PYTHONPATH；没配则继承环境。
+
+    F-B：这些路径同样出自 LLM 产出的结构化输出，原先只 `Path(p).resolve()` 就塞进去——
+    会话外的目录能 shadow 标准库与第三方包（同 S3 的 `working_directory` 是执行面上
+    挨着的两个字段，那轮只关了一个）。判据共用 `safe_session_path`，越界的一律丢弃：
+    这里没有「退回会话根」这种合理替代（把 `/etc` 换成会话根等于凭空多条 import 路径），
+    而丢掉后子进程 import 失败会照常从 stderr 回到角色眼前，是响的而不是静默降级。"""
     if not ctx.additional_python_paths:
         return None
-    paths = [str(Path(p).resolve()) for p in ctx.additional_python_paths]
+    paths = [str(q) for p in ctx.additional_python_paths if (q := safe_session_path(p))]
+    if not paths:
+        return None
     return {**os.environ, "PYTHONPATH": os.pathsep.join(paths + [os.environ.get("PYTHONPATH", "")]).rstrip(os.pathsep)}
 
 

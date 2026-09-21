@@ -464,6 +464,34 @@ def t34_additional_python_paths_reach_child():
     assert r.stdout.strip().startswith(str(ROOT / "libs")), r.stdout
 
 
+def t34b_additional_python_paths_clamped_to_session():
+    """F-B：`additional_python_paths` 与 `working_directory` 是执行面上挨着的两个 LLM 字段，
+    S3 那轮只关了一个（`sandbox.py:84` 原样 `Path(p).resolve()` 就进子进程 PYTHONPATH，
+    外部目录能 shadow 标准库/第三方包）。越界一律丢弃；界内必到由 t34 当阳性对照。"""
+    probe = [sys.executable, "-c", "import os;print(os.environ.get('PYTHONPATH',''))"]
+    outside_abs = WS.parent / "escape_site"                 # workspace_root 之外
+    outside_abs.mkdir(parents=True, exist_ok=True)
+    (outside_abs / "hollow.py").write_text("print('imported from outside')\n", encoding="utf-8")
+    inside = ROOT / "libs"
+    inside.mkdir(parents=True, exist_ok=True)
+
+    def run(paths):
+        return asyncio.run(run_context(RunCodeContext(
+            command=probe, working_directory=str(ROOT),
+            additional_python_paths=paths))).stdout.strip()
+
+    for bad in (str(outside_abs), "../escape_rel", str(Path(sys.executable).parent)):
+        resolved = str((ROOT / bad).resolve())
+        got = run([bad])
+        assert resolved not in got, f"越界路径 {bad!r}（解析后 {resolved!r}）进了子进程 PYTHONPATH：{got!r}"
+
+    mixed = run([str(inside), str(outside_abs)])            # 越界夹在合法值里也不许过
+    assert mixed.startswith(str(inside)), f"混合入参把界内那条也误伤了：{mixed!r}"
+    assert "escape_site" not in mixed, f"越界那条混在合法值里就漏过：{mixed!r}"
+    assert run([str(outside_abs)]) == os.environ.get("PYTHONPATH", ""), \
+        "全部越界时应退回继承环境（不凭空多一条 import 路径）"
+
+
 SOURCE_EDITOR_COMMANDS = [  # 源 roles/di/role_zero.py:147-167 默认装配 `Editor.*` 十四法
     "append_file", "create_file", "edit_file_by_replace", "find_file", "goto_line",
     "insert_content_at_line", "open_file", "read", "scroll_down", "scroll_up",
@@ -595,6 +623,7 @@ def main():
               t32_timeout_kills_whole_process_tree,
               t33_terminal_registry_is_per_session,
               t34_additional_python_paths_reach_child,
+              t34b_additional_python_paths_clamped_to_session,
               t35_source_editor_assembly_covered, t36_editor_tools_roundtrip_and_boundary,
               t37_git_tools_degrade_without_gh, t38_no_dangling_metagpt_imports]
     for c in checks:
