@@ -282,7 +282,7 @@ class SessionRunner:
             with self._session_ctx(sid):
                 async for ev in graph.astream_events(Command(resume=content), config, version="v2"):
                     self._translate(sid, ev)
-            self._settle(sid)
+            await self._settle(sid)
         except asyncio.CancelledError:
             session = self.store.update(sid, status=SessionStatus.stopped, finished_at=_now())
             self._publish_status(session, "stopped by user")
@@ -372,20 +372,50 @@ class SessionRunner:
                 from codeharness.tools.libs.editor_tools import close_editor
                 close_editor(project)
 
-    def _settle(self, sid: str):
+    async def _interrupt_payload(self, sid: str):
+        """活图视角问「这个 thread 是不是停在 interrupt 上」，是则回它的 payload（ask_human 的问题或待批项）。
+
+        为什么必须问活图：`astream_events(v2)` 在 langgraph 1.2.11 下**不发** interrupt 事件
+        （实测事件名只有 `on_chain_start/stream/end`）。旧代码把落态押在 `_translate` 的
+        `on_interrupt` 分支上，那条分支永不触发 → 停在待批处的会话被写成 `finished`、
+        `graphs` 被 pop、审批卡也进不了活流（前端只在切会话时 GET 一次，用户看不到新卡）。
+        A4 真模型那批（PLAN §2）取到的读数就是这条。graphs 已被清掉时按「没停」走 finished——
+        那种情况线程里没有待恢复的断点，误报 awaiting_human 反而会让 start/stop 卡住。"""
+        packed = self.graphs.get(sid)
+        if not packed:
+            return None
+        graph, config = packed
+        try:
+            state = await graph.aget_state(config)
+        except Exception:
+            return None
+        for task in getattr(state, "tasks", None) or ():
+            for intr in getattr(task, "interrupts", None) or ():
+                return intr.value
+        return None
+
+    def _park(self, sid: str, payload):
+        """停在待人工处的统一落态：`awaiting_human` + 把卡推给活流 + graph 留着供 resume。"""
+        self.store.update(sid, status=SessionStatus.awaiting_human)
+        item = payload.get("approval") if isinstance(payload, dict) else None
+        if item:
+            # 待批项是内核 gate 用 HSETNX 登记过的那条，这里只推给界面，不重复登记
+            self.bus.publish(sid, kind="approval", name="requested", value=item)
+        else:
+            question = payload.get("question", "") if isinstance(payload, dict) else str(payload)
+            self.bus.publish(sid, kind="ask_human", value=question)
+        self._publish_status(self.store.get(sid), "awaiting human input")
+        self._forget(sid, terminal=False)
+
+    async def _settle(self, sid: str):
         """事件流收口时的落态——**停在待人工处就不许写 finished**。
 
-        `_translate` 在 `on_interrupt` 里置了 `awaiting_human`（:434），而中断后
-        `astream_events` 是**正常结束**的，旧写法在 `_run`/`_resume` 两处各写一遍无条件
-        finished 把它抹掉（实测读数 `tests/s17::t1`）。界面靠 SSE 事件本地补一刀
-        （`stores/sessions.ts:414`）才没露馅，刷新一次 GET 就变「已完成」；而
-        `stop()` 的转发分支、`delete_session`/`start_session` 的 409 前提全建在这个字段上。
-        两条teardown 共用本出口，不再各写一遍。"""
-        cur = self.store.get(sid)
-        if cur is not None and cur.status == SessionStatus.awaiting_human:
-            # 断点在 checkpointer 里，graph 必须留着供 resume（_forget 的 docstring 同口径）
-            self._publish_status(cur, "awaiting human input")
-            self._forget(sid, terminal=False)
+        旧写法（A 项那次）读 `store.status == awaiting_human` 来判，而那个字段本来就是本函数要写的东西：
+        真正置它的那条路（`on_interrupt`）在生产里从不触发，于是判据恒假。现在改问活图。
+        两条 teardown（`_run`/`_resume`）共用本出口，不再各写一遍。"""
+        payload = await self._interrupt_payload(sid)
+        if payload is not None:
+            self._park(sid, payload)
             return
         session = self.store.update(sid, status=SessionStatus.finished, finished_at=_now())
         self._publish_status(session, "run completed")
@@ -424,7 +454,7 @@ class SessionRunner:
                 async for ev in team.astream_events(init, config, version="v2"):
                     self._translate(sid, ev)
 
-            self._settle(sid)
+            await self._settle(sid)
         except asyncio.CancelledError:                    # 必须 re-raise，否则僵尸协程
             session = self.store.update(sid, status=SessionStatus.stopped, finished_at=_now())
             self._publish_status(session, "stopped by user")
@@ -498,18 +528,11 @@ class SessionRunner:
                 self.bus.publish(sid, kind="report", block="Thought",
                                  uuid=f"stream-{node}", name="content",
                                  value=chunk.content, role=node)
-        elif kind == "on_interrupt":
-            q = ev.get("value")
-            payload = q[0] if isinstance(q, list) and q else q
-            self.store.update(sid, status=SessionStatus.awaiting_human)
-            item = payload.get("approval") if isinstance(payload, dict) else None
-            if item:
-                # 待批项是内核 gate 用 HSETNX 登记过的那条，这里只把它推给界面（不重复登记）
-                self.bus.publish(sid, kind="approval", name="requested", value=item)
-            else:
-                question = payload.get("question", "") if isinstance(payload, dict) else str(payload)
-                self.bus.publish(sid, kind="ask_human", value=question)
-            self._publish_status(self.store.get(sid), "awaiting human")
+        # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
+        # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
+        # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，
+        # 于是停在待批处的会话被 `_settle` 无条件写成 finished、graphs 被 pop、活流里也看不到卡。
+        # 落态与推卡统一改问活图：`_interrupt_payload()` → `_park()`。
 
     def _publish_status(self, session: Session, message: str = ""):
         """用量快照只读：token 与成本照实报，没有任何预算上限字段。"""
