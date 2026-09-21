@@ -1,7 +1,7 @@
 """S1 门禁：const + schema + document 的数据骨架自检。全部零成本、零联网。
 
 覆盖 docs/施工1-地基与运行时-S1-S3.md 规定的 8 条断言，另加 3 条本次改动的回归点：
-- MessageQueue 实例隔离（曾是类属性共享队列）
+- `MessageQueue` 不许复燃（C7 判定：本栈只有 LangGraph 状态与 Redis LIST 两条消息通道）
 - RunCodeContext 字段名对齐源 working_directory
 - 两种同名 Document 不串（schema.Document vs document.Document）
 
@@ -35,7 +35,6 @@ from codeharness.schema import (
     Document,
     Documents,
     Message,
-    MessageQueue,
     Plan,
     Resource,
     RunCodeContext,
@@ -198,24 +197,21 @@ def t7_repo_single_source():
 
 # ---------- 8. 本次修复的回归点 ----------
 def t8_regressions():
-    # 8a. 两个队列必须互不可见（曾是 _queue: Queue = Queue() 类属性共享）
-    q1, q2 = MessageQueue(), MessageQueue()
-    q1.push(Message(content="only-q1"))
-    if not q2.empty():
-        _fail("8a. MessageQueue 实例间串了——类属性共享队列又回来了")
-    if q1.empty() or q1.pop().content != "only-q1":
-        _fail("8a. q1 自身读写不通")
+    # 8a. `MessageQueue` 不复燃（C7 判定后删除，见 schema.py:506 的注释）。
+    #     它曾是"有 schema 无生产写入者/读者"的又一件——留着的代价不是 70 行代码，
+    #     是下一个人以为"进程内消息队列已经有了"，于是真通道永远不接。
+    import codeharness.schema as sch
+    if hasattr(sch, "MessageQueue"):
+        _fail("8a. MessageQueue 长回来了——要么接线（判据见 PLAN §2 C7）要么删干净，别拿半截当资产")
+    # 两台实体的行为平价与并发判据在 s7（那里有 Redis），这里只钉"别多第三条通道"
 
-    # 8b. 队列 dump 不消费 + load 还原
-    q = MessageQueue()
-    for i in range(3):
-        q.push(Message(content=f"m{i}"))
-    raw = asyncio.run(q.dump())
-    if q.empty() or len(q.pop_all()) != 3:
-        _fail(f"8b. dump 消费了队列: {raw}")
-    q3 = MessageQueue.load(raw)
-    if [m.content for m in q3.pop_all()] != ["m0", "m1", "m2"]:
-        _fail("8b. MessageQueue.load 顺序或内容不对")
+    # 8b. 插话通道的接口平价：进程内与 Redis 两台同名同签名（route 只认这一套）
+    from codeharness.runtime import ChatQueue
+    q = ChatQueue()
+    q.enqueue("追问 A", "PM")
+    q.enqueue("追问 B")
+    if q.drain() != [("追问 A", "PM"), ("追问 B", "")] or q.drain() != []:
+        _fail("8b. ChatQueue 的 drain 语义变了（route 的插话分支按这个形状写）")
 
     # 8c. 上下文字段名与源逐字对齐
     if "working_directory" not in RunCodeContext.model_fields:
@@ -388,7 +384,7 @@ def main():
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS1 门禁全部通过：{len(checks)} 组断言（消息往返 / 两态 instruct / cause_by 不覆盖 / "
-          f"Plan 拓扑与级联 / 路由常量收口 / RepoName 单源 / 队列实例隔离 / 上下文对齐源字段 / "
+          f"Plan 拓扑与级联 / 路由常量收口 / RepoName 单源 / 插话通道 drain 语义与不复燃 / 上下文对齐源字段 / "
           f"双同名 Document / parse_resources / 平台自有类型 / document 编码配对与 eda 降级 / "
           f"BaseSerialization 多态与 forbid）")
 

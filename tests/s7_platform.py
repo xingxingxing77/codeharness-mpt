@@ -9,8 +9,11 @@
 - 测试键固定 db=15，开跑前清库：绝不碰开发库（开发 server 用 db=0）。
 """
 import asyncio
+import inspect
 import json
+import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from codeharness.configs.settings import RedisConfig, settings
@@ -62,7 +65,37 @@ def t1_inproc_roundtrip():
         cq = ChatQueue()
         cq.enqueue("插话", "PM")
         assert cq.drain() == [("插话", "PM")] and cq.drain() == []
-        _ok("t1", "进程内 store/bus/chatqueue 往返正常（feature flag 关=默认路，S1–S6 自测据此零容器）")
+        # C7：一边有人投一边有人取，**一条都不许丢**。route 每轮 drain，而 HTTP 线程随时 enqueue，
+        # 旧写法是「快照 list(deque) → clear()」两步——中间到达的那条被 clear 一起抹掉，
+        # 用户点了「追问」而系统一个字都不说。新写法逐条 get_nowait，取走即消费，没有那个窗口。
+        hot, got, stop = ChatQueue(), [], threading.Event()
+
+        def _drain():
+            while not stop.is_set():
+                got.extend(hot.drain())
+        # 线程切换间隔压到 1µs：不压的话「快照→清空」那个窗口在 CPython 上很难撞上，
+        # 这条判据就变成偶尔红的运气测试（反向验证实测：默认间隔下旧写法 3 次里过 2 次）。
+        # ⚠ 别写成 `a, sys.setswitchinterval = ...`——那句会把函数本身换成 1e-6（本门禁第一版就中了）。
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            watcher = threading.Thread(target=_drain, daemon=True)
+            watcher.start()
+            for i in range(500):
+                hot.enqueue(f"插话{i}", "PM")
+            stop.set()
+            watcher.join(timeout=10)
+            got.extend(hot.drain())
+        finally:
+            sys.setswitchinterval(old_interval)
+        assert len(got) == 500 and sorted(got) == sorted([(f"插话{i}", "PM") for i in range(500)]), (
+            f"插话通道丢/重了：投 500 收 {len(got)}（两步 drain 的窗口就是这里，别改回去）")
+        # 结构判据兜底：行为那格再密也不是 100%，而「快照 + 清空」这个形状本身可以直接禁。
+        # 只看 `drain` 的函数体——类 docstring 里就抄着旧写法长什么样，拿整类源码判会自己判自己。
+        src = inspect.getsource(ChatQueue.drain)
+        assert "get_nowait" in src and "clear" not in src, (
+            "ChatQueue.drain 又退回「先快照再 clear」的两步写法了——那正是 C7 修的丢消息")
+        _ok("t1", "进程内 store/bus/chatqueue 往返正常 + 插话边投边取不丢（feature flag 关=默认路）")
     finally:
         ss.SESSIONS_FILE = keep
 

@@ -167,7 +167,6 @@ def t10_env_entry_arms_the_gate():
     """
     import os
 
-    from codeharness.configs.compress_msg_config import CompressType as CT
     from codeharness.configs.settings import Settings
     import codeharness.configs.settings as settings_mod
     from codeharness.provider.gateway import LLMGateway
@@ -185,11 +184,15 @@ def t10_env_entry_arms_the_gate():
         os.environ["LLM__CONTEXT_LENGTH"] = "3000"
         os.environ["LLM__COMPRESS_TYPE"] = "pre_cut_by_token"
         armed = Settings()
-        assert armed.llm.context_length == 3000 and armed.llm.compress_type == CT.PRE_CUT_BY_TOKEN,             f"env 没落到 settings.llm：{armed.llm.context_length} / {armed.llm.compress_type}"
+        pair = (armed.llm.context_length, armed.llm.compress_type.value)
+        assert pair == (3000, "pre_cut_by_token"), f"env 没落到 settings.llm：{pair}"
         with patch.object(settings_mod, "settings", armed):
-            assert LLMGateway(cfg=None, cost_manager=None).cfg.context_length == 3000,                 "网关没吃 settings.llm——配置写在 .env 里也白写"
+            armed_gw = LLMGateway(cfg=None, cost_manager=None)
+            assert armed_gw.cfg.context_length == 3000, "网关没吃 settings.llm——配置写在 .env 里也白写"
             swapped = _make_llm(None, {"model": "some-other-model"})
-            assert swapped.cfg.model == "some-other-model" and swapped.cfg.context_length == 3000,                 "会话换模型把压缩配置丢了（override 必须只改 model，其余原样带过去）"
+            assert swapped.cfg.model == "some-other-model", "会话换模型没生效"
+            assert swapped.cfg.context_length == 3000, \
+                "会话换模型把压缩配置丢了（override 必须只改 model，其余原样带过去）"
         print(f"✅（3000/pre_cut_by_token 开门；换成 {swapped.cfg.model} 后预算仍是 "
               f"{swapped.cfg.context_length}）")
     finally:

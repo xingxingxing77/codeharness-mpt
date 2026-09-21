@@ -5,7 +5,7 @@
 来源：metagpt/schema.py 逐符号对齐——SerializationMixin(:72) / SimpleMessage(:133) /
 Document(:138) / Documents(:194) / Resource(:224) / Message(:232) / UserMessage(:419) /
 SystemMessage(:429) / AIMessage(:439) / Task(:457) / TaskResult(:480) / Plan(:496) /
-MessageQueue(:713) / BaseContext(:789) / 六上下文(:797-857)。
+BaseContext(:789) / 六上下文(:797-857)。
 新栈自有：TeamState / Command / instruct_schema 字段。
 
 两处**有意偏差**（改动会波及整个 Action 层，故显式登记）：
@@ -20,13 +20,12 @@ import json
 import os
 import uuid
 from abc import ABC
-from asyncio import Queue, QueueEmpty, wait_for
 from datetime import datetime
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Type, TypeVar, Union
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, create_model, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_serializer, field_validator
 
 from codeharness.const import (
     AGENT,
@@ -504,72 +503,12 @@ class Plan(BaseModel):
                                        instruction=new_instruction, assignee=new_assignee))
 
 
-# ---------------- 收件箱队列（源 schema.py:713-782） ----------------
-class MessageQueue(BaseModel):
-    """Message queue which supports asynchronous updates.
-
-    ⚠ 队列必须是 `PrivateAttr(default_factory=Queue)`：写成类属性 `_queue: Queue = Queue()`
-    会让**所有实例共用同一个队列**（此前正是这个写法，两个会话的消息会互串）。"""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    _queue: Queue = PrivateAttr(default_factory=Queue)
-
-    def pop(self) -> Optional[Message]:
-        try:
-            item = self._queue.get_nowait()
-            if item:
-                self._queue.task_done()
-            return item
-        except QueueEmpty:
-            return None
-
-    def pop_all(self) -> List[Message]:
-        ret = []
-        while True:
-            msg = self.pop()
-            if not msg:
-                break
-            ret.append(msg)
-        return ret
-
-    def push(self, msg: Message):
-        self._queue.put_nowait(msg)
-
-    def empty(self):
-        return self._queue.empty()
-
-    async def dump(self) -> str:
-        """序列化但**不消费**：取出→再回推。"""
-        if self.empty():
-            return "[]"
-        lst, msgs = [], []
-        try:
-            while True:
-                item = await wait_for(self._queue.get(), timeout=1.0)
-                if item is None:
-                    break
-                msgs.append(item)
-                lst.append(item.dump())
-                self._queue.task_done()
-        except asyncio.TimeoutError:
-            pass
-        finally:
-            for m in msgs:
-                self._queue.put_nowait(m)
-        return json.dumps(lst, ensure_ascii=False)
-
-    @staticmethod
-    def load(data) -> "MessageQueue":
-        queue = MessageQueue()
-        try:
-            for i in json.loads(data):
-                msg = Message.load(i)
-                if msg:
-                    queue.push(msg)
-        except JSONDecodeError:
-            pass
-        return queue
+# 源 schema.py:713-782 的 `MessageQueue` 在 C7 判定后**删除**（不是"待接线"）：本栈只有两条消息通道
+# ——图内走 LangGraph 状态（`_inbox` + `Send`，随 checkpointer 落盘、跨 worker 可恢复），
+# 跨进程插话走 `platforms/chat_queue.RedisChatQueue`（LIST）。进程内再摆一个 Message 队列两头不靠：
+# 它既不是恢复介质（重启即空）也不是路由面（route 只认 Send）。当初唯一的"读者候选"
+# `runtime.ChatQueue` 装的是 (内容, 目标) 一对而非 Message，套上它只多一层编码解码——
+# 那条面上的真缺陷（两步 drain 丢消息）见 `runtime.py::ChatQueue` 的注释与 PLAN §2 C7。
 
 
 # ---------------- 上下文模型（源 schema.py:789-857） ----------------

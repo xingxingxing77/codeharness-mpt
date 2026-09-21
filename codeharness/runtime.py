@@ -1,7 +1,7 @@
 """运行时挂载点：ContextVar 三件套（沿用源项目 SESSION_ID/CURRENT_ROLE 的同款模式）。
 内核只读它们；server 在会话任务入口 set——包内保持零 fastapi 依赖。"""
 from contextvars import ContextVar
-from collections import deque, defaultdict
+from queue import Empty as QueueEmpty, Queue
 from pathlib import Path
 
 from codeharness.configs.settings import settings
@@ -46,16 +46,25 @@ def session_root(project: str | None = None) -> Path:
 
 
 class ChatQueue:
-    """每会话一个。runner 持有并暴露 enqueue；route 每轮 drain。"""
+    """每会话一个。runner 持有并暴露 enqueue；route 每轮 drain。
+
+    ⚠ 这里必须是**逐条取走**的队列，不能是「快照 + 清空」（C7 修的正是这个）：
+    旧写法 `out = list(deque)` 再 `deque.clear()`，这两步之间从 HTTP 线程 append 进来的那条
+    会被 clear 一起抹掉——用户点「追问」，消息没了、日志里一个字都没有。
+    `queue.Queue` 的 `put_nowait`/`get_nowait` 自带锁，取走即消费，没有那个窗口。
+    接口与 `platforms/chat_queue.RedisChatQueue` 同名同签名（enqueue/drain，同步）。"""
 
     def __init__(self, default_target: str = TEAMLEADER_NAME):
         self.default_target = default_target
-        self._q: dict[str, deque] = defaultdict(deque)
+        self._q: Queue = Queue()
 
     def enqueue(self, content: str, send_to: str = ""):
-        self._q["main"].append((content, send_to))
+        self._q.put_nowait((content, send_to))
 
     def drain(self) -> list[tuple[str, str]]:
-        out = list(self._q["main"])
-        self._q["main"].clear()
-        return out
+        out = []
+        while True:
+            try:
+                out.append(self._q.get_nowait())
+            except QueueEmpty:
+                return out
