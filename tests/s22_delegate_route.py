@@ -1,6 +1,6 @@
-"""S22 门禁（C1-② 委派载体）：队长的任务真的落到成员节点上，而且只落到该落的那个人身上。
+"""S22 门禁（C1-②/②b 委派与回报）：队长的任务真的落到成员节点上，成员的回报真的回到队长身上。
 
-钉五件事：
+钉七件事：
   t1 拆包 + 定向：`_wire_delegation` 把聚合件拆成「一人一条」，route 按**载荷自己的** send_to 收窄。
      不收窄就是 cartesian：两名成员会互相收到对方的任务（本文件最容易写错的一格）。
   t2 真图端到端：`dynamic_assembly` 三角色 + 真 `build_team`，队长脚本调
@@ -12,6 +12,12 @@
   t4 没名册不委派：registry 直建的单人队长（`teammates` 空）→ `[已忽略]`，既不抛也不投。
   t5 收窄只作用于装配器产出的载荷：原始消息即使具名，SOP 目标仍一并收到——钉住「我只改了拆包后的
      寻址」，经典线 `RunCode`→`{"Engineer"}` 那一路行为不许变。
+  t6 回报通路（②b）：Alice 的产出**定向回到派活给她的那个人**、队长的计划没被这条回报清掉、
+     他能 `Plan.finish_current_task`、回报原文进了他第二跑的模型请求。她的「汇报」与「收尾」刻意分两轮
+     ——旧写法（只读最后一轮 results）在这格必红，已做反向验证（content 掉成「收工」）。
+  t7 委派↔回报死循环的刹车：队长无视回报反复重派 → `team_rounds` 到档干净散会，不烧到 recursion_limit
+     把整场打成 failed。**对照组是判据的一部分**：同剧本把 `recursion_limit` 压到 12 必须真抛
+     `GraphRecursionError`，否则「它停下来了」可能只是因为剧本根本不循环（本仓反复踩过的空转判据）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -115,11 +121,15 @@ def t2_real_graph():
     assert bob_llm.calls == [], f"Bob 不该被唤醒，实际调了 {len(bob_llm.calls)} 次"
     delegated = [s for s in stats if s["cause_by"] == RequirementTag.RUN_COMMAND]
     woke = [s for s in delegated if s["activated"]]
-    assert len(woke) == 1 and woke[0]["activated"] == 1, \
-        f"整场只该有一次、且只唤醒一个节点的激活：{stats}"
-    assert out["messages"][-1].content.endswith("PRD 已写入产物仓"), \
-        f"会话没收在 Alice 的回报上：{out['messages'][-1].content!r}"
-    print(f"  ok  t2 真图：队长→Alice 激活 1 个节点、指令原文进了她的请求；Bob 零调用；stats={stats}")
+    # ②b 起这条链是两跳：队长的委派唤醒 Alice 一次、Alice 的回报再唤醒队长一次——各只 1 个节点
+    assert len(woke) == 2 and all(s["activated"] == 1 for s in woke), \
+        f"两跳来回每跳都该只唤醒 1 个节点：{stats}"
+    assert any(m.instruct_schema == "TeamReport" and m.send_to == {TEAMLEADER_NAME}
+               for m in out["messages"]), "Alice 干完没向派活的队长回报（通路见 t6）"
+    reports = [m for m in out["messages"] if m.instruct_schema == "TeamReport"]
+    assert reports[0].content.endswith("PRD 已写入产物仓"), \
+        f"回报内容不是她那句汇报：{reports[0].content!r}"
+    print(f"  ok  t2 真图：队长→Alice 定向激活、指令原文进了她的请求、Alice 的回报回到队长；Bob 零调用；stats={stats}")
 
     # 一次点名两名：outbox 聚合 → 拆包 → 两条 Send，各自拿到自己的指令（源「create all tasks at once」）
     agents2, sop2 = dynamic_assembly(FakeLLM([]))
@@ -210,13 +220,100 @@ def t5_original_message_not_narrowed():
     print("  ok  t5 原始消息不收窄（SOP 目标照旧一并收到）——收窄只在拆包后的载荷上")
 
 
+def _team(leader_script, alice_script, bob_script=None):
+    """真图 + 每角色独立剧本（三个 RoleZero 共用一个 llm 会把剧本吃串，所以各自换掉）"""
+    from codeharness.const import TEAMLEADER_NAME
+    from codeharness.team import dynamic_assembly
+    agents, sop = dynamic_assembly(FakeLLM([]))
+    llms = {TEAMLEADER_NAME: FakeLLM(leader_script), "Alice": FakeLLM(alice_script),
+            "Bob": FakeLLM(bob_script or [_think("结束", [{"command_name": "end", "args": {}}])])}
+    for name, llm in llms.items():
+        agents[name].llm = llm
+        agents[name].ltm = None
+    return agents, sop, llms
+
+
+PLAN_CMD = {"command_name": "Plan.append_task",
+            "args": {"task_id": "t1", "dependent_task_ids": [], "instruction": "写一份 PRD",
+                     "assignee": "Alice"}}
+PUBLISH = _publish("照需求写一份 PRD，中文，落到产物仓", "Alice")
+REPLY = {"command_name": "RoleZero.reply_to_human", "args": {"content": "PRD 已写入产物仓"}}
+FINISH = {"command_name": "Plan.finish_current_task", "args": {}}
+END = {"command_name": "end", "args": {}}
+
+
+async def t6_report_path():
+    """成员干完 → 回报进队长 → 队长的计划活着、能 finish_current_task（C1-②b 的全部意义）"""
+    from codeharness.const import TEAMLEADER_NAME
+    agents, sop, llms = _team(
+        [_think("先立计划再派活", [PLAN_CMD, PUBLISH]), _think("等回报", [END]),
+         _think("成员做完了，收口这一步", [FINISH, END])],
+        # 汇报与收尾**分两轮**：只读最后一轮的旧写法会把她那句 PRD 蒸发成第二轮的「收工」，
+        # 旧代码在这条断言上必红——这就是 t6 的判据所在
+        [_think("写完了", [REPLY]), _think("收工", [END])],
+        [_think("不该轮到我", [END])])
+    stats = []
+    graph = build_team(agents, sop=sop, stats=stats)
+    out = await graph.ainvoke(
+        {"messages": [Message(content="做一个命令行待办工具", role="user",
+                              cause_by=RequirementTag.USER_REQUIREMENT)],
+         "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False},
+        {"configurable": {"thread_id": "s22t6"}})
+
+    reports = [m for m in out["messages"] if m.instruct_schema == "TeamReport"]
+    assert len(reports) == 1 and reports[0].send_to == {TEAMLEADER_NAME} \
+        and reports[0].sent_from == "Alice", f"回报没投回队长：{[(r.sent_from, r.send_to) for r in reports]}"
+    assert "PRD 已写入产物仓" in reports[0].content, \
+        f"回报内容不是她那句汇报（跨轮次取 reply 的修法没生效）：{reports[0].content!r}"
+    leader = agents[TEAMLEADER_NAME]
+    assert leader.plan is not None and leader.plan.tasks, "回报把队长的计划清掉了（新任务判定漏了 is_report）"
+    assert leader.plan.tasks[0].is_finished, f"队长没能 finish_current_task：{leader.plan.tasks[0]}"
+    assert leader._report_to == "", "队长收到回报后又把回报回投给成员=活循环的引子"
+    flat = [m for call in llms[TEAMLEADER_NAME].calls for m in (call if isinstance(call, list) else [call])]
+    joined = " ".join(getattr(m, "content", str(m)) for m in flat)
+    assert "[Alice 的回报]" in joined, "回报没进队长的模型上下文"
+    assert llms["Bob"].calls == [], f"Bob 被无关唤醒了 {len(llms['Bob'].calls)} 次"
+    woke = [s for s in stats if s["activated"]]
+    assert len(woke) == 3 and all(s["activated"] == 1 for s in woke), f"来回里的激活不精准：{stats}"
+    print(f"  ok  t6 回报通路：Alice→队长定向送达、队长计划存活并 finish、"
+          f"三次激各活 1 个节点、Bob 零调用（stats={stats}）")
+
+
+async def t7_pingpong_brake():
+    """队长无视回报反复重派 → 必须靠 team_rounds 刹车散会，而不是烧到 recursion_limit 把整场打成 failed。
+    剧本刻意只给一条回复：FakeLLM 耗尽后重复最后一条，于是「派活→收口」与「汇报→收口」每轮都重演，
+    形成真·委派↔回报死循环。阳性对照：同一剧本把 recursion_limit 压到 12（刹车要 12 个来回≈24 超步才生效）
+    → 必须真抛 GraphRecursionError，证明这条判据不是「本来就停得下来」。"""
+    from langgraph.errors import GraphRecursionError
+    agents, sop, llms = _team([_think("再派一次", [PUBLISH, END])], [_think("做完了", [REPLY, END])])
+    graph = build_team(agents, sop=sop)
+    init = {"messages": [Message(content="做个工具", role="user",
+                                 cause_by=RequirementTag.USER_REQUIREMENT)],
+            "memories": {}, "round": 0, "debug_rounds": 0, "team_rounds": 0, "finished": False}
+    try:
+        await graph.ainvoke(init, {"configurable": {"thread_id": "s22t7control"},
+                                   "recursion_limit": 12})
+    except GraphRecursionError:
+        pass
+    else:
+        raise AssertionError("对照组没能把 recursion_limit 撞出来——这个剧本根本不循环，判据是空转")
+    out = await graph.ainvoke(init, {"configurable": {"thread_id": "s22t7"}})
+    assert out["team_rounds"] >= 12, f"刹车没到档就散了：team_rounds={out['team_rounds']}"
+    cycles = sum(1 for m in out["messages"] if m.instruct_schema == "TeamReport")
+    assert cycles >= 5, f"来回数对不上刹车档位：report×{cycles}"
+    print(f"  ok  t7 死循环刹车：对照组真撞 recursion_limit、实验组 {out['team_rounds']} 档"
+          f"（{cycles} 个委派-回报来回）后正常散会，会话没被打成 failed")
+
+
 def main():
     t1_split_and_target()
     t2_real_graph()
     t3_wrong_name_heals()
     t4_no_roster_refuses()
     t5_original_message_not_narrowed()
-    print("\ns22_delegate_route: 5/5 全绿")
+    asyncio.run(t6_report_path())
+    asyncio.run(t7_pingpong_brake())
+    print("\ns22_delegate_route: 7/7 全绿")
     return 0
 
 

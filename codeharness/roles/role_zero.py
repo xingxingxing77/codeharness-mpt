@@ -75,6 +75,7 @@ class RoleZero:
         # 会把整场已烧的用量陪葬——模型写错名字是常态，不是编程错误）。
         self.teammates: dict[str, str] = {}
         self._outbox: list[tuple[str, str]] = []    # [(任务指令, 成员名)]，as_node 收口时发成 Send
+        self._report_to = ""                        # 委派我的人，干完就向他回报（C1-②b）
 
     PLAN_COMMANDS = {   # 源 :121-124 的 Plan 命令面
         "Plan.append_task": "append_task", "Plan.reset_task": "reset_task",
@@ -359,8 +360,16 @@ class RoleZero:
             from codeharness.report import set_role
             set_role(name)                      # 报道事件的 role 字段
             inbox = state.get("_inbox") or []
-            task = inbox[-1].content if inbox else "continue"
-            if task != "continue":
+            incoming = inbox[-1] if inbox else None
+            # 回报（成员→队长）不是新任务：清了计划，队长就没法 finish_current_task 了。
+            # 委派出去的载荷不带这个标记（_wire_delegation 只留 content/sent_from），仍按新任务走。
+            is_report = incoming is not None and incoming.instruct_schema == "TeamReport"
+            task = incoming.content if incoming else "continue"
+            if is_report:
+                self.memory.add(Message(content=f"[{incoming.sent_from} 的回报] {task}", role="user",
+                                        sent_from=incoming.sent_from,
+                                        cause_by=RequirementTag.RUN_COMMAND))
+            elif task != "continue":
                 # 新任务→旧计划作废（源：每任务 planner 重立）；"continue" 保计划续跑。
                 # ⚠ 任务必须进 self.memory：_context_messages 只从记忆取材，think 的 prompt 里没有
                 # 任务文本——不装则模型上下文根本没有需求（S9.1 对照首跑实测：真模型第一条思考
@@ -369,6 +378,9 @@ class RoleZero:
                 self._plan_goal = task
                 self.memory.add(Message(content=task, role="user", sent_from="user",
                                         cause_by=RequirementTag.USER_REQUIREMENT))
+                # 谁派给我的，我就向谁回报（源 MGXEnv 靠全员广播让队长自己看见；本仓 `<all>` 刻意
+                # 不广播，所以指名回报。`sent_from=="user"` 时不回报——那本来就是用户直接递的活）。
+                self._report_to = incoming.sent_from if incoming.sent_from not in ("", "user", name) else ""
                 if self.plan_fn is not None:
                     # 批次1：ToT 等外部规划器——先树搜索出择优路径，写进记忆供 think 取材（源 ToT 无角色
                     # 消费者，本仓把它接到 RoleZero 首轮规划这一真实接缝上）
@@ -381,17 +393,25 @@ class RoleZero:
                         logger.warning(f"plan_fn({type(self.plan_fn).__name__}) 失败，退回无规划: {type(e).__name__}: {e}")
             sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
                                        "respond_language": "中文", "finished": False})
-            results = sub["history"][-1]["results"] if sub["history"] else []
-            reply = next((r["result"] for r in results if r["name"] == "RoleZero.reply_to_human"), None)
-            content = reply or (sub["history"][-1]["thought"] if sub["history"] else "done")
+            turns = sub["history"] or []
+            # `reply_to_human` 可能在任意一轮（模型常是「先汇报、再 end」），只读最后一轮会把成员
+            # 干完活的那句话蒸发在收尾 thought 里（实测：给成员排两轮脚本，黑板收到的是第二轮的「收工」）
+            reply = next((r["result"] for t in reversed(turns) for r in reversed(t.get("results") or [])
+                          if r["name"] == "RoleZero.reply_to_human"), None)
+            content = reply or (turns[-1]["thought"] if turns else "done")
+            to, self._report_to = self._report_to, ""
             msgs = [Message(content=content, role="assistant",
-                            cause_by=RequirementTag.RUN_COMMAND, sent_from=name)]
+                            cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                            send_to={to} if to else None,
+                            instruct_schema="TeamReport" if to else "")]
             # ---- 委派聚合件（C1-②）：源 publish_team_message 一次一发，本仓一次节点运行攒一摞，
             # 交给 team_graph 的 `_wire_delegation` 拆成「一人一条」再 Send。投给自己不算委派（源同）。
             deleg = [(c, m) for c, m in self._outbox if m != name]
             self._outbox = []
             if deleg:
                 # 顺序有讲究：route() 只读 state["messages"][-1]，聚合件必须排在最后一条。
+                # ponytail: 同一轮既委派又回报时，只有排最后的那条被路由（本仓一次超步只投递一条消息）；
+                # 上限=队长自己不收成员回报，要同轮双投递得让 route 改读「本超步新增的全部消息」。
                 msgs.append(Message(content="\n".join(f"→ {m}: {c[:120]}" for c, m in deleg),
                                     role="user", cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
                                     send_to={m for _, m in deleg},

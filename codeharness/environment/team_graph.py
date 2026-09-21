@@ -33,6 +33,7 @@ class TeamState(TypedDict):
     memories: Annotated[dict, merge_dicts]         # 每角色私有记忆（checkpointer 持久化）
     round: int
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）
+    team_rounds: int                               # 委派↔回报来回上限（C1-②b，防队长-成员活循环）
     finished: bool
 
 
@@ -191,6 +192,12 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
             return END                                 # 无订阅者且无插话 = 散会
         if last.cause_by == RequirementTag.DEBUG_ERROR and state.get("debug_rounds", 0) >= 3:
             return END                                 # 修复回路上限，防 QA↔Engineer 死循环（计数见 router 节点）
+        # 委派↔回报来回上限（C1-②b）：模型若无视「成员已做完」反复重派同一件事，让它干净散会，
+        # 而不是烧到 recursion_limit=60 把整场会话打成 failed（debug_rounds 同一套道理）。
+        # 12 = 6 个来回，够源 TL 四步 SOP（PRD→设计→任务→代码）各走一遍还有余。
+        if getattr(last, "instruct_schema", "") in ("TeamDelegation", "TeamReport") \
+                and state.get("team_rounds", 0) >= 12:
+            return END
         return sends
 
     return route
@@ -219,9 +226,13 @@ def build_team(agents: dict, checkpointer=None, sop: dict | None = None, stats: 
         last = msgs[-1] if msgs else None
         if last is None:
             return {}
+        out = {}
         if MESSAGE_ROUTE_TO_SELF in last.send_to or last.cause_by == RequirementTag.DEBUG_ERROR:
-            return {"debug_rounds": state.get("debug_rounds", 0) + 1}
-        return {}
+            out["debug_rounds"] = state.get("debug_rounds", 0) + 1
+        # 委派与回报各算一次来回（聚合件的标记在拆包前，回报标记在消息本身上）
+        if getattr(last, "instruct_schema", "") in ("TeamDelegation", "TeamReport"):
+            out["team_rounds"] = state.get("team_rounds", 0) + 1
+        return out
 
     g.add_node("router", router)
     for name, agent in agents.items():
