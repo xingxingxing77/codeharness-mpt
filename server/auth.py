@@ -1,11 +1,16 @@
 """N1 账号边界（施工4 S8 新增的欠账）：用户存储 + token + FastAPI 依赖。
 
-开关语义：`PLATFORM__AUTH` 默认 **关**——单机开发态现状不变（15 个门禁零破坏）；
+开关语义：`PLATFORM__AUTH_ENABLED` 默认 **关**——单机开发态现状不变（15 个门禁零破坏）；
 置 1 时除 /api/health 与 /api/auth/* 外全部要求 Bearer token，session/记忆/配额按 user_id 隔离。
+（⚠ 不是 `PLATFORM__AUTH`：settings 走 `env_nested_delimiter="__"`，段名必须等于字段名，
+ 实测 `PLATFORM__AUTH=1` 打不开、`PLATFORM__AUTH_ENABLED=1` 才生效。2026-09-21 现取。）
 
 - 用户表 `server/data/users.json`：pbkdf2_hmac（每用户独立盐），首用户注册即建——单机平台无邀请制。
 - token 进程内 dict + 7 天 TTL：重启重登，可接受。ponytail 上限：多 worker 部署时 token 不跨进程，
-  nginx 轮询会 401——升级路径=token 存 redis（chat_factory 同款注入）。
+  nginx 轮询会 401——升级路径=token 存 redis（chat_factory 同款注入）。同族还有两条进程内状态：
+  登录失败计数（`_login_fails`，多 worker 下阈值实为 5×N）与 users.json 的读-改-写（`_USERS_LOCK`
+  是线程锁，跨进程不互斥 → 并发注册会丢账号）。三条的边界表与「提 --workers 前必须先做什么」
+  记在 `docs/前端/接口契约.md` §5.1。
 - 隔离边界如实记：auth 只做**可见性**隔离（列表/读取/操作按 user 过滤），不做文件系统级隔离——
   workspace 目录仍按 project_name 平铺，同 project_name 跨用户在 create 时 409 拒绝（产物目录冲突）。
 """
