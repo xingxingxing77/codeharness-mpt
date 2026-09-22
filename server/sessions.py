@@ -73,8 +73,8 @@ class SessionStore:
         if self.path.exists():
             for item in json.loads(self.path.read_text(encoding="utf-8")):
                 s = Session(**item)
-                if s.status in (SessionStatus.running, SessionStatus.awaiting_human):
-                    s.status = SessionStatus.stopped      # 服务重启自愈
+                if s.status == SessionStatus.running:
+                    s.status = SessionStatus.stopped      # 重启自愈只抹 running；awaiting_human 是可信驻留态，跨进程能恢复（C18①，与 RedisSessionStore.heal_running 同口径）
                 self._sessions[s.id] = s
             self._persist()
 

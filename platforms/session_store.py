@@ -123,11 +123,13 @@ class RedisSessionStore:
         self.r.hset(KEY.format(sid), "cost", json.dumps(cost, ensure_ascii=False))
 
     def heal_running(self):
-        """服务重启自愈（与进程内实现同一语义）：running/awaiting_human 的残态改 stopped。
-        多 worker 时只应在启动时跑一次（lifespan 装配处）。"""
+        """服务重启自愈：**只**把 running 的残态改 stopped（C18①，与进程内实现同口径）。
+        awaiting_human 不动：那是可信驻留态——卡仍在 ch:appr:{sid}（30 天 TTL）、断点在持久化 checkpointer 里，
+        新进程按同一 thread_id 重建图就能续上（`runner._ensure_graph`），所以自愈无权替用户放弃这一场（C18① 实测：
+        跨进程 respond 真把动作跑完）。多 worker 时只应在启动时跑一次（lifespan 装配处）。"""
         for sid in self.r.zrange(INDEX, 0, -1):
             st = self.r.hget(KEY.format(sid), "status")
-            if st in (SessionStatus.running.value, SessionStatus.awaiting_human.value):
+            if st == SessionStatus.running.value:
                 self.r.hset(KEY.format(sid), "status", SessionStatus.stopped.value)
 
     def import_legacy(self, json_path: Path) -> int:

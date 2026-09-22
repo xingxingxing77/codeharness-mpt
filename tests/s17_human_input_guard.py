@@ -15,6 +15,8 @@
   t5/t6 真图真 gate（A4 之后新增，零花费）：审批卡驻留四格 + 批准真写盘/拒绝零副作用。
   t7 C15：审批面只 police `self.tools` 里的真工具——`end`/`RoleZero.*` 这类零副作用特殊命令
      不许挂起（真跑台账里那张 `tool:'end'` 的卡），同时**正向对照** `write_file` 照旧挂起。
+  t8 C18①：启动自愈只抹 `running`；停在待批处的会话跨**进程**重启仍是可信驻留态且真能恢复
+     （t4–t7 全在一个进程里，`heal_running()` 这条启动路径一次都没被问过）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -275,16 +277,15 @@ def t4_breakpoint_settles_and_stops():
           f"对照组旧写法 {clobbered!r}、start 409 detail={detail!r}）")
 
 
-def _gate_runner(project: str, leader_script=None):
-    """真图 + 真 gate：FakeLLM 让队长只调一次需要审批的 `write_file`（零花费、零外网）。
+def _patch_gate_assembly(leader_script=None):
+    """把 dynamic 线三个角色的模型换成 FakeLLM 剧本（零花费、零外网），返回还原函数。
 
-    为什么必须有这两组：t1–t4 全打在替身图上，而 A4 真模型那批实测出
-    **`astream_events(v2)` 里没有 `on_interrupt` 这条事件**——替身喂得出的事件，生产发不出来，
-    于是「停在待批处被写成 finished、审批卡进不了活流」这个缺陷带着 s17 全绿活了很久（§0 硬约定 4）。
+    ⚠ 换的是 `codeharness.team.dynamic_assembly` 这个**模块属性**：`runner._prepare` 在调用时才
+    `from codeharness.team import dynamic_assembly`，绑到调用前取好的名字上就换不掉。
     `leader_script` 换队长的剧本（C15 要用「一上来就 end」那一格），默认就是 write_file → end。
+    队长第一跑的 `write_file` 参数与 t5/t6/t8 断言的文件名内容逐字绑定，改它要一起改。
     """
     import json
-    import shutil
     import codeharness.team as team
     from codeharness.const import TEAMLEADER_NAME
     from codeharness.provider.fake import FakeLLM
@@ -305,6 +306,19 @@ def _gate_runner(project: str, leader_script=None):
             agents[n].ltm = None
         return agents, sop
 
+    team.dynamic_assembly = patched
+    return lambda: setattr(team, "dynamic_assembly", orig)
+
+
+def _gate_runner(project: str, leader_script=None):
+    """真图 + 真 gate：队长只调一次需要审批的 `write_file`。
+
+    为什么必须有这两组：t1–t4 全打在替身图上，而 A4 真模型那批实测出
+    **`astream_events(v2)` 里没有 `on_interrupt` 这条事件**——替身喂得出的事件，生产发不出来，
+    于是「停在待批处被写成 finished、审批卡进不了活流」这个缺陷带着 s17 全绿活了很久（§0 硬约定 4）。
+    """
+    import shutil
+    restore = _patch_gate_assembly(leader_script)
     tmp = Path(tempfile.mkdtemp())
     store = SessionStore(path=tmp / "sessions.json")
     runner = SessionRunner(store, SessionEventBus())
@@ -312,11 +326,10 @@ def _gate_runner(project: str, leader_script=None):
     async def none():
         return None
     runner._saver = none
-    team.dynamic_assembly = patched
     s = store.create("写一个文件", project_name=project, paradigm="dynamic", permission="readonly")
 
     def cleanup():
-        team.dynamic_assembly = orig
+        restore()
         shutil.rmtree(Path("workspace") / project, ignore_errors=True)
         shutil.rmtree(tmp, ignore_errors=True)
     return store, runner, s, cleanup
@@ -481,17 +494,205 @@ def t7_special_commands_never_park():
         cleanup2()
 
 
+# ---------------- t8（C18①）：启动自愈不许放弃停在待批处的那一场 ----------------
+def _sandbox_db():
+    """门禁的会话态钉在 db15（PLAN §0 环境铁律：db0 一个键都不读写），与 s7 的 `TEST_DB` 同一条。"""
+    from codeharness.configs.settings import RedisConfig, settings
+    return RedisConfig(host=settings.redis.host, port=settings.redis.port, db=15)
+
+
+def _purge(sid: str):
+    """自起的键自己收口。手工删键绕过了 API 的删除路径，`ch:index` 的成员得自己 ZREM（ADR-07 的补法）。"""
+    import redis
+    from platforms.session_store import INDEX
+    r = redis.Redis.from_url(_sandbox_db().to_url(), decode_responses=True)
+    ks = [k for k in r.scan_iter("*") if sid in k]
+    if ks:
+        r.delete(*ks)
+    r.zrem(INDEX, sid)
+
+
+def _worker(phase: str, root: Path, project: str, sid: str = "") -> dict:
+    """t8 第二格必须跨**进程**：单进程里「启动自愈」和「重启后重建图」两件事一件都发生不了。
+
+    `park` = 真图真 gate 挂出审批卡后进程退出（=服务死掉）；`resume` = 全新进程 `create_app()`
+    （启动期真跑自愈）走真 HTTP 面把它恢复掉。两个进程都把 `WORKSPACE_ROOT` 指到 tmp，断点因此
+    落在 `<root>/storage/checkpoints.db`——与生产 `default_checkpoint_path` 同一个形状，跑完随 tmp 没。
+    （产物目录 `workspace/<project>` 是工具层按 cwd 算的，跟 t5/t6 一样另清。）
+    """
+    import server.settings as srv_settings
+    from codeharness.configs.settings import settings
+    settings.platform.use_redis = True
+    root.mkdir(parents=True, exist_ok=True)
+    srv_settings.WORKSPACE_ROOT = root        # `runner._saver` 调用时才读这个属性，改这里就改了断点位置
+    restore = _patch_gate_assembly()
+    try:
+        if phase == "park":
+            from platforms.event_store import RedisEventBus
+            from platforms.session_store import RedisSessionStore
+            from server.runner import SessionRunner
+            db = _sandbox_db()
+            store, bus = RedisSessionStore(db), RedisEventBus(db)
+            runner = SessionRunner(store, bus)
+
+            async def go():
+                bus.start()
+                s = store.create("写一个文件", project_name=project, paradigm="dynamic",
+                                 permission="readonly")
+                runner.start(s)
+                status = "timeout"
+                for _ in range(600):                       # 60s 还不收口就是挂了，别把门禁一起卡住
+                    await asyncio.sleep(0.1)
+                    status = store.get(s.id).status.value
+                    if status not in ("created", "running"):
+                        break
+                from codeharness.environment.checkpoint import close_all
+                await close_all()                         # 断点得真写进 sqlite 文件，WAL 不能留在将死的进程里
+                await bus.aclose()
+                return {"sid": s.id, "parked": status}
+            return asyncio.run(go())
+
+        import time
+        import server.app as sa
+        sa.WORKSPACE_ROOT = root                          # create_app 的 mkdir/静态挂载在建 app 时读它
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        target = Path("workspace") / project / "probe.txt"
+        out: dict = {}
+        with TestClient(create_app()) as c:
+            out["after_boot"] = c.get(f"/api/sessions/{sid}").json()["status"]
+            appr = c.get(f"/api/sessions/{sid}/approvals").json()
+            out["pending"] = len(appr["pending"])
+            if not appr["pending"]:
+                return out                                # 没有卡就没资格谈恢复
+            aid = appr["pending"][0]["id"]
+            r = c.post(f"/api/sessions/{sid}/approvals/{aid}/respond", json={"outcome": "allowed-once"})
+            out["respond"] = r.status_code
+            out["ok"] = r.json().get("ok") if r.status_code == 200 else None
+            final = ""
+            for _ in range(600):
+                time.sleep(0.1)
+                if "file" not in out and target.exists():
+                    out["file"] = target.read_text(encoding="utf-8").strip()
+                final = c.get(f"/api/sessions/{sid}").json()["status"]
+                if "file" in out and final in ("finished", "failed", "stopped"):
+                    break                                 # 等的是**结果**，不是状态翻转（t6 同一课）
+            out["final"] = final
+        return out
+    finally:
+        restore()
+
+
+def _t8a_self_heal_only_touches_running():
+    """格① 两处启动自愈都只抹 running。
+
+    它们是两份代码（Redis 的 `RedisSessionStore.heal_running()` / 进程内 `SessionStore.__init__`
+    重载时的自愈），只钉一份另一份会漂。其中 `running → stopped` 那半是**阳性对照**：
+    自愈不许整个失效，否则这条判据恒绿。
+    """
+    import shutil
+    from platforms.session_store import RedisSessionStore
+    tmp = Path(tempfile.mkdtemp()) / "sessions.json"
+    st = RedisSessionStore(_sandbox_db())
+    a = st.create("自愈该抹", project_name="s17_c18_run")
+    b = st.create("自愈不该抹", project_name="s17_c18_park")
+    try:
+        st.update(a.id, status=SessionStatus.running)
+        st.update(b.id, status=SessionStatus.awaiting_human)
+        st.heal_running()
+        assert st.get(a.id).status == SessionStatus.stopped, \
+            f"格①阳性对照不成立：running 没被自愈（{st.get(a.id).status.value!r}）——这条判据抓不到任何东西"
+        assert st.get(b.id).status == SessionStatus.awaiting_human, \
+            f"格①失效：`heal_running()` 把待批会话抹成了 {st.get(b.id).status.value!r}（C18①）"
+
+        s0 = SessionStore(path=tmp)
+        x = s0.create("自愈该抹", project_name="s17_c18_run")
+        y = s0.create("自愈不该抹", project_name="s17_c18_park")
+        s0.update(x.id, status=SessionStatus.running)
+        s0.update(y.id, status=SessionStatus.awaiting_human)
+        s1 = SessionStore(path=tmp)                        # 重新加载同一份 JSON 就是「重启」
+        assert s1.get(x.id).status == SessionStatus.stopped, "格①失效：进程内 store 不再抹 running，两条实现漂了"
+        assert s1.get(y.id).status == SessionStatus.awaiting_human, \
+            f"格①失效：进程内 `SessionStore.__init__` 把待批抹成了 {s1.get(y.id).status.value!r}（与 Redis 版同罪）"
+        print("  ok  t8 格①两处自愈只抹 running、待批原样留着（Redis 与进程内各判一次）")
+    finally:
+        _purge(a.id)
+        _purge(b.id)
+        shutil.rmtree(tmp.parent, ignore_errors=True)
+
+
+def _t8b_cross_process_recovery():
+    """格② 跨**进程**重启后，停在待批处的那一场还得真能恢复。
+
+    A4 真模型那批只证到「卡还在 `ch:appr:{sid}`、`respond` 回 200、`_resume` 起跑」，而起跑不等于
+    跑完；这里取完整读数：GET 仍是 awaiting_human → pending 非空 → respond → **动作真落盘** → 收口
+    finished。零花费（FakeLLM 剧本，真图真 gate，同 t5/t6/t7）。
+    """
+    import json
+    import os
+    import shutil
+    import subprocess
+    import sys
+    root = Path(tempfile.mkdtemp()) / "ws"
+    project = f"s17_c18_{os.urandom(3).hex()}"
+    me = str(Path(__file__).resolve())
+    env = dict(os.environ, PLATFORM__USE_REDIS="1", REDIS__DB="15", PYTHONUNBUFFERED="1")
+
+    def run(*args):
+        p = subprocess.run([sys.executable, "-B", me, "--worker", *args], capture_output=True,
+                           text=True, env=env, timeout=300, cwd=str(Path(me).parent.parent))
+        line = next((l for l in p.stdout.splitlines() if l.startswith("RESULT ")), "")
+        assert line, (f"格② 子进程没出读数：args={args} rc={p.returncode}\n"
+                      f"stdout 末段={p.stdout[-600:]!r}\nstderr 末段={p.stderr[-600:]!r}")
+        return json.loads(line[len("RESULT "):])
+
+    sid = ""
+    try:
+        parked = run("park", str(root), project)
+        sid = parked["sid"]
+        assert parked["parked"] == "awaiting_human", f"格② 前置失配：子进程 A 没停在待批处：{parked}"
+        after = run("resume", str(root), project, sid)
+        assert after["after_boot"] == "awaiting_human", \
+            f"格②失效：重启后 GET 该会话是 {after['after_boot']!r}——启动自愈抹掉了可信驻留态，" \
+            f"而那张卡还在台账里（C18①，用户看得见卡却永远等不到这一场）"
+        assert after["pending"] >= 1, f"格②失效：重启后台账里没有待批项（该在 ch:appr:{sid}）：{after}"
+        assert after["respond"] == 200 and after["ok"] is True, f"格② respond 没被接住：{after}"
+        assert after.get("file") == "hello-from-gate", \
+            f"格②失效：批了没真执行——跨进程重建的图没续上 checkpointer 里的断点：{after}"
+        assert after["final"] == "finished", f"格②失效：恢复后没收口，停在 {after['final']!r}"
+        print(f"  ok  t8 格②跨进程重启：GET 仍 awaiting_human、pending={after['pending']}、"
+              f"respond 后动作真落盘、收口 {after['final']}")
+    finally:
+        if sid:
+            _purge(sid)
+        shutil.rmtree(root.parent, ignore_errors=True)
+        shutil.rmtree(Path("workspace") / project, ignore_errors=True)
+
+
+def t8_restart_keeps_parked_session():
+    """C18① 的两格（拆成两个函数只为反向验证能各自单独取证，见 `plan/` 里那轮变异读数）。"""
+    _t8a_self_heal_only_touches_running()
+    _t8b_cross_process_recovery()
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
-              t7_special_commands_never_park]
+              t7_special_commands_never_park, t8_restart_keeps_parked_session]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
           f"不抢槽/连点幂等 1 组 + human-input 409 端点半边 1 组 + 断点落态/停止/start 1 组 + "
           f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
-          f"特殊命令不进审批面 1 组（真工具照挂、批完不再为 end 挂卡）")
+          f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组")
 
 
 if __name__ == "__main__":
-    main()
+    import json
+    import sys
+    if "--worker" in sys.argv:                        # t8 格② 的子进程模式，见 `_worker`
+        a = sys.argv[sys.argv.index("--worker") + 1:]
+        print("RESULT " + json.dumps(_worker(a[0], Path(a[1]), a[2], a[3] if len(a) > 3 else ""),
+                                     ensure_ascii=False), flush=True)
+    else:
+        main()

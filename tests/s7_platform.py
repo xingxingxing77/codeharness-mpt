@@ -146,7 +146,8 @@ def t10_checkpoint_msgpack_whitelist():
 # ---------------- t11 start 的 409 store 化（永远跑） ----------------
 def t11_start_409_store_view():
     """多 worker 下 is_running 是本地视角——别的 worker 在跑的会话，本 worker 必须也 409。
-    真源=store 状态（running/awaiting_human 必有人在跑：残态由启动期 heal_running 自愈）。"""
+    真源=store 状态（`running` 必有人在跑：残态由启动期 heal_running 自愈；`awaiting_human` 自 C18① 起
+    是**不被自愈触碰的可信驻留态**——图可能早没了，但那一场所不许重开，去路是回答或点停止）。"""
     import server.sessions as ss
     keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
     try:
