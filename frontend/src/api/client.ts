@@ -1,4 +1,5 @@
 import type { ApprovalItem, Health, Session, WEvent } from '../types'
+import type { VoteEntry } from '../utils/votes'
 
 /* N1：token 存 localStorage；带 Authorization 出请求；401 即清票（App 层据 needLogin 切登录页）。
    auth 关闭（PLATFORM__AUTH_ENABLED=0，默认值）时服务端不校验，这里带不带都行——header 只在有票时附加。 */
@@ -144,14 +145,15 @@ export const api = {
   queue: (sid: string) => req<{ items: any[] }>('GET', `/api/sessions/${sid}/queue`),
   dropQueued: (sid: string, qid: string) =>
     req<{ ok: boolean; removed: string }>('DELETE', `/api/sessions/${sid}/queue/${qid}`),
-  /** B4 反馈：真值在 `Session.feedback`，这三条只是它的读写口。 */
-  feedback: (sid: string) => req<{ votes: Record<string, string> }>(
+  /** B4 反馈：真值在 `Session.feedback`，这三条只是它的读写口。回执里的值是两态的（旧裸串 / 新 `{v,at}`），
+   *  所以类型引 `VoteEntry` 而不是 `string`——写 `string` 时用量页那格把新票数成了「未识别」。 */
+  feedback: (sid: string) => req<{ votes: Record<string, VoteEntry> }>(
     'GET', `/api/sessions/${sid}/feedback`),
   putFeedback: (sid: string, key: string, vote: 'like' | 'dislike') =>
-    req<{ ok: boolean; feedback: Record<string, string> }>(
+    req<{ ok: boolean; feedback: Record<string, VoteEntry> }>(
       'PUT', `/api/sessions/${sid}/feedback`, { key, vote }),
   deleteFeedback: (sid: string, key: string) =>
-    req<{ ok: boolean; feedback: Record<string, string> }>(
+    req<{ ok: boolean; feedback: Record<string, VoteEntry> }>(
       'DELETE', `/api/sessions/${sid}/feedback?${new URLSearchParams({ key })}`),
 
   /** B3 分叉：`from_cursor` 留空 = 全量分叉。响应是新会话的字段 + 三个分叉回执。 */

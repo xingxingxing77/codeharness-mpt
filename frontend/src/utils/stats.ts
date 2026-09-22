@@ -1,5 +1,6 @@
 import type { Block, TraceSpan } from '../types'
 import { formatTokensPerSecond } from './messageChrome.ts'
+import { parseVote, type VoteEntry } from './votes.ts'
 
 /** 参考项目 `ui-conversation/src/client/chat/StatsLine.tsx:deriveStats` 的对应物：
  *  把块表与 /trace 的 span 折成一组窗口级显示总量。字段名照抄，分组规则照抄——
@@ -124,14 +125,16 @@ export function tokenTotals(
   )
 }
 
-/** B4 聚合：把会话表里的票按种类数一遍。真值就在 `Session.feedback`（键=尾行、值=like|dislike），
- *  所以不另开端点。**一张票是一个 (会话, 尾行) 对，不能按会话数**——一场会话投三票就是三票。
- *  认不出的值进 `other`：后端 validator 今天只放 like/dislike 进来，但这里不静默把第三种吞成任何一档。 */
-export function countVotes(rows: { feedback?: Record<string, string> }[]):
+/** B4 聚合：把会话表里的票按种类数一遍。真值就在 `Session.feedback`（键=尾行），所以不另开端点。
+ *  **一张票是一个 (会话, 尾行) 对，不能按会话数**——一场会话投三票就是三票。
+ *  值有新旧两态（裸串 / `{v,at}`），归一只认 `votes.ts::parseVote` 那一份：漏掉这层会把新票全数成「未识别」
+ *  （09-23 活体读数抓到过一次）。认不出的值单列 `other`，不静默吞进任何一档。 */
+export function countVotes(rows: { feedback?: Record<string, VoteEntry> }[]):
   { like: number; dislike: number; other: number } {
   const out = { like: 0, dislike: 0, other: 0 }
   for (const r of rows) {
-    for (const v of Object.values(r.feedback || {})) {
+    for (const entry of Object.values(r.feedback || {})) {
+      const v = parseVote(entry).vote
       if (v === 'like') out.like++
       else if (v === 'dislike') out.dislike++
       else out.other++

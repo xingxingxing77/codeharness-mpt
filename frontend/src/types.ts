@@ -1,3 +1,7 @@
+// 票值两态（裸串=09-23 之前的旧票、`{v,at}`=新票）的归一规则在 `utils/votes.ts::parseVote`，
+// 类型也从那一份引——两处各写一套就会长出「后端说有票、图标说不亮」。
+import type { VoteEntry } from './utils/votes'
+
 export interface Session {
   id: string
   idea: string
@@ -19,9 +23,10 @@ export interface Session {
   goal?: string
   goal_done_at?: string
   cost: Record<string, number>
-  // B4：尾行键 → 票（like | dislike）。真值在后端 `Session.feedback`（`_JSON_FIELDS` 那份），
+  // B4：尾行键 → 票。真值在后端 `Session.feedback`（`_JSON_FIELDS` 那份），
   // `GET /api/sessions` 回的就是整份 model_dump，所以用量页的聚合不需要新端点（`utils/stats.ts::countVotes`）。
-  feedback?: Record<string, string>
+  // 值**不是** `string`：新票带时刻，按 `string` 声明会让读侧把 `{v,at}` 数成「未识别」（09-23 活体读数量出来的）。
+  feedback?: Record<string, VoteEntry>
   created_at: string
   started_at: string
   finished_at: string

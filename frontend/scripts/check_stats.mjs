@@ -93,6 +93,16 @@ eq('未识别值单列，不进 like 也不进 dislike',
 eq('混合现场：like/dislike/未识别各归位',
   countVotes([{ feedback: { a: 'like', z: '?' } }, { feedback: { b: 'dislike' } }, {}]),
   { like: 1, dislike: 1, other: 1 })
+// 09-23 票值升级成 `{v,at}` 后，这一格是**第四个消费点**——活体读数当场量出「1 · 0 / 未识别 4」
+// （三张带时刻的真票被数成未识别）。归一漏掉时这两格红。
+eq('新票 {v,at} 与旧裸串同一档（漏归一即把新票数成未识别）',
+  countVotes([{ feedback: { a: { v: 'like', at: '2026-09-23 03:24:11' },
+                             b: { v: 'dislike', at: '2026-09-23 03:24:19' },
+                             c: 'like' } }]),
+  { like: 2, dislike: 1, other: 0 })
+eq('新票里认不出的值仍单列（有 at 也不算真票）',
+  countVotes([{ feedback: { a: { v: 'meh', at: '2026-09-23 03:24:11' }, b: { at: 'x' } } }]),
+  { like: 0, dislike: 0, other: 2 })
 
 // 8) T4-③ 聚合：两笔「无效调用」分开求和，缺字段按 0 计（老记录里根本没这两个键）
 eq('两类各自求和', wasteTotals([

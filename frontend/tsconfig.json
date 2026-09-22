@@ -3,6 +3,8 @@
     "target": "ES2021",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
     "strict": false,
     "jsx": "preserve",
     "esModuleInterop": true,
