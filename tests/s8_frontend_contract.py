@@ -873,10 +873,19 @@ def t15_kb_upload_entry():
         "B12 回归：上传结果不再同时报「摄入了多少」与「被拒哪几条」（部分成功被说成全成/全败）"
     assert "await load()" in body, "B12 回归：传完不刷新文件树（原件就在 kb/ 里，看不见等于没传）"
     assert "kbInput.value.value = ''" in body, "B12 回归：不清 input.value，同名文件第二次选不中"
+    # C16 的最后一米：后端非 2xx（含向量服务不可达那格 503）时，界面必须把 detail 原文显示出来。
+    # 浏览器导航本轮被自动模式挡，所以这一格只能钉在源码判据上——它钉的是「原文有没有走到那行字」，
+    # 不是「渲染好不好看」，后者仍属 B12/F-E 取过的活体读数。
+    assert re.search(r"catch\s*\(e\)[\s\S]{0,80}kbMsg\.value = \{ text: \(e as Error\)\.message, err: true", body), \
+        "C16 回归：doUploadKb 的 catch 不再把 `e.message` 原样显示（后端 detail 会在最后一米被换成固定文案）"
+    assert "white-space: pre-line" in dp.split("<style", 1)[-1], \
+        "C16 回归：.kbMsg 不再是 pre-line——后端 detail 是三行文本（哪台 / 原件在 kb/ 没切片 / 该查什么），" \
+        "不换行就糊成一条看不完的横条"
     assert 'accept=' not in dp and ".docx" not in dp and "20MB" not in dp, \
         "B12：前端把后缀白名单或大小上限抄成了第二份（会漂），拒因照后端原文显示就够"
     _ok("t15", "B12：upload_kb 三侧同判（后端门口三判+四字段 → client.ts multipart+长档 → "
-               "界面 errors 与成功数一起说 + 传完刷新树），白名单不在前端重抄")
+               "界面 errors 与成功数一起说 + 传完刷新树），白名单不在前端重抄；"
+               "C16 追加：非 2xx 的 detail 必须原样走到 .kbMsg（catch 用 e.message + pre-line 分行）")
 
 
 def t16_max_tokens_notice():
