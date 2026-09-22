@@ -2,6 +2,8 @@
 
 覆盖 docs/施工1 的 S2 门禁三条（payload 快照 / FakeLLM 记账非零 / 不重复计数），
 另加源符号面对齐、repair 组合档、只读计量与预算不回潮、未支持厂商不静默退回。
+t16 例外：它起**本机 127.0.0.1 的一次性桩端点**（不联外网、不花钱），因为 C17 那族漏账
+只在真 HTTP 真 SDK 解析的形状上才现形——拿替身喂判据正是本仓点名的病。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s2_gateway.py
@@ -52,7 +54,9 @@ class _Stub:
         self.bound = kw
         return self
 
-    def with_structured_output(self, schema, include_raw=False):
+    def with_structured_output(self, schema, include_raw=False, **kw):
+        # C17：真网关现在传 dict 形态 + method/strict（wire 不变、解析收口移回 langchain），
+        # 桩跟着接住即可——真读数在 t16 的 HTTP 桩，不打在这些构造参数上
         outer = self
 
         class _S:
@@ -368,7 +372,9 @@ def t13_usage_field_shapes():
         def bind(self, **kw):
             return self
 
-        def with_structured_output(self, schema, include_raw=False):
+        def with_structured_output(self, schema, include_raw=False, **kw):
+            # C17：真网关现在传 dict 形态 + method/strict（wire 不变、解析收口移回 langchain），
+            # 桩跟着接住即可——真读数在 t16 的 HTTP 桩，不打在这些构造参数上
             if include_raw is not True:
                 _fail("13. structured 没用 include_raw=True —— 拿不到原始响应就记不了账")
             return _StubStructured()
@@ -416,7 +422,9 @@ def t13_usage_field_shapes():
         def bind(self, **kw):
             return self
 
-        def with_structured_output(self, schema, include_raw=False):
+        def with_structured_output(self, schema, include_raw=False, **kw):
+            # C17：真网关现在传 dict 形态 + method/strict（wire 不变、解析收口移回 langchain），
+            # 桩跟着接住即可——真读数在 t16 的 HTTP 桩，不打在这些构造参数上
             return _StubTrunc()
 
     gw3 = LLMGateway(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", stream=False), cost_manager=CostManager())
@@ -559,11 +567,153 @@ def t15_stream_deadline():
         _fail(f"15. timeout=0 分支异常: {r3.content!r}")
 
 
+# ---------- 16. 坏结构化产出也要落账（C17：漏账 = 截断提示没东西可发） ----------
+def t16_structured_failure_accounts():
+    """模型回了非 JSON / 半截 JSON 时，那一笔照样花了钱——账必须落，截断必须被数到。
+
+    改前的形状（本机桩取证）：schema 以 **pydantic 类**交给 openai SDK 后，SDK 在流式逐块累加里
+    自己类型解析、失败即抛，并把整条响应连同 usage 一起丢掉 → 四种坏形状 pt/ct 恒 0、
+    `truncated_calls` 恒 0，B8 的截断提示在这一族最常见路径上根本发不出来。
+
+    三格互为对照，全打在**真 HTTP 往返**上（流式是生产默认档，非流式另跑一遍）：
+      ① 半截 JSON + length 收尾 → 落账 **且**被数成截断（repair 档接手，返回实例）
+      ② 非 JSON + stop 收尾     → 落账 **但不得**被数成截断（写成无条件计数也照样过 ①，那条不算判据）
+      ③ 合法 JSON + stop 收尾   → 落账、零截断（证明 ①② 的差别来自收尾原因，不是桩的形状）
+    """
+    import contextlib
+    import io as _io
+    import json as _j
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Shot(BaseModel):
+        answer: str = ""
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length") or 0)
+            req = _j.loads(self.rfile.read(n) or b"{}")
+            msg = str(req.get("messages", ""))
+            fin = "stop" if "收尾正常" in msg else "length"
+            content = ("这不是 JSON，是散文" if "散文" in msg else
+                       '{"answer": "写了一半' if "半截" in msg else '{"answer": "完整的一答"}')
+            usage = {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11}
+            self.send_response(200)
+            # 不发 Connection: close 的话 httpx 那条异步生成器会在复用时「didn't stop after athrow()」
+            self.send_header("Connection", "close")
+            if req.get("stream"):
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+
+                def piece(key, val, reason=None, with_usage=None):
+                    # chunk 必须自带 id/object/created/model，否则 openai SDK 一片都不收
+                    body = {"id": "chatcmpl-s2-16", "object": "chat.completion.chunk", "created": 1790000000,
+                            "model": "gpt-4o", "choices": [{"index": 0, key: val, "finish_reason": reason}]}
+                    if with_usage is not None:
+                        body["choices"] = []
+                        body["usage"] = with_usage
+                    return ("data: " + _j.dumps(body, ensure_ascii=False) + "\n\n").encode()
+
+                self.wfile.write(piece("delta", {"role": "assistant", "content": ""}))
+                self.wfile.write(piece("delta", {"content": content}))
+                self.wfile.write(piece("delta", {}, fin))
+                self.wfile.write(piece("delta", {}, None, usage))   # 生产端点就是 usage 落在最后一块
+                self.wfile.write(b"data: [DONE]\n\n")
+            else:
+                body = {"id": "chatcmpl-s2-16", "object": "chat.completion", "created": 1790000000,
+                        "model": "gpt-4o",
+                        "choices": [{"index": 0, "finish_reason": fin,
+                                     "message": {"role": "assistant", "content": content}}],
+                        "usage": usage}
+                out = _j.dumps(body, ensure_ascii=False).encode()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Stub)              # 端口 0：不跟别人抢固定口
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    async def _one(stream, prompt):
+        cm = CostManager()
+        gw = LLMGateway(cfg=LLMConfig(api_type=LLMType.OPENAI, base_url=f"http://127.0.0.1:{port}/v1",
+                                      api_key="stub", model="gpt-4o", max_token=64, stream=stream),
+                        cost_manager=cm)
+        got, err = None, None
+        try:
+            got = await gw.structured(Shot).ainvoke(prompt, tag="s2t16")
+        except Exception as exc:                            # ②③ 里 repair 无果会明确抛出，那是要的行为
+            err = exc
+        return cm, got, err
+
+    def _run(stream, prompt):
+        # 流式半途抛错时 httpx 的收尾噪声由 loop handler 打到 stderr；打字机回调在门禁里也不需要。
+        # 两者都不是代码坏了——真异常照样从这里抛出，只把刷屏留下。
+        from codeharness import logs as _logs
+        orig = _logs._llm_stream_log
+        _logs.set_llm_stream_logfunc(lambda *_: None)
+        buf = _io.StringIO()
+
+        async def go():
+            loop = asyncio.get_running_loop()
+            default = loop.get_exception_handler()
+
+            def _h(_l, ctx):
+                if "athrow" not in str(ctx.get("message", "")):
+                    (default or _l.default_exception_handler)(_l, ctx)
+            loop.set_exception_handler(_h)
+            try:
+                return await _one(stream, prompt)
+            finally:
+                loop.set_exception_handler(None)
+        try:
+            with contextlib.redirect_stderr(buf):
+                return asyncio.run(go())
+        finally:
+            _logs.set_llm_stream_logfunc(orig)
+
+    try:
+        for stream in (True, False):
+            tag = "流式" if stream else "非流式"
+            # ① 半截 JSON + length：repair 档接手，但这一笔必须既落了账又被数成截断
+            cm, got, err = _run(stream, "给我半截的答案，收尾要 length")
+            if err is not None:
+                _fail(f"16. {tag} 半截+length 不该把库异常抛到会话外: {type(err).__name__}: {err}")
+            if not isinstance(got, Shot) or "写了一半" not in got.answer:
+                _fail(f"16. {tag} 半截+length 的修复档结果不对: {got!r}")
+            if (cm.total_prompt_tokens, cm.total_completion_tokens) != (7, 4):
+                _fail(f"16. {tag} C17 漏账：被截断的那一笔花了钱却没进账 {cm.get_costs()}")
+            if cm.truncated_calls != 1:
+                _fail(f"16. {tag} C17：落账了却没被数成截断（truncated_calls={cm.truncated_calls}）"
+                      f"——B8 的提示在这一族发不出去，用户看到的还是半截回答")
+            # ② 非 JSON + stop：照样落账，但**不许**计成截断（判据特异性的对照组）
+            cm2, got2, err2 = _run(stream, "给我散文的答案，收尾正常")
+            if (cm2.total_prompt_tokens, cm2.total_completion_tokens) != (7, 4):
+                _fail(f"16. {tag} C17 漏账（非截断的坏产出）: {cm2.get_costs()}")
+            if cm2.truncated_calls != 0:
+                _fail(f"16. {tag} 对照失效：stop 收尾也被计成截断——这条判定等于无条件计数")
+            if not isinstance(err2, ValueError) or "修复无果" not in str(err2):
+                _fail(f"16. {tag} 散文产出应当明确失败而不是静默吞掉: {type(err2).__name__}: {err2}")
+            # ③ 正向对照：合法 JSON 一切照常
+            cm3, got3, err3 = _run(stream, "给我完整的一答，收尾正常")
+            if err3 is not None or not isinstance(got3, Shot) or got3.answer != "完整的一答":
+                _fail(f"16. {tag} 正常结构化调用被改坏了: {type(err3).__name__}: {err3} / {got3!r}")
+            if (cm3.total_prompt_tokens, cm3.truncated_calls) != (7, 0):
+                _fail(f"16. {tag} 正常调用的账不对: {cm3.get_costs()}")
+    finally:
+        srv.shutdown()
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
               t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
-              t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline]
+              t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline,
+              t16_structured_failure_accounts]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -571,7 +721,7 @@ def main():
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
           f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑 / "
-          f"流式分支按 deadline 失败）")
+          f"流式分支按 deadline 失败 / 坏结构化产出真 HTTP 落账与截断计数）")
 
 
 if __name__ == "__main__":

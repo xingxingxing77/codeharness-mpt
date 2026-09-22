@@ -284,8 +284,20 @@ class LLMGateway:
         解析失败时回落 `provider.repair` 的升级式修复档（S3 的 R2 会在此加**字段级**定向重试）。
 
         ⚠ 内部恒用 `include_raw=True`：这条路不经过 `ainvoke`，不在这里记账就整条动态范式
-        零账（RoleZero 每轮思考都走它）。对外契约不变——默认仍返回 schema 实例。"""
-        runnable = self._model.with_structured_output(schema, include_raw=True)
+        零账（RoleZero 每轮思考都走它）。对外契约不变——默认仍返回 schema 实例。
+
+        ⚠ **schema 传 dict 形态**（`method="json_schema"` + `strict=True`），不传 pydantic 类——
+        C17 的根因：类交给 openai SDK 后，SDK 在流式逐块累加里自己做类型解析，失败时把
+        **整条响应连同 usage 一起丢掉**（s2 t16 实测四种坏形状：类形态流式下 pt/ct 恒 0，
+        只有非流式的 LengthFinishReasonError 还挂着 completion）。dict 形态下 wire 不变
+        （同名、strict:true、additionalProperties:false、同一份 required），解析改由 langchain
+        收口 → 原始消息（带 usage_metadata 与 finish_reason）回到我们手上，账与截断都数得到。
+
+        ⚠ 也因此**不信** langchain 回传的 `parsed`：它会把 SDK 的部分解析结果（半截 JSON 被
+        `partial_mode` 补全的东西）当成功交出来，那是把截断的回答当完整回答。正文由 `_parse`
+        严格校验，过不了就走 repair 档并留 warning——与改前的语义一致。"""
+        runnable = self._model.with_structured_output(
+            schema.model_json_schema(), include_raw=True, method="json_schema", strict=True)
 
         class _Wrapped:
             """保持与 FakeLLM.structured() 同构：await .ainvoke(prompt) -> schema 实例。"""
@@ -301,11 +313,23 @@ class LLMGateway:
                 if getattr(raw, "usage_metadata", None) or getattr(raw, "response_metadata", None):
                     self.outer.cost_manager.add_usage(raw, model=self.outer.cfg.model, tag=tag)
                     return
+                # ChatCompletion 这一支不经 add_usage，所以 B8 的截断计数在这里自己数一次：
+                # 抛 LengthFinishReasonError 的那一笔必然是 length 收尾，漏计就等于截断不说出去。
+                choices = getattr(raw, "choices", None)
+                if choices and getattr(choices[0], "finish_reason", None) == "length":
+                    self.outer.cost_manager.truncated_calls += 1
                 usage = getattr(raw, "usage", None)          # ChatCompletion.usage
                 if usage is not None:
                     self.outer.cost_manager.update_cost(getattr(usage, "prompt_tokens", 0) or 0,
                                                         getattr(usage, "completion_tokens", 0) or 0,
                                                         self.outer.cfg.model)
+
+            def _parse(self, text: str):
+                """严格解析：半截 JSON 在这里过不了，好让 repair 档带着 warning 接手。"""
+                try:
+                    return self.schema.model_validate_json(text)
+                except Exception:
+                    return None
 
             def _repair(self, text: str):
                 from codeharness.provider.repair import repair_to_model
@@ -345,13 +369,14 @@ class LLMGateway:
                     return {"raw": getattr(exc, "output", None), "parsed": fixed} if include_raw else fixed
                 raw = (out or {}).get("raw")
                 self._account(raw, tag)
-                parsed = (out or {}).get("parsed")
-                if parsed is None:                              # include_raw 形态下解析失败不抛，只带 error
-                    fixed = self._repair(getattr(raw, "content", "") or "")
+                text = getattr(raw, "content", "") or ""
+                parsed = self._parse(text)
+                if parsed is None:              # 解析失败时 langchain 不抛，只把 error 带在 dict 里
+                    fixed = self._repair(text)
                     if fixed is None:
-                        raise ValueError(f"structured 解析失败且修复无果: {str(getattr(raw, 'content', ''))[:200]}")
+                        raise ValueError(f"structured 解析失败且修复无果: {text[:200]}")
                     parsed = fixed
-                return out if include_raw else parsed
+                return {"raw": raw, "parsed": parsed} if include_raw else parsed
 
         return _Wrapped(self)
 
