@@ -88,7 +88,20 @@ def t3_routes_exist():
     missing = {p for p in consumed
                if p not in declared and not any(d.startswith(p + "/") for d in declared)}
     assert not missing, f"前端消费的接口后端没注册：{sorted(missing)}"
-    _ok("t3", f"前端消费的 {len(consumed)} 条 /api 路径全部在 FastAPI 路由表")
+
+    # 契约 §1 抬头那两个数是手写的，已经错过两次（`8695b50` 修过一次「38→39」的口径，本笔又漂一格）。
+    # 数字要么由脚本产出，要么就别写死——这里把它钉成实测值，加路由忘了改文档当场红。
+    api = [r for r in create_app().routes if getattr(r, "path", "").startswith("/api")]
+    rows = sum(len(set(r.methods) - {"HEAD", "OPTIONS"}) for r in api)
+    paths = {r.path for r in api}
+    doc = (ROOT / "docs" / "前端" / "接口契约.md").read_text(encoding="utf-8")
+    head = re.search(r"^## 1\. 路由总表（(\d+) 行 / 去重后 (\d+) 条路径）", doc, re.M)
+    assert head, "契约 §1 抬头的计数格式变了（本门禁的核对点跟着失效，去改这里而不是删断言）"
+    assert int(head.group(1)) == rows and int(head.group(2)) == len(paths),         f"契约 §1 抬头写的是 {head.group(1)} 行 / {head.group(2)} 条路径，实测 {rows} 行 / {len(paths)} 条——"         "路由表或文档改了一边没改另一边"
+    tbl_rows = len(re.findall(r"^\| (?:GET|POST|PATCH|PUT|DELETE) \| `/api", doc, re.M))
+    assert tbl_rows == rows, f"§1 表里只有 {tbl_rows} 行路由，后端有 {rows} 行（少写的那条没人知道要先查契约）"
+
+    _ok("t3", f"前端消费的 {len(consumed)} 条 /api 路径全部在路由表；"               f"契约 §1 的 {rows} 行 / {len(paths)} 条路径与表体行数三处对得上账")
 
 
 def t4_graph_endpoint():
