@@ -612,17 +612,20 @@ def _c6_tools():
 
 
 async def _c6_select(min_tools, topk=6, recall_topk=12, use_llm=False, llm=None, query="写入文件",
-                     tools=None):
+                     tools=None, semantic=None):
     from codeharness.configs.settings import settings as S
     from codeharness.tools.tool_recall import select_for_prompt
-    keep = (S.tool_recall.min_tools, S.tool_recall.topk, S.tool_recall.recall_topk, S.tool_recall.use_llm)
+    keep = (S.tool_recall.min_tools, S.tool_recall.topk, S.tool_recall.recall_topk, S.tool_recall.use_llm,
+            S.tool_recall.semantic)
     S.tool_recall.min_tools, S.tool_recall.topk = min_tools, topk
     S.tool_recall.recall_topk, S.tool_recall.use_llm = recall_topk, use_llm
+    if semantic is not None:
+        S.tool_recall.semantic = semantic
     try:
         return await select_for_prompt(tools if tools is not None else _c6_tools(), query, llm=llm)
     finally:
-        (S.tool_recall.min_tools, S.tool_recall.topk,
-         S.tool_recall.recall_topk, S.tool_recall.use_llm) = keep
+        (S.tool_recall.min_tools, S.tool_recall.topk, S.tool_recall.recall_topk,
+         S.tool_recall.use_llm, S.tool_recall.semantic) = keep
 
 
 def t39_recall_dormant_on_today_roster():
@@ -638,7 +641,7 @@ def t39_recall_dormant_on_today_roster():
     tools = _c6_tools()
     same = asyncio.run(_c6_select(S.tool_recall.min_tools, query="把内容写进 note.txt", tools=tools))
     assert same is tools, "默认档竟然返回了别的对象——C6 的『今天不生效』是设计前提，不是巧合"
-    active = asyncio.run(_c6_select(1, topk=6, query="把内容写进 note.txt", tools=tools))
+    active = asyncio.run(_c6_select(1, topk=6, query="把内容写进 note.txt", tools=tools, semantic=False))
     assert active is not tools and 0 < len(active) < len(tools), \
         f"阈值降到 1 仍没裁（{len(active)} 只）：召回整条路是死的，上面那格就成了自证"
     assert set(active) <= set(tools), "裁出来的子集出现了名册外的工具"
@@ -652,9 +655,13 @@ def t40_recall_falls_back_to_full_and_warns():
        这一格是 C6 唯一真正救回命中率的机制：词法腿裁错时，代价由兜底承担而不是由会话承担。
     """
     tools = _c6_tools()
-    w1, got1 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, query="今天天气怎么样", tools=tools)))
+    # 两格都显式关语义腿：钉的是**词法腿**的兜底。语义腿一开，「今天天气」也会被 dense 补出命中，
+    # 那就不是零命中场景了（融合读数在 t44、降级路径在 t45）。
+    w1, got1 = _c6_capture_warn(lambda: asyncio.run(
+        _c6_select(1, query="今天天气怎么样", tools=tools, semantic=False)))
     assert got1 is tools and "零命中" in w1, f"①失效：{len(got1)} 只 / 日志 {w1[-160:]!r}"
-    w2, got2 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, query="跑一下 pytest 看结果", tools=tools)))
+    w2, got2 = _c6_capture_warn(lambda: asyncio.run(
+        _c6_select(1, query="跑一下 pytest 看结果", tools=tools, semantic=False)))
     assert got2 is tools and "判为不可用" in w2, \
         f"②失效：薄命中没兜住（给了 {len(got2)} 只），模型会被裁到只剩终端以外的工具：{w2[-160:]!r}"
 
@@ -670,16 +677,16 @@ def t41_rank_leg_degrades_without_losing_the_run():
 
     q = "把内容写进 note.txt 再读回来核对"
     good = FakeLLM(['["write_file", "read_file"]'])
-    got = asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=good, query=q))
+    got = asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=good, query=q, semantic=False))
     assert {"write_file", "read_file"} <= set(got) and len(got) <= 6, f"精排正常路径失配：{sorted(got)}"
 
     halluc = FakeLLM(['["make_coffee", "teleport"]'])
-    w, got2 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=halluc, query=q)))
+    w, got2 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=halluc, query=q, semantic=False)))
     assert len(got2) >= 3 and "没有一个在候选里" in w, \
         f"幻觉名那格失配：给了 {sorted(got2)} / 日志 {w[-160:]!r}（必须退粗筛原序并留话）"
 
     junk = FakeLLM(["抱歉，我不确定该用哪个工具。"])
-    w3, got3 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=junk, query=q)))
+    w3, got3 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=junk, query=q, semantic=False)))
     assert len(got3) >= 3 and "精排不可用" in w3, f"非 JSON 回法失配：{len(got3)} 只 / {w3[-160:]!r}"
 
 
@@ -709,7 +716,7 @@ def t42_recall_coverage_is_pinned_at_measured_value():
     full = trimmed = 0
     missed = []
     for q, want in CASES:
-        got = asyncio.run(_c6_select(1, topk=6, query=q))
+        got = asyncio.run(_c6_select(1, topk=6, query=q, semantic=False))   # 只钉词法腿，语义腿现值在 t44
         if want <= set(got):
             full += 1
             if len(got) < len(_c6_tools()):
@@ -729,6 +736,70 @@ def t43_roster_unchanged_by_c6():
     """
     assert set(TOOL_REGISTRY.tools) == EXPECTED_TOOLS and len(EXPECTED_TOOLS) == 18, \
         f"名册变了：{sorted(set(TOOL_REGISTRY.tools) ^ EXPECTED_TOOLS)}（C6 只裁 prompt，不加工具）"
+
+
+def t44_hybrid_coverage_when_embedding_live():
+    """语义腿在线时，融合粗筛的现值钉在 **13/14 且 13 格全是真裁小**（离线则显式跳过）。
+
+    与 t42 的分工：t42 是常跑的词法腿现值（13 覆盖 / 12 真裁中），这格是加腿之后的增量读数。
+    跳过纪律照 `s5_memory_rag::t25`：语义质量这件事不能拿假 embedding 冒充——`HashEmbeddings` 是
+    bag-of-chars（`provider/fake.py:56` 自己写着「只看得见字符重叠」），拿它跑出来的「命中」是假阳性。
+    现值仍差的那一格是 `'跑一下 pytest 看结果'`：`terminal_command` 的描述里有「执行命令」而任务里
+    只有「跑」和 `pytest`，bge-m3 把 `find_file`（"查找…返回路径"）排到了前面 ⇒ 这是措辞隔层，
+    不是注册表缺项，也不打算靠改描述把这格抹平（那叫教测试答题）。
+    """
+    import httpx
+
+    from codeharness.configs.settings import settings as S
+    try:
+        up = httpx.get(f"{S.embedding.base_url}/models", timeout=3).status_code < 400
+    except Exception:
+        up = False
+    if not up:
+        print(f"     skip t44（embedding 服务不在线：{S.embedding.base_url}）——语义腿读数不拿假向量冒充")
+        return
+    CASES = [("把这段内容写入 note.txt", {"write_file"}), ("append 一行日志到 app.log", {"append_file"}),
+             ("新建一个 config.yaml", {"create_file"}), ("读一下 src/main.py 现在写的什么", {"read_file"}),
+             ("把那一行改掉，替换成新的实现", {"edit_file_by_replace"}),
+             ("在 workspace 里搜 login 出现在哪些文件", {"search_file", "search_dir"}),
+             ("找出所有叫 handler.py 的文件", {"find_file"}),
+             ("打开 src/app.py 并跳到第 40 行", {"open_file", "goto_line"}),
+             ("跑一下 pytest 看结果", {"terminal_command", "execute_shell_async"}),
+             ("down 一屏看看后面的内容", {"scroll_down"}),
+             ("把这个分支推上去开 PR", {"git_create_pull"}),
+             ("给这个 bug 开一个 issue", {"git_create_issue"}),
+             ("search internet for langchain astream_events docs", {"search_internet"}),
+             ("在第 12 行后面插入一行 import os", {"insert_content_at_line"})]
+    full = trimmed = 0
+    missed = []
+    for q, want in CASES:
+        got = asyncio.run(_c6_select(1, topk=6, query=q, semantic=True))
+        if want <= set(got):
+            full += 1
+            if len(got) < len(_c6_tools()):
+                trimmed += 1
+        else:
+            missed.append((q[:20], sorted(want - set(got))))
+    assert (full, trimmed) == (13, 13), f"融合粗筛现值漂了：应 13/13，实际 覆盖 {full}、真裁小 {trimmed}，miss={missed}"
+    print(f"     融合读数（bge-m3 在线）：覆盖 {full}/14、真裁小 {trimmed}/14、miss={missed}")
+
+
+def t45_semantic_leg_offline_degrades_to_lexical():
+    """语义腿连不上时必须**当场退回词法腿**并留一行可 grep 的话，不许抛也不许静默变全量。
+
+    死端口那档是本仓既有的造法（不停共享服务）。这一格常跑、不依赖服务在线——它钉的是
+    「服务挂了的那条会话」的实际走向：t44 跳过的时候，全仓就没有任何判据覆盖过降级路径。
+    """
+    from codeharness.configs.settings import settings as S
+    keep = S.embedding.base_url
+    S.embedding.base_url = "http://127.0.0.1:1/v1"          # 与容器停着同一个 ConnectError，且不打扰别人
+    try:
+        w, got = _c6_capture_warn(lambda: asyncio.run(
+            _c6_select(1, topk=6, query="down 一屏看看后面的内容", semantic=True)))
+    finally:
+        S.embedding.base_url = keep
+    assert 0 < len(got) <= 6, f"降级后给了异常规模的工具集（{len(got)} 只）：{sorted(got)}"
+    assert "语义腿不可用" in w, f"降级没留话（日志 {w[-160:]!r}）——运维无从知道这一跳只跑了一条腿"
 
 
 def main():
@@ -767,7 +838,8 @@ def main():
               t37_git_tools_degrade_without_gh, t38_no_dangling_metagpt_imports,
               t39_recall_dormant_on_today_roster, t40_recall_falls_back_to_full_and_warns,
               t41_rank_leg_degrades_without_losing_the_run,
-              t42_recall_coverage_is_pinned_at_measured_value, t43_roster_unchanged_by_c6]
+              t42_recall_coverage_is_pinned_at_measured_value, t43_roster_unchanged_by_c6,
+              t44_hybrid_coverage_when_embedding_live, t45_semantic_leg_offline_degrades_to_lexical]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -788,8 +860,9 @@ def main():
           f"+ per-session 隔离 5 组（会话目录互不可见+脏名退回/超时留输出/杀整棵进程树/"
           f"Terminal 按会话登记且可关/additional_python_paths 进 PYTHONPATH）"
           f"+ 接线批 B3 4 组（源 Editor 装配覆盖/编辑闭环+八入口拒越界/git 无 gh 降级/全仓无 metagpt 悬空 import）"
-          f"+ C6 工具召回 5 组（默认档返回同一对象=生产 prompt 逐字不变/零命中与薄命中各兜底回全量并留告警/"
-          f"精排三种回法都不抛/实测覆盖率钉在 13-14 且第 13 格靠兜底/名册不因召回而涨）")
+          f"+ C6 工具召回 7 组（默认档返回同一对象=生产 prompt 逐字不变/零命中与薄命中各兜底回全量并留告警/"
+          f"精排三种回法都不抛/词法腿现值钉 13 覆盖-12 真裁中/名册不因召回而涨/"
+          f"bge-m3 在线时融合腿现值钉 13-13（离线显式跳过，不拿 bag-of-chars 假向量冒充）/语义腿死端口当场退词法并留话）")
 
 
 if __name__ == "__main__":

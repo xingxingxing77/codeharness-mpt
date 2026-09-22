@@ -47,6 +47,7 @@ class ToolRecallConfig(BaseModel):
     recall_topk: int = 12     # 词法粗筛留 12 只（源的 20 是给 27~31 只池子用的，本仓按比例收）
     topk: int = 6             # 最终进 prompt 的数量（源同款 5，这里留 6 给「写+读+终端」这类组合）
     use_llm: bool = False     # 开=每轮 think 多发一次模型调用；门禁用 FakeLLM 验形状，真读数按 ADR-02 批
+    semantic: bool = True     # 粗筛带语义腿（bge-m3 dense，走 `EMBEDDING__*`）；服务不可用时自动退词法腿并留话
 
 
 class QdrantConfig(BaseModel):

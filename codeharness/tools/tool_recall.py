@@ -111,6 +111,64 @@ async def rank(query: str, candidates: list[str], names: dict[str, str], llm, to
     return hit[:topk]
 
 
+async def coarse_hybrid(query: str, docs: dict[str, str], topk: int, emb=None) -> list[str]:
+    """粗筛 = 词法腿 ∪ 语义腿，**RRF 融合**（`1/(60+名次)`，与 `qdrant_store` 的 dense+sparse 同形状）。
+
+    实测理由（18 只名册、14 条真实口吻 query、top-6）：词法腿漏 `scroll_down`
+    （中文任务 vs 英文工具名），语义腿漏 `terminal_command`（「跑一下 pytest」离描述里的词义太远），
+    **两腿各自的 miss 正好被对方覆盖** ⇒ 任何一条腿单跑都是 13/14，融合才 14/14。
+    语义腿不可用（服务没起/报错）时**只用词法腿**并留话，与 `longterm._rerank` 同一条降级纪律。
+    """
+    lex = recall(query, docs, topk)
+    dense = await _dense_rank(query, docs, topk, emb)
+    if not dense:
+        return lex
+    if not lex:
+        return dense
+    fused: dict[str, float] = {}
+    for names in (lex, dense):
+        for rank, name in enumerate(names):
+            fused[name] = fused.get(name, 0.0) + 1.0 / (60 + rank)
+    return sorted(fused, key=lambda n: (-fused[n], n))
+
+
+# 语义腿的文档向量按「名册签名」缓存：签名变了必须整份重算（源 `tool_recommend.py:202-206` 的坑
+# 就是 `__init__` 里建好就不失效——招人的那条线一涨名册，召回还在按老册子打分）。
+_VEC_CACHE: dict[str, list[tuple[str, list[float]]]] = {}
+
+
+def _roster_key(docs: dict[str, str]) -> str:
+    import hashlib
+
+    blob = "\n".join(f"{k}\f{docs[k]}" for k in sorted(docs))
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()
+
+
+async def _dense_rank(query: str, docs: dict[str, str], topk: int, emb) -> list[str]:
+    """bge-m3 dense 召回；`emb` 为空或任何异常都回空表（= 这一腿不出场，融合函数自己退词法）。"""
+    if emb is None or not docs:
+        return []
+    import math
+
+    key = _roster_key(docs)
+    try:
+        if key not in _VEC_CACHE:
+            names = list(docs)
+            vecs = await emb.aembed_documents([docs[n] for n in names])
+            _VEC_CACHE.clear()                       # 只留当前名册那一份，招人来人往不攒旧向量
+            _VEC_CACHE[key] = list(zip(names, vecs))
+        qv = await emb.aembed_query(query)
+        qn = math.sqrt(sum(v * v for v in qv)) or 1.0
+        scored = []
+        for name, dv in _VEC_CACHE[key]:
+            dn = math.sqrt(sum(v * v for v in dv)) or 1.0
+            scored.append((sum(a * b for a, b in zip(qv, dv)) / (qn * dn), name))
+        return [n for _, n in sorted(scored, key=lambda x: (-x[0], x[1]))][:topk]
+    except Exception as exc:
+        logger.warning(f"工具召回的语义腿不可用，本跳只用词法腿：{type(exc).__name__}: {exc}")
+        return []
+
+
 async def select_for_prompt(tools: dict, query: str, llm=None) -> dict:
     """`_think` 唯一的工具块出口：返回**要进 prompt 的工具子集**（name -> tool）。
 
@@ -123,7 +181,12 @@ async def select_for_prompt(tools: dict, query: str, llm=None) -> dict:
     names = {n: (t.description or "") for n, t in tools.items()}
     # 粗筛的文档必须带工具名：只喂 description 时「write note.txt」这种英文任务一个词都命中不了
     # （18 条描述里没几句写着 write/read/search 这几个字），实测退化成整段回全量——等于机制没通电。
-    coarse = await _in_thread(recall, query, {n: f"{n}: {d}" for n, d in names.items()}, cfg.recall_topk)
+    docs = {n: f"{n}: {d}" for n, d in names.items()}
+    emb = None
+    if cfg.semantic:
+        from codeharness.provider.gateway import LLMGateway
+        emb = LLMGateway.embeddings()
+    coarse = await coarse_hybrid(query, docs, cfg.recall_topk, emb)
     if not coarse:                                  # 一个词都没命中：宁可全量，也不让模型看不见命令
         logger.warning(f"工具召回零命中（query 前 40 字={query[:40]!r}），prompt 保留全量 {len(tools)} 只")
         return tools
@@ -137,11 +200,3 @@ async def select_for_prompt(tools: dict, query: str, llm=None) -> dict:
     # 不再补一条「砍太狠就回全量」的下限——那条下限会把「这轮只用到 2 只」的正常判断也抹成回退。
     fine = await rank(query, coarse, names, llm if cfg.use_llm else None, cfg.topk)
     return {n: tools[n] for n in fine if n in tools}
-
-
-async def _in_thread(fn, *args):
-    """纯 CPU 的一级放线程池：与仓内其它「同步计算别占事件循环」的写法一致（18~几十条文本，
-    当前量级其实用不上，但 think 每轮都调，别在事件循环里做词频统计）。"""
-    import asyncio
-
-    return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
