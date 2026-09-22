@@ -739,7 +739,7 @@ def t43_roster_unchanged_by_c6():
 
 
 def t44_hybrid_coverage_when_embedding_live():
-    """语义腿在线时，融合粗筛的现值钉在 **13/14 且 13 格全是真裁小**（离线则显式跳过）。
+    """语义腿在线时，融合粗筛的现值钉在 **14/14 且 14 格全是真裁小**（常驻集不参与裁剪）（离线则显式跳过）。
 
     与 t42 的分工：t42 是常跑的词法腿现值（13 覆盖 / 12 真裁中），这格是加腿之后的增量读数。
     跳过纪律照 `s5_memory_rag::t25`：语义质量这件事不能拿假 embedding 冒充——`HashEmbeddings` 是
@@ -780,7 +780,7 @@ def t44_hybrid_coverage_when_embedding_live():
                 trimmed += 1
         else:
             missed.append((q[:20], sorted(want - set(got))))
-    assert (full, trimmed) == (13, 13), f"融合粗筛现值漂了：应 13/13，实际 覆盖 {full}、真裁小 {trimmed}，miss={missed}"
+    assert (full, trimmed) == (14, 14), f"融合+常驻集现值漂了：应 14/14，实际 覆盖 {full}、真裁小 {trimmed}，miss={missed}"
     print(f"     融合读数（bge-m3 在线）：覆盖 {full}/14、真裁小 {trimmed}/14、miss={missed}")
 
 
@@ -798,7 +798,8 @@ def t45_semantic_leg_offline_degrades_to_lexical():
             _c6_select(1, topk=6, query="down 一屏看看后面的内容", semantic=True)))
     finally:
         S.embedding.base_url = keep
-    assert 0 < len(got) <= 6, f"降级后给了异常规模的工具集（{len(got)} 只）：{sorted(got)}"
+    # 上限是 `topk + 常驻集`（6+4）：降级只该少一条腿，不该连带把常驻那四件也裁没或放大
+    assert 4 <= len(got) <= 10, f"降级后工具集规模异常（{len(got)} 只）：{sorted(got)}"
     assert "语义腿不可用" in w, f"降级没留话（日志 {w[-160:]!r}）——运维无从知道这一跳只跑了一条腿"
 
 

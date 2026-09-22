@@ -199,4 +199,13 @@ async def select_for_prompt(tools: dict, query: str, llm=None) -> dict:
     # 精排只信两件事：名字是真的、结果非空（都在 `rank()` 里判并降级）。它挑中 2 只是合法结论，
     # 不再补一条「砍太狠就回全量」的下限——那条下限会把「这轮只用到 2 只」的正常判断也抹成回退。
     fine = await rank(query, coarse, names, llm if cfg.use_llm else None, cfg.topk)
-    return {n: tools[n] for n in fine if n in tools}
+    picked = {n: tools[n] for n in fine if n in tools}
+    # 常驻集**不参与裁剪**：读文件/写文件/终端这四个是「几乎每轮都要」的地基工具。
+    # 为什么不靠 tune 召回把它们捞回来：实测 `'跑一下 pytest 看结果'` 里 `execute_shell_async` 排第 8、
+    # `terminal_command` 排第 11，而两者分数同为 0.537——bge-m3 在 18 条短描述上分不开，
+    # 抬 `topk` 去接一枚硬币是脆弱的，往描述里塞触发词则是教测试答题。地基工具让召回裁掉，
+    # 代价是模型凭常识猜对名字也要被「未知命令」回喂（多烧一发）⇒ 这一格风险不该由召回承担。
+    for n in (x.strip() for x in cfg.always.split(",")):
+        if n in tools:
+            picked.setdefault(n, tools[n])
+    return picked
