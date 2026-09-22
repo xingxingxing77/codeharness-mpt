@@ -28,7 +28,7 @@ const OPT = {
   out: arg('out'),
   width: Number(arg('width', 1280)),
   height: Number(arg('height', 900)),
-  eval: arg('eval'),
+  eval: arg('eval') || (arg('eval-file') ? fs.readFileSync(arg('eval-file'), 'utf8') : ''),
   waitFor: arg('wait-for'),
   theme: arg('theme'), // light | dark —— 截图前把主题钉住
   // A1：无头 Chrome 默认按 `prefers-reduced-motion: reduce` 报，于是**所有动画都被媒体查询关掉**
