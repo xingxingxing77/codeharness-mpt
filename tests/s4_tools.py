@@ -738,6 +738,19 @@ def t43_roster_unchanged_by_c6():
         f"名册变了：{sorted(set(TOOL_REGISTRY.tools) ^ EXPECTED_TOOLS)}（C6 只裁 prompt，不加工具）"
 
 
+def _c6_dense_alive() -> bool:
+    """语义腿**真的活着**吗——判据不是「端口有响应」，而是「dense 排得出名次」。
+
+    现场教训（2026-09-22）：C 盘模型删掉后 `OLLAMA_MODELS` 只在命令行里设，托盘 App 会立刻重拉一个
+    不带该变量的 serve 抢回 11434 —— 端口照样 200、`_dense_rank` 静默退词法腿，t44 于是量出
+    「13 覆盖 / 12 真裁中」这种**词法腿的数**却写着「bge-m3 在线」。这就是 §0 点名的假绿。
+    """
+    from codeharness.provider.gateway import LLMGateway
+    from codeharness.tools.tool_recall import _dense_rank
+    docs = {t.name: f"{t.name}: {t.description or ''}" for t in TOOL_REGISTRY.all()}
+    return bool(asyncio.run(_dense_rank("把内容写进文件再跑一遍测试", docs, 6, LLMGateway.embeddings())))
+
+
 def t44_hybrid_coverage_when_embedding_live():
     """语义腿在线时，融合粗筛的现值钉在 **14/14 且 14 格全是真裁小**（常驻集不参与裁剪）（离线则显式跳过）。
 
@@ -755,8 +768,8 @@ def t44_hybrid_coverage_when_embedding_live():
         up = httpx.get(f"{S.embedding.base_url}/models", timeout=3).status_code < 400
     except Exception:
         up = False
-    if not up:
-        print(f"     skip t44（embedding 服务不在线：{S.embedding.base_url}）——语义腿读数不拿假向量冒充")
+    if not up or not _c6_dense_alive():
+        print(f"     skip t44（语义腿没活着：{S.embedding.base_url}）——融合读数不拿词法腿的数冒充")
         return
     CASES = [("把这段内容写入 note.txt", {"write_file"}), ("append 一行日志到 app.log", {"append_file"}),
              ("新建一个 config.yaml", {"create_file"}), ("读一下 src/main.py 现在写的什么", {"read_file"}),
@@ -803,6 +816,39 @@ def t45_semantic_leg_offline_degrades_to_lexical():
     assert "语义腿不可用" in w, f"降级没留话（日志 {w[-160:]!r}）——运维无从知道这一跳只跑了一条腿"
 
 
+HELD_OUT = [("看看现在登录逻辑是怎么写的", {"read_file"}),
+            ("把这份报告保存到磁盘上", {"write_file"}),
+            ("列出目录里所有的 py 文件", {"search_file", "find_file", "search_dir"}),
+            ("翻到文件末尾再多看两行", {"scroll_down"}),
+            ("把刚才那个改动提交并推到远端", {"git_create_pull"}),
+            ("开个单子追踪这个崩溃", {"git_create_issue"}),
+            ("在第 30 行下面加一行注释", {"insert_content_at_line"}),
+            ("查一下官方文档里这个 API 的用法", {"search_internet"})]
+
+
+def t46_held_out_phrasings_show_the_real_rate():
+    """**held-out 8 条**：措辞没参与过任何调参、也没写进任何判据或工具描述——防答题的那格。
+
+    t42/t44 钉的「已用 14 条」写判据时就在那儿，抬 `topk`、补描述都能把绿凑出来；这格用没被碰过的口语
+    措辞量同一套召回（常驻集 + 融合，任一即中即算可用）。现值 **6/8**，漏的两条都落在 git（「把刚才那个
+    改动提交并推到远端」「开个单子追踪这个崩溃」）⇒ 中文口语到英文工具名/描述那层隔阂没被任何 tune 消掉。
+    **C6 记 🟡 的依据就是这格**，不是 t44 那个已 14/14 的已用集；满分反倒要警惕——说明有人拿这 8 条去改
+    描述了，正解是**改完描述换一批新 held-out 再量**（用户建议的「定期更新 held-out 集」已收进本格）。
+    """
+    if not _c6_dense_alive():
+        print("     skip t46（语义腿没活着）——held-out 不拿词法字符重叠冒充语义读数")
+        return
+    hit = 0
+    missed = []
+    for q, want in HELD_OUT:
+        got = set(asyncio.run(_c6_select(1, topk=6, query=q)))
+        hit += bool(got & want)
+        if not got & want:
+            missed.append(q[:14])
+    assert hit == 6, f"held-out 现值漂了：应 6/8（**故意不满分**，满分说明这格被拿去答题了），实际 {hit}/8，漏={missed}"
+    print(f"     held-out 读数：任一即中 {hit}/8、漏={missed}（C6 记 🟡 的依据）")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -840,7 +886,8 @@ def main():
               t39_recall_dormant_on_today_roster, t40_recall_falls_back_to_full_and_warns,
               t41_rank_leg_degrades_without_losing_the_run,
               t42_recall_coverage_is_pinned_at_measured_value, t43_roster_unchanged_by_c6,
-              t44_hybrid_coverage_when_embedding_live, t45_semantic_leg_offline_degrades_to_lexical]
+              t44_hybrid_coverage_when_embedding_live, t45_semantic_leg_offline_degrades_to_lexical,
+              t46_held_out_phrasings_show_the_real_rate]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
