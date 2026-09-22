@@ -478,6 +478,35 @@ def hire_role(sid: str, req: RoleReq, request: Request, user: str = Depends(curr
     return {"ok": True, "role": defn, "takes_effect": "next_start", "roles": updated.roles}
 
 
+@router.delete("/{sid}/roles/{name}")
+def fire_role(sid: str, name: str, request: Request, user: str = Depends(current_user)):
+    """B9 余账：摘掉**招进来的**成员。生效点与招人一样 = 下一次起跑/续跑（节点集 compile 时定死）。
+
+    三条闸，每条都挡一个"看着能删其实不该删"：
+      ① 只认 `role_defs` 里的名字。Alice/Bob/TeamLeader 来自装配表，不在册即拒——静态角色一摘，
+         SOP 路由就指向不存在的节点，那场会话直接跑不起来（不是"少个人"而是"整场坏"）。
+         这里给 422 不给 404：404 会让人以为再试一次就有，422 直接把在册名单报出来。
+      ② 运行中 409（与招人同档）：图已编译，摘档案不影响正在跑的那个人。
+      ③ 同批把名字从 `session.roles` 里去掉。`roles` 由装配出口回填（`runner._prepare`），那是**下一次**
+         起跑才算；不一起改就有两个后果：前端下拉一直挂着这个已经不存在的人，而 `check_role_def` 的
+         `taken` 也当他还在册 ⇒ "摘掉后用同一个名字再招"会被永久 422。
+    """
+    s = _owned(request, sid, user)
+    if s.status == SessionStatus.running:
+        raise HTTPException(409, "会话在跑：等它收口或先点停止，再摘成员（生效点是下一次装配）")
+    left = [d for d in s.role_defs if str(d.get("name", "")) != name]
+    if len(left) == len(s.role_defs):
+        raise HTTPException(422, f"{name!r} 不是招进来的成员，摘不掉。招进来的："
+                                 f"{[str(d.get('name')) for d in s.role_defs] or '（无）'}；"
+                                 f"静态角色（装配表里那些）摘掉会让 SOP 指向不存在的节点，不开这个口")
+    updated = _get(request, "store").update(sid, role_defs=left,
+                                            roles=[r for r in s.roles if r != name])
+    _get(request, "bus").publish(s.id, kind="status",
+                                 value={"status": updated.status, "message": f"已摘除 {name}（下一次起跑生效）"})
+    return {"ok": True, "fired": name, "takes_effect": "next_start",
+            "role_defs": updated.role_defs, "roles": updated.roles}
+
+
 @router.get("/{sid}/roles/draft")
 async def draft_role(sid: str, request: Request, user: str = Depends(current_user)):
     """让模型现场写一份档案（决策 #4「profile 现场写」）。**只回草案、不落库**——

@@ -165,6 +165,12 @@ export const api = {
     'GET', `/api/sessions/${sid}/roles/draft`),
   hireRole: (sid: string, def: Record<string, any>) =>
     req<Record<string, any>>('POST', `/api/sessions/${sid}/roles`, def),
+  /** B9 余账：摘掉招进来的成员（只认 role_defs 里的名字，静态角色后端直接 422）。
+   *  这里不套 encodeURIComponent：能走到这个名字的只有 `check_role_def` 放行过的合法节点名
+   *  （字母开头、≤32、无空格/中文/标点），本来就是一整个安全路径段；套进模板反而让
+   *  `s8 t3` 没法从 client.ts 反推出路径（它按 `${x}`→`{x}` 解析，函数调用不在它的语法里）。 */
+  fireRole: (sid: string, name: string) =>
+    req<Record<string, any>>('DELETE', `/api/sessions/${sid}/roles/${name}`),
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>

@@ -6,6 +6,15 @@
     <button v-if="!open" class="chip" type="button" :disabled="busy" @click="start">
       {{ store.current.role_defs?.length ? `已招 ${store.current.role_defs.length} 人 · 再招` : '招人' }}
     </button>
+    <!-- B9 余账：已招名册与「摘」。生效点写在下一次起跑，所以这里不假装人立刻从图里消失；
+         摘掉后同一个名字可以马上再用（后端同批把 session.roles 里的他也去掉，否则重名闸会永久拒）。 -->
+    <div v-if="!open && roster.length" class="roster">
+      <span v-for="d in roster" :key="d.name" class="mate">
+        {{ d.name }}
+        <button class="fire" type="button" :disabled="busy"
+                :aria-label="`摘除成员 ${d.name}`" @click="fire(d.name)">摘</button>
+      </span>
+    </div>
     <div v-else class="panel" role="group" aria-label="招人档案">
       <div class="row">
         <input v-model="form.name" class="inp" placeholder="成员名（字母开头，同时是图节点名）" />
@@ -34,7 +43,7 @@
 <script setup lang="ts">
 /** 生效点是**下一次起跑/续跑**（后端回执 takes_effect='next_start'）：LangGraph 的节点集在 compile
  *  时固定，热插要重建图——这里不假装「立刻就能点名」。 */
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { api } from '../../api/client'
 import { useSessionStore } from '../../stores/sessions'
 
@@ -76,6 +85,26 @@ async function draft() {
   } catch (e) {
     msg.value = (e as Error).message      // 502=模型声明了注册表外的工具，503=模型不通：照原文显示
     isErr.value = true
+  } finally {
+    busy.value = false
+  }
+}
+
+const roster = computed(() => (store.current?.role_defs || []) as { name?: string }[])
+
+async function fire(name: string) {
+  if (!store.currentId) return
+  busy.value = true
+  msg.value = ''
+  try {
+    const r = await api.fireRole(store.currentId, name)
+    await store.loadSessions()
+    msg.value = `已摘除 ${r.fired || name}：下一次起跑生效（图里现在还在的那一场不受影响）`
+    isErr.value = false
+  } catch (e) {
+    msg.value = (e as Error).message
+    isErr.value = true
+    open.value = true        // 折叠态没有 msg 的位置：出错就把面板展开，别只闪一下就算说过
   } finally {
     busy.value = false
   }
@@ -153,6 +182,40 @@ async function hire() {
   max-height: 96px;
   overflow-y: auto;
 }
+
+/* 已招名册：同一行的安静胶囊，尺寸跟着 .chip 的 28px 走（不新造几何） */
+.roster { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+
+.mate {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.fire {
+  height: 20px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.fire:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.fire:disabled { opacity: 0.5; cursor: default; }
 
 .tool {
   display: inline-flex;

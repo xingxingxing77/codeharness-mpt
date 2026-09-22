@@ -13,6 +13,7 @@
      **队长的名册里也有他**（没有名册队长不知道叫什么，委派就永远到不了）。
   t5 真图端到端：队长 `publish_team_message(指令, "Cleo")` → Cleo 节点被激活、拿到那条指令，
      干完把回报送回队长（C1-②/②b 那两跳在**新成员**身上重演一遍才算通路完整）。
+  t7 摘成员（B9 余账）：能摘招进来的 / 摘不掉静态角色 / session.roles 同批去掉 / 下一次装配真没这个节点。
   t6 越界与热插都拒：classic 线招人 → 422（那条线没人点名新节点，招进来是死成员）；
      会话正在跑 → 409（生效点是下一次装配，不做图中热插）。
 
@@ -214,6 +215,87 @@ def t6_no_hot_swap():
     print("  ok  t6 运行中拒招 + 响应里带 next_start 语义（不假装热插）")
 
 
+def t7_fire_role():
+    """B9 余账：摘成员。四格各挡一种「以为删了其实没删 / 不该删的删了」。
+
+    ① 真摘：`role_defs` 少一条，且 **`session.roles` 同批少一个**——不一起改就有两个后果：
+       前端下拉挂着已经不存在的人，而 `check_role_def` 的 `taken` 也当他还在册，
+       于是「摘掉后用同一个名字再招」会被永久 422（这条是本轮设计时才想到的连带面）。
+    ② 摘不存在的名字 → 422（不给 404：404 会让人以为再试一次就有）。
+    ③ **静态角色不许摘**（`TeamLeader` 来自装配表、不在 `role_defs`）→ 422。
+       摘掉静态角色不是"少个人"而是 SOP 路由指向不存在的节点，整场坏掉，所以不开这个口。
+       ①与③是同一条判据的两面：能摘 Cleo、不能摘 TeamLeader，才说明判的是"来源"而不是"名字存在"。
+    ④ 摘完**下一次建图真的没有这个节点**（复用 t4 那个 spy：装配收口拿到的 agents 才是事实）；
+       并且图里还留着一个不认识的旧名字也不会炸——`route()` 对未知节点名只打一行日志。
+    跑法沿用本文件：不起端口，`TestClient(create_app())`。
+    """
+    import codeharness.team as team
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    from server.runner import SessionRunner
+    from server.sessions import SessionStore
+
+    with TestClient(create_app()) as c:
+        sid = c.post("/api/sessions", json={"idea": "摘成员这格", "paradigm": "dynamic"}).json()["id"]
+        assert c.post(f"/api/sessions/{sid}/roles", json=HIRED).status_code == 200, "前置失配：没招进来"
+        # 先真跑一次装配：`session.roles` 是装配出口（`runner._prepare`）回填的。不装配就摘的话 roles 里
+        # 根本没有 Cleo，下面那条「roles 同批干净」会**恒真**——第一版就恒真过，是拿「摘成员时不同步
+        # roles」这个变异体**照样全绿**才抓出来的（判据不许自证，§0 硬约定）。
+        store = c.app.state.store
+        runner = SessionRunner(store, c.app.state.bus)
+
+        async def _none_saver():
+            return None
+        runner._saver = _none_saver
+        asyncio.run(runner._prepare(store.get(sid), store.get(sid).project_name, None))
+        assert "Cleo" in store.get(sid).roles, f"前置失配：装配后 roles 里该有 Cleo：{store.get(sid).roles}"
+        r = c.delete(f"/api/sessions/{sid}/roles/Cleo")
+        assert r.status_code == 200 and r.json()["role_defs"] == [], f"①失效：{r.status_code} {r.text[:160]}"
+        assert "Cleo" not in r.json()["roles"], f"①失效：roles 里还挂着已摘成员：{r.json()['roles']}"
+        got = c.get(f"/api/sessions/{sid}").json()
+        assert got["role_defs"] == [] and "Cleo" not in got["roles"], f"①回读不实：{got['role_defs']}"
+        # 摘掉后同名可再招（taken 闸没被历史卡死）
+        assert c.post(f"/api/sessions/{sid}/roles", json=HIRED).status_code == 200, "摘掉后同名再招被拒了"
+        assert c.delete(f"/api/sessions/{sid}/roles/Cleo").status_code == 200
+        # ②
+        bad = c.delete(f"/api/sessions/{sid}/roles/Nobody")
+        assert bad.status_code == 422 and "（无）" in bad.text, f"②失效：{bad.status_code} {bad.text[:120]}"
+        # ③
+        st = c.delete(f"/api/sessions/{sid}/roles/{TEAMLEADER_NAME}")
+        assert st.status_code == 422 and TEAMLEADER_NAME in st.text, \
+            f"③失效：静态角色被摘掉了（SOP 会指向不存在的节点）：{st.status_code} {st.text[:120]}"
+
+    # ④ 装配层：摘完再 _prepare，agents 里不该再有 Cleo，而队长仍在
+    seen = {}
+    saved = team.prepare_project
+
+    def spy(idea, project, agents=None, checkpointer=None, cost_manager=None, sop=None):
+        seen["agents"] = agents
+        return saved(idea, project, agents=agents, checkpointer=checkpointer,
+                     cost_manager=cost_manager, sop=sop)
+
+    team.prepare_project = spy
+    try:
+        store = SessionStore(path=Path(tempfile.mkdtemp()) / "s23f.json")
+        s = store.create(idea="摘成员装配", project_name="s23f", paradigm="dynamic")
+        store.update(s.id, role_defs=[HIRED])
+        runner = SessionRunner(store, None)
+
+        async def _none_saver():
+            return None
+        runner._saver = _none_saver
+        asyncio.run(runner._prepare(store.get(s.id), s.project_name, None))
+        assert "Cleo" in seen["agents"], "前置失配：招进来的人没进装配"
+        store.update(s.id, role_defs=[])
+        asyncio.run(runner._prepare(store.get(s.id), s.project_name, None))
+    finally:
+        team.prepare_project = saved
+    assert "Cleo" not in seen["agents"], f"④失效：摘完还在装配里：{sorted(seen['agents'])}"
+    assert TEAMLEADER_NAME in seen["agents"], f"④失效：静态角色被连带摘掉了：{sorted(seen['agents'])}"
+    print("  ok  t7 摘成员：能摘招进来的、摘不掉静态角色、roles 同批干净、下一次装配真没他")
+
+
+
 def main():
     t1_check_role_def()
     t2_tier_gate_and_rejections()
@@ -221,7 +303,8 @@ def main():
     t4_assembly_sees_the_hire()
     t5_real_graph_hire_reachable()
     t6_no_hot_swap()
-    print("\ns23_hire_role: 6/6 全绿")
+    t7_fire_role()
+    print("\ns23_hire_role: 7/7 全绿")
     return 0
 
 
