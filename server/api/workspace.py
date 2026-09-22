@@ -102,6 +102,39 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
         CURRENT_PROJECT.reset(tok)
 
 
+def _unreachable(exc: BaseException) -> bool:
+    """这条异常是不是「连不上某台服务」——顺着 cause/context 链找**连接级**失败。
+
+    为什么不能按顶层类型判（两台各包一层，实测）：qdrant 客户端把 httpx 的 ConnectError 裹成
+    `ResponseHandlingException("All connection attempts failed")`，openai 客户端裹成
+    `APIConnectionError("Connection error.")`——两个类名都不提「连接」。链末端才是共同形状。
+    ⚠ 只认连接族：不认 `OSError` 全部（磁盘写失败不该报「服务不可用」），也不并超时
+    （「服务在但慢」是另一件要说清的事，今天仍走 500，别顺手合并口径）。"""
+    import httpx
+    node, depth = exc, 0
+    while node is not None and depth < 8:                 # 有界遍历：库里再套几层也认，但不信无限链
+        if isinstance(node, (httpx.ConnectError, ConnectionError)):
+            return True
+        node = node.__cause__ or node.__context__
+        depth += 1
+    return False
+
+
+def _kb_down(written: list, errors: list, exc: BaseException) -> str:
+    """运行环境故障要说清两件事：**没成功**，以及**东西还在不在**。
+
+    C16 的原始症状正是这两句分家——端点先写盘、后摄取，向量库停着时界面只回一句
+    `Internal Server Error`，用户以为文件没传上去，而原件其实好好躺在 `kb/` 里（且重传会覆盖，
+    不丢数据，但没人告诉他这一点）。`.kbMsg` 是 `white-space: pre-line`，所以这里可以直接分行。"""
+    names = "、".join(p.name for p in written[:5]) + ("…" if len(written) > 5 else "")
+    lines = [f"向量服务连不上：{type(exc).__name__}: {str(exc)[:80]}",
+             f"已写进 kb/ 的 {len(written)} 份原件没有切片：{names}",
+             "起好服务后重传即可（检查 QDRANT__URL 与 EMBEDDING__BASE_URL），文件树里现在就能看见这些原件"]
+    if errors:
+        lines.append(f"另有 {len(errors)} 条在门口就被拒了（与向量库无关）：" + "；".join(errors[:3]))
+    return "\n".join(lines)
+
+
 @router.post("/{sid}/workspace/upload_kb")
 async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(...),
                     user: str = Depends(current_user)):
@@ -151,8 +184,13 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
     tok = CURRENT_PROJECT.set(workspace.name)       # 与 import_repo 同一接缝：切片按项目隔离
     try:
         from codeharness.actions.upload_kb import UploadKB
-        result = await UploadKB(llm=None)._call({"files": [str(p) for p in written]}) if written else \
-            {"uploaded_count": 0, "chunk_count": 0, "errors": []}
+        try:
+            result = await UploadKB(llm=None)._call({"files": [str(p) for p in written]}) if written else \
+                {"uploaded_count": 0, "chunk_count": 0, "errors": []}
+        except Exception as exc:
+            if not _unreachable(exc):
+                raise                   # 真 bug 一个字都不许吞：翻成「服务不可用」比 500 更糟
+            raise HTTPException(503, _kb_down(written, errors, exc)) from exc
     finally:
         CURRENT_PROJECT.reset(tok)
     result["errors"] = errors + result["errors"]

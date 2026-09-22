@@ -9,7 +9,7 @@
 t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM——模型确实收到了那段字，
 但**没有任何生产代码会去填那个参数**（`UploadKB` 零调用者、kb 切片零读者）。这正是 §0 硬约定 4
 点名的「断言打在构造参数上」：门禁绿 ≠ 知识库能用（`docs/对照2:97` G 条同一句）。
-现在的五格按链路排：
+现在的六格按链路排：
   t1 真 Qdrant（gate 专属集合）+ 确定性替身 embedding：一份 .md 切成多块灌进 `doc_type="kb"`，
      召回**命中自己刚灌进去的切片**，且重传幂等（点数不翻倍）。
   t2 HTTP 端点门口三判（离线，store/embeddings 换替身）：multipart 上传 → 原件真落
@@ -20,6 +20,9 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
   t4 摄取口径：不支持的格式与空文件明确拒（不默默灌半截），且一个点都不写。
   t5 不复燃守卫（源码文本级，先例 `s3b t15`）：B7 那个「第二个半截实现」`QdrantStore.aembed_documents`
      不许长回来；`UploadKB` 必须有生产调用者。
+  t6 C16 的可见结局：向量库 / 向量模型端点各**真连一个死端口**取一次读数 → 503 且文案说出
+     「原件已在 `kb/`、没切片」；两台都在线是阳性对照（200），store 抛真 bug 必须仍是 500
+     （把异常一律降级成「服务不可用」就是这里要防的谎）。这一格不依赖任何在线服务。
 
 t1/t3 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
 不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
@@ -275,13 +278,129 @@ def t5_no_regression_guard():
     print(f"  ok  t5 单一摄取出口 + 注入口在位 + 生产调用者 {hits} + 读者在位")
 
 
+def t6_vector_service_down_says_so():
+    """C16：向量服务连不上时，端点必须说出「没切片」+「原件还在 `kb/`」，而不是一句 500。
+
+    四格各司其职，前两格是**真 TCP 连死端口**（不是手工构造异常）——生产里两台服务各把自己的
+    连接失败包了一层（qdrant→`ResponseHandlingException`、openai→`APIConnectionError`，
+    **顶层类名都不提「连接」**，所以 `_unreachable` 必须顺 cause/context 链往下走）：
+      ① 向量库不可达（embeddings 用替身，只留这一个变量是死的）
+      ② 向量模型端点不可达（store 用替身，同上）
+      ③ 阳性对照：两台都「在线」（替身都会好好干活）→ 200，且不许出现那句降级文案
+      ④ 反向对照：store 抛**真 bug**（ValueError）→ 必须还是 500。把异常一律降级成
+         「服务不可用」是本格要防的谎，不防它就会有人这么写。
+
+    反向验证记账（三种偷懒写法，两抓得住一格抓不住）：一律降级 → ④ 红；只看顶层类型 → ① 红
+    （回 500 而不是 503）；文案少一句「没切片」→ ① 红。**抓不住的那格要写明白**：把
+    `isinstance(链上任意节点, ConnectError/ConnectionError)` 换成「顶层类名白名单
+    {ResponseHandlingException, APIConnectionError}」，本格四格照样全绿——它今天行为等价，
+    但库里换个包装类就静默失效。这条判据防不住那种写法，别以为它防住了。
+    """
+    import codeharness.actions.upload_kb as mod
+    from fastapi.testclient import TestClient
+
+    from codeharness.configs.settings import settings
+    from codeharness.provider.gateway import LLMGateway as LLMGatewayReal   # ② 要真工厂：真连接真失败
+    QdrantStoreReal = mod.QdrantStore                                       # ① 要真客户端：真连死端口
+
+    DEAD = "http://127.0.0.1:1"                 # 端口 1 必然拒连：造「服务没起」而不是「服务很慢」
+
+    class _Store:
+        def __init__(self, boom=None):
+            self.written, self.boom = [], boom
+
+        async def write(self, points):
+            if self.boom:
+                raise self.boom
+            self.written.extend(p.text for p in points)
+            return len(points)
+
+    class _GW:
+        @staticmethod
+        def embeddings():
+            return HashEmbeddings()
+
+    saved = (mod.QdrantStore, mod.LLMGateway, settings.qdrant.url, settings.embedding.base_url)
+    keep = None
+    tmp_root = Path(tempfile.mkdtemp())
+    store_box = {}
+    try:
+        import server.sessions as ss
+        keep = (ss.SESSIONS_FILE, settings.platform.use_redis)
+        ss.SESSIONS_FILE = tmp_root / "sessions.json"
+        settings.platform.use_redis = False             # 本格不依赖 Redis（也别去写共享 db）
+        from server.app import create_app
+
+        def parts(extra_exe=True):
+            p = [("files", ("faq.md", FAQ, "text/markdown"))]
+            if extra_exe:
+                p.append(("files", ("tool.exe", b"MZ\x00\x00", "application/octet-stream")))
+            return p
+
+        with TestClient(create_app(), raise_server_exceptions=False) as c:   # False：④ 要拿 500 的响应体
+            sid = c.post("/api/sessions", json={"idea": "c16", "project_name": "s15_kb_down"}).json()["id"]
+            ws = Path(c.get(f"/api/sessions/{sid}").json()["workspace"])
+
+            def expect_503(why):
+                rsp = c.post(f"/api/sessions/{sid}/workspace/upload_kb", files=parts())
+                assert rsp.status_code == 503, f"t6{why}：该回 503，实回 {rsp.status_code} {rsp.text[:160]}"
+                detail = rsp.json()["detail"]
+                assert "没有切片" in detail and "kb/" in detail, f"t6{why}：没说清「没切片」：{detail[:160]}"
+                assert "faq.md" in detail, f"t6{why}：没点名哪份原件躺着：{detail[:160]}"
+                assert "QDRANT__URL" in detail and "EMBEDDING__BASE_URL" in detail, \
+                    f"t6{why}：没给出该查哪两台：{detail[:200]}"
+                assert (ws / "kb" / "faq.md").exists(), f"t6{why}：文案说原件在 kb/，盘上却没有"
+                assert "与向量库无关" in detail and "tool.exe" in detail, \
+                    f"t6{why}：门口就拒的那条被降级文案盖掉了（部分成功不许吞）：{detail[:220]}"
+                return detail
+
+            # ① 向量库不可达：**store 用真客户端**指死端口（embeddings 换替身，只留一个死变量）
+            mod.QdrantStore, mod.LLMGateway = QdrantStoreReal, _GW
+            settings.qdrant.url = DEAD
+            d1 = expect_503("①")
+            assert "ResponseHandlingException" in d1 or "ConnectError" in d1 or "Connection" in d1, \
+                f"t6①：没带上真实失败形状：{d1[:200]}"
+            # ② 向量模型端点不可达：**embeddings 用真工厂**指死端口（store 换替身，同上）
+            mod.QdrantStore, mod.LLMGateway = lambda *a, **k: _Store(), LLMGatewayReal
+            settings.embedding.base_url = DEAD + "/v1"
+            d2 = expect_503("②")
+            assert "APIConnectionError" in d2, f"t6②：这台失败的真实类型没进文案：{d2[:200]}"
+            # ③ 阳性对照：两台都在线（替身好好干活）→ 200，且不许有那句降级文案
+            mod.QdrantStore, mod.LLMGateway = lambda *a, **k: _Store(), _GW
+            settings.qdrant.url = "http://127.0.0.1:6333"
+            settings.embedding.base_url = "http://127.0.0.1:11434/v1"
+            rsp3 = c.post(f"/api/sessions/{sid}/workspace/upload_kb", files=parts())
+            body3 = rsp3.json()
+            assert rsp3.status_code == 200 and body3["uploaded_count"] > 0, \
+                f"t6③ 对照失效：服务在线时也不落切片（{rsp3.status_code} {str(body3)[:160]}）"
+            assert "没有切片" not in json.dumps(body3, ensure_ascii=False), "t6③：在线也报降级"
+            assert any("tool.exe" in e for e in body3["errors"]), f"t6③：门口拒因丢了：{body3['errors']}"
+            # ④ 反向对照：真 bug 不许被翻成「服务不可用」
+            mod.QdrantStore = lambda *a, **k: _Store(boom=ValueError("'loss'"))
+            rsp4 = c.post(f"/api/sessions/{sid}/workspace/upload_kb", files=parts(extra_exe=False))
+            assert rsp4.status_code == 500, \
+                f"t6④：把真异常降级成了 {rsp4.status_code}——「服务不可用」的谎就是这么写出来的"
+            assert "没有切片" not in rsp4.text, f"t6④：500 里混进了降级文案：{rsp4.text[:160]}"
+        print("  ok  t6 两种不可达各取真读数（qdrant/openai 各包一层，类名都不提「连接」）、"
+              "文案三件事齐（没切片 / 原件在 kb/ / 该查哪两台）、门口拒因不被盖掉；"
+              "阳性对照 200、反向对照真 bug 仍 500")
+    finally:
+        mod.QdrantStore, mod.LLMGateway, settings.qdrant.url, settings.embedding.base_url = saved
+        if keep is not None:
+            ss.SESSIONS_FILE, settings.platform.use_redis = keep
+        shutil.rmtree(Path("workspace") / "s15_kb_down", ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 def main():
     checks = [t1_ingest_then_recall, t2_endpoint_door, t3_role_thinks_with_kb,
-              t4_rejects_what_it_cannot_ingest, t5_no_regression_guard]
+              t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
+              t6_vector_service_down_says_so]
     for f in checks:
         f()
-    print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型）——"
-          f"其中 t1/t3 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}")
+    print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局）——"
+          f"其中 t1/t3 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
+          f"t6 四格都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
 
 
 if __name__ == "__main__":
