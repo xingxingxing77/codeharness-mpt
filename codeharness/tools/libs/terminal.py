@@ -191,7 +191,10 @@ async def close_terminal(project: str | None = None) -> None:
 @register_tool(tags=["terminal"])
 @tool
 async def terminal_command(command: str, conda_env: str = "") -> str:
-    """在保态终端会话里执行命令（cd 与环境变量跨调用保留）。conda_env 非空则在该 conda 环境内执行"""
+    """在保态终端会话里执行命令：cd 与环境变量跨调用保留（要先切目录/进环境就用这条，而不是每次重敲）。
+    conda_env 非空则在该 conda 环境内执行。
+    关键词：终端、命令行、切目录、进环境、激活环境、常驻、看进程、看端口、服务起没起、top、netstat、run。
+    示例：terminal_command(command="cd web && npm run build", conda_env="anaconda3")"""
     t = current_terminal()
     if conda_env:
         return await t.execute_in_conda_env(command, conda_env)

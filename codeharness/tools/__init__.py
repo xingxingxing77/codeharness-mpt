@@ -10,7 +10,9 @@ from codeharness.tools.tool_registry import TOOL_REGISTRY, register_tool
 @register_tool(tags=["file"])
 @tool
 async def write_file(path: str, content: str) -> str:
-    """写入工作区文件（相对路径，禁止越界），返回确认信息"""
+    """整份写入工作区文件：路径相对会话根目录，越界即拒；父目录自动创建，已存在则整篇覆盖。
+    关键词：写入、保存、存成、另存为、覆盖、导出、落盘、write、save。
+    示例：write_file(path="note.txt", content="第一行")"""
     from codeharness.report import editor_block
     t = _safe(path)
     if not t:
@@ -26,7 +28,9 @@ async def write_file(path: str, content: str) -> str:
 @register_tool(tags=["file"])
 @tool
 def read_file(path: str) -> str:
-    """读取工作区文件内容"""
+    """读取工作区文件的全部内容（相对路径，越界即拒；单次最多回 2 万字符）。
+    关键词：读、看、查看、打开看看、里面写了什么、念一下、全文、read、show、内容。
+    示例：read_file(path="src/main.py")"""
     t = _safe(path)
     if not t or not t.exists():
         return f"文件不存在: {path}"
@@ -36,7 +40,9 @@ def read_file(path: str) -> str:
 @register_tool(tags=["terminal"])
 @tool
 async def execute_shell_async(command: str, timeout: int = 60) -> str:
-    """在本会话工作目录执行 shell 命令（异步版，图节点里用）"""
+    """在本会话工作目录跑一条 shell 命令并等它结束（异步版，图节点里用；默认 60 秒超时，回 stdout+stderr）。
+    关键词：执行、跑、运行、跑一下、起一下、命令、脚本、构建、编译、装依赖、测试、lint、shell、bash。
+    示例：execute_shell_async(command="pytest -q", timeout=120)"""
     from codeharness.report import terminal_block
     from codeharness.tools.sandbox import run_proc
     async with terminal_block() as rep:                     # 前端 Terminal 块（cmd+output 流式）
@@ -50,7 +56,9 @@ async def execute_shell_async(command: str, timeout: int = 60) -> str:
 @register_tool(tags=["web"])
 @tool
 async def search_internet(query: str) -> str:
-    """联网搜索，返回「标题 + 链接 + 摘要」列表；引擎不可用时返回降级文案而不是抛异常"""
+    """联网搜索，返回「标题 + 链接 + 摘要」列表（本会话唯一的外网出口；引擎不可用时回降级文案而不抛异常）。
+    关键词：搜索、查一下、网上找、官方文档、资料、报错怎么解、最新版本、search、google、docs。
+    示例：search_internet(query="langchain astream_events 用法")"""
     from codeharness.tools.search_engine import search
     try:
         rows = await search(query)

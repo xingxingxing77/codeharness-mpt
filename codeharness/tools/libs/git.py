@@ -27,8 +27,10 @@ async def _gh(args: list[str]) -> str:
 @tool
 async def git_create_pull(base: str, head: str, base_repo_name: str, head_repo_name: str = "",
                           title: str = "", body: str = "") -> str:
-    """在托管仓库创建 Pull Request（gh CLI）。base_repo_name 形如 "user/repo"；
-    跨仓 PR 时 head_repo_name 填 fork 的 "user/repo"。返回 PR 链接或降级说明。"""
+    """在托管仓库创建 Pull Request（走 gh CLI），返回 PR 链接或降级说明。
+    base_repo_name 形如 "user/repo"，跨仓 PR 时 head_repo_name 填 fork 的 "user/repo"。
+    关键词：提交代码、推上去、推到远端、开 PR、合并请求、让人评审、提审、branch、pull request。
+    示例：git_create_pull(base="main", head="fix-login", base_repo_name="acme/app")"""
     args = ["gh", "pr", "create", "--repo", base_repo_name, "--base", base,
             "--head", f"{head_repo_name}:{head}" if head_repo_name and head_repo_name != base_repo_name else head,
             "--title", title or f"{head} -> {base}", "--body", body or "Created by Codeharness"]
@@ -39,6 +41,8 @@ async def git_create_pull(base: str, head: str, base_repo_name: str, head_repo_n
 @register_tool(tags=["git"])
 @tool
 async def git_create_issue(repo_name: str, title: str, body: str = "") -> str:
-    """在托管仓库创建 Issue（gh CLI）。repo_name 形如 "user/repo"。返回 issue 链接或降级说明。
-    （源第三参 access_token 弃：R7 后凭据不进工具签名，gh 用自身登录态。）"""
+    """在托管仓库创建 Issue（走 gh CLI），返回 issue 链接或降级说明；凭据用 gh 自身登录态，不进工具签名（R7）。
+    repo_name 形如 "user/repo"。
+    关键词：开单、开个单子、工单、待办、记个问题、缺陷跟踪、崩溃要有人跟、issue、ticket、bug。
+    示例：git_create_issue(repo_name="acme/app", title="登录接口超时")"""
     return await _gh(["gh", "issue", "create", "--repo", repo_name, "--title", title, "--body", body or title])

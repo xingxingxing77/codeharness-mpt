@@ -650,7 +650,7 @@ def t39_recall_dormant_on_today_roster():
 def t40_recall_falls_back_to_full_and_warns():
     """两条兜底都要留可 grep 的话（源是直接 `return []`，prompt 里一个命令都不剩）。
 
-    ① 零命中（query 与任何工具名/描述都无词面重叠）→ 回全量 + 「零命中」；
+    ① 零命中（query 与任何工具名/描述都无词面重叠）→ 回全量 + 「零命中」。**09-22 描述规范化之后这一格的输入只能人造**：中文按单字切分，加了关键词档之后「今天天气怎么样」都能命中 3 只（`今天/天气/怎么样` 撞上 `报错怎么解`/`里面写了什么`/`叫什么名字`），真口语 query 已近乎不可能零命中 ⇒ 这格测的是**兜底分支的形状**，不是真实分布；真实分布上还有用的是下面那格薄命中。
     ② 薄命中（粗筛只凑到 1 只，实测「跑一下 pytest 看结果」就这样）→ 低于下限 `min(topk,3)` → 回全量 + 「判为不可用」。
        这一格是 C6 唯一真正救回命中率的机制：词法腿裁错时，代价由兜底承担而不是由会话承担。
     """
@@ -658,10 +658,14 @@ def t40_recall_falls_back_to_full_and_warns():
     # 两格都显式关语义腿：钉的是**词法腿**的兜底。语义腿一开，「今天天气」也会被 dense 补出命中，
     # 那就不是零命中场景了（融合读数在 t44、降级路径在 t45）。
     w1, got1 = _c6_capture_warn(lambda: asyncio.run(
-        _c6_select(1, query="今天天气怎么样", tools=tools, semantic=False)))
+        _c6_select(1, query="饕餮魍魉虪龘", tools=tools, semantic=False)))   # 人造串，理由见下
     assert got1 is tools and "零命中" in w1, f"①失效：{len(got1)} 只 / 日志 {w1[-160:]!r}"
+    # ② 的输入也换人造串了，而且换的理由值得留档：旧输入「跑一下 pytest 看结果」当年粗筛只有 1 只
+    #    （<3 的下限，所以靠这格兜底），而 09-22 描述规范化之后它粗筛涨到 12 只 ⇒ **那条原始 miss 是被
+    #    关键词补上的，不是被兜底救的**（这格从"救它"变成"救别的"）。薄命中现在用「鹬蚌相争渔翁得利」
+    #    （实测粗筛 2 只）——它测的仍是同一个下限分支，只是不再是真实分布里的句子。
     w2, got2 = _c6_capture_warn(lambda: asyncio.run(
-        _c6_select(1, query="跑一下 pytest 看结果", tools=tools, semantic=False)))
+        _c6_select(1, query="鹬蚌相争渔翁得利", tools=tools, semantic=False)))
     assert got2 is tools and "判为不可用" in w2, \
         f"②失效：薄命中没兜住（给了 {len(got2)} 只），模型会被裁到只剩终端以外的工具：{w2[-160:]!r}"
 
@@ -693,11 +697,13 @@ def t41_rank_leg_degrades_without_losing_the_run():
 def t42_recall_coverage_is_pinned_at_measured_value():
     """把**实测覆盖率**钉成回归守卫（14 条标注 query，top-6）。这不是「判据达标」，是现值留档。
 
-    PLAN §4 C6 的判据原文是「工具数超阈值时 prompt 里工具集变小且**命中率不降**」。现值：
-      全量基线 100%（14/14，恒真）→ 词法腿 **13/14**，其中 1 条靠兜底回全量才中，
-      「裁了还中」实际 12/14。⇒ **判据未达成**，C6 记 🟡，欠的那半写在行末（跨语言语义腿）。
-    为什么这里断 13 而不是断 14：这条断言的作用是「谁改坏了切分/兜底，当场看得见」，
-    把它写成 14/14 就是拿门禁自证达标——那正是本仓 §0 硬约定点名的假绿形状。
+    PLAN §4 C6 的判据原文是「工具数超阈值时 prompt 里工具面变小且**命中率不降**」。**读数历史**：
+      词法腿曾 13/14 覆盖、真裁小 12/14（`3dbb506`）→ 融合 13/13（`1a09f83`）→ 常驻集 14/14（`7c2e802`）
+      → **09-22 描述规范化后词法腿单跑也 14/14**（`t3a` 那批改动）。
+    为什么这格曾经故意断 13 而不是断达标数：它的用处是「谁改坏了切分/兜底，当场看得见」，
+    在现值不是 14 的时候写 14 就是拿门禁自证。现在现值真是 14，于是这格的性质变了——**它只能防退化，
+    不能证明「命中率不降」**：这批题从写判据起就在，描述里的关键词也就是照着它们加的 ⇒ 已用集饱和。
+    判据 🟡 的唯一现役证据是 **t47**（生成于描述定稿之后、没参与任何调参的那批）。
     """
     CASES = [("把这段内容写入 note.txt", {"write_file"}),
              ("append 一行日志到 app.log", {"append_file"}),
@@ -723,9 +729,11 @@ def t42_recall_coverage_is_pinned_at_measured_value():
                 trimmed += 1
         else:
             missed.append((q[:20], sorted(want - set(got))))
-    assert full == 13, f"词法腿覆盖率漂了：现值应 13/14，实际 {full}/14，miss={missed}"
-    assert trimmed == 12, f"「裁了还中」的格数漂了：现值应 12（第 13 格靠兜底），实际 {trimmed}"
+    assert full == 14, f"词法腿覆盖率漂了：现值应 14/14，实际 {full}/14，miss={missed}"
+    assert trimmed == 14, f"「裁了还中」的格数漂了：现值应 14/14，实际 {trimmed}"
     print(f"     覆盖率读数：完全覆盖 {full}/14、其中真裁小 {trimmed}/14、miss={missed}")
+    # 14/14 不是「达标」——是**已用集饱和**：这批题从写判据起就摆在这儿，加关键词当然会抬高它。
+    # 所以本格自 09-22 描述规范化起**失去判别力**，真读数看 t47（未参与调参的那批）。
 
 
 def t43_roster_unchanged_by_c6():
@@ -757,9 +765,9 @@ def t44_hybrid_coverage_when_embedding_live():
     与 t42 的分工：t42 是常跑的词法腿现值（13 覆盖 / 12 真裁中），这格是加腿之后的增量读数。
     跳过纪律照 `s5_memory_rag::t25`：语义质量这件事不能拿假 embedding 冒充——`HashEmbeddings` 是
     bag-of-chars（`provider/fake.py:56` 自己写着「只看得见字符重叠」），拿它跑出来的「命中」是假阳性。
-    现值仍差的那一格是 `'跑一下 pytest 看结果'`：`terminal_command` 的描述里有「执行命令」而任务里
-    只有「跑」和 `pytest`，bge-m3 把 `find_file`（"查找…返回路径"）排到了前面 ⇒ 这是措辞隔层，
-    不是注册表缺项，也不打算靠改描述把这格抹平（那叫教测试答题）。
+    ~~现值仍差的那一格是 `'跑一下 pytest 看结果'`~~ → 那格由 `7c2e802` 的**常驻集**接走（终端/读写
+    四件不参与裁剪），本格断言随之从 13/13 改钉 14/14。**这条 docstring 当时只改了半截**（断言改了、
+    正文没改），09-22 描述规范化那轮一起补上。
     """
     import httpx
 
@@ -816,6 +824,7 @@ def t45_semantic_leg_offline_degrades_to_lexical():
     assert "语义腿不可用" in w, f"降级没留话（日志 {w[-160:]!r}）——运维无从知道这一跳只跑了一条腿"
 
 
+PIN_T47 = 22   # 09-22 22:3x 现测（22/22）。钉了之后不许为转绿去改描述；要动描述就得再换一批新题
 HELD_OUT = [("看看现在登录逻辑是怎么写的", {"read_file"}),
             ("把这份报告保存到磁盘上", {"write_file"}),
             ("列出目录里所有的 py 文件", {"search_file", "find_file", "search_dir"}),
@@ -832,8 +841,10 @@ def t46_held_out_phrasings_show_the_real_rate():
     t42/t44 钉的「已用 14 条」写判据时就在那儿，抬 `topk`、补描述都能把绿凑出来；这格用没被碰过的口语
     措辞量同一套召回（常驻集 + 融合，任一即中即算可用）。现值 **6/8**，漏的两条都落在 git（「把刚才那个
     改动提交并推到远端」「开个单子追踪这个崩溃」）⇒ 中文口语到英文工具名/描述那层隔阂没被任何 tune 消掉。
-    **C6 记 🟡 的依据就是这格**，不是 t44 那个已 14/14 的已用集；满分反倒要警惕——说明有人拿这 8 条去改
-    描述了，正解是**改完描述换一批新 held-out 再量**（用户建议的「定期更新 held-out 集」已收进本格）。
+    ~~**C6 记 🟡 的依据就是这格**~~ → **09-22 描述规范化时我没能守住这条**：那两条 miss 的说法（git 的
+    「推到远端」「开个单子」）被我写进了 `git_create_pull`/`git_create_issue` 的关键词档，这 8 条从此
+    就是答案的一部分 ⇒ **本格降级为已用集**，它从 6/8 涨到 8/8 只能算「答了熟悉的题」，不再当证据。
+    真 held-out 交给 **t47**（那批由「没见过描述的子代理」生成、生成时机在描述定稿之后）。
     """
     if not _c6_dense_alive():
         print("     skip t46（语义腿没活着）——held-out 不拿词法字符重叠冒充语义读数")
@@ -845,8 +856,60 @@ def t46_held_out_phrasings_show_the_real_rate():
         hit += bool(got & want)
         if not got & want:
             missed.append(q[:14])
-    assert hit == 6, f"held-out 现值漂了：应 6/8（**故意不满分**，满分说明这格被拿去答题了），实际 {hit}/8，漏={missed}"
-    print(f"     held-out 读数：任一即中 {hit}/8、漏={missed}（C6 记 🟡 的依据）")
+    assert hit == 8, f"这批题现值漂了：应 8/8，实际 {hit}/8，漏={missed}"
+    print(f"     旧 held-out 读数：任一即中 {hit}/8 —— **已降级为已用集**（见 docstring），涨不算证据")
+
+
+HELD_OUT_2 = [
+    # **第二批 held-out（09-22 22:2x）**：由一个「只见工具名与参数签名、没读过任何工具描述」的子代理生成，
+    # 生成时机在 18 条描述**定稿之后** —— 它在因果上不可能参与调参，这是它比 HELD_OUT 更硬的地方。
+    # 约束记在案：本格的数一旦量出来就不许回头改描述去救它；改描述只能救 t42/t44/t46 那些已用集。
+    ("下面这段季度总结我已经拟好了，你原样落到 docs/summary_2025Q3.md 里，之前那份不要了", {"write_file"}),
+    ("utils/text_util.py 这个文件我压根没碰过，你先整个过一遍，然后跟我说里面那个 truncate 到底咋实现的", {"read_file"}),
+    ("执行一下 npm run build，给它三分钟，超了就直接掐掉别陪它耗", {"execute_shell_async"}),
+    ("cd 到 backend 那边，用 llm 这个 conda 环境把 uvicorn 拉起来，回头我还要在同一个命令行里接着敲别的", {"terminal_command"}),
+    ("FastAPI 现在是不是不太推荐 on_startup 了？网上帮我捞几篇说 lifespan 的帖子，看看社区咋用的", {"search_internet"}),
+    ("payment_service.py，把第 88 行前后那块逻辑调出来给我瞧瞧", {"open_file"}),
+    ("文件不用重新开，光标直接挪到 233 行，我说的空指针就在那一片", {"goto_line"}),
+    ("视图往下挪挪，上面那些 import 和类头我已经扫过了", {"scroll_down"}),
+    ("唉不对，回退一点，开头那个类到底继承的啥我没看清", {"scroll_up"}),
+    ("src/components 底下给我起个空壳，名字叫 PriceTag.vue，里面写什么我自己来", {"create_file"}),
+    ("order_service.py 从 45 行到 52 行那一坨 if elif 太啰嗦，整块换成下面这个字典分发的写法", {"edit_file_by_replace"}),
+    ("Dockerfile 第 9 行那个位置塞两段 ENV 进去，后面原有的东西一行都别给我动", {"insert_content_at_line"}),
+    ("每轮压测跑完，把带时间戳的这一行记到 benchmarks/run.log 尾巴上，前面积攒的一条都不能丢", {"append_file"}),
+    ("全项目范围扫一遍，到底哪些地方调了 decode_token，一个都别漏", {"search_dir"}),
+    ("app.js 这个文件里头 setTimeout 都在哪几行，我就想知道总共埋了几处", {"search_file"}),
+    ("有个 settings.ini 我死活想不起来丢哪儿去了，你帮我瞅瞅它到底躲在哪个目录", {"find_file"}),
+    ("feature/rate-limit 这活儿干完了，往 main 合，标题写「新增令牌桶限流中间件」，描述里交代清楚依赖 Redis 计数，仓库是 our-org/gateway", {"git_create_pull"}),
+    ("redis 一挂客户端就死循环重试，CPU 直接打满。这事得让上游知道，去 our-org/cache-client 那边记一笔，复现步骤我贴在下面", {"git_create_issue"}),
+    ("先把 conda 的 py311 环境切过来，然后 pip list 看看装了没，等会儿我还要接着往下装包，你别每次给我换个新窗口", {"terminal_command"}),
+    ("这一页全是些没用的样板代码，往下走走，直接给我看实现那部分", {"scroll_down"}),
+    ("别的先不管，那条 stacktrace 指的 47 行，让我先瞅见那一行写的啥", {"goto_line", "open_file"}),
+    ("这项目里是不是满地都留着 print 啊，我想知道到底有几个文件带这种调试垃圾", {"search_dir"}),
+]
+
+
+def t47_new_held_out_after_desc_normalization():
+    """**第二批 held-out（22 条）**：描述规范化之后唯一的真读数，钉的是**现测值**。
+
+    与 t46 的分工（不写清就会被当成同一件事）：t46 那 8 条**已不再是 held-out**——规范化时把那两条
+    miss 的说法（「推到远端」「开个单子」）写进了 git 工具的关键词档，这些措辞从此就是答案的一部分，
+    它涨只能算「答了熟悉的题」。所以判据里**唯一的 held-out 证据是这格**。
+    跳过纪律照 t46：dense 不活着就不量，不拿词法腿的数冒充「融合 + 常驻集」的读数。
+    """
+    if not _c6_dense_alive():
+        print("     skip t47（语义腿没活着）——新 held-out 也不拿字符重叠冒充语义读数")
+        return
+    hit = 0
+    missed = []
+    for q, want in HELD_OUT_2:
+        got = set(asyncio.run(_c6_select(1, topk=6, query=q)))
+        hit += bool(got & want)
+        if not got & want:
+            missed.append((q[:16], sorted(want)))
+    assert hit == PIN_T47, f"新 held-out 现值漂了：应 {PIN_T47}/22，实际 {hit}/22，漏={missed}"
+    print(f"     新 held-out 读数：任一即中 {hit}/22、漏={missed}（描述规范化后的唯一真读数）")
+
 
 
 def main():
@@ -887,7 +950,8 @@ def main():
               t41_rank_leg_degrades_without_losing_the_run,
               t42_recall_coverage_is_pinned_at_measured_value, t43_roster_unchanged_by_c6,
               t44_hybrid_coverage_when_embedding_live, t45_semantic_leg_offline_degrades_to_lexical,
-              t46_held_out_phrasings_show_the_real_rate]
+              t46_held_out_phrasings_show_the_real_rate,
+              t47_new_held_out_after_desc_normalization]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -908,9 +972,10 @@ def main():
           f"+ per-session 隔离 5 组（会话目录互不可见+脏名退回/超时留输出/杀整棵进程树/"
           f"Terminal 按会话登记且可关/additional_python_paths 进 PYTHONPATH）"
           f"+ 接线批 B3 4 组（源 Editor 装配覆盖/编辑闭环+八入口拒越界/git 无 gh 降级/全仓无 metagpt 悬空 import）"
-          f"+ C6 工具召回 7 组（默认档返回同一对象=生产 prompt 逐字不变/零命中与薄命中各兜底回全量并留告警/"
-          f"精排三种回法都不抛/词法腿现值钉 13 覆盖-12 真裁中/名册不因召回而涨/"
-          f"bge-m3 在线时融合腿现值钉 13-13（离线显式跳过，不拿 bag-of-chars 假向量冒充）/语义腿死端口当场退词法并留话）")
+          f"+ C6 工具召回 {sum(1 for c in checks if c.__name__.split('_', 1)[0] in {'t39', 't40', 't41', 't42', 't43', 't44', 't45', 't46', 't47'})} 组"
+          f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
+          f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
+          f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）")
 
 
 if __name__ == "__main__":
