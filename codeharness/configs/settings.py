@@ -34,6 +34,21 @@ class RerankerConfig(BaseModel):
     recall_k: int = 10                                # 粗排取 10 → 精排 top_n=5；未配置或服务离线都降级为仅粗排
 
 
+class ToolRecallConfig(BaseModel):
+    """C6 工具召回（`tools/tool_recall.py`）。默认值=**今天不生效**，理由都写在读数里：
+
+    现场实测：名册 18 只、18 条描述全量进 prompt 是 1455 字符；而召回漏一次，模型吐「未知命令」
+    被回喂、多烧一整发（`step-3.5-flash` 一句 ¥0.12–0.27）。所以长线钉在 30——
+    名册真长大了才开始裁（`docs/对照3-工具调用.md` §六-5 同一口径）。
+    `use_llm` 默认 False 与 `RerankerConfig.base_url=""` 同一条纪律：可选的那一级不许默认白烧钱/白等。
+    """
+
+    min_tools: int = 30       # 名册 ≤ 此数 ⇒ 不裁，prompt 逐字不变
+    recall_topk: int = 12     # 词法粗筛留 12 只（源的 20 是给 27~31 只池子用的，本仓按比例收）
+    topk: int = 6             # 最终进 prompt 的数量（源同款 5，这里留 6 给「写+读+终端」这类组合）
+    use_llm: bool = False     # 开=每轮 think 多发一次模型调用；门禁用 FakeLLM 验形状，真读数按 ADR-02 批
+
+
 class QdrantConfig(BaseModel):
     """源 qdrant_config.py + document_store/qdrant_store.py:11 的 QdrantConnection 字段合并。"""
 
@@ -120,6 +135,7 @@ class Settings(BaseSettings):
     redis: RedisConfig = RedisConfig()
     search: SearchConfig = SearchConfig()
     exp_pool: ExpPoolConfig = ExpPoolConfig()
+    tool_recall: ToolRecallConfig = ToolRecallConfig()
     platform: PlatformConfig = PlatformConfig()
     langfuse: LangfuseConfig = LangfuseConfig()
 

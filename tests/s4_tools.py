@@ -592,6 +592,145 @@ def t38_no_dangling_metagpt_imports():
     assert not hits, f"供体包悬空 import: {hits}"
 
 
+# ---------------- C6：工具召回（默认休眠；名册长过 min_tools 才开始裁 prompt） ----------------
+def _c6_capture_warn(fn):
+    """只收 WARNING 及以上：兜底路径全靠 warning 说话，收全级别会让任何一条旧告警都算通过。"""
+    import io
+
+    from codeharness.logs import logger
+    buf = io.StringIO()
+    hid = logger.add(buf, format="{message}", level="WARNING")
+    try:
+        got = fn()
+        return buf.getvalue(), got
+    finally:
+        logger.remove(hid)
+
+
+def _c6_tools():
+    return {t.name: t for t in TOOL_REGISTRY.all()}
+
+
+async def _c6_select(min_tools, topk=6, recall_topk=12, use_llm=False, llm=None, query="写入文件",
+                     tools=None):
+    from codeharness.configs.settings import settings as S
+    from codeharness.tools.tool_recall import select_for_prompt
+    keep = (S.tool_recall.min_tools, S.tool_recall.topk, S.tool_recall.recall_topk, S.tool_recall.use_llm)
+    S.tool_recall.min_tools, S.tool_recall.topk = min_tools, topk
+    S.tool_recall.recall_topk, S.tool_recall.use_llm = recall_topk, use_llm
+    try:
+        return await select_for_prompt(tools if tools is not None else _c6_tools(), query, llm=llm)
+    finally:
+        (S.tool_recall.min_tools, S.tool_recall.topk,
+         S.tool_recall.recall_topk, S.tool_recall.use_llm) = keep
+
+
+def t39_recall_dormant_on_today_roster():
+    """C6 的默认档必须是「什么都不做」：今天名册 18 只 ≤ `min_tools=30` ⇒ 返回**同一个对象**。
+
+    判 identity 不判相等：`role_zero.py` 那个 `json.dumps` 吃的是 dict 的键序与内容，
+    返回一个「等值的新 dict」也算通过，但键序漂了 prompt 就变了——休眠档要的是逐字不变。
+    阳性对照（同一格内）：把阈值调到 1，必须换回一个更小的集合，否则这格是恒真的废话。
+    """
+    from codeharness.configs.settings import settings as S
+    assert S.tool_recall.min_tools >= len(TOOL_REGISTRY.all()) > 1, \
+        f"默认阈值 {S.tool_recall.min_tools} 已低于现名册 {len(TOOL_REGISTRY.all())} 只：休眠前提没了，生产 prompt 会被裁"
+    tools = _c6_tools()
+    same = asyncio.run(_c6_select(S.tool_recall.min_tools, query="把内容写进 note.txt", tools=tools))
+    assert same is tools, "默认档竟然返回了别的对象——C6 的『今天不生效』是设计前提，不是巧合"
+    active = asyncio.run(_c6_select(1, topk=6, query="把内容写进 note.txt", tools=tools))
+    assert active is not tools and 0 < len(active) < len(tools), \
+        f"阈值降到 1 仍没裁（{len(active)} 只）：召回整条路是死的，上面那格就成了自证"
+    assert set(active) <= set(tools), "裁出来的子集出现了名册外的工具"
+
+
+def t40_recall_falls_back_to_full_and_warns():
+    """两条兜底都要留可 grep 的话（源是直接 `return []`，prompt 里一个命令都不剩）。
+
+    ① 零命中（query 与任何工具名/描述都无词面重叠）→ 回全量 + 「零命中」；
+    ② 薄命中（粗筛只凑到 1 只，实测「跑一下 pytest 看结果」就这样）→ 低于下限 `min(topk,3)` → 回全量 + 「判为不可用」。
+       这一格是 C6 唯一真正救回命中率的机制：词法腿裁错时，代价由兜底承担而不是由会话承担。
+    """
+    tools = _c6_tools()
+    w1, got1 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, query="今天天气怎么样", tools=tools)))
+    assert got1 is tools and "零命中" in w1, f"①失效：{len(got1)} 只 / 日志 {w1[-160:]!r}"
+    w2, got2 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, query="跑一下 pytest 看结果", tools=tools)))
+    assert got2 is tools and "判为不可用" in w2, \
+        f"②失效：薄命中没兜住（给了 {len(got2)} 只），模型会被裁到只剩终端以外的工具：{w2[-160:]!r}"
+
+
+def t41_rank_leg_degrades_without_losing_the_run():
+    """精排腿（`use_llm=True`）三种回法：正常选、幻觉名、不是 JSON——后两种都必须退回粗筛且**不抛**。
+
+    降级纪律照 `memory/longterm.py:_rerank`：精排是可选能力，不可用就原序，绝不把会话带崩。
+    默认 `use_llm=False` 的理由与 `RerankerConfig.base_url=""` 同一条：开一级 = 每轮 think 多发一次调用
+    （本机实测一句 ¥0.12–0.27），不能默认替用户烧。
+    """
+    from codeharness.provider.fake import FakeLLM
+
+    q = "把内容写进 note.txt 再读回来核对"
+    good = FakeLLM(['["write_file", "read_file"]'])
+    got = asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=good, query=q))
+    assert {"write_file", "read_file"} <= set(got) and len(got) <= 6, f"精排正常路径失配：{sorted(got)}"
+
+    halluc = FakeLLM(['["make_coffee", "teleport"]'])
+    w, got2 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=halluc, query=q)))
+    assert len(got2) >= 3 and "没有一个在候选里" in w, \
+        f"幻觉名那格失配：给了 {sorted(got2)} / 日志 {w[-160:]!r}（必须退粗筛原序并留话）"
+
+    junk = FakeLLM(["抱歉，我不确定该用哪个工具。"])
+    w3, got3 = _c6_capture_warn(lambda: asyncio.run(_c6_select(1, topk=6, use_llm=True, llm=junk, query=q)))
+    assert len(got3) >= 3 and "精排不可用" in w3, f"非 JSON 回法失配：{len(got3)} 只 / {w3[-160:]!r}"
+
+
+def t42_recall_coverage_is_pinned_at_measured_value():
+    """把**实测覆盖率**钉成回归守卫（14 条标注 query，top-6）。这不是「判据达标」，是现值留档。
+
+    PLAN §4 C6 的判据原文是「工具数超阈值时 prompt 里工具集变小且**命中率不降**」。现值：
+      全量基线 100%（14/14，恒真）→ 词法腿 **13/14**，其中 1 条靠兜底回全量才中，
+      「裁了还中」实际 12/14。⇒ **判据未达成**，C6 记 🟡，欠的那半写在行末（跨语言语义腿）。
+    为什么这里断 13 而不是断 14：这条断言的作用是「谁改坏了切分/兜底，当场看得见」，
+    把它写成 14/14 就是拿门禁自证达标——那正是本仓 §0 硬约定点名的假绿形状。
+    """
+    CASES = [("把这段内容写入 note.txt", {"write_file"}),
+             ("append 一行日志到 app.log", {"append_file"}),
+             ("新建一个 config.yaml", {"create_file"}),
+             ("读一下 src/main.py 现在写的什么", {"read_file"}),
+             ("把那一行改掉，替换成新的实现", {"edit_file_by_replace"}),
+             ("在 workspace 里搜 login 出现在哪些文件", {"search_file", "search_dir"}),
+             ("找出所有叫 handler.py 的文件", {"find_file"}),
+             ("打开 src/app.py 并跳到第 40 行", {"open_file", "goto_line"}),
+             ("跑一下 pytest 看结果", {"terminal_command", "execute_shell_async"}),
+             ("down 一屏看看后面的内容", {"scroll_down"}),
+             ("把这个分支推上去开 PR", {"git_create_pull"}),
+             ("给这个 bug 开一个 issue", {"git_create_issue"}),
+             ("search internet for langchain astream_events docs", {"search_internet"}),
+             ("在第 12 行后面插入一行 import os", {"insert_content_at_line"})]
+    full = trimmed = 0
+    missed = []
+    for q, want in CASES:
+        got = asyncio.run(_c6_select(1, topk=6, query=q))
+        if want <= set(got):
+            full += 1
+            if len(got) < len(_c6_tools()):
+                trimmed += 1
+        else:
+            missed.append((q[:20], sorted(want - set(got))))
+    assert full == 13, f"词法腿覆盖率漂了：现值应 13/14，实际 {full}/14，miss={missed}"
+    assert trimmed == 12, f"「裁了还中」的格数漂了：现值应 12（第 13 格靠兜底），实际 {trimmed}"
+    print(f"     覆盖率读数：完全覆盖 {full}/14、其中真裁小 {trimmed}/14、miss={missed}")
+
+
+def t43_roster_unchanged_by_c6():
+    """C6 不许往名册里塞工具：召回是「少给模型看」的一层，不是新能力面。
+
+    为什么单独一格：把阈值凑过去的最省事写法就是多注册几只假工具，而 `EXPECTED_TOOLS`
+    是登记制守卫（t1）——真有人这么干，那一格会红，但这格把「为什么不许」写在现场。
+    """
+    assert set(TOOL_REGISTRY.tools) == EXPECTED_TOOLS and len(EXPECTED_TOOLS) == 18, \
+        f"名册变了：{sorted(set(TOOL_REGISTRY.tools) ^ EXPECTED_TOOLS)}（C6 只裁 prompt，不加工具）"
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -625,7 +764,10 @@ def main():
               t34_additional_python_paths_reach_child,
               t34b_additional_python_paths_clamped_to_session,
               t35_source_editor_assembly_covered, t36_editor_tools_roundtrip_and_boundary,
-              t37_git_tools_degrade_without_gh, t38_no_dangling_metagpt_imports]
+              t37_git_tools_degrade_without_gh, t38_no_dangling_metagpt_imports,
+              t39_recall_dormant_on_today_roster, t40_recall_falls_back_to_full_and_warns,
+              t41_rank_leg_degrades_without_losing_the_run,
+              t42_recall_coverage_is_pinned_at_measured_value, t43_roster_unchanged_by_c6]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -645,7 +787,9 @@ def main():
           f"干净文件放行/非 Python 照源不校验）+ Editor._lint_file 真消费者 1 组 + env 读口签名 1 组"
           f"+ per-session 隔离 5 组（会话目录互不可见+脏名退回/超时留输出/杀整棵进程树/"
           f"Terminal 按会话登记且可关/additional_python_paths 进 PYTHONPATH）"
-          f"+ 接线批 B3 4 组（源 Editor 装配覆盖/编辑闭环+八入口拒越界/git 无 gh 降级/全仓无 metagpt 悬空 import）")
+          f"+ 接线批 B3 4 组（源 Editor 装配覆盖/编辑闭环+八入口拒越界/git 无 gh 降级/全仓无 metagpt 悬空 import）"
+          f"+ C6 工具召回 5 组（默认档返回同一对象=生产 prompt 逐字不变/零命中与薄命中各兜底回全量并留告警/"
+          f"精排三种回法都不抛/实测覆盖率钉在 13-14 且第 13 格靠兜底/名册不因召回而涨）")
 
 
 if __name__ == "__main__":

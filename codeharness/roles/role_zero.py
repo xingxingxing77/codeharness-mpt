@@ -25,6 +25,7 @@ from codeharness.memory.memory import Memory
 from codeharness.schema import Message, Command, Plan
 from codeharness.prompts.role_zero import (SYSTEM_PROMPT, CMD_PROMPT, ROLE_INSTRUCTION,
                                            TASK_TYPE_DESC)
+from codeharness.tools.tool_recall import select_for_prompt
 
 
 class ZeroThought(BaseModel):
@@ -283,7 +284,10 @@ class RoleZero:
         # 会让 prompt 里「经验」两个字骗人（A4 那批就是靠 prompt 文本判读写路的）。
         kb = await self._kb_recall(s["task"]) if self.kb is not None else ""
 
-        tool_info = json.dumps({n: {"description": t.description} for n, t in self.tools.items()},
+        # C6：名册长过 `TOOL_RECALL__MIN_TOOLS` 才开始裁工具块（默认 30，今天 18 只 ⇒ 逐字不变）。
+        # query 传本轮任务文本，不学源那样留 force 开关（源的 think 主路径因此从没跑过两级召回）。
+        tool_block = await select_for_prompt(self.tools, s["task"], llm=self.llm)
+        tool_info = json.dumps({n: {"description": t.description} for n, t in tool_block.items()},
                                ensure_ascii=False)
         plan_status, current_task = self._plan_status(s)
         # 批次3：instruction 可每轮重算（源 TL 把 team_info 现填）；task_type_desc/example 接构造期覆写。
