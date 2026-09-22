@@ -722,6 +722,7 @@ def t13_size_cap_and_truncation_reach_the_user():
     ③ 前端按**状态码**分流（`=== 413`），并按 `truncated` 换 toast 语气。
        文案由服务端给（「超过预览上限」那句里带真实大小与阈值），前端**不重抄数字**——
        两处各写一份 5MB 就是等它改上限那天漂移。
+    ④ 超时文案里的秒数必须是**本次那一发的档位**（`timeoutMs`）：上传走 120s 长档，写死常量的话界面会说「超时（15s 无响应）」——假数字比不报更容易把人带错方向。
     少任何一边这格都该红：只钉前端=后端哪天不回 truncated 也没人知道；只钉后端=界面照样静默。"""
     ws = (ROOT / "server" / "api" / "workspace.py").read_text(encoding="utf-8")
     act = (ROOT / "codeharness" / "actions" / "import_repo.py").read_text(encoding="utf-8")
@@ -752,8 +753,16 @@ def t13_size_cap_and_truncation_reach_the_user():
         "F-E 回归：导入结果不再看 truncated（撞上限的导入与完整导入长得一模一样）"
     assert "'warn'" in imp.group(2) and "截断" in imp.group(2), \
         f"F-E：撞上限时 toast 语气/文案没到位\n{imp.group(2).strip()[:200]}"
+
+    # ④ 超时秒数取本次档位（ADR-20260922-06）
+    to_msg = re.search(r"name === 'TimeoutError'\)\s*\{[\s\S]{0,260}?throw new Error\(`([^`]*)`", fe)
+    assert to_msg and 'timeoutMs' in to_msg.group(1), \
+        f"超时文案没取本次档位（{to_msg.group(1)[:90] if to_msg else '没抓到那条 throw'}）"
+    assert 'REQUEST_TIMEOUT_MS / 1000' not in fe, \
+        'C16 回归：client.ts 又拿常量拼超时秒数——120s 档的上传会报出「15s 无响应」这种假数字'
     _ok("t13", "F-E：413 与 truncated 两侧同判（后端仍回信号 → Error 挂 status → "
-               "前端按状态码分流 + 预览面板留话 + 上限处截断换 warn），阈值不在前端重抄")
+               "前端按状态码分流 + 预览面板留话 + 上限处截断换 warn），阈值不在前端重抄；"
+               "外加超时文案必须取本次档位（假秒数比不报更坏）")
 
 
 def t14_checkpoint_replay_surface():

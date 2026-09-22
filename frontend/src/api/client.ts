@@ -42,7 +42,9 @@ async function req<T = any>(method: string, url: string, body?: any,
     // 超时抛的是 DOMException('TimeoutError')，文案既没 url 也不说人话；调用方直接把
     // e.message 塞进 toast（ApprovalCard / QuestionCard 等），所以在这里翻成「哪个操作几秒没回」。
     if ((e as Error)?.name === 'TimeoutError') {
-      throw new Error(`${method} ${url} 超时（${REQUEST_TIMEOUT_MS / 1000}s 无响应，后端可能卡住）`)
+      // 秒数必须取**本次这一发**的档位：写死常量的话，120s 档的上传等满两分钟后
+      // 会说「超时（15s 无响应）」——报出来的数字是假的，比不报更容易把人带错方向。
+      throw new Error(`${method} ${url} 超时（${timeoutMs / 1000}s 无响应，后端可能卡住）`)
     }
     throw e
   }
