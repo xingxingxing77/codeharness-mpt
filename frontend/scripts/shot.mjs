@@ -31,6 +31,10 @@ const OPT = {
   eval: arg('eval'),
   waitFor: arg('wait-for'),
   theme: arg('theme'), // light | dark —— 截图前把主题钉住
+  // A1：无头 Chrome 默认按 `prefers-reduced-motion: reduce` 报，于是**所有动画都被媒体查询关掉**
+  // （读出来的 animationName 全是 none）。要读动效本身必须显式覆盖，否则探针会把「环境把动效关了」
+  // 误报成「代码没写动效」——这正是 A1 三处源值最容易得出的假结论。
+  reducedMotion: arg('reduced-motion'),   // no-preference | reduce —— 空则跟随浏览器默认
   // 端口不能写死：上一轮的 chrome 没退干净时端口还被旧实例占着，
   // 于是 jsonPort() 拿到的是**旧浏览器**的 page target，在它身上 evaluate 必然
   // 得到「Execution context was destroyed」——页面其实活着（批次14/16 误判为无头抖动）。
@@ -167,6 +171,14 @@ async function main() {
         await sleep(200)
       }
       if (!ok) throw new Error('等不到条件：' + OPT.waitFor)
+    }
+
+    // A1：先把动效媒体特性钉住，再截图/探针（默认无头会报 reduce，动效全被关掉）
+    if (OPT.reducedMotion) {
+      await cdp.send('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: OPT.reducedMotion }]
+      })
+      await sleep(120)
     }
 
     // 深色就是 body 上的 presence 属性，CSS 只认它，不必绕进 store

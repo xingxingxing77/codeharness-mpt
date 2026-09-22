@@ -7,7 +7,11 @@
 const PROPS = [
   'width', 'height', 'minHeight', 'maxWidth', 'padding', 'margin', 'gap',
   'fontSize', 'lineHeight', 'fontWeight', 'color', 'backgroundColor',
-  'borderTopWidth', 'borderTopStyle', 'borderTopColor', 'borderRadius', 'boxShadow', 'opacity'
+  'borderTopWidth', 'borderTopStyle', 'borderTopColor', 'borderRadius', 'boxShadow', 'opacity',
+  /* A1：动画三件。少了这三项，探针读得到「长得像不像」，读不到「动得对不对」——
+     而源值恰恰全是动效（sweep 2.6s / shimmer 1.8s / chase 1s step-end）。
+     shorthand 单独取即可：Chrome 会把 `animation` 展成 `名字 时长 缓动 无限`，不用逐子属性读。 */
+  'animation', 'animationDuration', 'transition'
 ]
 
 const SEL = {
