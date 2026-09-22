@@ -549,11 +549,13 @@ def t21_hit_count_reorders():
     点 id 用真实的派生式（record_hit 按 (tag,req) 反推同一个 id，这里必须一致）。"""
     from codeharness.document_store.exp_store import exp_point_id
     from codeharness.exp_pool.manager import ExperienceManager
-    hi, lo = exp_point_id("T", "近问题"), exp_point_id("T", "远问题")
+    hi, lo = exp_point_id("T", "近问题", "u21"), exp_point_id("T", "远问题", "u21")
     rows = [{"id": hi, "action_tag": "T", "input": "近问题", "output": "A", "score": 0.99},
             {"id": lo, "action_tag": "T", "input": "远问题", "output": "B", "score": 0.85}]
     counts = {lo: 3}                                     # 低相似但被复用 3 次的那条
-    mgr = ExperienceManager(store=StubStore(rows), counter=StubCounter(counts))
+    # user_id 必须与上面 hi/lo 的派生同一个租户：C4 之后经验 id 带租户，
+    # record_hit 反推的键只有同租户才对得上（不同租户本来就是两条不同的经验）
+    mgr = ExperienceManager(store=StubStore(rows), counter=StubCounter(counts), user_id="u21")
     got = asyncio.run(mgr.query_exps("q", tag="T"))
     assert [e.resp for e, _ in got] == ["B", "A"], "命中计数没有改变排序"
     counts[hi] = 3                                       # 追平 → 相似度做 tie-break
@@ -643,7 +645,7 @@ def t23_exp_store_replay_on_qdrant():
     user = f"u_exp_{uuid.uuid4().hex[:6]}"
     store = ExpStore(embeddings=HashEmbeddings(), user_id=user, store=gate_store())
     counter = HitCounter(user_id=user)
-    KEYS.append(f"exp_hits:{user}:{exp_point_id('RoleZero.llm_cached_think', '做个2048')}")
+    KEYS.append(f"exp_hits:{user}:{exp_point_id('RoleZero.llm_cached_think', '做个2048', user)}")
     mgr = ExperienceManager(store=store, counter=counter)
     exp = Experience(req="做个2048", resp='{"thought":"先建文件","commands":[]}',
                      tag="RoleZero.llm_cached_think")
@@ -655,7 +657,7 @@ def t23_exp_store_replay_on_qdrant():
     exact_miss = asyncio.run(mgr.query_exps("写一个五子棋", tag=exp.tag, query_type=QueryType.EXACT))
     assert exact_miss == [] or all(e.req == "写一个五子棋" for e, _ in exact_miss)
     asyncio.run(mgr.record_hit(exp))
-    assert asyncio.run(counter.get(exp_point_id(exp.tag, exp.req))) == 1, "真 Redis 计数没落"
+    assert asyncio.run(counter.get(exp_point_id(exp.tag, exp.req, user))) == 1, "真 Redis 计数没落"
     asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=user))
     print("  t23 真 Qdrant+真 Redis：入库→召回→计数落盘→作用域清理")
 
@@ -907,10 +909,21 @@ def t30_simple_scorer_fake_llm_path():
 
 
 def t31_exp_tenant_isolation():
-    """批次0 回归：经验池租户随 CURRENT_USER 流动（此前 manager 传字面量 "default" 令隔离空转）。"""
+    """C4 的正向证据：两个租户各写一条经验，**A 召得回自己的、B 召不回 A 的**。
+
+    旧写法这一格是**空转断言**：内部替身 `MemStore.search` 恒返回 `[r for r in []]`，连 A 自己都
+    查不到，于是「B 查不到 A 的经验」这句无论如何都成立，真正被断言的只剩「两个 manager 不是同一个」。
+    现在三格互钉：
+      ① 前半保留（manager 随 `CURRENT_USER` 分流，这是 `e382476` 那次修复的形状）；
+      ② 真往返（gate 专属集合）：A 写 A 查 → **非空**且逐字段对得上；B 用同一条 query 查 → 空，
+         而 B 查自己那条 → 非空。**没有 ① 之外的这格「B 也查得到自己的」，「B 查不到」就毫无意义**；
+      ③ 不依赖 Qdrant 在线的一格：拦 **ExpStore 真发出去的那次查询**，断言构造出的 filter 里带
+         `user_id == 该 store 的 user` 与 `doc_type == "exp"`。过滤是库做的，**在自己的替身里
+         手写过滤测的是替身**，所以这里只记不调。
+    ② 需要 Qdrant 在线（只写 `s5gate`，跑完按租户删净），不在线印跳过并进末行统计。
+    """
     import codeharness.exp_pool.manager as mg
     from codeharness.runtime import CURRENT_USER
-    from codeharness.exp_pool.schema import Experience
 
     tok = CURRENT_USER.set("alice")
     try:
@@ -922,25 +935,76 @@ def t31_exp_tenant_isolation():
         mB = mg.get_exp_manager()
         assert mB.store.user_id == "bob", "bob 应拿到自己的 manager"
         assert mB is not mA, "两用户共用同一 manager = 首个会话把租户冻死"
-
-        # 功能面：A 写的经验，B 按自己切片查不到（内存替身，不起容器）
-        class MemStore:
-            def __init__(self, uid): self.uid = uid; self.rows = []
-            async def save(self, tag, req, resp): self.rows.append((tag, req, resp))
-            async def search(self, tag, q, k=2):
-                return [r for r in [] ]   # 关键：跨用户永远查不到（B 的行集与 A 隔离）
-        class FakeEmb:
-            async def aembed_query(self, t): return [0.0]
-        mA.store = MemStore("alice"); mB.store = MemStore("bob")
-        for m in (mA, mB):
-            m.store.embeddings = FakeEmb()
-        asyncio.run(mA.create_exp(Experience(req="r-A", resp="v-A", tag="t")))
-        assert mA.store.rows and not mB.store.rows, "A 的写入漏进了 B 的切片"
-        assert asyncio.run(mB.query_exps("r-A", tag="t")) == [], "B 查到了 A 的经验 = 越权"
     finally:
         CURRENT_USER.reset(tok)
         mg._managers.clear()
-    print("  t31 经验池租户隔离：manager 随 CURRENT_USER 分流、A 写 B 查不到")
+
+    from codeharness.document_store.exp_store import ExpStore
+
+    if live_qdrant():
+        st_a = ExpStore(embeddings=HashEmbeddings(), user_id="alice", store=gate_store())
+        st_b = ExpStore(embeddings=HashEmbeddings(), user_id="bob", store=gate_store())
+        try:
+            asyncio.run(st_a.save("write_code", "把列表去重并保持顺序", "用 dict.fromkeys"))
+            asyncio.run(st_b.save("write_code", "把列表去重并保持顺序", "用 seen 集合累加"))
+            mine = asyncio.run(st_a.search("write_code", "把列表去重并保持顺序"))
+            assert mine and mine[0]["output"] == "用 dict.fromkeys", \
+                f"t31② 阳性对照塌了：A 连自己写的经验都召不回（{mine}）——那 B 查不到就是假绿"
+            assert all(h["output"] != "用 seen 集合累加" for h in mine), \
+                f"t31② 越权：A 召回了 B 的经验 {[h['output'] for h in mine]}"
+            theirs = asyncio.run(st_b.search("write_code", "把列表去重并保持顺序"))
+            assert theirs and theirs[0]["output"] == "用 seen 集合累加", \
+                f"t31② B 连自己都查不到 = 这格又退回恒空断言（{theirs}）"
+            assert all(h["output"] != "用 dict.fromkeys" for h in theirs), \
+                f"t31② 越权：B 召回了 A 的经验 {[h['output'] for h in theirs]}"
+            live = "②真往返两租户互不可见"
+        finally:
+            for uid in ("alice", "bob"):
+                asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=uid))
+    else:
+        live = "②跳过（无 Qdrant）"
+
+    # ③ 拦真查询：只记 filter，不自己实现过滤
+    from qdrant_client import AsyncQdrantClient
+
+    from codeharness.document_store.qdrant_store import QdrantStore
+    seen = {}
+    real = AsyncQdrantClient(url=settings.qdrant.url, check_compatibility=False)
+
+    class _Spy:
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def query_points(self, collection, **kw):
+            seen["collection"], seen["filter"] = collection, kw.get("query_filter")
+            return type("R", (), {"points": []})()
+
+        async def upsert(self, *a, **k):
+            return await self.inner.upsert(*a, **k)
+
+        async def create_collection(self, *a, **k):
+            return await self.inner.create_collection(*a, **k)
+
+        async def get_collection(self, *a, **k):
+            return await self.inner.get_collection(*a, **k)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    gated = QdrantStore(collection=GATE_COLL)
+    gated.client = _Spy(real)
+    gated._ready = True                       # 集合形态由 t12 钉，这一格只管发出去的 filter
+    asyncio.run(ExpStore(embeddings=HashEmbeddings(), user_id="carol",
+                         store=gated).search("run_code", "跑一下这段脚本"))
+    assert "filter" in seen, "t31③：ExpStore 根本没发出查询（这格成了空转）"
+    assert seen["collection"] == GATE_COLL, f"t31③：查到了生产集合 {seen['collection']}！"
+    conds = {c.key: getattr(c.match, "value", None) for c in (seen["filter"].must or [])}
+    assert conds.get("user_id") == "carol", \
+        f"t31③：真查询里的 user_id 不是这个 store 的租户（{conds}）——隔离在这一层漏了"
+    assert conds.get("doc_type") == "exp", \
+        f"t31③：经验没限定在 `doc_type=exp` 切片上（{conds}），会串到 kb/memory 里去"
+    print(f"  t31 经验池租户隔离：manager 随 CURRENT_USER 分流、{live}、"
+          f"③真查询 filter 带 user_id=carol + doc_type=exp")
 
 
 def t32_rerank_unset_default_skips_cleanly():

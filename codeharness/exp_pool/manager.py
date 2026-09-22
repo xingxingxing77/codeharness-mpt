@@ -48,11 +48,14 @@ class HitCounter:
 
 class ExperienceManager:
     def __init__(self, store=None, counter: HitCounter | None = None, user_id: str | None = None):
-        user_id = _resolve_user(user_id)
         if store is None:
             from codeharness.document_store.exp_store import ExpStore
-            store = ExpStore(user_id=user_id)
-        self.store = store
+            store = ExpStore(user_id=_resolve_user(user_id))
+        # 租户只有一个来源：显式传的 > store 身上的 > CURRENT_USER。三个消费者（写入、id 派生、
+        # 命中计数）必须同一个租户，否则计数打在别的键上——C4 之后 id 带租户，这个不一致从
+        # 「看着没事」变成「静默丢计数」，所以在构造时收掉，不靠调用点自觉。
+        user_id = user_id or getattr(store, "user_id", None) or _resolve_user(None)
+        self.store, self.user_id = store, user_id
         self.counter = counter or HitCounter(user_id=user_id)
 
     async def create_exp(self, exp: Experience) -> None:
@@ -69,7 +72,7 @@ class ExperienceManager:
             exp = Experience(req=h["input"], resp=h["output"], tag=h["action_tag"])
             if query_type == QueryType.EXACT and exp.req != req:
                 continue
-            pid = h.get("id") or exp_point_id(exp.tag, exp.req)
+            pid = h.get("id") or exp_point_id(exp.tag, exp.req, self.user_id)
             scored.append((exp, h["score"], await self.counter.get(pid)))
         scored.sort(key=lambda t: (-t[2], -t[1]))
         return [(exp, score) for exp, score, _ in scored]
@@ -77,7 +80,7 @@ class ExperienceManager:
     async def record_hit(self, exp: Experience) -> None:
         """只有真复用的那次才计数：召回了没看上的不计（计了就是把噪声排到前面）。"""
         from codeharness.document_store.exp_store import exp_point_id
-        await self.counter.bump(exp_point_id(exp.tag, exp.req))
+        await self.counter.bump(exp_point_id(exp.tag, exp.req, self.user_id))
 
     async def delete_all_exps(self) -> None:
         if hasattr(self.store, "clear"):
