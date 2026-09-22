@@ -385,6 +385,20 @@ def drop_queued(sid: str, qid: str, request: Request, user: str = Depends(curren
     return {"ok": True, "removed": qid}
 
 
+@router.get("/{sid}/tools")
+def list_hireable_tools(sid: str, request: Request, user: str = Depends(current_user)):
+    """B9 招人表单的可选项：工具名 + 声明需要的档位。
+    名单只有一个来源（`TOOL_REGISTRY.all()`），档位也只有一个来源（执行期那张 `TOOL_TIER`，
+    经 `team.required_tier` 这一个出口）——前端拿的是这两张表的投影，不在浏览器里再抄一份清单。
+    ⚠ `required_tier` 吃的是**一批工具名**（取最高档），传单个名字要包成列表：
+    直接塞字符串会按字符迭代、每个字符都不在那张表里 → 全按 fail-closed 判成 full_access，
+    于是 18 件工具的档位读数一个都不对（本端点第一版就中在这里，是 t21 的「档位读数全是同一档」那条抓出来的）。"""
+    _owned(request, sid, user)
+    from codeharness.team import required_tier
+    from codeharness.tools import TOOL_REGISTRY
+    return {"tools": [{"name": t.name, "tier": required_tier([t.name])} for t in TOOL_REGISTRY.all()]}
+
+
 @router.post("/{sid}/roles")
 def hire_role(sid: str, req: RoleReq, request: Request, user: str = Depends(current_user)):
     """C1-③ 现场招人。**生效点是下一次起跑/续跑**（不是运行中热插）：

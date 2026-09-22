@@ -145,6 +145,14 @@ export const api = {
   /** B3 分叉：`from_cursor` 留空 = 全量分叉。响应是新会话的字段 + 三个分叉回执。 */
   forkSession: (sid: string, fromCursor = '') =>
     req<Record<string, any>>('POST', `/api/sessions/${sid}/fork`, { from_cursor: fromCursor }),
+  /** B9 招人三件：可勾选的工具表、让模型现写的草案、确认落库。
+   *  草案与落库之间没有第二个真值——表单吃的就是后端那两张表的投影。 */
+  hireTools: (sid: string) => req<{ tools: { name: string; tier: string }[] }>(
+    'GET', `/api/sessions/${sid}/tools`),
+  roleDraft: (sid: string) => req<Record<string, any>>(
+    'GET', `/api/sessions/${sid}/roles/draft`),
+  hireRole: (sid: string, def: Record<string, any>) =>
+    req<Record<string, any>>('POST', `/api/sessions/${sid}/roles`, def),
   sendChat: (sid: string, content: string, sendTo = '') =>
     req('POST', `/api/sessions/${sid}/chat`, { content, send_to: sendTo }),
   answerHuman: (sid: string, content: string) =>

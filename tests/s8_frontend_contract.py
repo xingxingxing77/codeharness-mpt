@@ -1268,7 +1268,7 @@ def t19_fork_surface():
                "（文件内容逐字对）+ 未知游标 422 + 前端 forkFrom/branch 钮在位")
 
 
-def t21_icon_names_resolve():
+def t20_icon_names_resolve():
     """F-G：活组件按名字要的图标，必须真能在 `GLYPHS` 里取到。
 
     `DsIcon.vue` 的解法是 `ALIAS[name] || name` → `GLYPHS[key]`，取不到就走 FALLBACK
@@ -1300,8 +1300,84 @@ def t21_icon_names_resolve():
         f"F-G 回归：`file` 又没接上字形（现值 {alias.get('file')!r}）"
     # 阳性对照：一个压根不在表里的名字必须判不出来，否则上面两条断言是空转
     assert "no-such-glyph-xyz" not in alias and "no-such-glyph-xyz" not in glyphs
-    _ok("t21", f"F-G：活组件用到 {len(used)} 个图标名，逐个能在别名表或 GLYPHS（{len(glyphs)} 键）里取到；"
+    _ok("t20", f"F-G：活组件用到 {len(used)} 个图标名，逐个能在别名表或 GLYPHS（{len(glyphs)} 键）里取到；"
                "`file`→IconPaperclipOutline16 已接上，别名表无悬空指向")
+
+
+def t21_hire_surface():
+    """B9：招人控件——后端那条链早就通了（`s23` 六组），缺的是**用户点得着**。
+
+    本门只补 `s23` 覆盖不到的那一段：「表单里的可选项」与「后端判定用的」必须是同一张表。
+    前端自己抄一份工具清单，就会长成 C7 的 `MessageQueue` 那种形状——看着有，其实判的是另一套。
+    """
+    from codeharness.team import required_tier
+    from codeharness.tools import TOOL_REGISTRY
+
+    known = [t.name for t in TOOL_REGISTRY.all()]
+    import server.sessions as ss
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    from codeharness.configs.settings import settings
+    keep_file, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    keep_redis = settings.platform.use_redis
+    settings.platform.use_redis = False
+    try:
+        with TestClient(create_app()) as c:
+            # full_access：招进来的成员声明的工具要能真的批得下来（readonly 场会被
+            # required_tier 那道闸拒掉——那是正确行为，另有一格专门钉它）。
+            sid = c.post("/api/sessions", json={"idea": "招人门禁", "paradigm": "dynamic",
+                                                "permission": "full_access",
+                                                "project_name": "s8hire"}).json()["id"]
+            got = [t["name"] for t in c.get(f"/api/sessions/{sid}/tools").json()["tools"]]
+            assert got == known, (f"B9：`/{{sid}}/tools` 投影出的名单与 `TOOL_REGISTRY` 不一致 "
+                                  f"（少 {set(known) - set(got)} 多 {set(got) - set(known)}）")
+            tiers = {t["name"]: t["tier"] for t in c.get(f"/api/sessions/{sid}/tools").json()["tools"]}
+            assert all(v == required_tier([k]) for k, v in tiers.items()), \
+                "B9：档位不再是 `required_tier` 那一个出口给的（表单显示的和执行期判的会分叉）"
+            assert len(set(tiers.values())) > 1, \
+                "B9：18 件工具的档位读数全是同一档——`required_tier` 吃的是**一批名字**，" \
+                "把单个名字传成字符串会按字符迭代、全部 fail-closed 成 full_access"
+
+            bad = c.post(f"/api/sessions/{sid}/roles", json={
+                "name": "Cleo", "profile": "会查资料", "goal": "把资料补齐", "constraints": "",
+                "tools": ["no_such_tool_xyz"]})
+            assert bad.status_code == 422 and "no_such_tool_xyz" in bad.text, \
+                f"B9：未注册工具名该当场 422 并点名，实回 {bad.status_code}"
+            cls = c.post("/api/sessions", json={"idea": "x", "paradigm": "classic",
+                                               "project_name": "s8hire2"}).json()["id"]
+            cls2 = c.post("/api/sessions", json={"idea": "x", "paradigm": "dynamic",
+                                                "project_name": "s8hire3"}).json()["id"]
+            wrong = c.post(f"/api/sessions/{cls}/roles", json={
+                "name": "Cleo", "profile": "p", "goal": "g", "constraints": "", "tools": []})
+            assert wrong.status_code == 422, "B9：非 dynamic 线招人该拒（招进来是醒不过来的死成员）"
+            tight = c.post(f"/api/sessions/{cls2}/roles", json={
+                "name": "Cleo", "profile": "会查资料", "goal": "把资料补齐", "constraints": "",
+                "tools": [n for n in known if tiers[n] == "workspace_write"][:1]})
+            assert tight.status_code == 422 and "readonly" in tight.text,                 f"B9：readonly 场招高档工具该拒并说清要切哪一档，实回 {tight.status_code}"
+            ok = c.post(f"/api/sessions/{sid}/roles", json={
+                "name": "Cleo", "profile": "会查资料", "goal": "把资料补齐", "constraints": "不写文件",
+                "tools": [known[0]]})
+            assert ok.status_code == 200 and ok.json()["takes_effect"] == "next_start", ok.text[:160]
+            assert any(r["name"] == "Cleo" for r in c.get(f"/api/sessions/{sid}").json()["role_defs"]), \
+                "B9：确认招人后档案没落库"
+    finally:
+        settings.platform.use_redis = keep_redis
+        ss.SESSIONS_FILE = keep_file
+
+    api_ts = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    for route in ("/tools", "/roles/draft", "/roles"):
+        assert f"/api/sessions/${{sid}}{route}" in api_ts, f"B9 回归：client.ts 不再消费 {route}"
+    hr = (FE / "components" / "composer" / "HireRole.vue").read_text(encoding="utf-8")
+    assert "paradigm === 'dynamic'" in hr, "B9 回归：招人入口不再只对 dynamic 线出现（classic 线点了必被拒）"
+    assert "api.hireTools(" in hr and "api.roleDraft(" in hr and "api.hireRole(" in hr, \
+        "B9 回归：三件事不再由 HireRole 串起来（草案→勾选→确认）"
+    assert "hireRole" not in hr.split("async function draft(")[-1].split("async function hire(")[0], \
+        "B9 回归：**草案**路径里去调了落库端点——`/roles/draft` 的「不落库」这条契约被前端破坏了"
+    assert "(e as Error).message" in hr, "B9 回归：422/502/503 又去猜文案（原文里点名了哪个工具没注册）"
+    assert "store.loadSessions()" in hr, "B9 回归：招完不刷新，直聊下拉要重开一次才看得见新成员"
+    _ok("t21", "B9 三面同判：/{sid}/tools 与 TOOL_REGISTRY 逐字同名单 + 档位出自 required_tier 单口 + "
+               "未注册工具 422 点名 + 非 dynamic 拒 + 落库后 takes_effect=next_start；"
+               "前端三路由在位、草案不落库、错误照原文")
 
 
 def main():
@@ -1312,7 +1388,7 @@ def main():
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
               t17_goal_surface, t18_steer_queue, t19_fork_surface,
-              t21_icon_names_resolve)
+              t20_icon_names_resolve, t21_hire_surface)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")
