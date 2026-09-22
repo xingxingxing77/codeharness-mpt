@@ -17,6 +17,8 @@
      不许挂起（真跑台账里那张 `tool:'end'` 的卡），同时**正向对照** `write_file` 照旧挂起。
   t8 C18①：启动自愈只抹 `running`；停在待批处的会话跨**进程**重启仍是可信驻留态且真能恢复
      （t4–t7 全在一个进程里，`heal_running()` 这条启动路径一次都没被问过）。
+  t9 C18②：会话被打成 `failed` 那一刻留可 grep 的告警（`[session-failed]`）+ 事件流可见，
+     正常收口不打（阳性对照）；批准后那一发 `_resume` 的路径单独判一次。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -46,16 +48,19 @@ class _Team:
     ⚠ 落态判据**不再吃 `astream_events` 的事件**——实测 langgraph 1.2.11 只发 `on_chain_*`，
     没有 `on_interrupt`（A4 真模型那批查出来的缺陷）。runner 现在问活图 `aget_state().tasks[*].interrupts`，
     所以这个替身得把那一面也装上，形状照真图（`SimpleNamespace(tasks=[…interrupts=[…]])`）。
-    真图端到端的判据在 t5/t6，不吃这里的替身。"""
+    真图端到端的判据在 t5/t6，不吃这里的替身。
+    `boom` = 事件流走到一半时抛出的异常（t9 用它模拟「批准后那一发遇连接失败」）。"""
 
-    def __init__(self, events=(), hold=None, interrupts=()):
-        self.events, self.hold, self.interrupts = list(events), hold, list(interrupts)
+    def __init__(self, events=(), hold=None, interrupts=(), boom=None):
+        self.events, self.hold, self.interrupts, self.boom = list(events), hold, list(interrupts), boom
 
     async def astream_events(self, _input, _config, version=None):
         for ev in self.events:
             yield ev
         if self.hold is not None:
             await self.hold.wait()
+        if self.boom is not None:
+            raise self.boom
 
     async def aget_state(self, _config):
         from types import SimpleNamespace as NS
@@ -675,16 +680,101 @@ def t8_restart_keeps_parked_session():
     _t8b_cross_process_recovery()
 
 
+def t9_failure_is_loud():
+    """C18②：会话被打成 `failed` 那一刻必须留下**可 grep 的告警**，事件流里也看得见。
+
+    缺陷原文是「批准之后那一发遇连接失败，整场直接 `failed`、零重试零告警」——取证后**「零重试」那句
+    不成立**：非流式的模型调用走 `_acall`，连接类失败按 ADR-06 保留重发（实测桩收 3 次，判据在
+    `tests/s2_gateway.py::t14`）；真正缺的是重发用尽之后的那声响。所以这一格只判 `_fail`：
+      ① `_run` 那一发失败 → 状态 `failed` + 日志有 `[session-failed] sid=…` + 事件流有 `kind=error`；
+      ② **阳性对照**：正常收口的会话不许出现那行告警（否则它恒亮，grep 等于没有）；
+      ③ `_resume`（批准后那一发）单独判一次——它是被看见的那条路，与 `_run` 共用 `_fail` 但入口不同。
+    异常用真的 `openai.APIConnectionError`：缺陷台账里那行的 `error=APIConnectionError` 就是这么来的。
+    """
+    import io
+    from codeharness.logs import logger
+    from openai import APIConnectionError
+    import httpx
+
+    boom = APIConnectionError(request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+
+    def capture(fn):
+        """只收 ERROR 级：告警用的是 `logger.error`，收全部级别会让任何一条旧 error 都算通过。
+        ⚠ 顺序：先跑完再取 buffer——`return buf.getvalue(), fn()` 会按元组从左到右求值，
+        在 fn 之前就把空 buffer 快照走了（第一版就这样「日志里零痕迹」假红了一次）。"""
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="ERROR")
+        try:
+            got = fn()
+            return buf.getvalue(), got
+        finally:
+            logger.remove(hid)
+
+    def one(boom_exc=None):
+        """跑一版真 runner（替身图），返回 (状态, error 字段, 事件 kinds)。"""
+        store, runner, s = _make_runner()
+        _install(runner, _Team(boom=boom_exc), s.project_name)
+
+        async def body():
+            task = asyncio.create_task(runner._run(s))
+            runner.tasks[s.id] = task
+            await asyncio.gather(task, return_exceptions=True)
+            return (store.get(s.id).status.value, store.get(s.id).error,
+                    [(e.kind, e.name) for e in runner.bus.history(s.id)])
+        return asyncio.run(body())
+
+    log_failed, (status, err, kinds) = capture(lambda: one(boom_exc=boom))
+    assert status == "failed", f"t9① 前提失配：状态是 {status!r}"
+    assert "APIConnectionError" in (err or ""), f"t9① 失败原因没进会话记录：{err!r}"
+    assert "[session-failed]" in log_failed, \
+        f"t9① 失效：整场死了日志里零痕迹（运维 grep 不到）：{log_failed[-200:]!r}"
+    assert any(k == "error" for k, _n in kinds), f"t9① 失效：事件流里没有 error：{kinds}"
+
+    log_ok, (status_ok, _e2, _k2) = capture(one)      # 没有 boom、没有 interrupt → 正常收口 finished
+    assert status_ok == "finished" and "[session-failed]" not in log_ok, \
+        f"t9② 阳性对照不成立：正常收口也打了告警（status={status_ok!r}）——那行字恒亮就等于没有"
+
+    # ③ 批准后那一发：先停在待批处，再 answer_human → `_resume` → 同一处 `_fail`。
+    #    `boom` 必须在 resume 之前才装上——替身图与 `_run`/`_resume` 是同一个对象，
+    #    第一跑就抛的话会话根本停不下来（前置就假了）。
+    store3, runner3, s3 = _make_runner()
+    team3 = _Team(interrupts=PARKED)
+    _install(runner3, team3, s3.project_name)
+
+    async def body3():
+        task = asyncio.create_task(runner3._run(s3))
+        runner3.tasks[s3.id] = task
+        await task                                     # 停在待批处（graphs 留着供 resume）
+        parked = store3.get(s3.id).status.value
+        team3.boom = boom
+        started = runner3.answer_human(s3.id, "答案")
+        await asyncio.gather(runner3.tasks[s3.id], return_exceptions=True)
+        return (parked, started, store3.get(s3.id).status.value, store3.get(s3.id).error,
+                [(e.kind, e.name) for e in runner3.bus.history(s3.id)])
+
+    log3, (parked, started, after, err3, kinds3) = capture(lambda: asyncio.run(body3()))
+    assert parked == "awaiting_human", f"t9③ 前置失配：没停在待批处（{parked!r}）"
+    assert started is True, "t9③ 前置失配：answer_human 没接（resume 没起）"
+    assert after == "failed" and "APIConnectionError" in (err3 or ""), \
+        f"t9③ 失效：批准后那一发失败后状态是 {after!r} err={err3!r}"
+    assert "[session-failed]" in log3, \
+        f"t9③ 失效：批准后那一发死了，日志里没有那行告警（C18② 原症状）：{log3[-200:]!r}"
+    assert any(k == "error" for k, _n in kinds3), f"t9③ 失效：活流里没有 error 事件：{kinds3}"
+    print(f"  ok  t9（失败留 [session-failed] 告警 + error 事件、正常收口不打；"
+          f"批准后那一发同判：{after}）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
-              t7_special_commands_never_park, t8_restart_keeps_parked_session]
+              t7_special_commands_never_park, t8_restart_keeps_parked_session,
+              t9_failure_is_loud]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
           f"不抢槽/连点幂等 1 组 + human-input 409 端点半边 1 组 + 断点落态/停止/start 1 组 + "
           f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
-          f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组")
+          f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组")
 
 
 if __name__ == "__main__":

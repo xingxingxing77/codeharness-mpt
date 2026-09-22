@@ -9,6 +9,7 @@ import json
 import time
 import traceback
 from contextlib import contextmanager
+from codeharness.logs import logger
 from langgraph.types import Command
 from server.bridges import SESSION_ID
 from server.sessions import Session, SessionStatus
@@ -446,6 +447,10 @@ class SessionRunner:
 
     def _fail(self, sid: str, exc: Exception):
         message = f"{type(exc).__name__}: {exc}"
+        # 可 grep 的告警（C18②）：这是会话被打成 failed 的唯一出口。事件流是喂界面的，日志才是运维
+        # grep 的对象——缺这一行时「点了允许然后整场死了」在日志里零痕迹（告警与重试是两回事：
+        # 连接类失败本就由 `_retryable` 重发过，重发用尽之后必须留下响）。
+        logger.error(f"[session-failed] sid={sid} {message}")
         session = self.store.update(sid, status=SessionStatus.failed, error=message, finished_at=_now())
         self.bus.publish(sid, kind="error", value=traceback.format_exc(limit=6))
         self._publish_status(session, message)

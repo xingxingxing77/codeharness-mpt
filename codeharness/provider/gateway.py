@@ -401,14 +401,23 @@ class LLMGateway:
 
 
 def _retryable(exc: BaseException) -> bool:
-    """只重试**超时与连接类**异常；HTTP 状态错（鉴权/参数错，openai 的 APIStatusError）立刻抛出。
+    """重试判据按 ADR-06 拆成两半：**可能已被受理的不重发，连接没建立的照旧重发**。
+
+    - **不重发**：任何超时（`wait_for` 的 `TimeoutError`、openai 的 `APITimeoutError`）。请求大概率已经
+      受理，重发就是第二笔钱（实测 ¥0.27/句）与第二次副作用；端点慢是用户要知道的事，不是要替他兜掉的。
+      ⚠ 只把 `asyncio.TimeoutError` 从下面的元组里摘掉**不够**：3.11 起它就是内置 `TimeoutError`，
+      而 `TimeoutError` 是 `OSError` 的子类（本机 3.13 实测），照样会被 OSError 那支放行——所以先挡一道。
+    - **仍重发**：`ConnectionError/OSError`（连接建立失败＝没受理，不产生第二笔钱）与
+      「非 status 的 `APIError`」基形态：流被掐断 / 服务端 abort 掉 response_format 的 JSON 生成
+      （qwen MaaS 实测：`APIError: Model output became abnormal while generating a JSON response
+      for response_format`——同一请求重发即成，典型瞬态）。
 
     ⚠ 继承链坑：openai 的 APIStatusError 是 APIError 的子类——按类型族重试会把 401/400 也重了，
-    重试只是烧钱。要重的是「非 status 的 APIError」基形态：流被掐断 / 服务端 abort 掉
-    response_format 的 JSON 生成（qwen MaaS 实测：`APIError: Model output became abnormal
-    while generating a JSON response for response_format`——同一请求重发即成，典型瞬态）。"""
-    from openai import APIError, APIStatusError
-    if isinstance(exc, (asyncio.TimeoutError, ConnectionError, OSError)):
+    重试只是烧钱；`APITimeoutError` 同理是 `APIConnectionError` 的子类，也得单独扣掉。"""
+    from openai import APIError, APIStatusError, APITimeoutError
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, APITimeoutError)):
+        return False
+    if isinstance(exc, (ConnectionError, OSError)):
         return True
     return isinstance(exc, APIError) and not isinstance(exc, APIStatusError)
 

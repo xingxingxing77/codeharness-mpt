@@ -471,23 +471,54 @@ def t12_structured_and_code():
 
 
 def t14_retry_predicate():
-    """_acall 的重试判据（真模型第十处实测：qwen MaaS 服务端 abort 掉 response_format 的
-    JSON 生成，抛 openai.APIError——这是瞬态，重发即成；而 4xx/5xx 是 APIStatusError——
-    它的**父类才是 APIError**，判据写成 isinstance(APIError) 会把鉴权/参数错也重了，烧钱）。"""
+    """`_acall` 的重试判据 = ADR-06 拍定的两半（**可能已受理的不重发，连接没建立的照旧重发**）。
+
+    三条实测来路都在这格里钉住：qwen MaaS 服务端 abort 掉 response_format 的 JSON 生成，抛
+    `openai.APIError`——瞬态，重发即成；4xx/5xx 是 `APIStatusError`，它的**父类才是 APIError**，
+    判据写成 `isinstance(APIError)` 会把鉴权/参数错也重了（烧钱）；而超时那一半是本轮改判：
+    旧口径把 `asyncio.TimeoutError` 当可重，慢端点实测「一发 9.0s、桩收到多次请求」= 可能已受理的
+    请求被自动重发。⚠ 只把 `asyncio.TimeoutError` 从元组里摘掉**不生效**：3.11 起它就是内置
+    `TimeoutError`，而 `TimeoutError` 是 `OSError` 子类（本机 3.13 实测）——所以下面第三格连
+    `OSError` 一起验，第二格连 `APITimeoutError`（`APIConnectionError` 的子类）一起验。"""
     import httpx
-    from openai import APIError, AuthenticationError, APITimeoutError
+    from openai import APIConnectionError, APIError, APITimeoutError, AuthenticationError
     from codeharness.provider.gateway import _acall, _retryable
 
     req = httpx.Request("POST", "http://x")
     if not _retryable(APIError("Model output became abnormal ...", request=req, body=None)):
         _fail("服务端 abort JSON 生成（非状态类 APIError）必须重试")
-    if not _retryable(APITimeoutError(request=req)):
-        _fail("连接族（APIError 子类）照旧要可重")
+    if not _retryable(APIConnectionError(request=req)):
+        _fail("连接建立失败＝没受理、不产生第二笔钱，必须照旧可重")
+    if _retryable(APITimeoutError(request=req)):
+        _fail("超时=可能已受理，按 ADR-06 不许自动重发（`APITimeoutError` 是 APIConnectionError 的"
+              "子类，光靠「非 status 的 APIError」那一支挡不住，得单独扣）")
+    import asyncio as _aio
+    if _retryable(_aio.TimeoutError()):
+        _fail("内置 TimeoutError 是 OSError 的子类——不在 OSError 之前挡一道，摘掉元组里的名字是空转")
     auth = AuthenticationError("invalid api key", response=httpx.Response(401, request=req), body=None)
     if _retryable(auth):
         _fail("APIStatusError 是 APIError 的子类——判据不扣掉它，鉴权错会被重试三次")
     if _retryable(ValueError("契约错是自己的代码错")):
         _fail("自己的代码错不许重")
+
+    async def _attempts(boom, limit=6):
+        """数「桩真收到几次调用」——判据不看返回值看次数，否则「不重发」与「重发后成功」长得一样。"""
+        n = {"c": 0}
+
+        async def fn(*a, **kw):
+            n["c"] += 1
+            raise boom
+        try:
+            await asyncio.wait_for(_acall(fn, timeout=0), timeout=90)   # 退避最长 1+2+4s，别挂着不走
+        except Exception:
+            pass
+        return n["c"]
+
+    got_timeout = asyncio.run(_attempts(_aio.TimeoutError()))
+    got_connect = asyncio.run(_attempts(APIConnectionError(request=req)))
+    if (got_timeout, got_connect) != (1, 3):
+        _fail(f"重发次数读数失配：超时={got_timeout}（要 1，不重发）、"
+              f"连接失败={got_connect}（要 3，保留重发）——停在这里，口径就没落成代码")
 
     calls = {"n": 0}
 
