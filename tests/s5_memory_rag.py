@@ -182,9 +182,9 @@ def t7_tool_results_feed_next_round_prompt():
     """本轮抓出的真实缺陷：_act 的结果此前从不回喂，CMD_PROMPT 却要求 review the history。"""
     role = _role()
     s0 = {"task": "写个 prd", "history": [], "experience": "", "respond_language": "中文", "finished": False}
-    r1 = asyncio.run(role._think(s0))
+    r1 = asyncio.run(role._think(s0))                         # 图是**合并**语义：下一轮状态 = 起跑状态 + 节点返回
     assert len(role.memory.storage) == 1                       # 只有 thought 入库
-    acted = {**r1, "history": [{**r1["history"][-1],
+    acted = {**s0, **r1, "history": [{**r1["history"][-1],
                                 "results": [{"name": "write_file", "result": "已写入 prd.md"}]}]}
     asyncio.run(role._think(acted))
     last = role.llm.payloads[-1]
