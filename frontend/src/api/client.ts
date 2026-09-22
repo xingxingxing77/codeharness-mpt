@@ -142,6 +142,16 @@ export const api = {
   queue: (sid: string) => req<{ items: any[] }>('GET', `/api/sessions/${sid}/queue`),
   dropQueued: (sid: string, qid: string) =>
     req<{ ok: boolean; removed: string }>('DELETE', `/api/sessions/${sid}/queue/${qid}`),
+  /** B4 反馈：真值在 `Session.feedback`，这三条只是它的读写口。 */
+  feedback: (sid: string) => req<{ votes: Record<string, string> }>(
+    'GET', `/api/sessions/${sid}/feedback`),
+  putFeedback: (sid: string, key: string, vote: 'like' | 'dislike') =>
+    req<{ ok: boolean; feedback: Record<string, string> }>(
+      'PUT', `/api/sessions/${sid}/feedback`, { key, vote }),
+  deleteFeedback: (sid: string, key: string) =>
+    req<{ ok: boolean; feedback: Record<string, string> }>(
+      'DELETE', `/api/sessions/${sid}/feedback?${new URLSearchParams({ key })}`),
+
   /** B3 分叉：`from_cursor` 留空 = 全量分叉。响应是新会话的字段 + 三个分叉回执。 */
   forkSession: (sid: string, fromCursor = '') =>
     req<Record<string, any>>('POST', `/api/sessions/${sid}/fork`, { from_cursor: fromCursor }),

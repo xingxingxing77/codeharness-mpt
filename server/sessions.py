@@ -36,6 +36,9 @@ class Session(BaseModel):
     # ⚠ 新增这个字段必须同批登记 `platforms/session_store.py::_JSON_FIELDS`，
     # 否则 Redis 那台 store 会 `str(list)` 落库、回读成字符串，两台 store 从此不同形。
     role_defs: list[dict] = Field(default_factory=list)
+    # B4 反馈：`{尾行块键: "like"|"dislike"}`。像 role_defs 一样是 dict 字段 ⇒
+    # **必须同批登记 `platforms/session_store.py::_JSON_FIELDS`**，否则 Redis 那台会 `str(dict)` 落库。
+    feedback: dict = Field(default_factory=dict)
     entry_role: str = ""
     # 工具审批的会话级免审档：readonly | workspace_write | full_access（判定表见
     # codeharness/tools/_approval.py）。新建默认最保守的 readonly——只读面免审，

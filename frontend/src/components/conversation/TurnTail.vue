@@ -8,6 +8,7 @@
       :ttft-ms="turn.ttftMs"
       :tokens-per-second="turn.tokensPerSecond"
       clock="end"
+      :feedback-key="turn.key"
     />
     <!-- B3：branch 钮 = 从这一轮分叉一条新会话（参照系 chat/TurnTailNodeView 的 branch 动作位）。
          分叉点取本轮最后一个事件的游标，**含本轮**——切在本轮之后才有意义。 -->

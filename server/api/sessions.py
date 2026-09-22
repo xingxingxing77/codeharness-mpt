@@ -319,6 +319,54 @@ async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(cur
     return {"ok": True}
 
 
+class FeedbackReq(BaseModel):
+    "B4：反馈打在**尾行块键**上（`t:<块键>`，与前端 buildRows 的轮键同一个算法）。"
+    key: str = Field(min_length=1, max_length=80)
+    vote: str = Field(min_length=1, max_length=8)
+
+    @field_validator("vote")
+    @classmethod
+    def _vote(cls, v: str) -> str:
+        if v not in ("like", "dislike"):
+            raise ValueError("vote 只能是 like 或 dislike")
+        return v
+
+
+@router.get("/{sid}/feedback")
+def get_feedback(sid: str, request: Request, user: str = Depends(current_user)):
+    """已经点过的反馈。真值就在会话记录里，这里只是给「刷新后图标还亮着」一个读法。"""
+    return {"votes": _owned(request, sid, user).feedback}
+
+
+@router.put("/{sid}/feedback")
+def put_feedback(sid: str, req: FeedbackReq, request: Request, user: str = Depends(current_user)):
+    """点「有用 / 没用」。同一条重复点同一个票是幂等（不刷新次序、不重发事件）；
+    改票（like→dislike）合法——那是用户在纠错，不是脏数据。"""
+    s = _owned(request, sid, user)
+    if s.feedback.get(req.key) == req.vote:
+        return {"ok": True, "feedback": s.feedback}
+    merged = {**s.feedback, req.key: req.vote}
+    _get(request, "store").update(s.id, feedback=merged)
+    _get(request, "bus").publish(s.id, kind="feedback", name="set",
+                    value={"key": req.key, "vote": req.vote})
+    return {"ok": True, "feedback": merged}
+
+
+@router.delete("/{sid}/feedback")
+def delete_feedback(sid: str, request: Request, key: str = Query(..., min_length=1, max_length=80),
+                    user: str = Depends(current_user)):
+    """取消这一票。键不在表里也回 ok（幂等：用户点的就是"让它不亮"，不存在与已取消没有区别），
+    但**什么都不发**——与 PUT 的同票幂等同一口径：没有变化就不留事件，否则一次误点会在活流里留空痕迹。"""
+    s = _owned(request, sid, user)
+    if key not in s.feedback:
+        return {"ok": True, "feedback": s.feedback}
+    merged = {k: v for k, v in s.feedback.items() if k != key}
+    _get(request, "store").update(s.id, feedback=merged)
+    _get(request, "bus").publish(s.id, kind="feedback", name="clear",
+                    value={"key": key, "vote": ""})
+    return {"ok": True, "feedback": merged}
+
+
 class ForkReq(BaseModel):
     from_cursor: str = Field(default="", max_length=64)
 

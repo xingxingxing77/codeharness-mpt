@@ -1380,6 +1380,74 @@ def t21_hire_surface():
                "前端三路由在位、草案不落库、错误照原文")
 
 
+def t22_feedback_surface():
+    """B4：反馈三端点 + 尾行图标联动。参照系带版本 compare-and-set，本仓只有
+    `Session.feedback` 一张 last-write-wins 的表 —— 判据因此**不假装乐观并发**，
+    钉的是「幂等 + 改票 + 取消 + 值域」这四件真会做的事。
+    """
+    from platforms.session_store import _JSON_FIELDS
+    assert "feedback" in _JSON_FIELDS, \
+        ("B4 回归：`Session.feedback` 是 dict 字段却没登记 `_JSON_FIELDS` —— "
+         "Redis 那台会 `str(dict)` 落库、回读直接炸（两台 store 长得不一样，本仓反复踩的那类洞）")
+
+    import server.sessions as ss
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+    from codeharness.configs.settings import settings
+    keep_file, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    keep_redis = settings.platform.use_redis
+    settings.platform.use_redis = False
+    try:
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions", json={"idea": "反馈门禁", "project_name": "s8fb"}).json()["id"]
+            key = "t:stream-PM"
+            bad = c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "meh"})
+            assert bad.status_code == 422, f"B4：非法 vote 该 422，实回 {bad.status_code}"
+            assert c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "like"}).status_code == 200
+            again = c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "like"})
+            assert again.status_code == 200, again.text[:120]
+            votes = c.get(f"/api/sessions/{sid}/feedback").json()["votes"]
+            assert votes == {key: "like"}, f"B4：重复点同一票之后表里不是这一条 {votes}"
+            hist = c.get(f"/api/sessions/{sid}/events/history").json()["events"]
+            assert sum(1 for e in hist if e["kind"] == "feedback") == 1, \
+                "B4：重复点同一个票又发了一条事件（幂等要在事件流上也成立，不然活流会闪）"
+            c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "dislike"})
+            assert c.get(f"/api/sessions/{sid}/feedback").json()["votes"] == {key: "dislike"}, \
+                "B4：改票没覆盖掉旧票（用户在纠错，不是脏数据）"
+            gone = c.delete(f"/api/sessions/{sid}/feedback", params={"key": "t:never"})
+            assert gone.status_code == 200 and gone.json()["ok"] is True, \
+                "B4：取消一条不存在的票不该报错（用户要的就是「让它不亮」）"
+            c.delete(f"/api/sessions/{sid}/feedback", params={"key": key})
+            assert c.get(f"/api/sessions/{sid}/feedback").json()["votes"] == {}, "B4：DELETE 没清掉那一票"
+            names = [e["name"] for e in
+                     c.get(f"/api/sessions/{sid}/events/history").json()["events"] if e["kind"] == "feedback"]
+            assert names == ["set", "set", "clear"], f"B4：事件动作序列不对 {names}"
+    finally:
+        settings.platform.use_redis = keep_redis
+        ss.SESSIONS_FILE = keep_file
+
+    api_ts = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    assert "feedback: (sid: string)" in api_ts and "putFeedback" in api_ts and "deleteFeedback" in api_ts \
+        and "`/api/sessions/${sid}/feedback`" in api_ts, "B4 回归：client.ts 不再消费那三条反馈路由"
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    assert "ev.kind === 'feedback'" in st and "feedback: {} as Record<string, string>" in st, \
+        "B4 回归：反馈投影或 kind=feedback 分支没了"
+    assert "this.feedback = {}" in st, "B4 回归：切会话不清反馈表（上一场的票会亮在这一场的尾行上）"
+    mac = (FE / "components" / "conversation" / "MessageIconActions.vue").read_text(encoding="utf-8")
+    for token in ("like-fill", "dislike", "api.deleteFeedback", "api.putFeedback",
+                  "store.feedback[props.feedbackKey]"):
+        assert token in mac, f"B4 回归：尾行图标少了 {token}（点亮/取消/联动都靠它）"
+    # 两枚都要有按下态：只数「出现过一次」会被另一枚撑过去（反向验证第一版就这么漏过一格）
+    assert mac.count("aria-pressed") == 2, \
+        f"B4 回归：aria-pressed 只出现 {mac.count('aria-pressed')} 次——两枚图标钮各要一个，" \
+        "少一个就是「点亮了但屏幕阅读器不知道」"
+    assert mac.count(":aria-label=") >= 2, "B4 回归：反馈按钮没有可读名字"
+    tt = (FE / "components" / "conversation" / "TurnTail.vue").read_text(encoding="utf-8")
+    assert ":feedback-key=\"turn.key\"" in tt, "B4 回归：尾行不再把轮键传给图标（按钮根本不出现）"
+    _ok("t22", "B4 三面同判：vote 值域 422 + 同票幂等（事件也只一条）+ 改票覆盖 + 取消不存在的键回 ok + "
+               "set/set/clear 序列 + `feedback` 已登记 _JSON_FIELDS + 尾行 aria-pressed/like-fill 联动在位")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1388,7 +1456,7 @@ def main():
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
               t17_goal_surface, t18_steer_queue, t19_fork_surface,
-              t20_icon_names_resolve, t21_hire_surface)
+              t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

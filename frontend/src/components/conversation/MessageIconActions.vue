@@ -11,6 +11,22 @@
         <DsIcon :name="copied ? 'check' : 'copy'" :size="16" />
       </button>
     </VTooltip>
+    <!-- B4：反馈。参照系那三端点带版本 compare-and-set，我们只有一张 last-write-wins 的表，
+         所以这里不假装乐观并发：点了等服务端回执，改票/取消都以回执为准。 -->
+    <template v-if="feedbackKey">
+      <VTooltip :label="vote === 'like' ? '已标记有用，再点取消' : '标记有用'" side="bottom">
+        <button type="button" class="act" :aria-pressed="vote === 'like' ? 'true' : 'false'"
+                :aria-label="vote === 'like' ? '已标记有用' : '标记有用'" @click="cast('like')">
+          <DsIcon :name="vote === 'like' ? 'like-fill' : 'like'" :size="16" />
+        </button>
+      </VTooltip>
+      <VTooltip :label="vote === 'dislike' ? '已标记没用，再点取消' : '标记没用'" side="bottom">
+        <button type="button" class="act" :aria-pressed="vote === 'dislike' ? 'true' : 'false'"
+                :aria-label="vote === 'dislike' ? '已标记没用' : '标记没用'" @click="cast('dislike')">
+          <DsIcon name="dislike" :size="16" />
+        </button>
+      </VTooltip>
+    </template>
     <slot />
   </div>
 </template>
@@ -24,6 +40,8 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 import DsIcon from '../ui/DsIcon.vue'
 import VTooltip from '../ui/VTooltip.vue'
 import { useToastStore } from '../../stores/toast'
+import { useSessionStore } from '../../stores/sessions'
+import { api } from '../../api/client'
 import { formatLatencySeconds, formatMessageClock, formatRunDuration, formatTokensPerSecond } from '../../utils/messageChrome'
 
 const props = withDefaults(
@@ -37,11 +55,28 @@ const props = withDefaults(
     tokensPerSecond?: number
     /** 用户气泡时钟在图标前，助手在图标后。 */
     clock?: 'start' | 'end'
+    /** B4：给了这把键才出「有用/没用」两枚（轮尾键 = `t:<块键>`，与 buildRows 同一个算法）。 */
+    feedbackKey?: string
   }>(),
   { clock: 'end' }
 )
 
 const toast = useToastStore()
+const store = useSessionStore()
+const vote = computed(() => (props.feedbackKey ? store.feedback[props.feedbackKey] : undefined))
+
+/** 同一枚再点一次=取消（DELETE）；换票=直接 PUT 覆盖（用户在纠错，不是脏数据）。 */
+async function cast(v: 'like' | 'dislike') {
+  if (!store.currentId || !props.feedbackKey) return
+  try {
+    const r = vote.value === v
+      ? await api.deleteFeedback(store.currentId, props.feedbackKey)
+      : await api.putFeedback(store.currentId, props.feedbackKey, v)
+    store.feedback = r.feedback || {}
+  } catch (e) {
+    toast.fail((e as Error).message)      // 值域/越权的原文照说，不猜文案
+  }
+}
 const copied = ref(false)
 let timer: ReturnType<typeof setTimeout> | undefined
 

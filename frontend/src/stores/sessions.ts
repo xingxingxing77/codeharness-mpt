@@ -44,6 +44,8 @@ export const useSessionStore = defineStore('sessions', {
     /** B6：排着还没被 route 取走的插话。唯一真值仍是服务端队列，这里只是投影
      *  （开/切会话从 GET /queue 取一次，之后靠 kind=queue 事件跟着走）。 */
     queue: [] as QueueItem[],
+    /** B4：尾行键 → 票。同样只是投影，真值在 `Session.feedback`。 */
+    feedback: {} as Record<string, string>,
     status: '',
     cost: {} as Record<string, number>,
     /** 活流三态（B1 断线横幅的唯一状态源）。刻意只有三值：参考项目 ConnectionBanner 的原子
@@ -174,7 +176,18 @@ export const useSessionStore = defineStore('sessions', {
       void this.loadTrace(sid)
       void this.loadApprovals(sid)
       this.queue = []            // 上一场的排队胶囊不许挂在这一场名下（同「第二个游标」那族洞）
+      this.feedback = {}
       void this.loadQueue(sid)
+      void this.loadFeedback(sid)
+    },
+
+    async loadFeedback(sid: string) {
+      try {
+        const r = await api.feedback(sid)
+        if (sid === this.currentId) this.feedback = r.votes || {}
+      } catch {
+        /* 老会话没有这个字段：空表就是正确答案 */
+      }
     },
 
     async loadQueue(sid: string) {
@@ -485,6 +498,14 @@ export const useSessionStore = defineStore('sessions', {
             this.blockOrder.push(key)
           }
         }
+      } else if (ev.kind === 'feedback') {
+        // B4：反馈变更。按 key 增删这一份投影（`clear` 的 vote 是空串 ⇒ 删键）
+        const v = (ev.value || {}) as { key?: string; vote?: string }
+        if (!v.key) return
+        const next = { ...this.feedback }
+        if (v.vote) next[v.key] = v.vote
+        else delete next[v.key]
+        this.feedback = next
       } else if (ev.kind === 'queue') {
         // B6：队列变更。三个动作都只**按 id 增删**这一份投影，绝不整份覆盖——
         // 覆盖会把「add 到一半、GET 还没回来」的中间态抹掉，那就是第二个游标的老病。
