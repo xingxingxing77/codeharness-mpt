@@ -366,6 +366,11 @@ class RoleZero:
                         out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
                         results.append({"name": name, "result": str(out)[:4000]})
                     else:
+                        # T4-③：这是「召回/名册漏了」这件事在线上**唯一数得出来**的信号——命中率要真值才算得出
+                        # （线上没有真值），但「模型要的命令不在它这一轮看见的工具面里」是一条就是一次回喂 +
+                        # 多烧一发（实测 ¥0.12–0.27）。留一行可 grep 的话，纪律同 `[session-failed]`。
+                        logger.warning(f"[unknown-command] 模型要的命令不在本轮工具面：{name}"
+                                       f"（在册 {len(self.tools)} 只，task={str(s.get('task'))[:40]!r}）")
                         results.append({"name": name, "result": f"未知命令 {name}，可用: {list(self.tools)}"})
                 except GraphInterrupt:
                     raise                                         # interrupt 靠抛异常暂停图——绝不能被 self-heal 吞掉

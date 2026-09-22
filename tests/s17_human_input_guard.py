@@ -764,11 +764,58 @@ def t9_failure_is_loud():
           f"批准后那一发同判：{after}）")
 
 
+def t10_unknown_command_is_countable():
+    """T4-③：模型吐「本轮工具面里没有的命令」必须留下一行可 grep 的话——线上唯一数得出的召回信号。
+
+    为什么是日志不是指标：判据「命中率不降」要真值才算得出来，线上没有真值（PLAN §4 C6 行末定档 (a)，
+    这套裁剪今天不上线）。但这一条量的不是命中率——是**代价**：吐一次未知命令就多一轮回喂、多烧一发
+    （实测 ¥0.12–0.27）。纪律照 `[session-failed]`（t9）：留话、不抛、会话继续走。
+    两格：① 真未知命令 → 日志有 `[unknown-command]` + 结果串照旧回喂 + 整场不许死；
+          ② **阳性对照**：已知命令（`reply_to_human` + `end`）一条都不许打那行，否则它恒亮、grep 等于没有。
+    为什么直接打 `_act` 不走真图：未知命令走的正是「不进 `self.tools`、不碰审批」那支，真图那条路
+    t7 已经覆盖了；这里要判的是分支留下痕迹，绕开图反而少一层替身假绿。
+    """
+    import io
+
+    from codeharness.logs import logger
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+
+    role = RoleZero({"name": "Alice", "profile": "PM", "goal": "g"}, [], FakeLLM([""]))   # _act 不调模型，
+    #     命令由 history 末条给进来；FakeLLM 只是构造子句柄（它 responses 空会在 _next 里 IndexError）
+
+    def act(commands):
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="WARNING")   # 只收 WARNING 以上：收全部级别会让
+        try:                                                        # 任何一条旧 warning 都算通过
+            out = asyncio.run(role._act({"task": "把内容写进 note.txt", "history":
+                                         [{"thought": "先写文件", "commands": commands}],
+                                         "experience": "", "respond_language": "中文", "finished": False}))
+            return buf.getvalue(), out
+        finally:
+            logger.remove(hid)
+
+    log, out = act([{"command_name": "write_flie", "args": {"path": "note.txt"}}])
+    assert "[unknown-command]" in log, \
+        f"t10① 失效：模型要了个不存在的命令而日志零痕迹（运维数不出这一场烧了几发）：{log[-200:]!r}"
+    res = out["history"][-1]["results"]
+    assert res and res[0]["name"] == "write_flie" and "未知命令" in res[0]["result"], \
+        f"t10① 回喂串变了，模型下一轮看不出自己写错了名字：{res}"
+
+    log2, out2 = act([{"command_name": "RoleZero.reply_to_human", "args": {"content": "写好了"}},
+                      {"command_name": "end", "args": {}}])
+    assert "[unknown-command]" not in log2, \
+        f"t10② 阳性对照不成立：已知命令也打了那行 → {log2[-200:]!r}"
+    assert out2.get("finished") is True, f"t10② 前提失配：end 没收口，那这格什么都没测：{out2}"
+    print("  ok  t10 未知命令留下一行可 grep 的告警（已知命令不打＝阳性对照成立）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
               t7_special_commands_never_park, t8_restart_keeps_parked_session,
-              t9_failure_is_loud]
+              t9_failure_is_loud,
+              t10_unknown_command_is_countable]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
