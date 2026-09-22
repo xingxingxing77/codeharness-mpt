@@ -230,10 +230,22 @@ def t7_fire_role():
     跑法沿用本文件：不起端口，`TestClient(create_app())`。
     """
     import codeharness.team as team
+    import codeharness.configs.settings as cs
+    import server.sessions as ss
     from fastapi.testclient import TestClient
     from server.app import create_app
     from server.runner import SessionRunner
     from server.sessions import SessionStore
+
+    # 隔离照 t2 两条一起做。**本文件第一版的 t7 两条都没做，结果往受版本控制的 dev 会话库里
+    # 追加了 7 条测试会话**（`git status` 里那个 `M server/data/sessions.json` 就是它）：
+    #   ① SESSIONS_FILE 指临时目录  ② 显式关 redis 档（否则 create_app() 用默认 store 落开发库）。
+    # 不设 try/finally：万一中途断言炸掉，全局仍指向临时目录——**错的方向是安全的**，
+    # 反过来若先还原再失败，才会把脏数据写回 dev 库。
+    keep_file, keep_redis = ss.SESSIONS_FILE, cs.settings.platform.use_redis
+    dev_bytes = keep_file.read_bytes() if keep_file.exists() else None
+    ss.SESSIONS_FILE = Path(tempfile.mkdtemp()) / "s23fire.json"
+    cs.settings.platform.use_redis = False
 
     with TestClient(create_app()) as c:
         sid = c.post("/api/sessions", json={"idea": "摘成员这格", "paradigm": "dynamic"}).json()["id"]
@@ -292,7 +304,13 @@ def t7_fire_role():
         team.prepare_project = saved
     assert "Cleo" not in seen["agents"], f"④失效：摘完还在装配里：{sorted(seen['agents'])}"
     assert TEAMLEADER_NAME in seen["agents"], f"④失效：静态角色被连带摘掉了：{sorted(seen['agents'])}"
-    print("  ok  t7 摘成员：能摘招进来的、摘不掉静态角色、roles 同批干净、下一次装配真没他")
+    # 还原 + 守卫（阳性对照型）：dev 会话库一个字节都不许变。真变了这格当场红，
+    # 而不是留下一堆脏会话等下一个人去 git status 里发现。
+    cs.settings.platform.use_redis = keep_redis
+    ss.SESSIONS_FILE = keep_file
+    now = keep_file.read_bytes() if keep_file.exists() else None
+    assert now == dev_bytes, "t7 把 dev 会话库写脏了：门禁只许写临时 store（对照 t2 的隔离写法）"
+    print("  ok  t7 摘成员：四格全过，且 dev 会话库零改动（字节级比对）")
 
 
 
