@@ -19,6 +19,9 @@ export interface Session {
   goal?: string
   goal_done_at?: string
   cost: Record<string, number>
+  // B4：尾行键 → 票（like | dislike）。真值在后端 `Session.feedback`（`_JSON_FIELDS` 那份），
+  // `GET /api/sessions` 回的就是整份 model_dump，所以用量页的聚合不需要新端点（`utils/stats.ts::countVotes`）。
+  feedback?: Record<string, string>
   created_at: string
   started_at: string
   finished_at: string

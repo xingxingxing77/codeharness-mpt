@@ -1,7 +1,7 @@
 /** StatsLine 算术的自测：node --experimental-strip-types frontend/scripts/check_stats.mjs
  *  纯函数 + 断言，无框架。守三条：① 取不到的数不许变成 0 顶上去；② 紧凑格式化不吞量级；
  *  ③ 分位数（C12 的 P95 半边）与均值共用同一批样本，缺端点的调用不进样本集。 */
-import { deriveStats, formatDuration, formatTokens, statsGroups, tokenTotals } from '../src/utils/stats.ts'
+import { countVotes, deriveStats, formatDuration, formatTokens, statsGroups, tokenTotals } from '../src/utils/stats.ts'
 
 let failed = 0
 function eq(name, got, want) {
@@ -78,6 +78,21 @@ eq('无 LLM 耗时的组不出现', statsGroups(deriveStats([], [span(null, 1, 2
 eq('账本优先', tokenTotals([span(1, 2, 3, 7, 7)], { total_prompt_tokens: 999, total_completion_tokens: 111 }),
   { input: 999, output: 111 })
 eq('账本为空退 span', tokenTotals([span(1, 2, 3, 7, 9)], {}), { input: 7, output: 9 })
+
+// 7) B4 票聚合：一张票 = 一个 (会话, 尾行) 对，**不是**一个会话
+eq('按票不按会话（一场两票 + 另一场一票）',
+  countVotes([{ feedback: { a: 'like', b: 'like' } }, { feedback: { c: 'dislike' } }]),
+  { like: 2, dislike: 1, other: 0 })
+eq('改票不重复计（同 key 覆盖后只剩一张）',
+  countVotes([{ feedback: { a: 'dislike' } }]), { like: 0, dislike: 1, other: 0 })
+eq('没有会话 → 三档全零（不藏格也不假亮）', countVotes([]), { like: 0, dislike: 0, other: 0 })
+eq('行里根本没 feedback 字段也不炸', countVotes([{}, { cost: {} }]), { like: 0, dislike: 0, other: 0 })
+// 认不出的值不许被吞进任何一档：写成 `else out.like++` 这一格当场红
+eq('未识别值单列，不进 like 也不进 dislike',
+  countVotes([{ feedback: { a: 'spam' } }]), { like: 0, dislike: 0, other: 1 })
+eq('混合现场：like/dislike/未识别各归位',
+  countVotes([{ feedback: { a: 'like', z: '?' } }, { feedback: { b: 'dislike' } }, {}]),
+  { like: 1, dislike: 1, other: 1 })
 
 console.log(failed ? `\n${failed} 条失败` : '\n全过')
 process.exit(failed ? 1 : 0)

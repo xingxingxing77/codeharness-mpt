@@ -10,6 +10,13 @@
       <div class="u-cell"><b>{{ fmt(total.pt) }}</b><span>输入 tokens</span></div>
       <div class="u-cell"><b>{{ fmt(total.ct) }}</b><span>输出 tokens</span></div>
       <div class="u-cell"><b>{{ moneyBoth(total) }}</b><span>总成本（分币种·不换算）</span></div>
+      <!-- B4 的读面：票今天已经落库（`Session.feedback`），但只有会话自己看得见——
+           聚到这一格才算「反馈这条链跑通了」。零=诚实的零，不藏格。认不出的值单列出来，
+           免得第三种票被静默吞进「有用」或「无用」任何一档。 -->
+      <div class="u-cell">
+        <b>{{ votes.like }} · {{ votes.dislike }}</b>
+        <span>反馈（有用 · 无用）{{ votes.other ? ` · 未识别 ${votes.other}` : '' }}</span>
+      </div>
     </div>
 
     <div v-if="rows.length" class="sgroup u-table">
@@ -39,6 +46,7 @@ import { computed, onMounted } from 'vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
 import { moneyBoth, sumCosts } from '../../utils/money'
+import { countVotes } from '../../utils/stats'
 import type { Session } from '../../types'
 
 const store = useSessionStore()
@@ -67,6 +75,9 @@ const total = computed(() => ({
   // 而标签写着「人民币价目」，等于每一行美元模型都在给人民币计数（C12 修的就是这个）。
   ...sumCosts(rows.value.map(r => r.cost))
 }))
+
+// 按 (会话, 尾行) 数票，不按会话数：一场会话投三票就是三票（口径与 `countVotes` 一致）
+const votes = computed(() => countVotes(rows.value))
 
 function fmt(n: number): string {
   return n >= 10000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString('en-US')
