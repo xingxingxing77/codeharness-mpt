@@ -1046,6 +1046,55 @@ def t32_rerank_unset_default_skips_cleanly():
     print("  t32 精排未配置：默认值即跳过——零 HTTP、零异常、零 warning，粗排原序前 k 条")
 
 
+def t33_point_id_carries_tenant_and_doc_type():
+    """C4 同族审（09-22）：点 id 的派生式必须带齐**租户**与 **doc_type** 两个维度。
+
+    C4 那个洞的形状是「派生式漏了 user ⇒ 两个租户算出同一个点 id，读侧 filter 挡住了越权可见、
+    写侧却是后写的把先写的静默覆盖」。这一格把同一条判据打在另外两条入库路上（拦真写者收集产出——
+    在自己的替身里手写过滤测的是替身，C4 同一课）：
+      ① 跨用户同内容 → id 必须不同；
+      ② 同用户同项目、**doc_type 不同** → id 必须不同。这一格是本轮审出来的**真不对称**：
+         `overflow` 的 scope 原先只到 `user/project`，而 kb 那条实例与 memory 那条**是同一个类**
+         （`team.py:23-24` 一次建两个、`role.kb` 就是它的挂点）。谁哪天调一次
+         `role.kb.overflow(...)`，同一段文本就会跨 doc_type 互相顶掉：payload 说自己是 kb、
+         id 却与 memory 那条相同 ⇒ 后写的赢，前一个读者再也召不回它。
+      ③ 同租户同 doc_type 同内容 → id 必须**相同**（幂等是刻意的，这条防有人把它改成 uuid4）。
+    `actions/upload_kb.py:70` 从 C3 起就把 doc_type 写进 scope，所以只有 ② 这一支是漏的。
+    """
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER
+
+    TEXT = "重置密码要先验证旧密码"
+
+    class _Cap:
+        def __init__(self):
+            self.points = []
+
+        async def write(self, points):
+            self.points += list(points)
+            return len(points)
+
+    def ids(user: str, doc_type: str, project: str = "p33") -> set:
+        cap = _Cap()
+        tok_p, tok_u = CURRENT_PROJECT.set(project), CURRENT_USER.set(user)
+        try:
+            ltm = LongTermMemory(project_id=project, embeddings=HashEmbeddings(), user_id=user,
+                                 store=cap, doc_type=doc_type)
+            asyncio.run(ltm.overflow([Message(content=TEXT, role="user")]))
+        finally:
+            CURRENT_PROJECT.reset(tok_p)
+            CURRENT_USER.reset(tok_u)
+        assert cap.points, f"前置失配：{user}/{doc_type} 这一趟根本没写到点"
+        return {pt.id for pt in cap.points}
+
+    alice, bob = ids("alice", "memory"), ids("bob", "memory")
+    assert not (alice & bob), f"①失效：两个租户同一段文本算出同一个点 id（就是 C4 那个洞）：{alice}"
+    mem, kb = ids("alice", "memory"), ids("alice", "kb")
+    assert not (mem & kb), f"②失效：memory 与 kb 共用一个点 id，写 kb 会把记忆那条顶掉：{mem}"
+    assert ids("alice", "memory") == alice, "③失效：同租户同 doc_type 同内容不再是同一个点（幂等没了）"
+    print("  ok  t33 点 id 带齐租户与 doc_type 两个维度，且同内容仍幂等")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -1065,7 +1114,8 @@ def main():
               t25_real_bge_semantic_path, t26_plan_state_machine_wired,
               t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades,
               t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path,
-              t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly]
+              t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly,
+              t33_point_id_carries_tenant_and_doc_type]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

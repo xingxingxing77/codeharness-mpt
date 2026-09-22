@@ -69,7 +69,13 @@ class LongTermMemory:
         if not uniq:
             return 0
         vecs = await self.embeddings.aembed_documents([m.content for m in uniq])
-        scope = f"{self.user_id}/{self.project_id}"
+        # C4 同族审（09-22）：派生式必须带 doc_type。这个类一次被建两个实例（`team.py:23-24`：
+        # memory 与 kb 各一条），scope 只到 user/project 时同一段文本在两条切片上算出**同一个点 id**，
+        # 于是 `role.kb.overflow(...)` 一旦被人调用就会顶掉记忆那条（payload 说是 kb、id 却是 memory 的）。
+        # 配方与 `actions/upload_kb.py:70` 对齐（它从 C3 起就含 doc_type）。代价照 C4/C12 先例：
+        # 改造前的老点不会变哑也不会消失，只是与新点并存成两条（读侧按 payload filter，不看 id），
+        # dev 数据不做迁移清洗。
+        scope = f"{self.doc_type}/{self.user_id}/{self.project_id}"
         return await self.store.write([
             Point(id=point_id(scope, m.content), text=m.content, dense=list(v), doc_type=self.doc_type,
                   user_id=self.user_id, session_id=self.session_id, project=self.project_id,
