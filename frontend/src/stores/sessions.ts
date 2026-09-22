@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { api, getToken } from '../api/client'
+import { normalizeVotes } from '../utils/votes'
 import type { ApprovalItem, Block, Health, QueueItem, Session, TraceSpan, WEvent } from '../types'
 
 const MAX_LOGS = 800
@@ -184,7 +185,8 @@ export const useSessionStore = defineStore('sessions', {
     async loadFeedback(sid: string) {
       try {
         const r = await api.feedback(sid)
-        if (sid === this.currentId) this.feedback = r.votes || {}
+        // 票值有两态（旧票裸字符串、新票 {v,at}），图标那层只吃票种 ⇒ 在这里归一一次。
+        if (sid === this.currentId) this.feedback = normalizeVotes(r.votes || {})
       } catch {
         /* 老会话没有这个字段：空表就是正确答案 */
       }

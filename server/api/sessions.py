@@ -332,6 +332,14 @@ class FeedbackReq(BaseModel):
         return v
 
 
+def _vote_of(entry) -> str:
+    """票值的唯一读法。两种形态：裸字符串 = 09-23 之前投的旧票（**没有时刻**）；
+    dict = 新票 `{v, at}`。归一只能在这一个地方做——前端也要一份同规则的
+    `utils/votes.ts::parseVote`，两处不一致就会出现「后端说有票、图标说不亮」那种打脸。
+    ⚠ 旧票没时间戳是事实缺失，不是 0：下游按时间分时必须单独归档，不许拿会话创建日顶上去。"""
+    return entry.get("v", "") if isinstance(entry, dict) else str(entry or "")
+
+
 @router.get("/{sid}/feedback")
 def get_feedback(sid: str, request: Request, user: str = Depends(current_user)):
     """已经点过的反馈。真值就在会话记录里，这里只是给「刷新后图标还亮着」一个读法。"""
@@ -343,12 +351,15 @@ def put_feedback(sid: str, req: FeedbackReq, request: Request, user: str = Depen
     """点「有用 / 没用」。同一条重复点同一个票是幂等（不刷新次序、不重发事件）；
     改票（like→dislike）合法——那是用户在纠错，不是脏数据。"""
     s = _owned(request, sid, user)
-    if s.feedback.get(req.key) == req.vote:
+    if _vote_of(s.feedback.get(req.key)) == req.vote:
+        # 同票重复点：不写、不发事件、**也不刷新 `at`**（那时刻是"用户第一次这么说"的时间）。
         return {"ok": True, "feedback": s.feedback}
-    merged = {**s.feedback, req.key: req.vote}
+    from server.sessions import _now
+    merged = {**s.feedback, req.key: {"v": req.vote, "at": _now()}}
     _get(request, "store").update(s.id, feedback=merged)
     _get(request, "bus").publish(s.id, kind="feedback", name="set",
-                    value={"key": req.key, "vote": req.vote})
+                    value={"key": req.key, "vote": req.vote,
+                                 "at": merged[req.key]["at"]})
     return {"ok": True, "feedback": merged}
 
 

@@ -41,6 +41,7 @@ import DsIcon from '../ui/DsIcon.vue'
 import VTooltip from '../ui/VTooltip.vue'
 import { useToastStore } from '../../stores/toast'
 import { useSessionStore } from '../../stores/sessions'
+import { normalizeVotes } from '../../utils/votes'
 import { api } from '../../api/client'
 import { formatLatencySeconds, formatMessageClock, formatRunDuration, formatTokensPerSecond } from '../../utils/messageChrome'
 
@@ -72,7 +73,9 @@ async function cast(v: 'like' | 'dislike') {
     const r = vote.value === v
       ? await api.deleteFeedback(store.currentId, props.feedbackKey)
       : await api.putFeedback(store.currentId, props.feedbackKey, v)
-    store.feedback = r.feedback || {}
+    // PUT/DELETE 回执里的票值可能是新形态 {v,at}，而 `vote`  computed 拿它和 "like" 比
+    // ——不归一就会「再点一次取消」失效（对象永远 !== 字符串）。同一个 normalizeVotes，规则只有一份。
+    store.feedback = normalizeVotes(r.feedback || {})
   } catch (e) {
     toast.fail((e as Error).message)      // 值域/越权的原文照说，不猜文案
   }

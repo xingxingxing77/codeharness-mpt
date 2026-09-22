@@ -1438,21 +1438,54 @@ def t22_feedback_surface():
             again = c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "like"})
             assert again.status_code == 200, again.text[:120]
             votes = c.get(f"/api/sessions/{sid}/feedback").json()["votes"]
-            assert votes == {key: "like"}, f"B4：重复点同一票之后表里不是这一条 {votes}"
+            # B4 之后票值是 `{"v","at"}`（旧记录才是裸字符串，读侧两边都归一）。这里三件事一起钉：
+            # 形状对、重复点同一票不新增键、也不刷新时刻（那个时刻是"用户第一次这么说"的时间）。
+            assert set(votes) == {key}, f"B4：表里键不对 {votes}"
+            entry = votes[key]
+            assert isinstance(entry, dict) and entry.get("v") == "like" and entry.get("at"), \
+                f"B4：新票形状不对（应为 {{v, at}}）：{entry}"
+            at0 = entry["at"]
             hist = c.get(f"/api/sessions/{sid}/events/history").json()["events"]
             assert sum(1 for e in hist if e["kind"] == "feedback") == 1, \
                 "B4：重复点同一个票又发了一条事件（幂等要在事件流上也成立，不然活流会闪）"
+            # 先塞一条旧形态的票（裸字符串＝没记时刻），再改现在这条：改票必须**刷新时刻**
+            # （那是另一次表态），且旧形态不能把读侧打炸——归一在前端 `parseVote`、后端 `_vote_of` 各一份同规则。
+            store_obj = c.app.state.store
+            legacy = dict(store_obj.get(sid).feedback)
+            legacy["t:legacy"] = "like"
+            store_obj.update(sid, feedback=legacy)
             c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "dislike"})
-            assert c.get(f"/api/sessions/{sid}/feedback").json()["votes"] == {key: "dislike"}, \
-                "B4：改票没覆盖掉旧票（用户在纠错，不是脏数据）"
+            after = c.get(f"/api/sessions/{sid}/feedback").json()["votes"]
+            assert isinstance(after[key], dict) and after[key]["v"] == "dislike", \
+                f"B4：改票没覆盖掉旧票（用户在纠错，不是脏数据）：{after}"
+            # 「改票要刷新时刻」不能靠连着点两次比字符串——`_now()` 只到秒，同一秒内两次 PUT
+            # 必然相等（这条断言第一版就这么写，实测必红）。做法：把首次时刻改成哨兵值再改票。
+            stamped = dict(after)
+            stamped[key] = {"v": "dislike", "at": "2020-01-01 00:00:00"}
+            store_obj.update(sid, feedback=stamped)
+            c.put(f"/api/sessions/{sid}/feedback", json={"key": key, "vote": "like"})
+            r2 = c.get(f"/api/sessions/{sid}/feedback").json()["votes"][key]
+            assert r2["at"] != "2020-01-01 00:00:00", \
+                f"B4：改票没刷新时刻——按时间分会把它记在首次表态那天：{r2}"
+            assert c.put(f"/api/sessions/{sid}/feedback", json={"key": "t:legacy", "vote": "like"}).status_code == 200
+            same = c.get(f"/api/sessions/{sid}/feedback").json()["votes"]["t:legacy"]
+            # 同票幂等走的是"没变化就不写、不发事件"那支 ⇒ 旧形态**原地保留**，不趁机改写历史。
+            # 读侧（后端 `_vote_of` / 前端 `parseVote`）负责把两态归一，所以这不构成缺陷。
+            assert same == "like", f"B4：同票幂等竟然改写了旧记录形态：{same}"
             gone = c.delete(f"/api/sessions/{sid}/feedback", params={"key": "t:never"})
             assert gone.status_code == 200 and gone.json()["ok"] is True, \
                 "B4：取消一条不存在的票不该报错（用户要的就是「让它不亮」）"
             c.delete(f"/api/sessions/{sid}/feedback", params={"key": key})
-            assert c.get(f"/api/sessions/{sid}/feedback").json()["votes"] == {}, "B4：DELETE 没清掉那一票"
+            # 本格中途塞过一条旧形态的票（t:legacy），一起清掉才谈得上"表空了"——
+            # 第一版没清它，于是"DELETE 没清掉那一票"这条红是**我自己的账没平**，不是端点的错。
+            c.delete(f"/api/sessions/{sid}/feedback", params={"key": "t:legacy"})
+            assert c.get(f"/api/sessions/{sid}/feedback").json()["votes"] == {}, "B4：DELETE 没清掉那两票"
             names = [e["name"] for e in
                      c.get(f"/api/sessions/{sid}/events/history").json()["events"] if e["kind"] == "feedback"]
-            assert names == ["set", "set", "clear"], f"B4：事件动作序列不对 {names}"
+            # 序列：like(记) → 同票重复点(不发) → dislike(改) → t:legacy 同票幂等但值要归一(发) → 取消
+            # 事件序列（实测）：like → 同票重复点(不发) → dislike → 改回 like → t:legacy 同票(不发)
+            # → 删不存在的键(不发) → 删两条(各发一次 clear)。"没变化就不留事件"这条在流上也成立。
+            assert names == ["set", "set", "set", "clear", "clear"], f"B4：事件动作序列不对 {names}"
     finally:
         settings.platform.use_redis = keep_redis
         ss.SESSIONS_FILE = keep_file
@@ -1463,6 +1496,14 @@ def t22_feedback_surface():
     st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
     assert "ev.kind === 'feedback'" in st and "feedback: {} as Record<string, string>" in st, \
         "B4 回归：反馈投影或 kind=feedback 分支没了"
+    icon = (FE / "components" / "conversation" / "MessageIconActions.vue").read_text(encoding="utf-8")
+    # 票值两态的归一只有**一条规则**（`utils/votes.ts::parseVote`），但**消费点有三处**：
+    # 会话投影（loadFeedback）、PUT/DELETE 回执（图标组件）、活流事件（kind=feedback 分支）。
+    # 漏一处的症状很阴：回执那次没归一时 `vote === "like"` 恒假 ⇒ 「再点一次取消」静默变成"又投一次"，
+    # 而 PUT 本身还是 200，端点判据全绿（本轮第一版就漏在这儿，是 grep 消费点抓出来的）。
+    assert "normalizeVotes(r.votes" in st, "B4 回归：会话投影不再归一票值两态"
+    assert "normalizeVotes(r.feedback" in icon, "B4 回归：图标组件不再归一 PUT/DELETE 回执的票值"
+    assert api_ts.count("/feedback`") >= 3 or "putFeedback" in api_ts, "B4 回归：client.ts 少了反馈路由"
     assert "this.feedback = {}" in st, "B4 回归：切会话不清反馈表（上一场的票会亮在这一场的尾行上）"
     mac = (FE / "components" / "conversation" / "MessageIconActions.vue").read_text(encoding="utf-8")
     for token in ("like-fill", "dislike", "api.deleteFeedback", "api.putFeedback",
