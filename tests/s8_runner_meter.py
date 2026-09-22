@@ -10,6 +10,7 @@
       实例（双账本防回归，docs 第 0 步的教训）。
 （后续各加一格：**t7** span 的 t0/ft 计时；**t8** C12 跨币种分桶——两种币价各记各的、
  快照与 `Costs` 里不存在混币种合计字段、未知模型不入桶，并带「清空 CNY 名单」的对照组。）
+  **t9** 再往真处走一步：两台本机端点各回一种币价的真 usage 回执、进同一本账——t8 用构造好的 AIMessage 证口径，t9 证「真跑一次调用之后两桶各有数、逐笔 cc 分得开」。）
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s8_runner_meter.py
@@ -287,6 +288,101 @@ def t8_two_currency_buckets():
               "Costs 与快照都没有混币种合计字段；未知模型不入桶；对照组证明确实按 CNY_MODELS 分流")
 
 
+def t9_two_endpoints_one_ledger():
+    """C12 的那半格正向读数：**同场两台端点、两种币价、各拿真 HTTP 回执进同一本账**。
+
+    t8 钉的是分桶口径与字段形状（喂的是构造好的 AIMessage），它证不了「真跑一次调用之后
+    两桶是不是各有数」。这一格补的就是那半句——两台本机 OpenAI 兼容桩（各自 model 名分别
+    落在价表的 USD 行与 CNY 行），走真 `LLMGateway.ainvoke` → 真 usage 回执 → 同一个 CostManager：
+      ① 两桶都 > 0 且各等于按价表算出的数；
+      ② 逐笔留痕 `records[]` 里两笔的 `cc` 分别是 USD / CNY（C12 根因原话是「只有合计的话，
+         混币种在数据里就看不见」——逐笔 cc 就是为这一句留的）；
+      ③ 特异性对照：两台都回同一张 USD 行的模型名时，CNY 桶必须**保持 0**
+         （证明币种是按回执里的 model 真算的，不是代码里写死了两个名字）；
+      ④ 快照 `cost_snapshot()` 两桶都在、且没有 `total_cost` 键。
+    零花费、不碰任何真厂商端点。**它替掉的是「等第二个厂商 key」这个借口**，
+    但真厂商 usage 字段的差异（例如不回的、少字段的）仍属未验，写在 PLAN §4 C12 行末。
+    """
+    PT, CT = 1000, 500          # 与 t8 同量：按价表算出来的数要能手算核对
+    from codeharness.provider.token_costs import TOKEN_COSTS
+    import json as _j
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from codeharness.configs.llm_config import LLMConfig, LLMType
+    from codeharness.provider.gateway import LLMGateway
+    from server.runner import cost_snapshot
+
+    class _Stub(BaseHTTPRequestHandler):
+        model_name = "unset"
+
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length") or 0)
+            self.rfile.read(n)
+            body = {"id": "chatcmpl-t9", "object": "chat.completion", "created": 1790000000,
+                    "model": type(self).model_name,
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant", "content": "好的"}}],
+                    "usage": {"prompt_tokens": PT, "completion_tokens": CT,
+                              "total_tokens": PT + CT}}
+            out = _j.dumps(body, ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    def serve(model_name):
+        # 端口 0：三台桩互不抢，也不跟别人抢；model 名决定这台桩「是哪个厂商的行」
+        srv = HTTPServer(("127.0.0.1", 0), type("S", (_Stub,), {"model_name": model_name}))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+
+    def price(model):
+        r = TOKEN_COSTS[model]
+        return (PT * r["prompt"] + CT * r["completion"]) / 1000
+
+    async def ask(cm, port, model):
+        cfg = LLMConfig(api_type=LLMType.OPENAI, base_url=f"http://127.0.0.1:{port}/v1",
+                        api_key="stub", model=model, stream=False)
+        await LLMGateway(cfg=cfg, cost_manager=cm).ainvoke("问一句")
+
+    a, b, control = serve("gpt-4o"), serve("step-3.5-flash"), serve("gpt-4o")
+    try:
+        cm = CostManager()
+        asyncio.run(ask(cm, a.server_address[1], "gpt-4o"))
+        asyncio.run(ask(cm, b.server_address[1], "step-3.5-flash"))
+        assert (cm.total_prompt_tokens, cm.total_completion_tokens) == (2 * PT, 2 * CT), \
+            f"两台端点的真回执没都进同一本账：pt={cm.total_prompt_tokens} ct={cm.total_completion_tokens}"
+        assert abs(cm.cost_usd - price("gpt-4o")) < 1e-9, \
+            f"USD 桶对不上价表（{cm.cost_usd} ≠ 按 gpt-4o 算的 {price('gpt-4o')}）"
+        assert abs(cm.cost_cny - price("step-3.5-flash")) < 1e-9, \
+            f"CNY 桶对不上价表（{cm.cost_cny} ≠ 按 step-3.5-flash 算的 {price('step-3.5-flash')}）"
+        assert {r["cc"] for r in cm.records} == {"USD", "CNY"}, \
+            f"逐笔留痕没把两种币价分开：{cm.records}"
+
+        cm2 = CostManager()
+        asyncio.run(ask(cm2, a.server_address[1], "gpt-4o"))
+        asyncio.run(ask(cm2, control.server_address[1], "gpt-4o"))
+        assert cm2.cost_cny == 0 and cm2.cost_usd > 0, \
+            f"对照失效：两台都回 USD 行的模型名，CNY 桶却还是 {cm2.cost_cny}——币种不是按回执算的"
+
+        snap = cost_snapshot(cm)
+        assert {"cost_usd", "cost_cny"} <= set(snap) and "total_cost" not in snap, \
+            f"快照又出现合计字段或少了某一桶：{sorted(snap)}"
+        assert snap["cost_usd"] > 0 and snap["cost_cny"] > 0, f"快照两桶没都带出去：{snap}"
+        _ok("t9", f"两台端点真回执进同一本账：$ {cm.cost_usd:.6f} / ¥ {cm.cost_cny:.6f}、"
+                  "逐笔 cc 分列 USD/CNY、快照两桶都在且无 total_cost；"
+                  "对照组（两台同回 USD 行名字）CNY 保持 0")
+    finally:
+        for srv in (a, b, control):
+            srv.shutdown()
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -295,8 +391,9 @@ def main():
     t5_lifespan_unwires_seams()
     t6_events_history_bounded()
     asyncio.run(t7_span_timing())
+    t9_two_endpoints_one_ledger()
     t8_two_currency_buckets()
-    print("\ns8_runner_meter: 8/8 全绿")
+    print("\ns8_runner_meter: 9/9 全绿")
 
 
 if __name__ == "__main__":
