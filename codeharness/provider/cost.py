@@ -36,6 +36,14 @@ class CostManager(BaseModel):
     # 而 `_translate` 的 `on_chat_model_end` 在最伤的那种截断上（JSON 被切半→解析失败→走 repair）
     # 拿不到 finish_reason——活体实测三次 length 收尾零条提示。截断要说话就得站在不漏的口上。
     truncated_calls: int = 0
+    # T4-③：模型吐「本轮工具面里没有的命令」被回喂了几笔。与 truncated_calls 同族——都是
+    # "这一发白花了"的只读计数，不参与金额口径。为什么要落在账本上：日志行只能让人 grep
+    # 单场，而用量页要的是跨会话求和，那个出口只能有一个（另起一处就长出第二个游标）。
+    # ⚠ 有一条**没被本格证明**，别当已证：runner 读到非零的前提是"角色手上的 manager 就是
+    # runner `self.costs[sid]` 那一份"（`_make_llm` 注入，B8 的截断计数同吃这条）。t10③ 只测了
+    # "同一个 manager 的快照带出两键"，**没测那条注入链**——真端到端要起一场真会话读 GET 出口，
+    # 已登记为未验边界（PLAN §1 本棒那行）。
+    unknown_command_calls: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""

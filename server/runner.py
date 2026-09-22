@@ -39,9 +39,13 @@ def cost_snapshot(cm) -> dict:
     """成本快照的唯一出口（`_sync_cost` 与 `_publish_status` 两处必须同形，
     否则 SSE 那一路与 GET 那一路读到的字段集会漂）。币种分两桶，**不相加**。"""
     c = cm.get_costs()
+    # 两个「无效调用」计数不住在 `Costs` 里（那是钱与 token 的计量口径，字段集有结构守卫钉着），
+    # 它们是 manager 上的观测项；快照这份 dict 才是被持久化、被列表出口带出去的那一份。
     return {"cost_usd": round(c.cost_usd, 6), "cost_cny": round(c.cost_cny, 6),
             "total_prompt_tokens": c.total_prompt_tokens,
-            "total_completion_tokens": c.total_completion_tokens}
+            "total_completion_tokens": c.total_completion_tokens,
+            "truncated_calls": getattr(cm, "truncated_calls", 0),
+            "unknown_command_calls": getattr(cm, "unknown_command_calls", 0)}
 
 
 class SessionRunner:

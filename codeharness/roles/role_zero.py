@@ -371,6 +371,11 @@ class RoleZero:
                         # 多烧一发（实测 ¥0.12–0.27）。留一行可 grep 的话，纪律同 `[session-failed]`。
                         logger.warning(f"[unknown-command] 模型要的命令不在本轮工具面：{name}"
                                        f"（在册 {len(self.tools)} 只，task={str(s.get('task'))[:40]!r}）")
+                        # 计数落到账本上（T4-③ 的聚合面）：事件流是喂界面的，日志行是给人 grep 的，
+                        # 而"这场会话白烧了几发"要能被 GET 读到、要能跨会话求和，就得有个唯一出口。
+                        cm = getattr(self.llm, "cost_manager", None)
+                        if cm is not None:
+                            cm.unknown_command_calls += 1
                         results.append({"name": name, "result": f"未知命令 {name}，可用: {list(self.tools)}"})
                 except GraphInterrupt:
                     raise                                         # interrupt 靠抛异常暂停图——绝不能被 self-heal 吞掉

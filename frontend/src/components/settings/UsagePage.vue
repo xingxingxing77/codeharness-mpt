@@ -17,6 +17,12 @@
         <b>{{ votes.like }} · {{ votes.dislike }}</b>
         <span>反馈（有用 · 无用）{{ votes.other ? ` · 未识别 ${votes.other}` : '' }}</span>
       </div>
+      <!-- T4-③：两笔「花了钱却没产出」的调用。分开报——截断是端点把回答切了，未知命令是
+           模型要的工具有些没给它看见；并成一个"浪费数"就没人知道该去修哪一个。 -->
+      <div class="u-cell">
+        <b>{{ waste.unknown }} · {{ waste.truncated }}</b>
+        <span>无效调用（未知命令 · 被截断）</span>
+      </div>
     </div>
 
     <div v-if="rows.length" class="sgroup u-table">
@@ -46,7 +52,7 @@ import { computed, onMounted } from 'vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
 import { moneyBoth, sumCosts } from '../../utils/money'
-import { countVotes } from '../../utils/stats'
+import { countVotes, wasteTotals } from '../../utils/stats'
 import type { Session } from '../../types'
 
 const store = useSessionStore()
@@ -78,6 +84,8 @@ const total = computed(() => ({
 
 // 按 (会话, 尾行) 数票，不按会话数：一场会话投三票就是三票（口径与 `countVotes` 一致）
 const votes = computed(() => countVotes(rows.value))
+// 跨会话求和吃的就是列表带出的那份 cost 快照（零新端点；老记录里没这两个键 ⇒ 按 0 计）
+const waste = computed(() => wasteTotals(rows.value))
 
 function fmt(n: number): string {
   return n >= 10000 ? `${(n / 1000).toFixed(1)}k` : n.toLocaleString('en-US')

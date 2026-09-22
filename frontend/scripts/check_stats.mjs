@@ -1,7 +1,7 @@
 /** StatsLine 算术的自测：node --experimental-strip-types frontend/scripts/check_stats.mjs
  *  纯函数 + 断言，无框架。守三条：① 取不到的数不许变成 0 顶上去；② 紧凑格式化不吞量级；
  *  ③ 分位数（C12 的 P95 半边）与均值共用同一批样本，缺端点的调用不进样本集。 */
-import { countVotes, deriveStats, formatDuration, formatTokens, statsGroups, tokenTotals } from '../src/utils/stats.ts'
+import { countVotes, wasteTotals, deriveStats, formatDuration, formatTokens, statsGroups, tokenTotals } from '../src/utils/stats.ts'
 
 let failed = 0
 function eq(name, got, want) {
@@ -93,6 +93,19 @@ eq('未识别值单列，不进 like 也不进 dislike',
 eq('混合现场：like/dislike/未识别各归位',
   countVotes([{ feedback: { a: 'like', z: '?' } }, { feedback: { b: 'dislike' } }, {}]),
   { like: 1, dislike: 1, other: 1 })
+
+// 8) T4-③ 聚合：两笔「无效调用」分开求和，缺字段按 0 计（老记录里根本没这两个键）
+eq('两类各自求和', wasteTotals([
+  { cost: { unknown_command_calls: 2, truncated_calls: 1 } },
+  { cost: { unknown_command_calls: 1 } },
+]), { unknown: 3, truncated: 1 })
+eq('老记录没这两个键 → 两个 0，不报错', wasteTotals([{ cost: { cost_usd: 0.1 } }, {}]),
+  { unknown: 0, truncated: 0 })
+eq('null/undefined 行不参与求和', wasteTotals([{}, { cost: { truncated_calls: 4 } }]),
+  { unknown: 0, truncated: 4 })
+eq('不许把两类并成一个数（分开报才知道去修哪个）',
+  (() => { const r = wasteTotals([{ cost: { unknown_command_calls: 1, truncated_calls: 2 } }])
+    return r.unknown === 1 && r.truncated === 2 && !('total' in r) })(), true)
 
 console.log(failed ? `\n${failed} 条失败` : '\n全过')
 process.exit(failed ? 1 : 0)

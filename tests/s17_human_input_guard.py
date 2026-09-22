@@ -798,6 +798,11 @@ def t10_unknown_command_is_countable():
     log, out = act([{"command_name": "write_flie", "args": {"path": "note.txt"}}])
     assert "[unknown-command]" in log, \
         f"t10① 失效：模型要了个不存在的命令而日志零痕迹（运维数不出这一场烧了几发）：{log[-200:]!r}"
+    # ①′ 同一笔要落到账本上：日志行给人 grep，但「这场会话白烧了几发」要能被 GET 读到、
+    #      要能跨会话求和，就必须有个唯一出口（T4-③ 的聚合面）。
+    cm = role.llm.cost_manager
+    assert cm.unknown_command_calls == 1, \
+        f"t10①′ 失效：账本没记这一笔，聚合面无从求和：{cm.unknown_command_calls}"
     res = out["history"][-1]["results"]
     assert res and res[0]["name"] == "write_flie" and "未知命令" in res[0]["result"], \
         f"t10① 回喂串变了，模型下一轮看不出自己写错了名字：{res}"
@@ -806,8 +811,19 @@ def t10_unknown_command_is_countable():
                       {"command_name": "end", "args": {}}])
     assert "[unknown-command]" not in log2, \
         f"t10② 阳性对照不成立：已知命令也打了那行 → {log2[-200:]!r}"
+    assert cm.unknown_command_calls == 1, \
+        f"t10②′ 阳性对照不成立：已知命令也被计数了（计数会虚高）：{cm.unknown_command_calls}"
+    # ③ 快照必须把两笔「无效调用」带出去。
+    #    ⚠ 本格证的是「同一个 manager 的快照带出两键、且不长回合计字段」；**没证**的是
+    #    "角色手上的 manager == runner 的 self.costs[sid]"（那条靠 `_make_llm` 注入，B8 的截断计数
+    #    共用它）。要钉住同一性得跑一场真会话再读 GET 出口——已按未验边界记进 PLAN，
+    #    不许把这条注释当成已验（team.py:82 记过"另建实例只记到 0"那条断链的教训）。
+    from server.runner import cost_snapshot
+    snap = cost_snapshot(cm)
+    assert snap["unknown_command_calls"] == 1 and "truncated_calls" in snap, f"t10③ 快照没带出计数：{snap}"
+    assert "total_cost" not in snap, f"t10③ 失效：快照又长出合计字段（C12 删掉的就是它）：{snap}"
     assert out2.get("finished") is True, f"t10② 前提失配：end 没收口，那这格什么都没测：{out2}"
-    print("  ok  t10 未知命令留下一行可 grep 的告警（已知命令不打＝阳性对照成立）")
+    print("  ok  t10 未知命令：留可 grep 的告警 + 落账本计数 + 快照带出（已知命令三处都不动＝阳性对照）")
 
 
 def main():

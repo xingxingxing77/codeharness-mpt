@@ -270,7 +270,13 @@ def t8_two_currency_buckets():
     assert "total_cost" not in Costs._fields and set(Costs._fields) == {
         "total_prompt_tokens", "total_completion_tokens", "cost_usd", "cost_cny"}, Costs._fields
     snap = cost_snapshot(cm)
-    assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens"}, snap
+    # 键集仍然**整颗钉死**（这条防的是漂移，不是"多两个键就放宽到不检"）。
+    # 后两个是 T4-③ 的「无效调用」计数：住在 manager 上、随快照持久化、被列表出口带出。
+    assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
+                          "truncated_calls", "unknown_command_calls"}, snap
+    assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
+    assert (snap["truncated_calls"], snap["unknown_command_calls"]) == (0, 0), \
+        f"这一格没制造无效调用，计数却非 0（那就是恒亮的告警）：{snap}"
 
     unknown = CostManager()
     unknown.update_cost(10, 10, "no-such-model-xyz")
