@@ -143,18 +143,18 @@ async def b_tail_reachable(store, emb, window: int):
 async def c_cap(store, emb, window: int):
     doc = _filler()[:12000]
     curve, first_v = [], None
+    probe = doc[:400]                      # 固定串：四种 H 下发的是**同一段文本**，才谈得上比幂等
     for h in (400, settings.embedding.max_chars, 2400, EMBEDDING_OBSERVED_TRUNCATION_CHARS):
         ch = split_for_embedding([doc], max_chars=h)
         assert all(0 < len(c) <= h for c in ch), f"C：H={h} 却产出了 {max(map(len, ch))} 字的块"
         # 守恒的准确说法：**字**一个不丢、顺序不变；被丢的只有跨块边界上的换行符
         # （`document.py` 那个 splitter 也是 `keep_separator=False`，同一口径）。
         assert "".join(ch).replace("\n", "") == doc.replace("\n", ""), f"C：H={h} 切完吞字了"
-        # 曲线由**真端点**量：把首块原样发一次，四种 H 下必须逐维相同——
-        # 既证这台端点幂等（改 H 不影响已有块的向量），也证切的是「尾巴」不是把前缀重排。
-        v = await emb.aembed_query(ch[0])
+        v = await emb.aembed_query(probe)
         if first_v is None:
             first_v = v
-        assert v == first_v, f"C：H={h} 下首块向量变了 ⇒ 端点不幂等，切块把已有内容挪了位置"
+        assert v == first_v, (f"C：同一段 {len(probe)} 字文本在 H={h} 这次发的向量与前一次不同"
+                              f" ⇒ 这台端点不幂等，块 id 之外的任何「重跑可比」都不成立")
         curve.append(f"H={h}→{len(ch)}块")
     over = doc[:window + 400]
     equal_at = await _first_equal_prefix(emb, over, max(200, window - 200), window + 400, 50)
@@ -162,9 +162,10 @@ async def c_cap(store, emb, window: int):
                       f"（窗口 {window} 字）—— 窗口量歪了，A/B 两格的读数也要重取")
     assert equal_at <= EMBEDDING_OBSERVED_TRUNCATION_CHARS, \
         f"C：越过窗口的块在 {equal_at} 字才等值，超过观测截断点 {EMBEDDING_OBSERVED_TRUNCATION_CHARS}"
-    print(f"  C 上限生效曲线（12,000 字真文档、端点实发）{' '.join(curve)}：逐块 ≤H、字一个不丢，"
-          f"且首块在四种 H 下**向量逐维相同**；一块 {len(over)} 字（越过 A 量到的 {window} 字窗口）"
-          f"与它的前 {equal_at} 字**逐维相同** ⇒ 上限比端点窗口还大就等于没设，validator 那条上界有实测依据")
+    print(f"  C 上限生效曲线（12,000 字真文档）{' '.join(curve)}：逐块 ≤H、字一个不丢；"
+          f"同一段 {len(probe)} 字文本连发四次**逐维相同**（端点幂等）；一块 {len(over)} 字"
+          f"（越过 A 量到的 {window} 字窗口）与它的前 {equal_at} 字**逐维相同**"
+          f" ⇒ 上限比端点窗口还大就等于没设，validator 那条上界有实测依据")
 
 
 async def main():
