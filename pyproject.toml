@@ -14,6 +14,11 @@ dependencies = [
     "redis>=5.0",     # utils/redis.py（源语义客户端）+ S7 平台层
     "gitignore-parser>=0.1",   # utils/{tree,file,repo_to_markdown}.py 顶层 import，漏声明则三件 import 即炸
     "anthropic>=0.25",         # utils/token_counter.py 顶层 import（本机靠别的包带入才没暴露）
+    # 漏声明的后果不是报错而是**装完起不来**：`server/api/workspace.py:6` 吃 `UploadFile`/`File`，
+    # FastAPI 在 import `server.app` 时就 `RuntimeError: Form data requires "python-multipart"`。
+    # 本机照样没暴露（`pip show python-multipart` → `Required-by: mcp`），是 09-23 第一次
+    # `docker build` 出一个干净 backend 镜像跑 `import server.app` 才当场炸出来。
+    "python-multipart>=0.0.9",
     # 持久化断点：runner 走 astream_events，只能用 AsyncSqliteSaver，而它运行时依赖 aiosqlite。
     # 漏装 aiosqlite 时工厂会静默退回内存型 —— 表现为"重启后丢进度"，而不是报错，所以必须声明。
     "langgraph-checkpoint-sqlite>=2.0", "aiosqlite>=0.20",
