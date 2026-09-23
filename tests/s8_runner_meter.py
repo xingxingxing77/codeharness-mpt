@@ -273,10 +273,31 @@ def t8_two_currency_buckets():
     # 键集仍然**整颗钉死**（这条防的是漂移，不是"多两个键就放宽到不检"）。
     # 后两个是 T4-③ 的「无效调用」计数：住在 manager 上、随快照持久化、被列表出口带出。
     assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
-                          "truncated_calls", "unknown_command_calls"}, snap
+                          "truncated_calls", "unknown_command_calls", "empty_output_calls"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
-    assert (snap["truncated_calls"], snap["unknown_command_calls"]) == (0, 0), \
+    assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"]) == (0, 0, 0), \
         f"这一格没制造无效调用，计数却非 0（那就是恒亮的告警）：{snap}"
+
+    # C19：正文空＝这一发花了钱没产出（真云端实测最贵那发 ¥0.914、24.5 万 ct、正文是空串，
+    # 而它既不进截断也不进未知命令）。三格一起钉：空的要计上、**只调工具不说话的不算浪费**（阳性对照）、
+    # 非空的不许被计。
+    ec = CostManager()
+    e_empty = AIMessage(content="")
+    e_empty.usage_metadata = {"input_tokens": 2400, "output_tokens": 500}
+    ec.add_usage(e_empty, model="step-3.5-flash", tag="c19-empty")
+    assert ec.empty_output_calls == 1, f"空正文没计上账：{ec.empty_output_calls}"
+    e_tool = AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": "a"},
+                                                "id": "c1", "type": "tool_call"}])
+    e_tool.usage_metadata = {"input_tokens": 2400, "output_tokens": 500}
+    ec.add_usage(e_tool, model="step-3.5-flash", tag="c19-toolonly")
+    assert ec.empty_output_calls == 1, \
+        f"把「只调工具、没说话」也计成浪费了（那是合法的一轮）：{ec.empty_output_calls}"
+    e_text = AIMessage(content="正常一句话")
+    e_text.usage_metadata = {"input_tokens": 20, "output_tokens": 8}
+    ec.add_usage(e_text, model="step-3.5-flash", tag="c19-text")
+    assert ec.empty_output_calls == 1, f"非空正文也被计数 ⇒ 判据在数错东西：{ec.empty_output_calls}"
+    assert cost_snapshot(ec)["empty_output_calls"] == 1, \
+        f"这一笔没被快照带出（用量页那个格子吃的是快照）：{cost_snapshot(ec)}"
 
     unknown = CostManager()
     unknown.update_cost(10, 10, "no-such-model-xyz")

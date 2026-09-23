@@ -45,7 +45,8 @@ def cost_snapshot(cm) -> dict:
             "total_prompt_tokens": c.total_prompt_tokens,
             "total_completion_tokens": c.total_completion_tokens,
             "truncated_calls": getattr(cm, "truncated_calls", 0),
-            "unknown_command_calls": getattr(cm, "unknown_command_calls", 0)}
+            "unknown_command_calls": getattr(cm, "unknown_command_calls", 0),
+            "empty_output_calls": getattr(cm, "empty_output_calls", 0)}
 
 
 class SessionRunner:

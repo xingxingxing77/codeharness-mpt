@@ -17,11 +17,11 @@
         <b>{{ votes.like }} · {{ votes.dislike }}</b>
         <span>反馈（有用 · 无用）{{ votes.other ? ` · 未识别 ${votes.other}` : '' }}</span>
       </div>
-      <!-- T4-③：两笔「花了钱却没产出」的调用。分开报——截断是端点把回答切了，未知命令是
-           模型要的工具有些没给它看见；并成一个"浪费数"就没人知道该去修哪一个。 -->
+      <!-- T4-③/C19：三笔「花了钱却没产出」的调用。分开报——截断是端点把回答切了，未知命令是
+           模型要的工具有些没给它看见，空正文是模型说完却没吐一个字（并成一个"浪费数"就没人知道该去修哪一个）。 -->
       <div class="u-cell">
-        <b>{{ waste.unknown }} · {{ waste.truncated }}</b>
-        <span>无效调用（未知命令 · 被截断）</span>
+        <b>{{ waste.unknown }} · {{ waste.truncated }} · {{ waste.empty }}</b>
+        <span>无效调用（未知命令 · 被截断 · 空正文）</span>
       </div>
     </div>
 

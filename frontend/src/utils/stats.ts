@@ -143,18 +143,21 @@ export function countVotes(rows: { feedback?: Record<string, VoteEntry> }[]):
   return out
 }
 
-/** B4/T4-③ 同一条路：跨会话求和直接吃 `GET /api/sessions` 带出的那份 cost 快照，不开新端点。
- *  两个口径分开报——截断是端点把回答切了，未知命令是模型要的工具有些没给它看见，
+/** B4/T4-③/C19 同一条路：跨会话求和直接吃 `GET /api/sessions` 带出的那份 cost 快照，不开新端点。
+ *  三个口径分开报——截断是端点把回答切了，未知命令是模型要的工具有些没给它看见，
+ *  空正文是模型自己说完却没吐一个字（真云端实测最贵那一发就是这种）；
  *  混成一个"浪费数"就没人知道该去修哪一个。 */
 export function wasteTotals(rows: { cost?: Record<string, number> }[]):
-  { unknown: number; truncated: number } {
+  { unknown: number; truncated: number; empty: number } {
   let unknown = 0
   let truncated = 0
+  let empty = 0
   for (const r of rows) {
     unknown += r.cost?.unknown_command_calls ?? 0
     truncated += r.cost?.truncated_calls ?? 0
+    empty += r.cost?.empty_output_calls ?? 0
   }
-  return { unknown, truncated }
+  return { unknown, truncated, empty }
 }
 
 /** 竖线分组（参考项目的 stats strip）：每段内部用「·」，段间用「 | 」，没数据的整段丢掉。 */

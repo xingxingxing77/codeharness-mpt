@@ -44,6 +44,12 @@ class CostManager(BaseModel):
     # "同一个 manager 的快照带出两键"，**没测那条注入链**——真端到端要起一场真会话读 GET 出口，
     # 已登记为未验边界（PLAN §1 本棒那行）。
     unknown_command_calls: int = 0
+    # C19：正文空的调用（模型说完话但一个字没吐）。与上面两笔同族——只是计数，不参与金额口径。
+    # 为什么要第三笔：2026-09-23 真云端实测 14 发里最贵那一发（¥0.914、24.5 万 completion token、
+    # 10.1 秒）正文是**空串**，厂商自己认为说完了 ⇒ 没有 `finish_reason=length`（不进截断），
+    # 也没走到命令派发（不进未知命令）。那种"钱花了、产出为零"的形态在账面上原本隐形。
+    # ⚠ 只调工具不说话的那一笔**不算**浪费（`tool_calls` 非空即合法），所以判据两边都要有对照。
+    empty_output_calls: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""
@@ -86,6 +92,12 @@ class CostManager(BaseModel):
         um = getattr(resp, "usage_metadata", None) or {}
         if str((getattr(resp, "response_metadata", None) or {}).get("finish_reason") or "") == "length":
             self.truncated_calls += 1                 # B8：截断计数，与钱/token 口径无关
+        # C19：正文空。多模态 content 是块列表，取不到文本就当空；只调工具不说话的不算浪费。
+        body = getattr(resp, "content", "")
+        if isinstance(body, list):
+            body = "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in body)
+        if not str(body).strip() and not (getattr(resp, "tool_calls", None) or []):
+            self.empty_output_calls += 1
         if um:
             pt, ct = um.get("input_tokens", 0) or 0, um.get("output_tokens", 0) or 0
         else:

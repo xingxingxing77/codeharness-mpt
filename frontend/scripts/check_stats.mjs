@@ -104,18 +104,18 @@ eq('新票里认不出的值仍单列（有 at 也不算真票）',
   countVotes([{ feedback: { a: { v: 'meh', at: '2026-09-23 03:24:11' }, b: { at: 'x' } } }]),
   { like: 0, dislike: 0, other: 2 })
 
-// 8) T4-③ 聚合：两笔「无效调用」分开求和，缺字段按 0 计（老记录里根本没这两个键）
-eq('两类各自求和', wasteTotals([
-  { cost: { unknown_command_calls: 2, truncated_calls: 1 } },
-  { cost: { unknown_command_calls: 1 } },
-]), { unknown: 3, truncated: 1 })
-eq('老记录没这两个键 → 两个 0，不报错', wasteTotals([{ cost: { cost_usd: 0.1 } }, {}]),
-  { unknown: 0, truncated: 0 })
+// 8) T4-③/C19 聚合：三笔「无效调用」分开求和，缺字段按 0 计（老记录里根本没这几个键）
+eq('三类各自求和', wasteTotals([
+  { cost: { unknown_command_calls: 2, truncated_calls: 1, empty_output_calls: 3 } },
+  { cost: { unknown_command_calls: 1, empty_output_calls: 1 } },
+]), { unknown: 3, truncated: 1, empty: 4 })
+eq('老记录没这些键 → 三个 0，不报错', wasteTotals([{ cost: { cost_usd: 0.1 } }, {}]),
+  { unknown: 0, truncated: 0, empty: 0 })
 eq('null/undefined 行不参与求和', wasteTotals([{}, { cost: { truncated_calls: 4 } }]),
-  { unknown: 0, truncated: 4 })
-eq('不许把两类并成一个数（分开报才知道去修哪个）',
-  (() => { const r = wasteTotals([{ cost: { unknown_command_calls: 1, truncated_calls: 2 } }])
-    return r.unknown === 1 && r.truncated === 2 && !('total' in r) })(), true)
+  { unknown: 0, truncated: 4, empty: 0 })
+eq('不许把三类并成一个数（分开报才知道去修哪个）',
+  (() => { const r = wasteTotals([{ cost: { unknown_command_calls: 1, truncated_calls: 2, empty_output_calls: 4 } }])
+    return r.unknown === 1 && r.truncated === 2 && r.empty === 4 && !('total' in r) })(), true)
 
 console.log(failed ? `\n${failed} 条失败` : '\n全过')
 process.exit(failed ? 1 : 0)
