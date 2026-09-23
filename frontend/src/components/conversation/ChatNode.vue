@@ -115,15 +115,23 @@ const KIND: Record<string, { title: string; icon: string }> = {
 const row = computed(() => {
   const kind = KIND[b.value.type] || { title: b.value.type || 'Tool call', icon: 'settings' }
   const state = open.value ? 'running' : b.value.meta?.ok === false ? 'error' : 'ok'
-  const summary =
+  const raw =
     b.value.cmd ||
     fileName.value ||
     b.value.page?.page_url ||
     b.value.url ||
     b.value.lines[0] ||
-    text.value.split('\n')[0] ||
+    text.value ||
     ''
-  return { ...kind, state: state as 'running' | 'ok' | 'error' | 'stopped', summary: summary.slice(0, 200) }
+  // 摘要只取**首行**，长度交给 CSS 的 ellipsis——参照系 `tool-call-model.ts` 的 `firstLine()`
+  // 加 `.summary{text-overflow:ellipsis}` 就是这个组合。原来这里 `slice(0, 200)` 会把一行 300 字的
+  // grep 模式硬切成"看不懂的半截"，而 CSS 那套是"看得见的半截 + 悬停有 tooltip"。
+  const nl = raw.indexOf('\n')
+  return {
+    ...kind,
+    state: state as 'running' | 'ok' | 'error' | 'stopped',
+    summary: nl === -1 ? raw : raw.slice(0, nl)
+  }
 })
 </script>
 

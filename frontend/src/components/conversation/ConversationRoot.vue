@@ -7,6 +7,9 @@
         <span class="crumb cur">{{ store.current?.idea || '新会话' }}</span>
       </nav>
       <span class="modeChip">{{ paradigmLabel }}</span>
+      <!-- 子 agent 胶囊：多角色线（经典 SOP 的 PM/Architect/Engineer/QA、动态线的 Mike/Alice…）
+           跑起来后头部要看得出「此刻是谁在干活」，否则流里全是 Think 行、根本分不出人。 -->
+      <AgentChip v-if="agentLabel" :label="agentLabel" :running="store.isRunning" />
       <span class="grow" />
       <span class="cost">{{ moneyBoth(store.cost) }}</span>
       <button
@@ -94,6 +97,8 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ChatNode from './ChatNode.vue'
 import TurnTail from './TurnTail.vue'
 import StatsLine from './StatsLine.vue'
+import AgentChip from './AgentChip.vue'
+import { activeRole, agentChipLabel } from '../../utils/agents'
 import TrajectoryTable from './TrajectoryTable.vue'
 import QuestionCard from '../composer/QuestionCard.vue'
 import { moneyBoth } from '../../utils/money'
@@ -144,6 +149,15 @@ function openLogs() {
 
 const paradigmLabel = computed(
   () => ({ classic: '标准模式', dynamic: '动态组队', react: 'ReAct 模式' })[store.current?.paradigm || 'classic'] || '标准模式'
+)
+
+/** 此刻在干活的子 agent：从块序列**倒着**找第一个在册角色（内层节点名 think/act/gate 不算，
+ *  理由见 `utils/agents.ts` 文件头）。没角色可认就整颗胶囊不出现——不是显示「未知」。 */
+const agentLabel = computed(() =>
+  agentChipLabel(
+    activeRole(store.current?.roles, store.blockList.map((b) => b.role)),
+    store.current?.roles
+  )
 )
 
 /** takeover 优先级栈：靠前的赢。顺序照施工5 F6 定的「问题卡 > 审批条 > 常规 composer」。 */
