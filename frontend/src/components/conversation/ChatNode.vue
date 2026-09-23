@@ -77,6 +77,7 @@ import VDisclosureRow from '../ui/VDisclosureRow.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
+import { toolRow } from '../../utils/toolRow'
 import type { Block } from '../../types'
 
 defineEmits<{ toggle: [key: string, open: boolean] }>()
@@ -112,7 +113,18 @@ const KIND: Record<string, { title: string; icon: string }> = {
   System: { title: 'Tool call', icon: 'settings' }
 }
 
+/** 一次工具调用的块（后端 `report.tool_call_report` 发的第十值）。
+ *  它必须有自己这一句判据式的分支：门禁 s8 t1 拿 `BlockType` 全集去查 ChatNode/ToolCard 里的
+ *  `type === '...'` 分发名，少一支就会静默降级成灰色通用块。 */
+const isToolCall = computed(() => b.value.type === 'ToolCall')
+
 const row = computed(() => {
+  // ToolCall 块：动词与摘要**从 args 派生**（照参照系 `tool-call-model.ts` 的 `SUMMARY_KEYS`），
+  // 后端只发事实，不发明"意图"字段。其余块仍走类型表。
+  if (isToolCall.value && b.value.meta?.tool) {
+    const t = toolRow(String(b.value.meta.tool), b.value.meta.args as Record<string, string>)
+    return { ...t, state: (b.value.meta.ok === false ? 'error' : 'ok') as 'ok' | 'error' }
+  }
   const kind = KIND[b.value.type] || { title: b.value.type || 'Tool call', icon: 'settings' }
   const state = open.value ? 'running' : b.value.meta?.ok === false ? 'error' : 'ok'
   const raw =

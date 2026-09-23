@@ -362,8 +362,16 @@ class RoleZero:
                             # 未决（None）也按不执行处理：正常图里 gate 一定先跑，走到 act 还
                             # 没有结论只可能是接线漏了——这种情况绝不默默放行副作用。
                             results.append({"name": name, "result": "[已拒绝] 未获批准，不执行"})
+                            # 被拒也要有一行：否则界面上"这一步没发生"和"这一步被拦下"长得一样，
+                            # 而后者是用户该看见的（审批刚做完就静默消失，是最容易被误读的一种反馈）。
+                            from codeharness.report import tool_call_report
+                            await tool_call_report(name, args, "", ok=False)
                             continue
                         out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
+                        # 每一步都发一行（C6/对话流：只读类工具原本一个块都不发 ⇒ "每步一行"无从谈起）。
+                        # 只发事实（工具名+参数摘要+结果首行），动词与摘要由前端派生。
+                        from codeharness.report import tool_call_report
+                        await tool_call_report(name, args, out)
                         results.append({"name": name, "result": str(out)[:4000]})
                     else:
                         # T4-③：这是「召回/名册漏了」这件事在线上**唯一数得出来**的信号——命中率要真值才算得出

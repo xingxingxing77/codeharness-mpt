@@ -46,6 +46,11 @@ class BlockType(str, Enum):
     NOTEBOOK = "Notebook"
     DOCS = "Docs"
     THOUGHT = "Thought"
+    # 第十值：一次工具调用一个块。为什么要有它——`read_file`/`search_dir`/`search_file`/`find_file`
+    # 与编辑器读那一类工具**一个块都不发**（只有 write_file 与 shell 有），所以对话流里
+    # "每一步一行"无从谈起：缺的是发射，不是渲染。发射点只有一个接缝（`role_zero._act` 的
+    # `self.tools[name].ainvoke`），所以一处改动覆盖全部工具，不去动 12 个工具函数。
+    TOOL_CALL = "ToolCall"
 
 
 def _role_name() -> Optional[str]:
@@ -369,6 +374,30 @@ async def docs_block(doc_type: str, role: str = ""):
         yield rep
     finally:
         await rep.close()
+
+
+def _brief_args(args: dict | None) -> dict:
+    """参数摘要：每个值取一行 120 字。整份文件内容不许进事件流（那是产物，不是线索），
+    但**键要留着**——前端靠它派生动词与摘要（照参照系 `SUMMARY_KEYS` 的取法：path/query/command…）。"""
+    out = {}
+    for k, v in (args or {}).items():
+        s = str(v).split("\n")[0]
+        out[k] = s if len(s) <= 120 else s[:117] + "…"
+    return out
+
+
+async def tool_call_report(name: str, args: dict | None, out, ok: bool = True, role: str = ""):
+    """一次工具调用 → 一个 ToolCall 块（meta 带工具名与参数摘要，正文带结果首行）。
+
+    与参照系的差别要写清：它那一行 `Read · app\api\admin.py` 的"标题"也不是模型给的，
+    而是「变体名 + 从 args 派生的摘要」（`ui-tool/src/client/tool/models/tool-call-model.ts`
+    的 `SUMMARY_KEYS`）——所以我们只发**事实**（工具名 + 参数 + 结果摘要），
+    动词与摘要由前端派生，不新造一个"意图"字段去求模型填（那要动 prompt，属 C6 那类风险）。
+    """
+    rep = BlockReporter(BlockType.TOOL_CALL.value, role)
+    await rep.meta({"type": "tool_call", "tool": name, "args": _brief_args(args), "ok": ok})
+    await rep.content(f"[已拒绝] 未获批准，不执行" if not ok else str(out).split("\n")[0][:400])
+    await rep.close()
 
 
 @asynccontextmanager

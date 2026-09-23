@@ -64,7 +64,12 @@ def t1_class_surface():
 
 def t2_blocktype_vocabulary():
     got = [b.value for b in RP.BlockType]
-    want = ["Terminal", "Task", "Browser", "Browser-RT", "Editor", "Gallery", "Notebook", "Docs", "Thought"]
+    # 第十值 `ToolCall` 是 09-23 有意扩的：只读类工具（read_file/grep/find_file/编辑器读）
+    # 原本一个块都不发，对话流里"每步一行"无从谈起。扩词汇表的代价由两处兜住：
+    # s8 t1 要求 `ChatNode/ToolCard` 里有 `type === 'ToolCall'` 分发分支（少一支就会整体降级灰块），
+    # `frontend/scripts/check_tool_row.mjs` 钉住动词/摘要派生与图标名可在别名表取到。
+    want = ["Terminal", "Task", "Browser", "Browser-RT", "Editor", "Gallery", "Notebook", "Docs",
+            "Thought", "ToolCall"]
     if got != want:
         _fail(f"2. BlockType 词汇表被改动: {got} != {want}（前端会整体降级为灰色 GenericBlock）")
     if RP.END_MARKER_NAME != "end_marker":
@@ -314,12 +319,56 @@ def t13_artifact_filename_gate():
         shutil.rmtree(base, ignore_errors=True)
 
 
+def t14_tool_call_report():
+    """`tool_call_report` 的发射形状（09-23 扩 BlockType 第十值时同批装的判据）。
+
+    为什么必须有：只读类工具（read_file/grep/find_file/编辑器读）原本一个块都不发，
+    "对话流里每步一行"因此只是愿望。扩了词汇表而没有发射判据，下次谁把它改回静默，
+    界面上只是"少了几行"——没有任何测试会红，正是本仓反复踩的那类洞。
+    """
+    import asyncio
+    from codeharness.runtime import REPORT_SINK
+    from codeharness.report import tool_call_report, BlockType
+
+    ev = []
+
+    async def go():
+        tok = REPORT_SINK.set(lambda e: ev.append(e))
+        try:
+            await tool_call_report("read_file", {"path": "a.py", "content": "第一行\n第二行"},
+                                   "文件不存在: a.py")
+            await tool_call_report("terminal_command", {"command": "ls -al"}, "", ok=False)
+            await tool_call_report("search_dir", {"pattern": "x" * 300}, "3 matches")
+        finally:
+            REPORT_SINK.reset(tok)
+
+    asyncio.run(go())
+    names = [e["name"] for e in ev]
+    if names != ["meta", "content", "end_marker"] * 3:
+        _fail(f"14. 一次调用应发 meta/content/end_marker 三条，实为 {names}")
+    if {e["block"] for e in ev} != {BlockType.TOOL_CALL.value}:
+        _fail(f"14. 块类型不是 ToolCall：{sorted({e['block'] for e in ev})}")
+    m1 = ev[0]["value"]
+    if m1["tool"] != "read_file" or m1["type"] != "tool_call" or m1["ok"] is not True:
+        _fail(f"14. meta 形状不对：{m1}")
+    if "\n" in m1["args"]["content"]:
+        _fail(f"14. 参数摘要吃了第二行（整份文件内容会灌进事件流）：{m1['args']['content']!r}")
+    if ev[1]["value"] != "文件不存在: a.py":
+        _fail(f"14. 结果首行没进正文：{ev[1]['value']!r}")
+    if ev[3]["value"]["ok"] is not False or "已拒绝" not in ev[4]["value"]:
+        _fail("14. 被拒的那一步发成了成功（界面上「没发生」与「被拦下」就分不出来）："
+              f"{ev[3]['value']} / {ev[4]['value']!r}")
+    long_args = ev[6]["value"]["args"]["pattern"]
+    if len(long_args) > 121 or not long_args.endswith("…"):
+        _fail(f"14. 超长参数没截断（事件流不该搬 300 字模式串）：{long_args!r}")
+
+
 def main():
     checks = [t1_class_surface, t2_blocktype_vocabulary, t3_payload_shape, t4_path_absolute,
               t5_context_manager_and_hooks, t6_llm_stream_bridge,
               t7_retry_targets_only_missing, t8_no_retry_when_complete, t9_empty_semantics,
               t10_merge_never_clobbers, t11_partial_schema_keys, t12_plain_text_path_untouched,
-              t13_artifact_filename_gate]
+              t13_artifact_filename_gate, t14_tool_call_report]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
