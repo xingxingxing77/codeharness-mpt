@@ -11,7 +11,9 @@
           {{ roster.length ? '再招一人' : '招人' }}
         </button>
       </div>
-      <p v-if="!roster.length" class="empty">还没有招进来的成员——只有动态组队线能招人。</p>
+      <!-- 空态文案：这个页签本来就只对 dynamic 线出现（非 dynamic 连页签都没有），
+           所以不能再写"只有动态组队线能招人"——那是在跟已经站在这里的人解释他为什么能站在这里。 -->
+      <p v-if="!roster.length" class="empty">还没有招进来的成员。招一个进来，下一次起跑时它就在图里。</p>
       <div v-for="d in roster" :key="d.name" class="mate">
         <span class="name">{{ d.name }}</span>
         <span class="goal">{{ d.goal || d.profile || '—' }}</span>
