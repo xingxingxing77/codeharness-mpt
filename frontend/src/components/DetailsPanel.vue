@@ -3,7 +3,7 @@
     <div class="bar">
       <div class="tabs" role="tablist">
         <button
-          v-for="v in shownViews"
+          v-for="v in VIEWS"
           :key="v.key"
           class="tab"
           :class="{ on: ui.rightView === v.key }"
@@ -179,12 +179,9 @@ const VIEWS = [
   { key: 'team', label: '成员' }
 ] as const
 
-/** 「成员」（招人）只对 dynamic 线出现：classic/react 线里没有任何边会指向新节点，
- *  招进来是死成员、后端也拒 ⇒ 与其留一个点了必报错的入口，不如连页签都不给。
- *  原先这块控件挂在中间列 composer 上方，把对话区挤掉一屏——搬进右栏后中间列只剩
- *  QueueDock/GoalBar/ComposerCard 三件。 */
-const shownViews = computed(() =>
-  VIEWS.filter((v) => v.key !== 'team' || store.current?.paradigm === 'dynamic'))
+/** 「成员」页签**对所有线都出现**（09-23 改）：只有 dynamic 线能招人，但上一版把它按线过滤掉，
+ *  结果用户在 classic 线上根本不知道有这一页（实测反馈就是"没看到"）。看得见、并说明为什么不能，
+ *  才是反馈；隐藏入口等于宣称功能不存在。收动作的逻辑在 `HireRole.vue` 的 `canHire`。 */
 
 const tree = ref<FileNodeT[]>([])
 const mermaid = ref('')

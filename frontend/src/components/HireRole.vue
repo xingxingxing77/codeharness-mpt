@@ -1,25 +1,29 @@
 <template>
-  <!-- B9 招人控件，现在住在右侧栏「成员」页签里（原先挂在中间列 composer 上方，把对话区挤掉一屏）。
+  <!-- B9 招人控件，住在右侧栏「成员」页签里（原先挂在中间列 composer 上方，把对话区挤掉一屏）。
        参照系没有「招人」界面 ⇒ 按它的风格取语义最近的类比：`ui-subagent` 的名单行
-       （`StateDot + label + secondary` 左、右侧给数值）+ 本仓右栏卡片的 12px 内衬 / radius 12 / border-l1。
-       只有 dynamic 线能招：classic/react 线里没有任何边会指向新节点，招进来是死成员（后端也拒）。 -->
-  <div v-if="store.current?.paradigm === 'dynamic'" class="wrap">
+       （`label · secondary` 左、右侧给数值）+ 本仓右栏卡片的 12px 内衬 / radius 12 / border-l1。
+       **页签对所有线都出现**：只有 dynamic 线能招人（classic/react 线的图在装配时就固定了，
+       后端也拒），但把入口藏起来会让用户以为功能不存在——看得见、并说明为什么不能，才是反馈。 -->
+  <div class="wrap">
     <div v-if="!open" class="sec">
       <div class="secTitle">
         <span>本场成员</span>
-        <button class="act add" type="button" :disabled="busy" @click="start">
-          {{ roster.length ? '再招一人' : '招人' }}
+        <button v-if="canHire" class="act add" type="button" :disabled="busy" @click="start">
+          {{ roleDefs.length ? '再招一人' : '招人' }}
         </button>
       </div>
-      <!-- 空态文案：这个页签本来就只对 dynamic 线出现（非 dynamic 连页签都没有），
-           所以不能再写"只有动态组队线能招人"——那是在跟已经站在这里的人解释他为什么能站在这里。 -->
-      <p v-if="!roster.length" class="empty">还没有招进来的成员。招一个进来，下一次起跑时它就在图里。</p>
-      <div v-for="d in roster" :key="d.name" class="mate">
-        <span class="name">{{ d.name }}</span>
-        <span class="goal">{{ d.goal || d.profile || '—' }}</span>
+      <p v-if="!canHire" class="why">
+        这条线不能招人——{{ paradigmName }} 的图在装配时就固定了，没有指向新节点的边，
+        后端也会当场拒。要试就新建一场「动态组队」会话。
+      </p>
+      <p v-else-if="!roster.length" class="empty">还没有成员。招一个进来，下一次起跑时它就在图里。</p>
+      <div v-for="m in roster" :key="m.name" class="mate">
+        <span class="name">{{ m.name }}</span>
+        <span class="goal">{{ m.goal || m.profile || (m.hired ? '' : '装配自带') }}</span>
         <!-- B9 余账：摘的生效点是下一次起跑，所以这里不假装人立刻从图里消失 -->
-        <button class="act fire" type="button" :disabled="busy"
-                :aria-label="`摘除成员 ${d.name}`" @click="fire(d.name)">摘</button>
+        <button v-if="canHire" class="act fire" type="button" :disabled="busy"
+                :aria-label="`摘除成员 ${m.name}`" @click="fire(m.name)">摘</button>
+        <em v-else class="tier">固定</em>
       </div>
     </div>
 
@@ -76,6 +80,16 @@ const form = reactive<{ name: string; profile: string; goal: string; constraints
   name: '', profile: '', goal: '', constraints: '', tools: []
 })
 
+/** 只有 dynamic 线能招人与摘人：classic/react 线的图在 compile 时就固定了，
+ *  后端 `POST /roles` 对非 dynamic 直接拒（s23 钉着）。这里不隐藏页签，只把动作收掉并说明原因。 */
+const canHire = computed(() => store.current?.paradigm === 'dynamic')
+const PARADIGM_NAMES: Record<string, string> = {
+  classic: '标准模式（SOP 流程）', react: 'ReAct 模式', dynamic: '动态组队'
+}
+const paradigmName = computed(() => PARADIGM_NAMES[store.current?.paradigm || 'classic'] || '这条线')
+const roleDefs = computed(() => (store.current?.role_defs || []) as
+  { name?: string; goal?: string; profile?: string }[])
+
 async function start() {
   if (!store.currentId) return
   open.value = true
@@ -109,8 +123,14 @@ async function draft() {
   }
 }
 
-const roster = computed(() => (store.current?.role_defs || []) as
-  { name?: string; goal?: string; profile?: string }[])
+const roster = computed(() => [
+  // 招进来的成员排在前面（带职责），装配自带的节点跟在后面（只有名字，标「固定」）——
+  // 这样 classic/react 线打开这一页也不是空的，看得见"这场到底有谁"。
+  ...roleDefs.value.map((d) => ({ name: d.name || '', goal: d.goal, profile: d.profile, hired: true })),
+  ...(store.current?.roles || [])
+    .filter((n) => !roleDefs.value.some((d) => d.name === n))
+    .map((n) => ({ name: n, goal: undefined, profile: undefined, hired: false }))
+])
 
 async function fire(name: string) {
   if (!store.currentId) return
@@ -167,6 +187,27 @@ async function hire() {
   margin: 8px 0 0;
   font-size: 13px;
   line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 非 dynamic 线的说明：说清"为什么不能"和"要试去哪儿"，不然这一页就是个死胡同 */
+.why {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-specific-tip);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.mate .tier {
+  flex: none;
+  margin-left: auto;
+  font-style: normal;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--dsw-alias-label-tertiary);
 }
 

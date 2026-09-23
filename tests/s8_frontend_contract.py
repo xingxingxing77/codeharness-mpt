@@ -1405,10 +1405,12 @@ def t21_hire_surface():
     dp = (FE / "components" / "DetailsPanel.vue").read_text(encoding="utf-8")
     assert "import HireRole from './HireRole.vue'" in dp and "ui.rightView === 'team'" in dp, \
         "B9 回归：右栏不再挂招人（或页签正文分支没了）"
-    assert "{ key: 'team', label: '成员' }" in dp and "v.key !== 'team' || store.current?.paradigm === 'dynamic'" in dp, \
-        "B9 回归：「成员」页签不再只对 dynamic 线过滤（classic/react 线点它必被后端拒）"
-    assert "shownViews" in dp and "v-for=\"v in shownViews\"" in dp, \
-        "B9 回归：页签列表还在用未过滤的 VIEWS（非 dynamic 线会看见这个入口）"
+    assert "{ key: 'team', label: '成员' }" in dp and 'v-for="v in VIEWS"' in dp, \
+        "B9 回归：「成员」页签又被按线藏起来了——用户在 classic 线上不知道有这一页（实测反馈就是「没看到」）"
+    assert "canHire" in hr and 'v-if="canHire"' in hr, \
+        "B9 回归：页签常驻后动作没按线收（非 dynamic 线点招人必被后端拒）"
+    assert "这条线不能招人" in hr, "B9 回归：非 dynamic 线只收了动作、没说明为什么不能 —— 那就是死胡同"
+    assert "装配自带" in hr, "B9 回归：classic/react 线打开这一页是空的（看不见这场到底有谁）"
     app = (FE / "App.vue").read_text(encoding="utf-8")
     assert "<HireRole" not in app, "B9 回归：中间列 composer 又挂回招人（右栏那份会两份并存）"
     assert "rightView: 'cards' as" in (FE / "stores" / "ui.ts").read_text(encoding="utf-8") \
