@@ -11,7 +11,10 @@ SimpleNodeParser / PDFReader）整体换成 LangChain document loaders + text sp
 
 依赖策略：pandas 必需；docx/pdf 的 loader 依赖（docx2txt、pypdf）**一律函数内惰性 import**，
 否则本模块 import 就会拖垮 S1 门禁。tqdm 不引入（只为进度条，去掉不影响语义）。
+**惰性不等于可以不说**：这两件从 09-23 起在 `pyproject.toml` 里显式声明（C26——此前两头都没有，
+白名单却宣称收这两个格式），而 `reader_available()` 负责在缺件的环境里说人话而不是抛 Python 原文。
 """
+import importlib.util
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Union
@@ -27,6 +30,34 @@ def validate_cols(content_col: str, df: pd.DataFrame):
         raise ValueError("Content column not found in DataFrame.")
 
 
+# C26：`.docx`/`.pdf` 的 loader 依赖是**可选**的（`read_data` 里惰性 import，理由见模块头）。
+# 但「声明支持这个格式」与「本机读得动它」是两件事——混成一份白名单就会对用户撒谎：
+# 白名单收 `.docx`，而 `Docx2txtLoader` 一缺件就抛 `ModuleNotFoundError: No module named 'docx2txt'`，
+# 那句话会被摄取件原样拼进给用户看的 `errors[]`（原件却已经落进 `kb/` 了）。
+OPTIONAL_READERS = {".docx": "docx2txt", ".doc": "docx2txt", ".pdf": "pypdf"}
+
+
+def reader_available(suffix: str) -> bool:
+    """这个后缀在**本机**读不读得动——只问它的可选依赖在不在，不猜别的。
+
+    必须在真正 import loader **之前**问：那时候抛出来的已经是 Python 的原始报错了。
+    `find_spec` 不导入模块（零副作用、零依赖代价），缺件与「没装过」同答 False。"""
+    mod = OPTIONAL_READERS.get(suffix.lower())
+    return mod is None or importlib.util.find_spec(mod) is not None
+
+
+class ReaderUnavailable(RuntimeError):
+    """可选读取组件没装。单独一个类型：调用方要能分清「这是我该翻成人话的那一类」
+    与「这是真 bug，类名留着给我看」。"""
+
+
+def _require_reader(suffix: str):
+    """`read_data` 那两支惰性 import 之前的闸——缺件时抛这一句，而不是
+    `ModuleNotFoundError: No module named 'docx2txt'`（C26：那句话会被拼进给用户看的 `errors[]`）。"""
+    if not reader_available(suffix):
+        raise ReaderUnavailable(f"{suffix} 本机暂时读不了：缺组件 `{OPTIONAL_READERS[suffix.lower()]}`")
+
+
 def read_data(data_path: Path) -> Union[pd.DataFrame, list]:
     """按后缀分派读取。表格类返回 DataFrame，文档类返回 LangChain Document 列表。"""
     suffix = data_path.suffix
@@ -37,6 +68,7 @@ def read_data(data_path: Path) -> Union[pd.DataFrame, list]:
     elif ".json" == suffix:
         data = pd.read_json(data_path)
     elif suffix in (".docx", ".doc"):
+        _require_reader(suffix)
         from langchain_community.document_loaders import Docx2txtLoader
         data = Docx2txtLoader(str(data_path)).load()
     elif suffix in (".txt", ".md"):     # C3：知识库文档九成是 .md，原先会掉进下面的 NotImplementedError
@@ -44,9 +76,13 @@ def read_data(data_path: Path) -> Union[pd.DataFrame, list]:
         from langchain_text_splitters import CharacterTextSplitter
         docs = TextLoader(str(data_path), encoding="utf-8").load()
         # 源：SimpleNodeParser.from_defaults(separator="\n", chunk_size=256, chunk_overlap=0)
+        # ⚠ 这个 splitter 只认分隔符：900 字不换行的段落原样出一块（langchain 自己打
+        # `Created a chunk of size 400, which is longer than the specified 256`）⇒ 它**不是**长度上限，
+        # 上限在 `document_store/embed_split.py`（C27，端点超长会静默截断）。
         splitter = CharacterTextSplitter(separator="\n", chunk_size=256, chunk_overlap=0, keep_separator=False)
         data = splitter.split_documents(docs)
     elif ".pdf" == suffix:
+        _require_reader(suffix)
         from langchain_community.document_loaders import PyPDFLoader
         data = PyPDFLoader(str(data_path)).load()
     else:

@@ -36,6 +36,7 @@ t1/t3 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker com
 """
 import asyncio
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -176,8 +177,9 @@ def t2_endpoint_door():
             assert rsp.status_code == 200, f"t2①上传被拒：{rsp.status_code} {rsp.text[:160]}"
             body = rsp.json()
             assert sorted(body["written"]) == ["evil.md", "faq.md"], body["written"]
-            assert any("tool.exe" in e and "只收" in e for e in body["errors"]), \
+            assert any("tool.exe" in e and "只摄取文本类文档" in e for e in body["errors"]), \
                 f"t2①非白名单后缀没被拒或没说清：{body['errors']}"
+                # 文案与摄取件同源（C26 起 `door_refusal()` 一份），所以这里钉的是那句的关键词而不是「只收」
             ws = Path(c.get(f"/api/sessions/{sid}").json()["workspace"])
             on_disk = sorted(p.name for p in (ws / "kb").iterdir())
             assert on_disk == ["evil.md", "faq.md"], f"t2②落盘不对：{on_disk}"
@@ -555,17 +557,231 @@ def t8_every_ingestion_path_goes_through_the_exit():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+DOCX_TEXT = "ALPHA chunk of the knowledge base probe. " * 70      # 3010 字，一段到底：顺手把 C27 的上限接缝量出来
+
+
+def _write_docx(dir_: Path, name: str = "probe.docx", text: str = DOCX_TEXT) -> Path:
+    """手工搭一份**最小合法 .docx**（zip + 三个部件）。
+
+    不为此加 `python-docx`：夹具的本体就是「docx 是一个带 `[Content_Types].xml` 的 zip」，
+    `docx2txt` 只读 `word/document.xml` 里的 `<w:t>`。文本按 `\\n` 分段的 `<w:p>`，
+    所以它天然**整篇一个 Document**（不二次切）——那正是 C26 记的粒度缺陷，也是 C27 出口要接住的东西。
+    """
+    import zipfile
+    body = "".join('<w:p><w:r><w:t xml:space="preserve">' + p + "</w:t></w:r></w:p>"
+                   for p in text.split("\n"))
+    parts = {
+        "[Content_Types].xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        "_rels/.rels":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+        "word/document.xml":
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body>" + body + "</w:body></w:document>",
+    }
+    p = dir_ / name
+    with zipfile.ZipFile(p, "w") as z:
+        for k, v in parts.items():
+            z.writestr(k, v)
+    return p
+
+
+def _write_pdf(dir_: Path, name: str = "probe.pdf", lines=("KB probe page one line",)) -> Path:
+    """手工搭一份**最小合法单页 PDF**（Type1 Helvetica + 若干 `Tj`，带正确 xref）。
+
+    用 ASCII：`pypdf` 从无字体的中文流里提不出东西，那会把「读不出块」和「读得出但没字」混成一格。
+    PDF 那条按页出块（一页 = 一份 Document），所以这里的判据是「读出 ≥1 块」，不是「切成几块」。
+    """
+    stream = "BT /F1 11 Tf " + "".join("1 0 0 1 60 " + str(760 - 14 * i) + " Tm ("
+                                       + t.replace("\\", "\\\\").replace("(", r"\(").replace(")", r"\)")
+                                       + ") Tj " for i, t in enumerate(lines)) + "ET"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R"
+        b" /Resources << /Font << /F1 5 0 R >> >> >>",
+        ("<< /Length " + str(len(stream)) + " >>\nstream\n" + stream + "\nendstream").encode(),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, obj in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += (str(i) + " 0 obj\n").encode() + obj + b"\nendobj\n"
+    xref_at = len(out)
+    out += ("xref\n0 " + str(len(objs) + 1) + "\n0000000000 65535 f \n").encode()
+    for off in offsets:
+        out += (("%010d 00000 n \n" % off).encode())
+    out += ("trailer\n<< /Size " + str(len(objs) + 1) + " /Root 1 0 R >>\nstartxref\n"
+            + str(xref_at) + "\n%%EOF\n").encode()
+    p = dir_ / name
+    p.write_bytes(bytes(out))
+    return p
+
+
+def _fixture_for(dir_: Path, suffix: str) -> Path:
+    return {".txt": lambda: _write_faq(dir_, "probe.txt", "知识库探针\n\n" + DOCX_TEXT),
+            ".md": lambda: _write_faq(dir_, "probe.md", FAQ),
+            ".docx": lambda: _write_docx(dir_),
+            ".pdf": lambda: _write_pdf(dir_)}[suffix]()
+
+
+def t9_whitelist_never_lies():
+    """C26：白名单宣称收 `.docx`/`.pdf`，而**声明**与**本机读得动**是两件事——以前混成一份，
+    于是缺组件的机器上传一份 .docx：先落进 `kb/`、再在摄取那步抛
+    `ModuleNotFoundError: No module named 'docx2txt'`，那句话被原样拼进给用户看的 `errors[]`，
+    HTTP 还是 200（读数出处见 PLAN §4 C26 行）。
+
+    三格，都不依赖在线服务（`_texts_of` 直调 + 门口那一格把 store/embeddings 换成替身）：
+      ① **两态必居其一**（结构不变量）：白名单里每个后缀，要么这台机器真读出 ≥1 块，
+         要么被明确拒收——**没有第三种**（静默回空、抛 Python 原文都算坏）。哪一态由本机的真能力决定，
+         所以同一格在装了组件的镜像里走「读出」那支、在这台机器上走「拒收」那支，两支都必须过。
+      ② **拒收那支的文案是人话**：点名缺哪个组件与补法，且**不含** `ModuleNotFoundError`/`ImportError`
+         /`package not found` 任何一句 Python 原文（少这条，① 会被「抛了个别的错」糊过去）。
+      ③ **门口真拒、原件不落盘**：真发一次 multipart（一份 .docx + 一份 .md）→ 200、`uploaded_count>0`
+         （.md 那条照常摄取，这是① ② 的阳性对照），而缺件环境里 .docx **不在 `kb/` 里**、
+         它的拒因带「没有入库」字样；装了组件的环境里它必须**进 `written[]`**（否则白名单反过来说谎了）。
+    """
+    from codeharness.actions.upload_kb import KbFormatError, SUPPORTED, _texts_of
+    from codeharness.configs.settings import settings
+    from codeharness.document import OPTIONAL_READERS, reader_available
+
+    state = {s: reader_available(s) for s in sorted(SUPPORTED)}
+    tmp = Path(tempfile.mkdtemp())
+
+    class _Store:
+        def __init__(self):
+            self.written = []
+
+        async def write(self, points):
+            self.written.extend(p.text for p in points)
+            return len(points)
+
+    class _Spy(HashEmbeddings):
+        def __init__(self):
+            self.sent = []
+
+        async def aembed_documents(self, texts):
+            self.sent.append(list(texts))
+            return await super().aembed_documents(texts)
+
+    read_out, refused = [], []
+    for suffix in sorted(SUPPORTED):
+        f = _fixture_for(tmp, suffix)
+        if state[suffix]:
+            texts = _texts_of(f)
+            assert texts and all(t.strip() for t in texts), f"t9①：{suffix} 说读得动却读不出块：{texts}"
+            spy, store = _Spy(), _Store()
+            out = asyncio.run(_action(store, spy, [f]))
+            sent = spy.sent[0] if spy.sent else []
+            assert out["uploaded_count"] > 0 and sent, f"t9①：{suffix} 走 action 没写进任何点：{out}"
+            assert all(len(t) <= settings.embedding.max_chars for t in sent), \
+                f"t9①：{suffix} 的块有 {max(map(len, sent))} 字，越过 C27 的上限接缝（{out}）"
+            read_out.append(f"{suffix}→{len(texts)}块/{len(sent)}发")
+        else:
+            assert suffix in OPTIONAL_READERS, f"t9①：{suffix} 不是可选组件那类，凭什么拒收"
+            try:
+                _texts_of(f)
+                raise AssertionError(f"t9①：{suffix} 缺组件却读出了东西——白名单和现实又对不上了")
+            except KbFormatError as e:
+                msg = str(e)
+                assert OPTIONAL_READERS[suffix] in msg and "没有入库" in msg, \
+                    f"t9②：拒因没点名该补哪个组件：{msg}"
+            except Exception as e:
+                raise AssertionError(f"t9②：{suffix} 抛的不是 KbFormatError，是 {type(e).__name__}: {e}")
+            # **给用户看的那一行**才是判据对象（`_texts_of` 的 message 只是半成品）：
+            # 不许有 Python 原文，也不许有异常类名前缀——`KbFormatError: …` 那种拼法
+            # 就是 C26 那行 `type(e).__name__` 格式化器长出来的（反向验证 m3 专钉这一格）。
+            line = asyncio.run(_action(_Store(), _Spy(), [f]))["errors"][0]
+            for leak in ("ModuleNotFoundError", "ImportError", "No module named", "package not found"):
+                assert leak not in line, f"t9②：Python 原文漏进给用户看的 errors[]：{line[:180]}"
+            assert not re.search(r"[A-Za-z_][A-Za-z0-9_]*(Error|Exception)\s*:", line), \
+                f"t9②：给用户看的那行还挂着异常类名前缀：{line[:180]}"
+            assert "没有入库" in line and OPTIONAL_READERS[suffix] in line, \
+                f"t9②：门口那两句人话没原样到达用户：{line[:180]}"
+            refused.append(suffix)
+
+    # ③ 端点门口那一格：store/embeddings 全换替身 ⇒ 真 HTTP 语义、零在线服务
+    import codeharness.actions.upload_kb as mod
+    from fastapi.testclient import TestClient
+
+    class _GW:
+        @staticmethod
+        def embeddings():
+            return _Spy()
+
+    saved = (mod.QdrantStore, mod.LLMGateway)
+    tmp_root = Path(tempfile.mkdtemp())
+    try:
+        import server.sessions as ss
+        keep = (ss.SESSIONS_FILE, settings.platform.use_redis)
+        ss.SESSIONS_FILE = tmp_root / "sessions.json"
+        settings.platform.use_redis = False
+        mod.QdrantStore, mod.LLMGateway = lambda *a, **k: _Store(), _GW
+        from server.app import create_app
+        with TestClient(create_app(), raise_server_exceptions=False) as c:
+            sid = c.post("/api/sessions", json={"idea": "c26", "project_name": "s15_c26_door"}).json()["id"]
+            ws = Path(c.get(f"/api/sessions/{sid}").json()["workspace"])
+            rsp = c.post(f"/api/sessions/{sid}/workspace/upload_kb", files=[
+                ("files", ("probe.docx", _write_docx(tmp).read_bytes(),
+                           "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
+                ("files", ("ok.md", FAQ, "text/markdown"))])
+            assert rsp.status_code == 200, f"t9③：门口这一判不该把请求打成 {rsp.status_code}：{rsp.text[:200]}"
+            body, docx_ok = rsp.json(), state.get(".docx", False)
+            dline = [e for e in body["errors"] + body.get("written", []) if "probe.docx" in e]
+            for e in body["errors"]:
+                for leak in ("ModuleNotFoundError", "ImportError", "package not found", "No module named"):
+                    assert leak not in e, f"t9③：端点把 Python 原文吐给了用户：{e[:160]}"
+            assert body["uploaded_count"] > 0, f"t9③：阳性对照失效，那份 .md 也没进库：{body}"
+            assert (ws / "kb" / "ok.md").exists(), "t9③：.md 的原件没落盘"
+            landed = (ws / "kb" / "probe.docx").exists()
+            if docx_ok:
+                assert "probe.docx" in body["written"] and landed, \
+                    f"t9③：这台机器读得动 .docx，它却没进 written[]：{body}"
+                assert not dline or all("读不了" not in e for e in dline), f"t9③：读得动还被拒：{dline}"
+            else:
+                assert not landed, "t9③：.docx 本机读不了，原件却已经落进 kb/ 了（这正是 C26 那个坏形状）"
+                assert any("没有入库" in e for e in body["errors"]), f"t9③：.docx 的拒因没说清：{body['errors']}"
+        print(f"  ok  t9 白名单两态必居其一：读出 {read_out or '（本机一种都没有）'}；"
+              f"缺件拒收 {refused or '（本机全读得动）'}；门口真请求 → "
+              f".docx {'进 written[] 并落盘' if docx_ok else '不落盘、拒因说「没有入库」'}，"
+              f".md 阳性对照 uploaded_count={body['uploaded_count']}")
+    finally:
+        mod.QdrantStore, mod.LLMGateway = saved
+        if keep is not None:
+            ss.SESSIONS_FILE, settings.platform.use_redis = keep
+        shutil.rmtree(Path("workspace") / "s15_c26_door", ignore_errors=True)
+        shutil.rmtree(tmp_root, ignore_errors=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
+    from codeharness.configs.settings import settings
+    if settings.langfuse.enabled:
+        # 已知慢，不是卡死：`observability.shutdown()` 会在 lifespan 退出时**同步** flush 队列，
+        # 而 `.env` 默认开着开关、本机 langfuse 容器停着 ⇒ 每退一次就多等一轮导出超时（t1/t3 真跑起来
+        # span 一多，整份门禁能从 30 秒涨到看不完）。要快跑就 `LANGFUSE__ENABLED=0`，账在 PLAN C28。
+        print("  ⚠ LANGFUSE__ENABLED=1 而端点多半没起：每组 TestClient 退出都会等一次 span flush；"
+              "嫌慢就加 `LANGFUSE__ENABLED=0` 再跑（判据不依赖它）")
     checks = [t1_ingest_then_recall, t2_endpoint_door, t3_role_thinks_with_kb,
               t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
-              t8_every_ingestion_path_goes_through_the_exit]
+              t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C27 的输入长度两道闸）——"
+          f"+ C27 的输入长度两道闸 + C26 的白名单两态）——"
           f"其中 t1/t3 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
-          f"t6/t7/t8 都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
+          f"t6/t7/t8/t9 都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
 
 
 if __name__ == "__main__":

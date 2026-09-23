@@ -854,7 +854,8 @@ def _ok(n, msg):
 def t15_kb_upload_entry():
     """B12（C3 那条链的界面入口）：后端在 `c21b881` 就通了，缺的是「用户点得着」。三侧同判。
 
-    ① 后端门口三判还在（basename / 白名单 import 自摄取件 / 两个上限），响应四字段齐；
+    ① 后端门口三判还在（basename / 门口判据与拒因文案都 import 自摄取件 / 两个上限），响应四字段齐；
+       C26 之后这一格钉的是「端点里不许出现第二份后缀白名单，也不许自己拼那句拒因」；
     ② `client.ts` 走 multipart——**手设 Content-Type 会把 boundary 打掉**，所以那条分支必须
        是「有 body 且不是 FormData 才设 JSON」；并且这条路由进了前端消费集（t3 自动覆盖形状）；
     ③ `DetailsPanel` 把 `errors[]` 与成功数**一起**说出去（部分成功是合法结局：只报成功数=悄悄
@@ -869,8 +870,11 @@ def t15_kb_upload_entry():
     # ① 后端
     assert 'Path(f.filename or "").name' in ws and "is_relative_to(root)" in ws, \
         "C3 回归：upload_kb 的文件名判据没了（`../../` 会穿出 kb/ 目录）"
-    assert "from codeharness.actions.upload_kb import SUPPORTED as KB_SUFFIXES" in ws, \
-        "C3 回归：端点自己抄了一份后缀白名单（白名单应当只住在摄取件里）"
+    assert "from codeharness.actions.upload_kb import door_refusal" in ws \
+        and "door_refusal(target.suffix" in ws, \
+        "C3/C26 回归：端点不再从摄取件 import 那一份门口判据（白名单与拒因文案都应当只住一处）"
+    assert '".docx"' not in ws and '".pdf"' not in ws, \
+        "端点里出现了第二份知识库后缀白名单——C26 之后连「不收 / 本机读不了」那两句也只许住在摄取件里"
     assert re.search(r"SUPPORTED\s*[:=]", act), "摄取件里的 SUPPORTED 没了"
     for field in ("uploaded_count", "chunk_count", "errors", "written"):
         assert field in ws, f"C3 回归：响应体不再带 {field}（前端按这四个字段显示）"

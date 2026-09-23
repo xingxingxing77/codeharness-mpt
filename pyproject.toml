@@ -11,6 +11,12 @@ dependencies = [
     # 不声明则新环境 pip install -e . 后 import codeharness.utils.common 直接 ModuleNotFoundError
     "aiofiles>=23.0", "aiohttp>=3.9", "chardet>=5.0", "requests>=2.31", "pillow>=10.0", "tenacity>=8.2",
     "pandas>=2.0",    # document.py 的 IndexableDocument / read_data
+    # C26：知识库白名单宣称收 .docx/.pdf，而这两件**两头都没有**（本机 import 不到、这里零声明）——
+    # 于是上传一份 .docx 只会把 `ModuleNotFoundError` 原文塞进给用户看的 errors[]，而原件已落进 kb/。
+    # 与 09-23 F-F 那轮抓出的 `python-multipart` 同族：这类洞只在「装一个干净环境」时才露出来。
+    # 仍然惰性 import（`document.py` 模块头的理由不变：别拖垮 S1 门禁），但**声明**是另一件事。
+    "docx2txt>=0.8",  # document.py 的 Docx2txtLoader
+    "pypdf>=4.0",     # document.py 的 PyPDFLoader
     "redis>=5.0",     # utils/redis.py（源语义客户端）+ S7 平台层
     "gitignore-parser>=0.1",   # utils/{tree,file,repo_to_markdown}.py 顶层 import，漏声明则三件 import 即炸
     "anthropic>=0.25",         # utils/token_counter.py 顶层 import（本机靠别的包带入才没暴露）

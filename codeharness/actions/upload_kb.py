@@ -27,18 +27,37 @@ from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER
 SUPPORTED = {".txt", ".md", ".docx", ".pdf"}     # 唯一出口：端点上传的白名单也读这个集合
 
 
+class KbFormatError(ValueError):
+    """门口就该拒的那两类（不收 / 本机读不了）。单独一个类型是给 `_call` 分派用的：
+    它 catch 到这一类就**只印文案**，不再往前面拼 `type(e).__name__`——
+    `ModuleNotFoundError: No module named 'docx2txt'` 那种给用户看的东西就是这么拼出来的（C26）。"""
+
+
+def door_refusal(suffix: str) -> str:
+    """门口那一句人话。两种拒必须分开说：不收（换格式）vs 本机读不了（补组件）。
+    刻意不含 `ModuleNotFoundError`/`ImportError` 那种 Python 原文——那正是 C26 量到的坏形状。"""
+    from codeharness.document import OPTIONAL_READERS, reader_available
+    if suffix not in SUPPORTED:
+        return (f"知识库只摄取文本类文档（{'/'.join(sorted(SUPPORTED))}），收到 {suffix or '无后缀'}")
+    if reader_available(suffix):
+        return ""
+    mod = OPTIONAL_READERS.get(suffix, "?")
+    return (f"{suffix} 这台机器暂时读不了：缺读取组件 `{mod}`（补法 `pip install {mod}`）"
+            f"——这份文档**没有入库**，也没落进 kb/，补好组件再传一次")
+
+
 def _texts_of(path: Path) -> list[str]:
     """一份文档 → 切片文本。后缀在**读它之前**就判，别拿 pandas 的
     「Content column not found in DataFrame.」当用户看得懂的拒绝理由。"""
     if not path.exists():
         raise FileNotFoundError("文件不存在")
-    if path.suffix.lower() not in SUPPORTED:
-        raise NotImplementedError(
-            f"知识库只摄取文本类文档（{'/'.join(sorted(SUPPORTED))}），收到 {path.suffix or '无后缀'}")
+    suffix = path.suffix.lower()
+    if reason := door_refusal(suffix):
+        raise KbFormatError(reason)
     from codeharness.document import IndexableDocument
     doc = IndexableDocument.from_path(path)
     if not isinstance(doc.data, list):        # DataFrame（.csv/.json/.xlsx）没有「一段文本」的语义
-        raise NotImplementedError(f"{path.suffix} 读出来是表格，没有可切片的文本")
+        raise KbFormatError(f"{suffix} 读出来是表格，没有可切片的文本")
     texts, _ = doc.get_docs_and_metadatas()
     return [t for t in texts if t and t.strip()]
 
@@ -75,6 +94,9 @@ class UploadKB(Action):
         for filepath in files:
             try:
                 found = await asyncio.to_thread(_texts_of, Path(filepath))
+            except KbFormatError as e:
+                errors.append(f"{Path(filepath).name}: {e}")            # 门口那类拒：只给人话，不拼类名（C26）
+                continue
             except Exception as e:
                 errors.append(f"{Path(filepath).name}: {type(e).__name__}: {e}")
                 continue

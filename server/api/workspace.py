@@ -146,7 +146,8 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
     落点再 resolve 复核一次做纵深）、后缀白名单、单文件与件数上限。
     部分成功是合法结局：`errors` 逐条给原因，`uploaded_count` 只算真写进去的点。
     """
-    from codeharness.actions.upload_kb import SUPPORTED as KB_SUFFIXES   # 白名单住在摄取件里，不在这里另抄一份
+    from codeharness.actions.upload_kb import door_refusal
+    # 白名单住在摄取件里，不在这里另抄一份；C26：门口还要分得清「不收这种格式」与「这台机器读不了」
     workspace = _ws(request, sid, user).resolve()
     if not files:
         raise HTTPException(400, "至少要有一个文件")
@@ -165,10 +166,9 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
         if not target.is_relative_to(root):         # basename 判据之外的第二道：真落点必须在 kb/ 里
             errors.append(f"{name}: 落点越出 kb/ 目录，已拒")
             continue
-        if target.suffix.lower() not in KB_SUFFIXES:
-            errors.append(f"{name}: 知识库只收 {'/'.join(sorted(KB_SUFFIXES))}，收到 "
-                          f"{target.suffix or '无后缀'}")
-            continue
+        if reason := door_refusal(target.suffix.lower()):
+            errors.append(f"{name}: {reason}")        # 拒在门口：原件**不落盘**（C26——原先 .docx 先落进
+            continue                                   # kb/ 再在摄取时抛 ModuleNotFoundError，用户以为进去了）
         data = await f.read()
         if not data:
             errors.append(f"{name}: 空文件")
