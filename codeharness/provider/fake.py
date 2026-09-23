@@ -1,4 +1,5 @@
 """FakeLLM：按剧本吐回复，所有单测用它（花不起真钱也跑得起测试）。"""
+from contextlib import contextmanager
 from typing import Optional
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -52,6 +53,36 @@ class FakeLLM:
 
         return _Structured()
 
+
+
+class DirEmbeddings:
+    """按**方向**给定向量：每条文本与 query 的余弦由调用方指定，名次与分数都是门禁说了算。
+
+    为什么 `HashEmbeddings` 不够用（C23）：它按字面算，于是「字面最像问题」的切片分最高——而那正是
+    C23 要拦的形状。要钉「不相关的被挡在外面、相关的仍在里面」，得能把**语义分**与**字面重叠**拆开：
+    dense 由这里的 cos 表给定，词法腿仍是生产件 `qdrant_store.sparse_from_text` 从文本现算。
+    真 bge-m3 下的同一判据在 `tests/manual_recall_floor_curve.py`（C20 那把尺子）里量。
+    """
+
+    dim = 64
+
+    def __init__(self, cos: dict[str, float], query: str):
+        self.cos, self.query = cos, query
+
+    def _v(self, text: str) -> list[float]:
+        if text == self.query:
+            return [1.0] + [0.0] * (self.dim - 1)
+        c = self.cos[text]
+        s = max(0.0, 1.0 - c * c) ** 0.5
+        return [c, s] + [0.0] * (self.dim - 2)
+
+    async def aembed_documents(self, texts):
+        return [self._v(t) for t in texts]
+
+    async def aembed_query(self, q):
+        return self._v(q)
+
+
 class HashEmbeddings:
     """确定性 bag-of-chars 假 embedding：离线、可复现，dense 只看得见字符重叠（对照实验要利用的就是这点）。
 
@@ -73,3 +104,24 @@ class HashEmbeddings:
 
     async def aembed_query(self, q):
         return self._v(q)
+
+
+@contextmanager
+def uncalibrated_embeddings():
+    """把 C23 的相关性下限**显式关掉**，给那些「与本项无关、但用的不是标定过的那个 embedding」的格子。
+
+    `RECALL_FLOOR__MIN_SCORE=0.40` 是按本机 bge-m3 的余弦刻度标定在 C20 那张尺子上的（依据写在
+    `configs/settings.py` 的 `FLOOR_CALIBRATED_*`）；`HashEmbeddings` 是 bag-of-chars，两条中文文本
+    只要有共同字符就能拿高分——那根线在这个刻度上量不出任何产品语义。
+    **显式关比让每格自己撞红好，但撞红这件事本身留在账上**：这一版默认值翻开时，s5 的 t15/t16/t25
+    与 s15 的 t1/t10 是真的先红过——那条红就是「换 embedding 模型必须重量这根线」不是文档空话的凭据。
+    改默认值会先红在 s5 t34/t35 与 s15 t12（那三格才是这道闸自己的判据）。
+    """
+    from codeharness.configs.settings import settings
+    cfg = settings.recall_floor
+    keep = cfg.mode, cfg.min_score, cfg.max_rank, cfg.oversample
+    cfg.mode = "off"
+    try:
+        yield cfg
+    finally:
+        cfg.mode, cfg.min_score, cfg.max_rank, cfg.oversample = keep

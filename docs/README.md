@@ -149,6 +149,15 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 `RerankerConfig.base_url` 缺省从 `http://localhost:9998/v1` 改成空串，未配置即**干净跳过**（不发 HTTP、不抛、
 不刷 warning）；本机确实没部署 `bge-reranker-v2-m3`，要精排就设 `RERANKER__BASE_URL`。
 两条分支都有门禁：`s5 t32`（未配置=跳过）+ `s5 t28`（配了但服务离线=降级并留痕）。
+**召回相关性下限（C23，2026-09-23）**：`recall` 原先拿到什么回什么，不相关的切片照样进 prompt。
+现在先跑一次 dense-only 宽窗（`RECALL_FLOOR__OVERSAMPLE`，默认 3）拿**可比的**余弦与名次，按
+`RECALL_FLOOR__MODE` 筛（`score` 默认、线 `MIN_SCORE=0.40`；`rank` 按 dense 原始名次；`off` 回到改前那条单发路径），
+**再**交 hybrid 只在筛剩的点里重排。两根纪律：① 线只能打在 dense 腿上——hybrid 那条是 RRF 名次分，
+跟任何相似度刻度都不可比（`s5 t34` 的 m2 变异就是这一条的反例）；② 这根线是 **embedding 端点的属性**，
+默认值标定在 C20 那张尺子上（真 bge-m3 + 生产切块 + RGB_En 300 问，工装
+`tests/manual_recall_floor_curve.py`，k=5 与 k=3 各一份产物），换模型或换量化必须重量——
+这一条不是推演：默认档翻开时两个用 `HashEmbeddings` 的门禁格当场红了，替身没有那个刻度。
+门禁 `s5 t34/t35`（两支各钉一次，含「现状会进 → 加了不进」与阳性对照）+ `s15 t12`（真 bge-m3 的 prompt 面）。
 3. ~~**`qwen3.8-flash` 不在 `TOKEN_COSTS`**~~ —— **2026-09-16 闭合**（用户报价：输入 0.8 / 输出 2.7 元/百万 token）：表内注明该行是**人民币口径**（其余行美元，前端 "$" 符号是展示层遗留，不跨币种换算——归 S8 一并清）。缓存命中价（输入 0.1）未入账：MaaS 不回传 `cache_read` 字段，归 S9 计费口径对齐。
 4. ~~**LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"~~ —— **2026-09-17 闭合**（S7）：`checkpoint.py` 三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)` 白名单；门禁 s7 t10 双向钉（未配必警=断言不空转，配了静默）。**C2（2026-09-21）改口径**：白名单只留真正进过 `TeamState` 的 Message 系（`Document`/`Documents` 原为已删的 `docs` 假通道而挂），t10 因此改成「Message 静默、**Document 照旧告警**」——反向那一格同时钉住白名单没被放宽成"什么都放行"。
 5. `structured` 的 `include_raw` 路径每次调用会打一条 pydantic 序列化 `UserWarning`（噪声，未影响结果）。
@@ -315,6 +324,12 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
   `s13_redis_qdrant_auth`（t2/t6 需本机 `redis-server.exe`/qdrant 二进制，t5 需 `QDRANT_BINARY` 或
   `QDRANT_URL`+`QDRANT_API_KEY`）、`s18_session_store_fields`（**缺服务时整件全跳**，它自己打印
   「退出码 0 不代表验过」）。其余 `s*` 是本进程内的 FakeLLM/静态核对，不依赖外部服务。
+
+- **09-23 复取件数（C23 这一轮 `ls tests/` 现取）**：**29 件 `s*.py` + 3 件 `test_*.py` + 8 件 `manual_*.py`**。
+  上面那条 26/3/6 也是当日快照，涨的三件 `manual_*` 是 `manual_embed_truncation`（C27 的真读数）与本行的
+  `manual_recall_floor_curve`（C23 的下限标定）加上治理阶段那一件；`manual_*` 一律**不是门禁**（挂在真服务或
+  供体语料上，缺件直接 exit 非 0，不写「打印跳过 + 退 0」那种形状）。探活式名单随之补两件：
+  `s15_kb_upload`（t1/t3/t10 无 Qdrant 即跳、**t12 还要真 bge-m3**）与 `s5_memory_rag`（新增 t34/t35 需 Qdrant）。
 
 ## ⚠ 三个仓库级陷阱（都已实际发生）
 

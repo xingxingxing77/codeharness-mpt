@@ -116,15 +116,25 @@ class QdrantStore:
         return len(points)
 
     @staticmethod
-    def _filters(doc_type: str, user_id: str, **scope) -> m.Filter | None:
+    def _filters(doc_type: str, user_id: str, *, only_ids: Sequence[str] = (), **scope) -> m.Filter | None:
         pairs = [("doc_type", doc_type), ("user_id", user_id), *scope.items()]
         must = [m.FieldCondition(key=k, match=m.MatchValue(value=v)) for k, v in pairs if v]
+        if only_ids:
+            # C23：相关性下限筛完剩下的那批点。`has_id` 而不是往 payload 里塞标记位——
+            # 点 id 本来就是稳定键，多一个字段就多一处「写了没人清」。
+            must.append(m.HasIdCondition(has_id=[str(i) for i in only_ids]))
         return m.Filter(must=must) if must else None
 
     async def search(self, query: str, dense: list[float], *, k: int = 10, hybrid: bool = True,
-                     doc_type: str = "", user_id: str = "default", **scope) -> list[m.ScoredPoint]:
-        """hybrid=True 走服务端 RRF 融合两路召回；False 只走 dense —— S5 门禁要的就是这两个数的对比。"""
-        flt = self._filters(doc_type, user_id, **scope)
+                     doc_type: str = "", user_id: str = "default",
+                     only_ids: Sequence[str] = (), **scope) -> list[m.ScoredPoint]:
+        """hybrid=True 走服务端 RRF 融合两路召回；False 只走 dense —— S5 门禁要的就是这两个数的对比。
+
+        `only_ids`（C23）：把两路召回都限制在这批点里排序。下限闸要的正是「只在留下的里面重排」——
+        先粗排筛、再在筛剩的集合上跑融合，才是同一个池子里比名次；
+        拿全表融合完再去客户端挑，被融合顶到前面的仍然是那批不相关的。
+        """
+        flt = self._filters(doc_type, user_id, only_ids=only_ids, **scope)
         if not hybrid:
             return (await self.client.query_points(
                 self.collection, query=dense, using=DENSE, limit=k, query_filter=flt)).points

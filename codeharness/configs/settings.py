@@ -4,10 +4,10 @@
 `LLM__API_KEY` / `LLM__MAX_TOKEN` / `EMBEDDING__BASE_URL` / `REDIS__HOST`。
 字段名一律照源（含源的 `max_token` 单数），以免 S6 逐字复制的源代码取不到属性。
 """
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import quote
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from codeharness.configs.llm_config import LLMConfig
@@ -19,6 +19,19 @@ from codeharness.configs.llm_config import LLMConfig
 # 取更保守的那个当下界依据——旧台账早写明「3600 是观测上限不是安全值，真中文 token 密度更高」，
 # 真文档量出来确实更早（3200 < 3600）。`EMBEDDING__MAX_CHARS` 的上限就钉在这里：超过它＝设了一个不再安全。
 EMBEDDING_OBSERVED_TRUNCATION_CHARS = 3200
+
+# C23：`RECALL_FLOOR__MIN_SCORE` 的标定依据与上界。这根线是 **embedding 端点的属性**，不是可以从书上
+# 抄的常数：超过它就连「真相关」的切片也进不了 prompt，而症状只是「知识库里没资料」——所以它和
+# `EMBEDDING__MAX_CHARS` 一样钉在一次实测上（`tests/manual_recall_floor_curve.py`，C20 那张尺子：
+# 本机真 bge-m3 + 生产切块 + RGB_En 300 问，k=5 与生产那一档 k=3 各跑一次，读数
+# `storage/benchmark/recall_floor_curve_k{5,3}.json`）。换模型/换量化必须重量。
+#   · gold 那条切片的 dense 分下界（RGB_En p05）= 0.5918 —— 线画到那儿就开始吃真相关；
+#   · 实测代价（`gold_lost_vs_base`，基线 top-k 里有 gold 而这一档没有）：0.40 → 两个 k 都是 **0**；
+#     0.45 → k=3 丢 1/300；0.50 → 丢 2/300；0.60 → 丢 19/300（hit@3 从 .95 掉到 .90）。
+# 所以默认取 **0.40**（零丢失里最高的那档），上界钉在 **0.50**：再往上就是上面那条实测下坡路。
+FLOOR_CALIBRATED_ON = ("bge-m3:latest (ollama, 1024d) @ RGB_En 300 问 / k=5 与 k=3 两档，"
+                       "工装 tests/manual_recall_floor_curve.py")
+FLOOR_CALIBRATED_MAX_SCORE = 0.50
 
 
 class EmbeddingConfig(BaseModel):
@@ -58,6 +71,54 @@ class RerankerConfig(BaseModel):
     base_url: str = ""
     top_n: int = 5
     recall_k: int = 10                                # 粗排取 10 → 精排 top_n=5；未配置或服务离线都降级为仅粗排
+
+
+class RecallFloorConfig(BaseModel):
+    """C23：召回的相关性下限。`memory/longterm.py::recall` 的闸门——**融合分不可比**这件事是这根闸
+    存在的理由，不是可以绕过去的细节：hybrid 那条腿的 score 是 RRF 名次分（`1/(60+rank)` 那一族），
+    拿它跟任何余弦刻度比都是自欺（`document_store/exp_store.py:7` 同一条口径，经验池因此走 dense-only
+    才敢跟 0.9 比）。所以下限一律打在 **dense 腿**上——它的 score 是真余弦、名次也是真名次。
+
+    三种档：
+      · `off`   —— 今天的行为，一次 hybrid 原样返回（默认值待 C20 尺子量完再钉，见 `mode` 那行）；
+      · `score` —— (a) 支：dense 腿先取 `k*oversample` 当候选窗，余弦 < `min_score` 的直接出局，
+                   剩下的才交给 hybrid 排序；
+      · `rank`  —— (c) 支：同一个候选窗，但按 dense **原始名次** ≤ `max_rank` 出局。名次是序数、
+                   换任何 embedding 模型都还是「第几名」，所以这一支**不依赖标定**。
+
+    ⚠ `score` 那根线是 **embedding 模型的属性不是常量**（同 `EmbeddingConfig.max_chars` 是端点属性）：
+    换模型或换量化，余弦刻度整个搬走，默认值必须由 C20 那把尺子（真 bge-m3 + 生产切块 + RGB_En 300 问）
+    重新量一次，标定读数钉在 `FLOOR_CALIBRATED_ON` 里。
+    """
+
+    mode: Literal["off", "score", "rank"] = "score"
+    oversample: int = 3        # dense 候选窗 = k × 此数（≥1；=1 即窗与最终条数同宽）
+    min_score: float = 0.40    # score 档的余弦下限：C20 尺子上「gold 零丢失」那一档（依据见上面的常量）
+    max_rank: int = 5          # rank 档的名次上限（≥1）
+
+    @field_validator("min_score")
+    @classmethod
+    def check_min_score(cls, v):
+        if v < 0 or v > 1:
+            raise ValueError(f"RECALL_FLOOR__MIN_SCORE 必须在 [0,1]（余弦刻度），收到 {v}")
+        return v
+
+    @model_validator(mode="after")
+    def check_active_mode(self):
+        """坏配置不许「能跑但行为不对」：开了哪一档就把那一档的参数判实，与 C27 的 max_chars 同纪律。
+
+        `score` 档留 0 等于开了闸又什么都不砍（还白花一次 dense 预查）；大到超过标定上界的线
+        等于「以为设过了」——真相关的那批也过不去，召回从此恒空，而界面看上去只是「知识库里没资料」。
+        """
+        if self.oversample < 1:
+            raise ValueError(f"RECALL_FLOOR__OVERSAMPLE 必须 ≥1，收到 {self.oversample}")
+        if self.mode == "score" and not (0 < self.min_score <= FLOOR_CALIBRATED_MAX_SCORE):
+            raise ValueError(
+                f"RECALL_FLOOR__MODE=score 要求 0 < MIN_SCORE <= {FLOOR_CALIBRATED_MAX_SCORE}"
+                f"（{FLOOR_CALIBRATED_ON}；超过它连尺子上真相关的切片都进不来），收到 {self.min_score}")
+        if self.mode == "rank" and self.max_rank < 1:
+            raise ValueError(f"RECALL_FLOOR__MODE=rank 要求 MAX_RANK ≥1，收到 {self.max_rank}")
+        return self
 
 
 class ToolRecallConfig(BaseModel):
@@ -159,6 +220,7 @@ class Settings(BaseSettings):
     llm: LLMConfig = LLMConfig()
     embedding: EmbeddingConfig = EmbeddingConfig()
     reranker: RerankerConfig = RerankerConfig()
+    recall_floor: RecallFloorConfig = RecallFloorConfig()    # C23
     qdrant: QdrantConfig = QdrantConfig()
     redis: RedisConfig = RedisConfig()
     search: SearchConfig = SearchConfig()

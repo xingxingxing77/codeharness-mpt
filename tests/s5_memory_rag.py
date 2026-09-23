@@ -277,7 +277,8 @@ def pid(tag: str) -> str:
 
 
 # 替身本体在 `codeharness/provider/fake.py`（C3 起 S15 的知识库门禁共用它，不再各存一份）
-from codeharness.provider.fake import HashEmbeddings   # noqa: E402
+from codeharness.provider.fake import (DirEmbeddings, HashEmbeddings,   # noqa: E402
+                                       uncalibrated_embeddings)
 
 
 class BoomEmbeddings(HashEmbeddings):
@@ -360,7 +361,8 @@ def t15_longterm_overflow_recall_roundtrip():
                                   Message(content="同上", role="user")]))
     assert n == 2 and asyncio.run(ltm.overflow([Message(content="run_proc 在 Windows 上按进程树杀子进程",
                                                         role="user", sent_from="Alex")])) == 1
-    hits = asyncio.run(ltm.recall("run_proc 超时怎么保留输出", k=3))
+    with uncalibrated_embeddings():     # 本格钉的是入库幂等与召回字段，不是 C23 那根线（替身刻度未标定）
+        hits = asyncio.run(ltm.recall("run_proc 超时怎么保留输出", k=3))
     assert any("进程树" in h.content for h in hits), hits
     one = next(h for h in hits if "进程树" in h.content)
     assert one.sent_from == "Alex" and one.role == "user"
@@ -381,8 +383,9 @@ def t16_rolezero_uses_longterm_recall():
     asyncio.run(ltm.overflow([Message(content="既有约定：门禁一律不花钱", role="user", sent_from="Memo")]))
     role = _role()
     role.ltm = ltm
-    asyncio.run(role._think({"task": "给项目加个门禁", "history": [], "experience": "",
-                            "respond_language": "中文", "finished": False}))
+    with uncalibrated_embeddings():     # 同上：这一格钉「召回的经验真出现在发给模型的 prompt 里」
+        asyncio.run(role._think({"task": "给项目加个门禁", "history": [], "experience": "",
+                                 "respond_language": "中文", "finished": False}))
     joined = " ".join(str(getattr(m, "content", m)) for m in role.llm.payloads[-1])
     assert "门禁一律不花钱" in joined, "召回的经验没进 prompt"
     asyncio.run(ltm.drop())
@@ -1095,6 +1098,153 @@ def t33_point_id_carries_tenant_and_doc_type():
     print("  ok  t33 点 id 带齐租户与 doc_type 两个维度，且同内容仍幂等")
 
 
+# `DirEmbeddings`（按方向给定 dense 余弦的替身）住在 `codeharness/provider/fake.py`，与 HashEmbeddings 作伴：
+# C23 两格与 s15 t12 共用它——替身是公共件，不是一个门禁的私产（C3 搬 HashEmbeddings 同一条理由）。
+C23_REL, C23_LOUD = "先校验旧密码再发一次性链接", "重置密码流程重置密码流程"
+C23_MID, C23_COLD = "账号策略要求至少十二位含符号", "今天适合去爬山"
+C23_Q = "重置密码的流程是什么"
+C23_COS = {C23_REL: 1.0, C23_MID: 0.6, C23_LOUD: 0.25, C23_COLD: 0.0}
+
+
+def _c23_ltm(user: str, project: str) -> "object":
+    from codeharness.memory.longterm import LongTermMemory
+    ltm = LongTermMemory(project_id=project, embeddings=DirEmbeddings(C23_COS, C23_Q),
+                         user_id=user, store=gate_store(), doc_type="kb")
+    asyncio.run(ltm.drop())            # 上一轮残点会挤掉名次，先按作用域清干净（drop 不依赖在线以外的东西）
+    asyncio.run(ltm.overflow([Message(content=t, role="user")
+                              for t in (C23_REL, C23_LOUD, C23_MID, C23_COLD)]))
+    return ltm
+
+
+class _FloorCfg:
+    """临时改 `settings.recall_floor` 的那四个值，`with` 退出还原（同 t2 改 redis 端口，只是不止一个键）。"""
+
+    def __init__(self, **kw):
+        self.kw = kw
+
+    def __enter__(self):
+        cfg = settings.recall_floor
+        self.keep = {k: getattr(cfg, k) for k in self.kw}
+        for k, v in self.kw.items():
+            setattr(cfg, k, v)
+        return cfg
+
+    def __exit__(self, *exc):
+        cfg = settings.recall_floor
+        for k, v in self.keep.items():
+            setattr(cfg, k, v)
+        return False
+
+
+class _SearchSpy:
+    """记下发出去的那两次检索的实参（C4 那一课：过滤是库做的，在自己的替身里手写过滤测的是替身）。"""
+
+    def __init__(self, inner):
+        self.inner, self.calls = inner, []
+
+    async def search(self, query, dense, **kw):
+        self.calls.append(kw)
+        return await self.inner.search(query, dense, **kw)
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def t34_recall_floor_dense_score():
+    """C23 (a) 支：dense 腿先按**余弦**筛，再交 hybrid 只在留下的里面重排。四格各管一种坏法：
+
+      ① 现状（不设下限）：那条「字面最像、语义最不相干」的切片真的进了 top-2 —— 本项要修的就是它；
+         这一格同时是 ② 的**阳性对照反面**：不先证明它会进来，② 的「不在」可以是恒绿。
+      ② 加了余弦下限：它不进，而真相关那条**仍进**（阳性对照）。
+      ③ 第二次检索必须带着筛剩的点 id 发出去（拦真调用）：把筛选写在客户端「hybrid 完再挑」是同一句
+         判据的另一种实现，③ 当场分辨——留在 prompt 里的集合必须等于筛剩的集合。
+      ④ 坏配置当场拒：开了 score 档却不给线、线在余弦刻度之外、窗宽 0。
+    """
+    from pydantic import ValidationError
+    from codeharness.configs.settings import RecallFloorConfig
+    if not live_qdrant():
+        print("  t34 跳过（无 Qdrant）")
+        return
+    ltm = _c23_ltm("u_c23s", "c23_gate_s")
+    spy = _SearchSpy(ltm.store)
+    try:
+        with _FloorCfg(mode="off", oversample=3, min_score=0.4):
+            base = asyncio.run(ltm.recall(C23_Q, k=2))
+        assert [m.content for m in base] == [C23_REL, C23_LOUD], \
+            f"①现状失配：不设下限时那条字面像的应当挤进 top-2，实得 {[m.content for m in base]}"
+        ltm.store = spy
+        with _FloorCfg(mode="score", oversample=3, min_score=0.4):
+            got = asyncio.run(ltm.recall(C23_Q, k=2))
+        names = [m.content for m in got]
+        assert C23_REL in names, f"②失效：阳性对照（真相关那条）也被砍了 → {names}"
+        assert C23_LOUD not in names, f"②失效：下限 0.4 没挡住 dense=0.25 那条 → {names}"
+        assert len(spy.calls) == 2, f"③失效：应是 dense 预筛 + 受限重排两次，实得 {len(spy.calls)} 次"
+        first, second = spy.calls
+        assert first.get("hybrid") is False and first["k"] == 6, f"③失效：预筛腿不是宽窗 dense：{first}"
+        assert second.get("only_ids"), f"③失效：重排腿没带筛剩的 id（等于没筛）：{second}"
+        assert second.get("hybrid", True) is not False, f"③失效：重排腿退回 dense-only 了：{second}"
+        ltm.store = spy.inner
+        for bad in [dict(mode="score", min_score=0.0), dict(mode="score", min_score=1.5),
+                    dict(mode="score", min_score=-0.1), dict(oversample=0),
+                    dict(mode="rank", max_rank=0)]:
+            try:
+                RecallFloorConfig(**bad)
+            except ValidationError:
+                continue
+            raise AssertionError(f"④失效：坏配置被收下了 {bad}")
+    finally:
+        asyncio.run(ltm.drop())
+    print("  ok  t34 C23(a) 余弦下限：字面像而语义无关那条被挡在 prompt 外、真相关那条仍进、"
+          "重排腿带筛剩 id 出门、坏配置当场拒")
+
+
+def t35_recall_floor_dense_rank():
+    """C23 (c) 支：同一个候选窗按 dense **原始名次**出局（名次是序数，换 embedding 模型不必重量）。
+
+      ① 线画在 1 → 只留 dense 第 1 名；真相关那条仍进（阳性对照），那条字面像的进不来。
+      ② 候选窗不许比名次线更窄：`oversample=1` + `k=2` 时窗本来说是 2，而线画在 3 → 交给重排腿的必须是
+         3 条。实现若忘了把窗抬到 `max_rank`，「名次 ≤3」会被窗静默截成「名次 ≤2」——判据在、行为不是一回事，
+         而且**这一格第一版就是那个忘法**（拿 `k=3`+`oversample=1` 试，`max(3,3)=3` 让 max 成了恒等，
+         变异 m5 跑成绿；改成 `k=2` 才有牙）。所以判据打在「第二次检索实发的 id 数」上，不是打在条数上。
+      ③ 筛空必须回空集：`only_ids` 为老实语义是「不加限制」，拿一条过不了的线把整批砍掉时，
+         漏判这一条的实现会把全表放行（那比没有下限更糟）。
+      ④ `screen_dense` 纯函数面：名次档只看序数、余弦档只看分，两档互不串。
+    """
+    if not live_qdrant():
+        print("  t35 跳过（无 Qdrant）")
+        return
+    from types import SimpleNamespace
+    from codeharness.configs.settings import RecallFloorConfig
+    from codeharness.memory.longterm import screen_dense
+    ltm = _c23_ltm("u_c23r", "c23_gate_r")
+    try:
+        with _FloorCfg(mode="rank", max_rank=1, oversample=3):
+            got = asyncio.run(ltm.recall(C23_Q, k=2))
+            assert [m.content for m in got] == [C23_REL], \
+                f"①失效：名次线=1 时应只留 dense 第 1 名，实得 {[m.content for m in got]}"
+        spy = _SearchSpy(ltm.store)
+        ltm.store = spy
+        with _FloorCfg(mode="rank", max_rank=3, oversample=1):
+            wide = asyncio.run(ltm.recall(C23_Q, k=2))     # 窗 = max(2×1, 3) = 3，名次线 3 才留得下 3 条
+        ltm.store = spy.inner
+        assert len(spy.calls[1]["only_ids"]) == 3, \
+            (f"②失效：候选窗没被抬到名次线——窗只有 2 时「名次 ≤3」被静默截成「≤2」，"
+             f"交给重排腿的 {len(spy.calls[1]['only_ids'])} 条：{spy.calls[1]}")
+        assert wide and wide[0].content == C23_REL, \
+            f"②阳性对照：重排回来第一条该是 dense 第 1 名，实得 {[m.content for m in wide]}"
+        with _FloorCfg(mode="score", min_score=0.4):
+            assert C23_LOUD not in [m.content for m in asyncio.run(ltm.recall(C23_Q, k=2))]
+        # ③ 运行期绕开 validator 把线抬到余弦刻度之上：唯一的目的是造出「整批被砍空」，
+        #    这时必须回空集，而不是把全表放行。
+        with _FloorCfg(mode="score", min_score=1.2):
+            assert asyncio.run(ltm.recall(C23_Q, k=2)) == [], "③失效：砍空却放行了全表"
+        hits = [SimpleNamespace(id="a", score=0.9), SimpleNamespace(id="b", score=0.2)]
+        assert screen_dense(hits, RecallFloorConfig(mode="rank", max_rank=1)) == ["a"]
+        assert screen_dense(hits, RecallFloorConfig(mode="score", min_score=0.5)) == ["a"]
+    finally:
+        asyncio.run(ltm.drop())
+    print("  ok  t35 C23(c) 名次下限：按 dense 原始名次出局、窗不静默截线、砍空回空集")
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
@@ -1115,7 +1265,8 @@ def main():
               t27_di_review_gate_blocks_until_resume, t28_ltm_rerank_absorbed_and_degrades,
               t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path,
               t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly,
-              t33_point_id_carries_tenant_and_doc_type]
+              t33_point_id_carries_tenant_and_doc_type,
+              t34_recall_floor_dense_score, t35_recall_floor_dense_rank]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

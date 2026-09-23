@@ -29,6 +29,18 @@ def point_id(scope: str, content: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{scope}:{content}"))
 
 
+def screen_dense(hits: list, cfg) -> list[str]:
+    """C23 的下限判据，只打在 **dense 腿**上：它的 score 是真余弦、名次也是真名次。
+    dense 结果按余弦降序回来 ⇒ 名次就是下标+1，不必另排序。
+
+    为什么不能拿 hybrid 的返回分比阈值：那条腿是服务端 RRF 融合分（名次分），
+    `document_store/exp_store.py:7` 的注释就是为同一件事写的——经验池因此只走 dense 才敢跟 0.9 比。
+    """
+    if cfg.mode == "score":
+        return [str(h.id) for h in hits if h.score >= cfg.min_score]
+    return [str(h.id) for h in hits[:cfg.max_rank]]
+
+
 class LongTermMemory:
     def __init__(self, project_id: str = "", embeddings=None, user_id: str = "",
                  session_id: str = "", store: QdrantStore | None = None,
@@ -113,14 +125,37 @@ class LongTermMemory:
         """新任务开始时检索回填（调用方：RoleZero._think 里 `_retrieve_experience` 的位置）。
         hybrid 粗排 → reranker 在场则精排重排（台账 #11 的吸收点）。
         N9：整条检索链（embedding → Qdrant hybrid → rerank）不在 LangChain callback 面内，
-        由 span 装饰器手工成 span——S9「hit-rate@5」的证据来源。"""
+        由 span 装饰器手工成 span——S9「hit-rate@5」的证据来源。
+
+        C23：`settings.recall_floor.mode != "off"` 时先过一道相关性下限——dense 腿取宽候选、按余弦或
+        名次砍掉不相关的，**再**交 hybrid 只在留下的里面重排。下限不许打在 hybrid 的返回分上（理由见
+        `screen_dense`）。`off` 是今天这条单发路径，行为与判据逐字不变。
+        """
+        cfg = settings.recall_floor
         dense = await self.embeddings.aembed_query(query)
-        hits = await self.store.search(query, list(dense), k=k, doc_type=self.doc_type,
-                                      user_id=self.user_id, project=self.project_id)
+        scope = dict(doc_type=self.doc_type, user_id=self.user_id, project=self.project_id)
+        if cfg.mode == "off":
+            hits = await self.store.search(query, list(dense), k=k, **scope)
+        else:
+            window = k * cfg.oversample
+            if cfg.mode == "rank":
+                window = max(window, cfg.max_rank)   # 候选窗比名次线还窄 = 那条线静默失效
+            probe = await self.store.search(query, list(dense), k=window, hybrid=False, **scope)
+            keep = screen_dense(probe, cfg)
+            if not keep:
+                # 空集合必须在这里就回：`only_ids` 为老是「不加限制」，把它交给 hybrid 反而放行全表。
+                if probe:
+                    # 砍空是「线设高了」唯一的现场症状（界面上只会显示成知识库里没资料），留一条响的。
+                    logger.info(f"{self.doc_type} 召回被相关性下限砍空：dense top={probe[0].score:.4f} "
+                                f"未过 {cfg.min_score if cfg.mode == 'score' else cfg.max_rank}"
+                                f"（档={cfg.mode}，候选 {len(probe)} 条）")
+                return []
+            logger.debug(f"{self.doc_type} 召回下限({cfg.mode}) {len(probe)}→{len(keep)} 条")
+            hits = await self.store.search(query, list(dense), k=k, only_ids=keep, **scope)
         hits = await self._rerank(query, hits, k)
         # C21：payload 里的出处带回来。`Message.metadata` 是全系统现成的那个 dict（不是为这件事新造的字段），
-        # 下游要归因就在上面读 `source`/`page`——`role_zero` 那条「[知识库片段]」拼的是 `m.content`，
-        # 今天它仍然不带出处，那一格归 C22（本行只把数据面接上）。
+        # 下游要归因就在上面读 `source`/`page`——`role_zero._kb_recall` 给每条切片挂一行
+        # `〔来自 文件名 [第 N 页]〕`（C22），模型答完才说得出这段话是哪份文件里的。
         return [Message(content=h.payload["text"], role=h.payload.get("role", "user"),
                         cause_by=h.payload.get("cause_by", ""),
                         sent_from=h.payload.get("sent_from", ""),

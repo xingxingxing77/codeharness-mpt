@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from codeharness.const import RequirementTag                                    # noqa: E402
 from codeharness.document_store.qdrant_store import QdrantStore                  # noqa: E402
-from codeharness.provider.fake import FakeLLM, HashEmbeddings                    # noqa: E402
+from codeharness.provider.fake import FakeLLM, HashEmbeddings, uncalibrated_embeddings  # noqa: E402
 from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER                    # noqa: E402
 from codeharness.schema import Message                                           # noqa: E402
 
@@ -78,6 +78,18 @@ def live_qdrant() -> bool:
     from codeharness.configs.settings import settings
     try:
         return httpx.get(f"{settings.qdrant.url}/healthz", timeout=3).status_code == 200
+    except Exception:
+        return False
+
+
+def live_embedding() -> bool:
+    """真 bge-m3 探活（t12 的门）：C23 那根下限线是按真模型余弦标定的，hash 替身量不出它。
+    `.env` 把 `EMBEDDING__BASE_URL` 钉成空端口 ⇒ 在线读数必须显式带它，否则本函数返回 False、t12 跳过。"""
+    from codeharness.configs.settings import settings
+    from codeharness.provider.gateway import LLMGateway
+    try:
+        v = asyncio.run(LLMGateway.embeddings().aembed_query("探活"))
+        return len(v) == settings.embedding.dim and any(v)
     except Exception:
         return False
 
@@ -125,7 +137,8 @@ def t1_ingest_then_recall():
 
         reader = LongTermMemory(project_id=PROJ, embeddings=emb, user_id="u_kb",
                                store=store, doc_type="kb")
-        hits = asyncio.run(reader.recall("怎么重置密码", k=3))
+        with uncalibrated_embeddings():     # C23 那根线按真 bge-m3 标定，hash 替身带不动（判据在 t12）
+            hits = asyncio.run(reader.recall("怎么重置密码", k=3))
         texts = [h.content for h in hits]
         assert texts, "t1②召回空——写进去的东西读不出来，这条链还是死的"
         assert any("重置密码" in t for t in texts), f"t1②没命中自己灌进去的切片：{texts}"
@@ -241,7 +254,11 @@ def t3_role_thinks_with_kb():
         asyncio.run(store.drop())
         out = asyncio.run(_action(store, emb, [_write_faq(tmp)]))
         assert out["uploaded_count"] >= 2, f"t3 前置失配（没灌进切片）：{out}"
-        with_kb = run(True)
+        # 下限那根线（C23）是按真 bge-m3 的余弦刻度标定的，本格的 hash 替身带不动它 ⇒ 显式关掉；
+        # 这道闸自己的判据在 t12（真模型 + 真 Qdrant + 真图同一支 `_kb_recall`）。
+        with uncalibrated_embeddings():
+            with_kb = run(True)
+            without = run(False)
         assert "[知识库片段]" in with_kb and "重置密码" in with_kb, \
             "t3①失效：知识库读者挂了但 prompt 里什么都没有——上传的文档永远不会被模型看见"
         # C22：出处不止在数据面（C21 那格钉的是 `Message.metadata`），得**跟着文本进模型**。
@@ -249,7 +266,6 @@ def t3_role_thinks_with_kb():
         assert "〔来自 faq.md〕" in with_kb, \
             "t3①失效：切片进了 prompt 却没说来自哪份文件——模型答完无法归因，用户也没法核"
         assert 1 <= with_kb.count("〔来自 ") <= 3, f"t3①标记数不对（k=3 上限三条）：{with_kb.count('〔来自 ')}"
-        without = run(False)
         assert "[知识库片段]" not in without and "〔" not in without, \
             "t3②对照组不成立：没挂读者也出现了知识库段"
         print("  ok  t3 真图真 think 吃到知识库片段（含「重置密码」那段）且每条带 `〔来自 faq.md〕`，"
@@ -903,6 +919,93 @@ def t11_recall_lines_are_labeled():
     print("  ok  t11 三种 metadata 形状各得一行标记（文件名 / 带页码 / 老点未登记），标记数=块数、正文不吞")
 
 
+NOISE_DOC = ("城市马拉松的补给站怎么摆：每 5 公里一处，饮用水与电解质饮料交替供应；"
+             "赛道封闭时间按枪声成绩起算，医疗点每 2.5 公里一处，志愿者按分段密度配 40 人。"
+             "完赛物资含降温毯与盐丸，领取动线要避免与冲刺区交叉。")
+NOISE_MARK = "补给站"
+
+
+def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
+    """C23 的 prompt 面，**真 bge-m3** + 真 Qdrant：库里多一份毫不相干的文档，它不该出现在给模型的那段里。
+
+    为什么这一格非用真模型不可：下限那根线（`RECALL_FLOOR__MIN_SCORE=0.40`）是按 bge-m3 的余弦刻度
+    标定在 C20 那张尺子上的（依据与逐档代价写在 `configs/settings.py` 的 `FLOOR_CALIBRATED_*` 注释里），
+    而 `HashEmbeddings` 是 bag-of-chars——中文之间的字符重叠天然把余弦顶到高位，拿它量这道闸，
+    「过不过线」这件事根本没有意义（C20 用真 embedding 推翻假向量表，量的就是这类差别）。
+
+    三格：
+      ① 前置读数：这份夹具真的考得动这道闸——噪声切片的 dense 分必须**在线以下**、FAQ 那条在**线以上**，
+         并把两个数印出来。少了这一格，②③ 可能只是在量夹具碰巧的排序；
+      ② 现状（下限关掉）：噪声那条**真的进了**要喂模型的那段（这就是本项要修的病，也是 ③ 的阳性对照反面）；
+      ③ 开着默认档：它不在，而 FAQ 那条带着 `〔来自 faq.md〕` 仍在（阳性对照）。
+    「这段字符串真会进 prompt」那半边由 t3 钉（同一个 `_kb_recall`、同一个 `[知识库片段]` 外框），
+    两格合起来才是「无关切片进不去 prompt」这句判据的完整链。
+    """
+    if not live_qdrant():
+        print("  skip t12（Qdrant 不在线）")
+        return
+    from codeharness.configs.settings import settings
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.gateway import LLMGateway
+    from codeharness.roles.role_zero import RoleZero
+
+    emb = LLMGateway.embeddings()
+    try:
+        probe_v = [float(x) for x in asyncio.run(emb.aembed_query("真 embedding 探活"))]
+    except Exception as e:
+        print(f"  skip t12（真 embedding 不在线：{type(e).__name__}: {e}）")
+        return
+    if len(probe_v) != settings.embedding.dim:
+        print(f"  skip t12（embedding 端点 dim={len(probe_v)} ≠ {settings.embedding.dim}，刻度不对）")
+        return
+
+    tmp = Path(tempfile.mkdtemp())
+    store = QdrantStore(collection="s15gate_bge")     # 真模型 1024 维，与 hash 替身那几格分开集合
+    task = "怎么重置密码？"
+    floor = settings.recall_floor
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_kb")
+    try:
+        asyncio.run(store.drop())
+        out = asyncio.run(_action(store, emb, [_write_faq(tmp),
+                                               _write_faq(tmp, "marathon.md", NOISE_DOC)]))
+        assert out["errors"] == [] and out["chunk_count"] >= 3, f"t12 前置失配（没灌够切片）：{out}"
+        reader = LongTermMemory(project_id=PROJ, embeddings=emb, user_id="u_kb",
+                                store=store, doc_type="kb")
+        qv = [float(x) for x in asyncio.run(emb.aembed_query(task))]
+        hits = asyncio.run(store.search(task, qv, k=8, hybrid=False, doc_type="kb",
+                                        user_id="u_kb", project=PROJ))
+        noisy = [h.score for h in hits if NOISE_MARK in h.payload["text"]]
+        faqy = [h.score for h in hits if "重置密码" in h.payload["text"]]
+        line = floor.min_score
+        assert noisy and faqy, f"t12①前置失配：噪声/FAQ 切片没被 dense 腿取到（{len(noisy)}/{len(faqy)}）"
+        assert max(noisy) < line < max(faqy), \
+            (f"t12①夹具考不动这道闸：噪声 top={max(noisy):.4f}、FAQ top={max(faqy):.4f}、"
+             f"下限={line}——换端点或换模型后这根线要重量（见 settings 的 FLOOR_CALIBRATED_ON）")
+
+        role = RoleZero({"name": "R", "profile": "p", "goal": "g"}, [], FakeLLM(["x"]), max_loops=2)
+        role.kb = reader
+        keep = (floor.mode, floor.min_score, floor.oversample)
+        try:
+            floor.mode, floor.min_score = "off", 0.0
+            bare = asyncio.run(role._kb_recall(task))
+            assert NOISE_MARK in bare, \
+                f"t12②现状不成立：不设下限时那份马拉松文档也没进来（夹具失效，③就成了假绿）：{bare[:200]}"
+            floor.mode, floor.min_score, floor.oversample = keep
+            gated = asyncio.run(role._kb_recall(task))
+        finally:
+            floor.mode, floor.min_score, floor.oversample = keep
+        assert NOISE_MARK not in gated, f"t12③失效：下限 {line} 没挡住无关文档（{gated[:200]}）"
+        assert "〔来自 faq.md〕" in gated and "重置密码" in gated, \
+            f"t12③阳性对照失效：真相关那条被一起砍了：{gated[:200]}"
+        print(f"  ok  t12 真 bge-m3 下无关文档 dense={max(noisy):.4f} < 下限 {line} < FAQ "
+              f"dense={max(faqy):.4f}：不设下限它进 prompt、设了就不进，而 FAQ 那条带着出处仍在")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -915,12 +1018,15 @@ def main():
               t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
               t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies,
-              t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled]
+              t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled,
+              t12_recall_floor_keeps_unrelated_doc_out_of_prompt]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C26 的白名单两态 + C22 的来源标记）——"
-          f"其中 t1/t3/t10 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
+          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限）——"
+          f"其中 t1/t3/t10 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
+          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那三格**'} / "
+          f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
           f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")
 
 
