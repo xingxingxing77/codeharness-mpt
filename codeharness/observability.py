@@ -20,6 +20,8 @@ SDK **懒导入**：内核（memory）在本模块挂了装饰器，未接入的
 """
 from __future__ import annotations
 
+import atexit
+import threading
 from contextlib import nullcontext
 from functools import wraps
 
@@ -115,17 +117,63 @@ def span(name: str, as_type: str = "span"):
 
 
 def flush():
-    """短脚本收尾用（长驻 server 靠 SDK 后台定时 flush，停机走 shutdown）。"""
+    """短脚本收尾用（长驻 server 靠 SDK 后台定时 flush，停机走 shutdown）。
+    ⚠ 这一条是**无界**等待，且是故意的：调它的脚本就是要「发完再继续」。无界的问题只在停机路径上，
+    那一条由 `shutdown()` 的 grace 管（C28）。"""
     if enabled() and _client is not None:
         _client.flush()
 
 
-def shutdown():
-    """长驻进程退出钩子：冲干净队列再关。
+def shutdown() -> bool:
+    """长驻进程退出钩子：等 flush，但**最多等 `LANGFUSE__SHUTDOWN_GRACE_SEC` 秒**（C28）。
+    返回 `True` = 按时冲完；`False` = grace 用尽、这批里有没发出去的 span（调用方不必处理，
+    给它一个可读的值是为了让门禁能断言「不许静默」，而不是去猜日志）。
 
-    ⚠ 必须连进程级单例一起清掉：shutdown 后的 client 不再导出（实测 t1 关过客户端后
-    t3 的 span 静默丢光），不重置的话同一进程里重建不了。"""
+    为什么不直接调 SDK 的 `shutdown()`：它 = `flush()`（三个 `Queue.join()`）
+    + `_stop_and_join_consumer_threads()`（逐个 `Thread.join()`），**四处都不带超时**；构造期传的
+    `timeout=` 只约束单次 HTTP 尝试，端点不可达时每次尝试各退各的 ⇒ 墙钟没有上界。
+    09-23 现取：`.env` 默认 `LANGFUSE__ENABLED=1` 而本机 langfuse 容器停着，s15 跑到第九组卡住
+    150 秒未出，`LANGFUSE__ENABLED=0` 同一份 30 秒跑完。
+
+    两件必须同时做到的事，少一件就是假修：
+      ① 整次 shutdown 放进 **daemon 线程**里等一个 grace，到点就走（SDK 自己的消费线程也是 daemon）；
+      ② 顺手把 SDK 注册在 **atexit** 上的那个 `shutdown` 试着反注册掉（`resource_manager.py:279`
+         `atexit.register(self.shutdown)`）——这一条**今天实测没做到**：包一层 `atexit.register` 看得清
+         客户端建起来时挂了 4 个（`certifi.exit_cacert_ctx`、OTel 的 `TracerProvider.shutdown`、
+         `PromptCacheTaskManager.shutdown`、`LangfuseResourceManager.shutdown`），而 `atexit.unregister`
+         之后注册数一次都没降（09-24 实测）。留下这条尝试是因为它便宜且方向对，不是因为有用。
+    ⚠ **所以本函数是有界「等待」，不是有界「耗时」**：放弃之后那份网络工作还在跑，进程退出时
+    `concurrent.futures` 的收尾会 join 它的非 daemon 工作线程——实测尾巴 ≈ 一次无界 shutdown 的长度
+    （40 个 span 量到 7.6s），且**不受 OTel 那两个超时环境变量约束**（`OTEL_BSP_EXPORT_TIMEOUT=1000`
+    与 `=30000` 两档总墙钟一样 9.8s，09-24 实测 ⇒ 想靠调小 timeout 消掉尾巴是走不通的）。
+    被修掉的真正症状是**每一次 lifespan 退出都等一轮**：s15 一份里六七个 TestClient ⇒ 改前逐个付
+    （09-23 现取：整份 150 秒未出；改后 in-process 单次进出 1.01s，无界的旧形状同批 9.3s）。
+    代价写在脸上并喊出来：grace 内没发完的那批 span 丢掉。这是本件**唯一**的降级形状，不静默。
+    """
     global _client, _handler
-    if enabled() and _client is not None:
-        _client.shutdown()
-    _client = _handler = None
+    cli, _client, _handler = _client, None, None
+    if cli is None or not enabled():
+        return True                             # 没东西可冲 = 按时
+    from codeharness.configs.settings import settings
+    from codeharness.logs import logger
+    grace = settings.langfuse.shutdown_grace_sec
+    done = threading.Event()
+
+    def _go():
+        try:
+            cli.shutdown()
+        except Exception as e:                      # 端点挂了不该把停机路径抛出 traceback
+            logger.debug(f"可观测 shutdown 抛错（不影响退出）: {type(e).__name__}: {e}")
+        finally:
+            done.set()
+
+    threading.Thread(target=_go, daemon=True, name="langfuse-shutdown").start()
+    if done.wait(grace):
+        return True
+    res = getattr(cli, "_resources", None)
+    hook = getattr(res, "shutdown", None)
+    if hook is not None:
+        atexit.unregister(hook)                     # 见 docstring 的 ②：实测没做到，留着方向
+    logger.warning(f"可观测停机只等 {grace}s：{settings.langfuse.host} 多半不可达，没发完的 span "
+                   f"这批丢掉（要等久一点就调 LANGFUSE__SHUTDOWN_GRACE_SEC；不采就 LANGFUSE__ENABLED=0）")
+    return False

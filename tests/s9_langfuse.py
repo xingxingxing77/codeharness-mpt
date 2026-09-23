@@ -4,16 +4,20 @@
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s9_langfuse.py
   LF_LIVE=1 同上                     # 追加 t3：真模型一发 + 工具/手工 span 回读断言（花真钱，默认跳过）
 
-三组：
+三组 + C28 一组：
 - t1 零成本断言（永远跑）：关=全 no-op；开了但 key 缺=仍 no-op；开+双 key=handler/会话上下文/
   span 装饰器就位；runner 接线处 `config["callbacks"]` 真被塞上（唯一注入点）。
+- **t4 有界停机（永远跑，不需要任何在线服务）**：C28——端点连不通时 `observability.shutdown()`
+  必须在一个 grace 内回来；配「同批 span 直接调 SDK 的无界 shutdown 明显更久」的阳性对照，
+  和「本地假端点真收到了导出」的反证（防「把可观测关掉当修慢」）。
 - t2 探活（Langfuse 可达才跑）：Basic auth 回读通路（v2/observations），不建 span、不花钱。
 - t3 可选活体（LF_LIVE=1）：真模型一发 + 一个本地工具调用 + 一个手工 span → flush → 回读该会话
   的三类 span：LLM generation / TOOL / 手工 retriever（真钱 ~一次 ping，默认跳过）。
-门禁不挂在外部服务上：Langfuse 不通则 t2/t3 整段跳过并明说（s7 姿势）。
+门禁不挂在外部服务上：Langfuse 不通则 t2/t3 整段跳过并明说（s7 姿势）；t1/t4 任何时候都必须跑到。
 """
 import asyncio
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -185,22 +189,218 @@ async def t3_live_roundtrip():
               f"read_file、手工 {got['probe.manual'].get('type')}（等 {waited}s）")
 
 
+_RAW_SCRIPT = '''
+import os, sys, time
+sys.path.insert(0, os.environ["CH_ROOT"])
+from codeharness import observability as obs
+from codeharness.configs.settings import settings
+settings.langfuse.enabled = True
+settings.langfuse.public_key, settings.langfuse.secret_key = "pk-lf-t4raw", "sk-lf-t4raw"
+settings.langfuse.host = os.environ["LF_HOST"]
+settings.langfuse.shutdown_grace_sec = 2          # 本脚本不走它：调的就是 SDK 那一行（改前形状）
+t0 = time.time()
+cli = obs.client()
+for i in range(40):
+    with cli.start_as_current_observation(name=f"t4raw-{i}", as_type="span"):
+        pass
+cli.shutdown()
+print(f"{time.time() - t0:.2f}", flush=True)
+'''
+
+
+def _raw_shutdown_seconds(host, cap=25):
+    line = _run_script(_RAW_SCRIPT, cap, {"LF_HOST": host})
+    try:
+        return float(line)
+    except (TypeError, ValueError):
+        return None
+
+
+_STUB_SCRIPT = '''
+import os, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+sys.path.insert(0, os.environ["CH_ROOT"])
+got = []
+
+
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("content-length") or 0))
+        got.append(raw)
+        # 空 body + 200 才是 OTLP 的成功响应（ExportTraceServiceResponse 允许零字节）。
+        # 回 JSON 会被导出端判失败并无限重试，而 flush 无界——09-24 实测把整份门禁挂住两次。
+        self.send_response(200)
+        self.send_header("content-type", "application/x-protobuf")
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+from codeharness import observability as obs
+from codeharness.configs.settings import settings
+settings.langfuse.enabled = True
+settings.langfuse.public_key, settings.langfuse.secret_key = "pk-lf-t4live", "sk-lf-t4live"
+settings.langfuse.host = f"http://127.0.0.1:{srv.server_address[1]}"
+cli = obs.client()
+with cli.start_as_current_observation(name="t4-marker-unique", as_type="span"):
+    pass
+box, done = {}, threading.Event()
+
+
+def _f():
+    tf = time.time()
+    obs.flush()                       # flush 本性无界 ⇒ 拿线程等它，父进程还有 timeout 兜底
+    box["t"] = time.time() - tf
+    done.set()
+
+
+threading.Thread(target=_f, daemon=True).start()
+ok = done.wait(20)
+print("FLUSH_OK" if ok else "FLUSH_TIMEOUT", f"{box.get('t', -1):.2f}",
+      sum(1 for b in got if b"t4-marker-unique" in b), len(got), sep="|")
+'''
+
+
+def _run_script(src, cap, extra_env=None):
+    """把一段探针脚本写到临时目录跑一发（**不落进仓库**），返回它 stdout 的末行；超时返回 None。
+
+    为什么要子进程：C28 的两种形状（无界 shutdown、导出端点被进程钉死）都会**把等待留在本进程**，
+    在门禁进程里跑就是拿整份 s9 去赌（09-24 实测挂过两次：一次 400 秒、一次 300 秒）。
+    """
+    import shutil
+    import subprocess
+    d = Path(tempfile.mkdtemp())
+    try:
+        script = d / "probe.py"
+        script.write_text(src, encoding="utf-8")
+        env = {**os.environ, "CH_ROOT": str(Path(__file__).resolve().parents[1]),
+               "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1", "REDIS__DB": "15",
+               "LANGFUSE__ENABLED": "1", **(extra_env or {})}
+        try:
+            r = subprocess.run([sys.executable, "-B", str(script)], env=env, capture_output=True,
+                               text=True, timeout=cap, errors="replace")
+        except subprocess.TimeoutExpired:
+            return None
+        out = (r.stdout or "").strip()
+        return out.splitlines()[-1] if out else None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _raw_shutdown_seconds(host, cap=25):
+    """在子进程里跑改前那一行（无界 `client.shutdown()`），返回耗时；cap 内没跑完返回 None。
+
+    为什么不在本进程跑：我第一版就是在门禁进程里直接调它，40 个 span 对着 refuse 的端口
+    **400 秒没跑完**，把整份 s9 挂住了；而放弃它又会把尾巴留给本进程退出（C28 实测 ~7.6s/轮）。
+    子进程既隔离了等待，也让「25 秒还没完」本身成为可读的判别结果。"""
+    line = _run_script(_RAW_SCRIPT, cap, {"LF_HOST": host})
+    try:
+        return float(line)
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_export_verdict(cap=70):
+    """子进程里起假 ingestion 端点，导出一条带 marker 的 span，返回 `[FLUSH_OK, 秒, 含marker数, 总请求数]`。"""
+    line = _run_script(_STUB_SCRIPT, cap)
+    if not line or "|" not in line:
+        return None
+    return line.split("|")
+
+
+def t4_shutdown_is_bounded():
+    """C28：可观测端点是死的，停机路径也必须**有界**。三格，全本地，不要求 Langfuse 在线。
+
+      ① 有界：建客户端 → 40 个 span → 本仓 `observability.shutdown()`，`grace=2` 时单次进出墙钟
+         必须 ≤ 4s；连做两次（顺带覆盖旧 t1 那条「关过客户端后同进程建不回来」的坑）。
+      ② 阳性对照 = 本件的「它真的会等」：同一批 span 直接调 SDK 的 `client.shutdown()`（就是改前
+         `observability.py` 里那一行），墙钟必须**明显大于** ①。少了这格，① 可以靠「根本没发 span」
+         恒绿——那正是 C20 打过的假绿形状。
+      ③ 不许拿「把可观测关掉」当修慢：起一个本地假 ingestion 端点（真 HTTP、真 SDK 发），
+         断言桩里**真收到了**带这条 span 名字的请求，而停机墙钟仍在 grace 内。
+    """
+    from codeharness import observability as obs
+    keep = settings.langfuse.model_copy()
+
+    def cycle(n_spans=40, tag="t4"):
+        """客户端 → 一串 span → 本仓 `shutdown()`，返回（墙钟, 是否按时冲完, warning 响了几声）。"""
+        from codeharness.logs import logger as _lg
+        t0 = time.time()
+        cli = obs.client()
+        for i in range(n_spans):
+            with cli.start_as_current_observation(name=f"{tag}-span-{i}", as_type="span"):
+                pass
+        warned, orig = [], _lg.warning
+        _lg.warning = lambda *a, **k: warned.append(a)
+        try:
+            on_time = obs.shutdown()
+        finally:
+            _lg.warning = orig
+        return time.time() - t0, on_time, len(warned)
+
+    settings.langfuse.enabled = True
+    settings.langfuse.public_key, settings.langfuse.secret_key = "pk-lf-t4", "sk-lf-t4"
+    settings.langfuse.shutdown_grace_sec = 2
+    try:
+        # ① 有界：真连不通的端口，两次进出都必须在一个 grace 多一点的时间内回来，
+        #    且必须**自己承认没冲完**（on_time=False）并**恰好喊一声**——静默丢掉与刷屏都算坏
+        settings.langfuse.host = os.environ.get("LF_DEAD_HOST", "http://127.0.0.1:1")
+        b1, on1, w1 = cycle(tag="t4a")
+        b2, on2, w2 = cycle(tag="t4b")
+        assert b1 <= 4 and b2 <= 4, f"①失效：有界停机实测 {b1:.2f}s / {b2:.2f}s（上限 4s）"
+        assert (on1, on2) == (False, False), f"①失效：端点不通却报告「按时冲完」（{on1}/{on2}）"
+        assert (w1, w2) == (1, 1), f"①失效：降级喊话次数 {w1}/{w2}（要求恰好 1 声，静默与刷屏都算坏）"
+
+        # ② 阳性对照 = 「它真的会等」。旧形状（直接 `client.shutdown()`）**不能在本进程里跑**：
+        # 实测它 400 秒都没跑完（我第一版就这么把整份门禁挂住了），放弃还会把尾巴留给进程退出。
+        # 所以放到子进程里，给它 CAP 秒——**超时就正好是无界的直接证据**。
+        raw = _raw_shutdown_seconds(settings.langfuse.host, cap=25)
+        assert raw is None or raw - b1 >= 1.0, \
+            (f"②失效：无界的旧形状只比有界档多花 {None if raw is None else round(raw - b1, 2)}s"
+             f"（旧 {raw} vs 有界 {b1:.2f}）——差值不到 1s 就说明这里量不到「它会等」，"
+             "① 的绿不能算修掉了什么")
+
+        # ③ 不许拿「关掉可观测」当修慢：本地假 ingestion 端点**真收到** SDK 的导出。
+        # 必须放子进程：OTel 的 `TracerProvider` 是进程级的，langfuse 的 `_init_tracer_provider`
+        # 看到默认 provider 已存在就不换 ⇒ **导出端点被这个进程的第一个客户端钉死**。①/② 已把它
+        # 钉在死端口上，本进程里再改 `settings.langfuse.host` 是收不到的（09-24 实测：桩一个请求没收到）。
+        # 这条不是测试技巧，是运维事实：**换 host 要重启进程**。
+        verdict = _live_export_verdict(cap=70)
+        assert verdict and verdict[0] == "FLUSH_OK" and int(verdict[2]) >= 1, \
+            (f"③失效：子进程导出判定 {verdict!r}（格式 FLUSH_OK|flush秒|含marker请求数|总请求数）"
+             "——收不到导出，那 ①/② 的快就只是「发不出去」，不构成反证")
+        assert float(verdict[1]) <= 15, f"③失效：端点在线时 flush 也要 {verdict[1]}s ⇒ 慢不是端点造成的"
+        _ok("t4", f"有界停机 {b1:.2f}s/{b2:.2f}s ≤4s、承认没冲完={on1 is False}、各喊一声={w1}/{w2}；"
+                  f"无界旧形状子进程 25s 内跑完={raw is not None}"
+                  f"（{f'{raw:.2f}s，比有界多 {raw - b1:.2f}s' if raw is not None else '没跑完'}）；"
+                  f"在线真导出：{verdict[2]}/{verdict[3]} 个请求含该 span、flush {verdict[1]}s "
+                  "⇒ 修的是等待，不是采集")
+    finally:
+        settings.langfuse = keep
+        obs._client = obs._handler = None
+
+
 def main():
     global LF_UP
     asyncio.run(t1_gate_states())
+    t4_shutdown_is_bounded()                  # C28：不依赖外部服务，必须先跑
     LF_UP = _langfuse_up()
     if not LF_UP:
         _skip("t2/t3", f"Langfuse 未起（{settings.langfuse.host}/api/public/health 不通）"
                        f"——起 E:\\langfuse 的 compose 后复跑")
-        print("\ns9_langfuse: 1/1 过（t1 零成本），探活组待环境")
+        print("\ns9_langfuse: 2/2 过（t1 零成本 + t4 有界停机），探活组待环境")
         return
     t2_api_readback()
     if os.getenv("LF_LIVE") != "1":
         _skip("t3", "需 LF_LIVE=1（发真模型调用，花真钱）")
-        print("\ns9_langfuse: 2/2 过（t1+t2）")
+        print("\ns9_langfuse: 3/3 过（t1 + t4 + t2）")
         return
     asyncio.run(t3_live_roundtrip())
-    print("\ns9_langfuse: 3/3 全绿")
+    print("\ns9_langfuse: 4/4 全绿")
 
 
 if __name__ == "__main__":

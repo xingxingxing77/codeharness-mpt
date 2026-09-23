@@ -219,6 +219,21 @@ class LangfuseConfig(BaseModel):
     public_key: str = ""
     secret_key: str = ""
     timeout: int = 5
+    # C28：停机时**最多**等多久把队列里的 span 发完。SDK 自己的 `shutdown()` 没有任何上界
+    # （`flush()` 里三个 `Queue.join()` + `_stop_and_join_consumer_threads()` 里逐个 `Thread.join()`，
+    # 四处都不带超时；构造期那个 `timeout=` 只管**单次 HTTP 尝试**），所以端点不可达时墙钟没有上界
+    # ——09-23 现取：s15 默认档跑到第九组卡住 150 秒未出，而 `LANGFUSE__ENABLED=0` 同一份 30 秒跑完。
+    # 到点就走并丢掉没发完的那批（唯一会留下的降级，且它喊出来）。真要全发完就把这个调大。
+    shutdown_grace_sec: int = 5
+
+    @field_validator("shutdown_grace_sec")
+    @classmethod
+    def check_grace(cls, v):
+        """0 不是「不等」的开关，是「每次停机都必定丢数据且没人知道」——要 0 请显式把开关关掉。"""
+        if v <= 0:
+            raise ValueError(f"LANGFUSE__SHUTDOWN_GRACE_SEC 必须是正整数（秒），收到 {v}"
+                             "（设 0 不等于不采，是让停机永远静默丢弃）")
+        return v
 
 
 class Settings(BaseSettings):
