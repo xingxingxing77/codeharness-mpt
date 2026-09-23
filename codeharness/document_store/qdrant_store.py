@@ -81,6 +81,9 @@ class QdrantStore:
         if self._ready:
             return
         if await self.client.collection_exists(self.collection):
+            # C21：老集合是在 `source` 进 payload 之前建的。不在这里补那一道索引，「按 source 过滤 /
+            # 下架单份文档」就退化成全扫——`ensure()` 每进程只走到一次，补它的市场价是一次 API 调用。
+            await self._ensure_indexes()
             self._ready = True
             return
         await self.client.create_collection(
@@ -89,11 +92,19 @@ class QdrantStore:
             sparse_vectors_config={SPARSE: m.SparseVectorParams(modifier=m.Modifier.IDF)},
             quantization_config={"scalar": {"type": "int8", "always_ram": False}},
         )
-        for key, tenant in (("user_id", True), ("session_id", False), ("project", False), ("doc_type", False)):
+        await self._ensure_indexes()
+        self._ready = True
+
+    async def _ensure_indexes(self) -> None:
+        """payload 上的 keyword 索引（`create_payload_index` 幂等，重复调没事）。
+
+        `source`（C21：切片来自哪份文件）与 `page` 里只给 `source` 建索引——按页筛今天没人做，
+        而 `.pdf` 的 page 是整数，keyword 索引要的是字符串，硬塞进去就是一道用不上的写放大。"""
+        for key, tenant in (("user_id", True), ("session_id", False), ("project", False),
+                            ("doc_type", False), ("source", False)):
             await self.client.create_payload_index(
                 self.collection, field_name=key,
                 field_schema=m.KeywordIndexParams(type="keyword", is_tenant=tenant or None))
-        self._ready = True
 
     async def write(self, points: Sequence[Point]) -> int:
         if not points:

@@ -46,9 +46,13 @@ def door_refusal(suffix: str) -> str:
             f"——这份文档**没有入库**，也没落进 kb/，补好组件再传一次")
 
 
-def _texts_of(path: Path) -> list[str]:
-    """一份文档 → 切片文本。后缀在**读它之前**就判，别拿 pandas 的
-    「Content column not found in DataFrame.」当用户看得懂的拒绝理由。"""
+def _texts_of(path: Path) -> list[tuple[str, dict]]:
+    """一份文档 → `[(切片文本, 这一片的 metadata)]`。
+
+    后缀在**读它之前**就判，别拿 pandas 的「Content column not found in DataFrame.」当用户看得懂的拒绝理由。
+    C21：`get_docs_and_metadatas()` 本来就把 `(docs, metadatas)` 两值都给出来（`TextLoader` 的每片带
+    `{"source": 路径}`、`PyPDFLoader` 每片带 `{"source","page"}`），而这里从前写的是 `texts, _ = …`
+    ——**第二个返回值就地丢弃**，于是召回说不出这段是哪份文件、也删不掉单份文档。"""
     if not path.exists():
         raise FileNotFoundError("文件不存在")
     suffix = path.suffix.lower()
@@ -58,8 +62,8 @@ def _texts_of(path: Path) -> list[str]:
     doc = IndexableDocument.from_path(path)
     if not isinstance(doc.data, list):        # DataFrame（.csv/.json/.xlsx）没有「一段文本」的语义
         raise KbFormatError(f"{suffix} 读出来是表格，没有可切片的文本")
-    texts, _ = doc.get_docs_and_metadatas()
-    return [t for t in texts if t and t.strip()]
+    texts, metas = doc.get_docs_and_metadatas()
+    return [(t, m or {}) for t, m in zip(texts, metas) if t and t.strip()]
 
 
 class UploadKB(Action):
@@ -90,7 +94,7 @@ class UploadKB(Action):
         scope = f"{doc_type}/{user_id}/{CURRENT_PROJECT.get()}"
 
         errors: list[str] = []
-        chunks: list[str] = []
+        slices: list[tuple[str, dict]] = []
         for filepath in files:
             try:
                 found = await asyncio.to_thread(_texts_of, Path(filepath))
@@ -102,18 +106,35 @@ class UploadKB(Action):
                 continue
             if not found:
                 errors.append(f"{Path(filepath).name}: 没读出可切片的文本")
-            chunks += found
+            slices += found
 
-        if not chunks:
+        if not slices:
             return {"uploaded_count": 0, "chunk_count": 0, "errors": errors}
-        # C27：进端点前过唯一出口。上游那个 256 的切块器只在有换行处生效，`.docx` 整篇一块、
-        # `.pdf` 一页一块且不看长度——不过这一道，超长切片的尾巴会被端点静默截掉（读数见
-        # `document_store/embed_split.py` 模块头）。`chunk_count` 从此报**切完之后**的数：
-        # 它回答的是「库里有多少个可检索切片」，不是「读出来几段」。
-        chunks = split_for_embedding(chunks)
-        vectors = await embeddings.aembed_documents(chunks)
-        points = [Point(id=point_id(scope, text), text=text, dense=list(vec), doc_type=doc_type,
-                        user_id=user_id, project=CURRENT_PROJECT.get())
-                  for text, vec in zip(chunks, vectors) if vec]
+        # C27 + C21 的接缝：**逐片过出口**，块和它的来源一起往下走（整批一次过就把这个对应关系洗掉了）。
+        # 上游那个 256 的切块器只在有换行处生效，`.docx` 整篇一块、`.pdf` 一页一块且不看长度——
+        # 不过这一道，超长切片的尾巴会被端点静默截掉（读数见 `document_store/embed_split.py` 模块头）。
+        # `chunk_count` 报**切完之后**的数：它回答的是「库里有多少个可检索切片」，不是「读出来几段」。
+        pairs = [(c, meta) for text, meta in slices for c in split_for_embedding([text])]
+        vectors = await embeddings.aembed_documents([c for c, _ in pairs])
+        points = []
+        for (text, meta), vec in zip(pairs, vectors):
+            if not vec:
+                continue
+            # C21：出处只记**文件名**。`TextLoader`/`PyPDFLoader` 给的 `source` 是服务端绝对路径
+            # （本机实测 `C:\Users\…\Temp\tmpxxxx\b.md`），原样进 payload 就等于把服务器目录结构顺着
+            # 召回结果漏到界面上；而端点本来就按 basename 落进 `kb/`（`workspace.py` 门口剥过一层），
+            # 所以文件名既是稳定键也是全部有意义的信息。
+            src = Path(str(meta.get("source") or "")).name
+            # C21：点 id 的派生式**带上 source**。只由内容派生时，同一句话出现在两份文档里会算出
+            # 同一个点——后写的把先写的**连出处一起顶掉**，于是「只下架这一份」要么带走别份的切片、
+            # 要么留下一条 attribution 已错的僵尸点（与 C4 那条「租户必须在派生里」同族）。
+            # 代价照 C4/C12/C27 先例写在头里：改造前的老点没有 source、与新点**并存**，
+            # 且按 `source` 过滤删不到它们（读侧按 payload 走，不看 id）；dev 不迁移清洗。
+            extra = {"source": src}
+            if meta.get("page") is not None:
+                extra["page"] = meta["page"]
+            points.append(Point(id=point_id(f"{scope}/{src}", text), text=text, dense=list(vec),
+                                doc_type=doc_type, user_id=user_id, project=CURRENT_PROJECT.get(),
+                                extra=extra))
         written = await store.write(points)
-        return {"uploaded_count": written, "chunk_count": len(chunks), "errors": errors}
+        return {"uploaded_count": written, "chunk_count": len(pairs), "errors": errors}

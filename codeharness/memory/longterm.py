@@ -118,9 +118,14 @@ class LongTermMemory:
         hits = await self.store.search(query, list(dense), k=k, doc_type=self.doc_type,
                                       user_id=self.user_id, project=self.project_id)
         hits = await self._rerank(query, hits, k)
+        # C21：payload 里的出处带回来。`Message.metadata` 是全系统现成的那个 dict（不是为这件事新造的字段），
+        # 下游要归因就在上面读 `source`/`page`——`role_zero` 那条「[知识库片段]」拼的是 `m.content`，
+        # 今天它仍然不带出处，那一格归 C22（本行只把数据面接上）。
         return [Message(content=h.payload["text"], role=h.payload.get("role", "user"),
                         cause_by=h.payload.get("cause_by", ""),
-                        sent_from=h.payload.get("sent_from", "")) for h in hits]
+                        sent_from=h.payload.get("sent_from", ""),
+                        metadata={key: h.payload[key] for key in ("source", "page")
+                                  if h.payload.get(key) not in (None, "")}) for h in hits]
 
     async def drop(self):
         await self.store.delete_scope(doc_type=self.doc_type, user_id=self.user_id, project=self.project_id)

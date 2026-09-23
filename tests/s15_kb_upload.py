@@ -9,7 +9,7 @@
 t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM——模型确实收到了那段字，
 但**没有任何生产代码会去填那个参数**（`UploadKB` 零调用者、kb 切片零读者）。这正是 §0 硬约定 4
 点名的「断言打在构造参数上」：门禁绿 ≠ 知识库能用（`docs/对照2:97` G 条同一句）。
-现在的八格按链路排：
+现在的十格按链路排：
   t1 真 Qdrant（gate 专属集合）+ 确定性替身 embedding：一份 .md 切成多块灌进 `doc_type="kb"`，
      召回**命中自己刚灌进去的切片**，且重传幂等（点数不翻倍）。
   t2 HTTP 端点门口三判（离线，store/embeddings 换替身）：multipart 上传 → 原件真落
@@ -29,8 +29,14 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
      换行优先、**真上传发给端点的文本**被裁、坏配置当场拒。
   t8 C27 判据 ① 的结构不变量：三条入库路（知识库/记忆/经验池）发给端点的每条文本都必须带出口记号
      ——记号做在出口函数上，绕开出口的写法直接红，不是 grep 源码文本。
+  t9 C26 的白名单不撒谎：白名单里每个后缀要么被这台机器真读出块、要么被明确拒收（**两态必居其一**），
+     拒因是人话且 `errors[]` 里不许出现任何异常类名前缀；另有一格真 HTTP 门口——缺件时原件**不落盘**。
+     同一格在装了 `docx2txt`/`pypdf` 的镜像里走「读出」支（`.docx→1块/3发`、`.pdf→1块/1发`）。
+  t10 C21 的归因与下架：每条切片都带 `source`（空串算坏）、同一段话在两份文件里必须是**两条点各带各的出处**
+     （`point_id` 不带 source 时后写的会连出处一起顶掉），按 `source` 下架一份之后别份一字未动、
+     共享段仍召得回。
 
-t1/t3 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
+t1/t3/t10 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
 不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
 真 bge-m3 的语义改写召回不在这里（那是 s5 t25 的形状），本门禁只钉「链路通不通」。
 """
@@ -121,6 +127,10 @@ def t1_ingest_then_recall():
         texts = [h.content for h in hits]
         assert texts, "t1②召回空——写进去的东西读不出来，这条链还是死的"
         assert any("重置密码" in t for t in texts), f"t1②没命中自己灌进去的切片：{texts}"
+        # C21：召回回来的切片要能报出处（`Message.metadata` 那条数据面）。判据打在「非空且指向这份文件」，
+        # 不是「有这个键」——`source` 空串一样能过 `in h.payload`，那就又是假绿。
+        src = next((h.metadata.get("source", "") for h in hits if "重置密码" in h.content), "")
+        assert src.endswith("faq.md"), f"t1②切片报不出自己来自哪份文件：{src!r}"
         got = asyncio.run(store.search("怎么重置密码", emb._v("怎么重置密码"), k=3,
                                        doc_type="kb", user_id="u_kb", project=PROJ))
         assert got and {h.payload["doc_type"] for h in got} == {"kb"}, \
@@ -678,15 +688,17 @@ def t9_whitelist_never_lies():
     for suffix in sorted(SUPPORTED):
         f = _fixture_for(tmp, suffix)
         if state[suffix]:
-            texts = _texts_of(f)
-            assert texts and all(t.strip() for t in texts), f"t9①：{suffix} 说读得动却读不出块：{texts}"
+            slices = _texts_of(f)             # C21 之后是 [(文本, metadata)]
+            assert slices and all(t.strip() for t, _ in slices), f"t9①：{suffix} 说读得动却读不出块：{slices}"
+            assert all(m.get("source", "").endswith(f.name) for _, m in slices), \
+                f"t9①：{suffix} 的切片没带上自己那份的出处：{[m for _, m in slices]}"
             spy, store = _Spy(), _Store()
             out = asyncio.run(_action(store, spy, [f]))
             sent = spy.sent[0] if spy.sent else []
             assert out["uploaded_count"] > 0 and sent, f"t9①：{suffix} 走 action 没写进任何点：{out}"
             assert all(len(t) <= settings.embedding.max_chars for t in sent), \
                 f"t9①：{suffix} 的块有 {max(map(len, sent))} 字，越过 C27 的上限接缝（{out}）"
-            read_out.append(f"{suffix}→{len(texts)}块/{len(sent)}发")
+            read_out.append(f"{suffix}→{len(slices)}块/{len(sent)}发")
         else:
             assert suffix in OPTIONAL_READERS, f"t9①：{suffix} 不是可选组件那类，凭什么拒收"
             try:
@@ -764,6 +776,89 @@ def t9_whitelist_never_lies():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def t10_slices_are_attributable_and_deletable():
+    """C21：切片要报得出出处，且「下架一份」不等于「下架整个库」。
+
+    三格（都要真 Qdrant——按 `source` 过滤是服务端的 payload filter，替身 store 演不出这个语义）：
+      ① **没有一条切片是无出处的**：库里这个租户/项目下的每一条 kb 点，payload 的 `source` 都必须指向
+         这次传的那两份文件之一（空串也算坏——`in payload` 这种判据会被空串糊过去）。
+      ② **同一段话在两份文件里 = 两条点**：`point_id` 只由内容派生时，后写的那份会把先写那份的
+         出处**连点一起顶掉**（C4「租户必须在派生里」同族）。所以共享段必须数出两条、各带各的 source。
+      ③ **按 source 下架**：删掉 a.md 之后，b.md 的点数一字不动，且那句**共享的话仍然召得回**
+         （它靠的是 b.md 自己那条点，不是被 a.md 顺带带走的）——这一格是「别份原样」的全部含义。
+      ④ 阳性对照：不删的时候两次计数相等（防「filter 根本不生效、每次都恰好」）。
+    """
+    if not live_qdrant():
+        print("  skip t10（Qdrant 不在线）")
+        return
+    from qdrant_client import models as m
+
+    SHARED = FAQ.split("\n\n")[1]                       # 两份文件都收这一段
+    # b 故意是 **a 原文 + 一句独有的**：这样它的第一块与 a 的第一块**逐字相同**。
+    # （上一版给 b 换了一个标题头，两块文字就不再相等、点 id 压根不撞 ⇒ 下面那条「同一段 = 两条点」
+    # 的判据当场没牙，n2 变异体跑出来是绿的。判据要有牙，夹具就得真造出那个碰撞。）
+    a_text, b_text = FAQ, FAQ + "\n青隼站的月台在雨天会亮起三十七盏灯。\n"
+    tmp = Path(tempfile.mkdtemp())
+    store = QdrantStore(collection=GATE_COLL)
+    emb = HashEmbeddings()
+    user, tok_p, tok_u = "u_attr", CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_attr")
+    src_of = {}
+
+    async def count(source: str = "") -> int:
+        must = [m.FieldCondition(key=k, match=m.MatchValue(value=v))
+                for k, v in (("doc_type", "kb"), ("user_id", user), ("project", PROJ)) if v]
+        if source:
+            must.append(m.FieldCondition(key="source", match=m.MatchValue(value=source)))
+        r = await store.client.count(GATE_COLL, count_filter=m.Filter(must=must))
+        return r.count
+
+    try:
+        asyncio.run(store.drop())
+        fa = _write_faq(tmp, "a.md", a_text)
+        fb = _write_faq(tmp, "b.md", b_text)
+        out = asyncio.run(_action(store, emb, [fa, fb]))
+        assert out["errors"] == [] and out["uploaded_count"] > 0, f"t10①摄取失败：{out}"
+        src_of = {p.name: p.name for p in (fa, fb)}     # payload 里存的是**文件名**（绝对路径不外泄）
+        ca, cb = asyncio.run(count(src_of["a.md"])), asyncio.run(count(src_of["b.md"]))
+        assert ca > 0 and cb > 0, f"t10①两份都没被归因：a={ca} b={cb}"
+        assert ca + cb == asyncio.run(count()), \
+            f"t10①有切片不带出处：两份各 {ca}/{cb}，总点 {asyncio.run(count())}"
+        pts, _ = asyncio.run(store.client.scroll(GATE_COLL, limit=50, with_payload=True))
+        for p in pts:
+            s = p.payload.get("source", "")
+            assert s and Path(s).name == s, f"t10①出处要么是空的要么带目录（会漏服务端路径）：{s!r}"
+        # C21 代价①：`source` 得有 keyword 索引，否则「按出处过滤」在服务端是全扫。
+        # 这一格钉得住，是因为 `ensure()` 对**已存在的集合**也会补索引（老 dev 集合不会漏在那儿）。
+        schema = asyncio.run(store.client.get_collection(GATE_COLL)).payload_schema or {}
+        assert "source" in schema, f"t10①集合上没给 source 建 payload 索引：{sorted(schema)}"
+        both = [h.payload["source"] for h in asyncio.run(
+            store.search("重置密码", emb._v("重置密码"), k=20, hybrid=False,
+                         doc_type="kb", user_id=user, project=PROJ)) if SHARED[:18] in h.payload["text"]]
+        assert len(set(both)) == 2, \
+            f"t10②同一段话只留下一条出处（后写的顶掉了先写的）：{both}"
+
+        n_before = asyncio.run(count())
+        asyncio.run(_action(store, emb, [fa]))          # 原样重传：不堆积（C3 的幂等仍在）
+        assert asyncio.run(count()) == n_before, f"t10②重传 a.md 后点数从 {n_before} 变了"
+
+        asyncio.run(store.delete_scope(doc_type="kb", user_id=user, project=PROJ,
+                                       source=src_of["a.md"]))
+        left_a, left_b = asyncio.run(count(src_of["a.md"])), asyncio.run(count(src_of["b.md"]))
+        assert left_a == 0 and left_b == cb, f"t10③下架一份：a 剩 {left_a}（应 0）、b 剩 {left_b}（应 {cb}）"
+        kept = [h.payload["text"] for h in asyncio.run(
+            store.search("重置密码", emb._v("重置密码"), k=20, hybrid=False,
+                         doc_type="kb", user_id=user, project=PROJ))]
+        assert any(SHARED[:18] in t for t in kept), f"t10③删掉 a.md 把 b.md 的共享段也带走了：{kept}"
+        assert asyncio.run(count(src_of["b.md"])) == cb, "t10④阳性对照：不删的时候计数也会漂"
+        print(f"  ok  t10 切片全带出处（a {ca} 片 / b {cb} 片，总数 {n_before}）、共享段两条点各归各的、"
+              f"按 source 下架 a.md 后 b.md 的 {cb} 片一字未动且共享段仍召得回")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -775,12 +870,13 @@ def main():
     checks = [t1_ingest_then_recall, t2_endpoint_door, t3_role_thinks_with_kb,
               t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
-              t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies]
+              t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies,
+              t10_slices_are_attributable_and_deletable]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
           f"+ C27 的输入长度两道闸 + C26 的白名单两态）——"
-          f"其中 t1/t3 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
+          f"其中 t1/t3/t10 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
           f"t6/t7/t8/t9 都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
 
 
