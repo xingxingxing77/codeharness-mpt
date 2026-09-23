@@ -175,9 +175,25 @@ class RoleZero:
 
     async def _kb_recall(self, task: str) -> str:
         """知识库切片召回（C3 的下半截：`UploadKB` 灌进去的东西得有读者，否则写进去就是死数据）。
-        与 `_ltm_recall` 同一档位：检索链任何一环挂了都按「没有资料」继续，不为一次召回打断这场。"""
+        与 `_ltm_recall` 同一档位：检索链任何一环挂了都按「没有资料」继续，不为一次召回打断这场。
+
+        C22：每条切片单独挂一行**可 grep 的来源标记**（`.pdf` 带页码）。C21 只把出处接到了数据面
+        （`Message.metadata`），而模型读的是这段文本——没有标记时它答完没法归因、用户也没法拿它去核。
+        C21 之前入库的老切片没有 `source` ⇒ 标「出处未登记」，**不拿文件名格式凑一个假出处**。
+        """
         try:
-            return "\n".join(m.content for m in await self.kb.recall(task, k=3))
+            blocks = []
+            for m in await self.kb.recall(task, k=3):
+                meta = m.metadata or {}
+                src, page = str(meta.get("source") or ""), meta.get("page")
+                if not src:
+                    where = "〔出处未登记〕"       # 老点：承认不知道，比编一个名字诚实
+                elif page in (None, ""):
+                    where = f"〔来自 {src}〕"
+                else:
+                    where = f"〔来自 {src} 第 {page} 页〕"
+                blocks.append(f"{where}\n{m.content}")
+            return "\n".join(blocks)
         except Exception as e:
             logger.warning(f"{self.profile['name']} 知识库召回失败，按无资料继续: "
                            f"{type(e).__name__}: {e}")

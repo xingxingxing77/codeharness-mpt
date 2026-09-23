@@ -9,7 +9,7 @@
 t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM——模型确实收到了那段字，
 但**没有任何生产代码会去填那个参数**（`UploadKB` 零调用者、kb 切片零读者）。这正是 §0 硬约定 4
 点名的「断言打在构造参数上」：门禁绿 ≠ 知识库能用（`docs/对照2:97` G 条同一句）。
-现在的十格按链路排：
+现在的十一格按链路排：
   t1 真 Qdrant（gate 专属集合）+ 确定性替身 embedding：一份 .md 切成多块灌进 `doc_type="kb"`，
      召回**命中自己刚灌进去的切片**，且重传幂等（点数不翻倍）。
   t2 HTTP 端点门口三判（离线，store/embeddings 换替身）：multipart 上传 → 原件真落
@@ -32,6 +32,8 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
   t9 C26 的白名单不撒谎：白名单里每个后缀要么被这台机器真读出块、要么被明确拒收（**两态必居其一**），
      拒因是人话且 `errors[]` 里不许出现任何异常类名前缀；另有一格真 HTTP 门口——缺件时原件**不落盘**。
      同一格在装了 `docx2txt`/`pypdf` 的镜像里走「读出」支（`.docx→1块/3发`、`.pdf→1块/1发`）。
+  t11 C22 的来源标记：`_kb_recall` 每块前面那行 `〔来自 …〕` 三种形状各验一次，老切片写「出处未登记」
+     而不是凑一个 `〔来自 〕` 的假样子（离线格，挂一个假 kb 直接喂三种 metadata）。
   t10 C21 的归因与下架：每条切片都带 `source`（空串算坏）、同一段话在两份文件里必须是**两条点各带各的出处**
      （`point_id` 不带 source 时后写的会连出处一起顶掉），按 `source` 下架一份之后别份一字未动、
      共享段仍召得回。
@@ -242,9 +244,16 @@ def t3_role_thinks_with_kb():
         with_kb = run(True)
         assert "[知识库片段]" in with_kb and "重置密码" in with_kb, \
             "t3①失效：知识库读者挂了但 prompt 里什么都没有——上传的文档永远不会被模型看见"
+        # C22：出处不止在数据面（C21 那格钉的是 `Message.metadata`），得**跟着文本进模型**。
+        # 钉的是「至少一条带文件名的标记」+「标记数 ≤ 切片数」（不许有人把整段拼成一条标记糊上去）。
+        assert "〔来自 faq.md〕" in with_kb, \
+            "t3①失效：切片进了 prompt 却没说来自哪份文件——模型答完无法归因，用户也没法核"
+        assert 1 <= with_kb.count("〔来自 ") <= 3, f"t3①标记数不对（k=3 上限三条）：{with_kb.count('〔来自 ')}"
         without = run(False)
-        assert "[知识库片段]" not in without, "t3②对照组不成立：没挂读者也出现了知识库段"
-        print("  ok  t3 真图真 think 吃到知识库片段（含「重置密码」那段），摘掉读者后当场消失")
+        assert "[知识库片段]" not in without and "〔" not in without, \
+            "t3②对照组不成立：没挂读者也出现了知识库段"
+        print("  ok  t3 真图真 think 吃到知识库片段（含「重置密码」那段）且每条带 `〔来自 faq.md〕`，"
+              "摘掉读者后整段（含标记）当场消失")
     finally:
         CURRENT_PROJECT.reset(tok_p)
         CURRENT_USER.reset(tok_u)
@@ -859,6 +868,41 @@ def t10_slices_are_attributable_and_deletable():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def t11_recall_lines_are_labeled():
+    """C22：`_kb_recall` 出来的每一块前面都有一行可 grep 的来源标记（离线格，不挂服务）。
+
+    t3 量的是「真图真 think 里那句话到了模型眼前」，这一格量的是**三种 metadata 形状各得到什么标记**——
+    特别是 C21 之前入库的老切片（没有 `source`）：那种块必须写成「出处未登记」，
+    **不许拿文件名格式凑一个假出处**（`〔来自 〕` 就是那种假样子：形状对、内容是空）。
+    """
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+
+    class _KB:
+        def __init__(self, msgs):
+            self.msgs = msgs
+
+        async def recall(self, query, k=3):
+            return self.msgs
+
+    def rendered(msgs):
+        role = RoleZero({"name": "R", "profile": "p", "goal": "g"}, [], FakeLLM(["{}"]), max_loops=1)
+        role.kb = _KB(msgs)
+        return asyncio.run(role._kb_recall("怎么重置密码"))
+
+    out = rendered([Message(content="甲段正文", metadata={"source": "faq.md"}),
+                    Message(content="乙段正文", metadata={"source": "report.pdf", "page": 3}),
+                    Message(content="丙段正文")])          # 老切片：C21 之前入库，没有 source
+    assert "〔来自 faq.md〕" in out, f"t11①纯文件名那一档没标出来：{out}"
+    assert "〔来自 report.pdf 第 3 页〕" in out, f"t11②页码丢了（pdf 归因到页才算能核）：{out}"
+    assert "〔出处未登记〕" in out and "〔来自 〕" not in out and "〔来自 \n" not in out, \
+        f"t11③老点被标成了假出处：{out}"
+    assert out.count("〔") == 3 and all(x in out for x in ("甲段正文", "乙段正文", "丙段正文")), \
+        f"t11④标记数不等于块数、或标记把正文吞了：{out}"
+    assert "〔" not in rendered([]) and rendered([]) == "", "t11⑤空召回不该产出任何标记行"
+    print("  ok  t11 三种 metadata 形状各得一行标记（文件名 / 带页码 / 老点未登记），标记数=块数、正文不吞")
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -871,13 +915,13 @@ def main():
               t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
               t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies,
-              t10_slices_are_attributable_and_deletable]
+              t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C27 的输入长度两道闸 + C26 的白名单两态）——"
+          f"+ C26 的白名单两态 + C22 的来源标记）——"
           f"其中 t1/t3/t10 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
-          f"t6/t7/t8/t9 都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
+          f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")
 
 
 if __name__ == "__main__":
