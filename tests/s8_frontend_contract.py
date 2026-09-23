@@ -1506,9 +1506,19 @@ def t22_feedback_surface():
     assert api_ts.count("/feedback`") >= 3 or "putFeedback" in api_ts, "B4 回归：client.ts 少了反馈路由"
     assert "this.feedback = {}" in st, "B4 回归：切会话不清反馈表（上一场的票会亮在这一场的尾行上）"
     mac = (FE / "components" / "conversation" / "MessageIconActions.vue").read_text(encoding="utf-8")
-    for token in ("like-fill", "dislike", "api.deleteFeedback", "api.putFeedback",
-                  "store.feedback[props.feedbackKey]"):
+    for token in ("api.deleteFeedback", "api.putFeedback",
+                  "store.feedback[props.feedbackKey]", "DsIcon name=\"like\"", "DsIcon name=\"dislike\""):
         assert token in mac, f"B4 回归：尾行图标少了 {token}（点亮/取消/联动都靠它）"
+    # 按下态的机制**照参照系钉**：两颗都吃 outline 字形，靠 `data-active` + 颜色 token 表示"已记上"。
+    # （参照系 ui-message-feedback 里 IconLikeFill16/IconDislikeFill16 零消费处，实测取证；
+    #   本仓曾用 `vote==='like' ? 'like-fill' : 'like'` 是自家分叉，且只给 like 一颗 ⇒ 「没用」点了没反馈。）
+    for token in (":data-active=\"vote === 'like' || undefined\"",
+                  ":data-active=\"vote === 'dislike' || undefined\""):
+        assert token in mac, f"B4 回归：少了 {token} —— 按下态没有可读属性，只剩颜色，深浅两色下会看不出来"
+    assert ".act[data-active]" in mac, "B4 回归：`data-active` 没有对应样式（属性挂上但界面不变）"
+    alias = (FE / "components" / "ui" / "DsIcon.vue").read_text(encoding="utf-8")
+    assert "'like-fill'" not in alias and "'dislike-fill'" not in alias, \
+        "B4 分叉复燃：别名表又长出 Fill 字形——按下态按参照系走 data-active+颜色，不换字形"
     # 两枚都要有按下态：只数「出现过一次」会被另一枚撑过去（反向验证第一版就这么漏过一格）
     assert mac.count("aria-pressed") == 2, \
         f"B4 回归：aria-pressed 只出现 {mac.count('aria-pressed')} 次——两枚图标钮各要一个，" \
@@ -1517,7 +1527,8 @@ def t22_feedback_surface():
     tt = (FE / "components" / "conversation" / "TurnTail.vue").read_text(encoding="utf-8")
     assert ":feedback-key=\"turn.key\"" in tt, "B4 回归：尾行不再把轮键传给图标（按钮根本不出现）"
     _ok("t22", "B4 三面同判：vote 值域 422 + 同票幂等（事件也只一条）+ 改票覆盖 + 取消不存在的键回 ok + "
-               "set/set/clear 序列 + `feedback` 已登记 _JSON_FIELDS + 尾行 aria-pressed/like-fill 联动在位")
+               "set/set/clear 序列 + `feedback` 已登记 _JSON_FIELDS + 尾行两颗各有 aria-pressed/data-active"
+               "（按下态＝outline 字形 + 颜色 token，照参照系；Fill 别名不许复燃）")
 
 
 def main():

@@ -14,14 +14,20 @@
     <!-- B4：反馈。参照系那三端点带版本 compare-and-set，我们只有一张 last-write-wins 的表，
          所以这里不假装乐观并发：点了等服务端回执，改票/取消都以回执为准。 -->
     <template v-if="feedbackKey">
+      <!-- 按下态照参照系 `ui-message-feedback/MessageFeedbackActions.tsx:232-260`：两颗**都用 outline 字形**，
+           靠 `data-active` + `--dsw-alias-label-primary` 上色标"这一票记上了"，不换成 Fill 字形
+           （源里 `IconLikeFill16`/`IconDislikeFill16` 零消费处，已取证）。源的注释就是理由：
+           投完不把鼠标停在行上也要看得见 ⇒ 信号不能只挂在 hover 上。 -->
       <VTooltip :label="vote === 'like' ? '已标记有用，再点取消' : '标记有用'" side="bottom">
         <button type="button" class="act" :aria-pressed="vote === 'like' ? 'true' : 'false'"
+                :data-active="vote === 'like' || undefined"
                 :aria-label="vote === 'like' ? '已标记有用' : '标记有用'" @click="cast('like')">
-          <DsIcon :name="vote === 'like' ? 'like-fill' : 'like'" :size="16" />
+          <DsIcon name="like" :size="16" />
         </button>
       </VTooltip>
       <VTooltip :label="vote === 'dislike' ? '已标记没用，再点取消' : '标记没用'" side="bottom">
         <button type="button" class="act" :aria-pressed="vote === 'dislike' ? 'true' : 'false'"
+                :data-active="vote === 'dislike' || undefined"
                 :aria-label="vote === 'dislike' ? '已标记没用' : '标记没用'" @click="cast('dislike')">
           <DsIcon name="dislike" :size="16" />
         </button>
@@ -155,6 +161,11 @@ onBeforeUnmount(() => clearTimeout(timer))
 
 .act:hover {
   background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 源 .action[data-active]：已记上的票离开鼠标也要看得出来（参照系 MessageFeedbackActions.module.css:34）。 */
+.act[data-active] {
   color: var(--dsw-alias-label-primary);
 }
 

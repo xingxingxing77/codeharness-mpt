@@ -56,7 +56,6 @@ const ALIAS: Record<string, string> = {
   warning: 'IconWarningOutline16',
   question: 'IconQuestionOutline14',
   like: 'IconLikeOutline16',
-  'like-fill': 'IconLikeFill16',
   dislike: 'IconDislikeOutline16',
   download: 'IconDownloadOutline16',
   fullscreen: 'IconFullscreenOutline16',
