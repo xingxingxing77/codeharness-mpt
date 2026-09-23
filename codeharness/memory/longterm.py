@@ -13,6 +13,7 @@ import uuid
 import httpx
 
 from codeharness.configs.settings import settings
+from codeharness.document_store.embed_split import split_for_embedding
 from codeharness.document_store.qdrant_store import Point, QdrantStore
 from codeharness.logs import logger
 from codeharness.observability import span
@@ -68,7 +69,13 @@ class LongTermMemory:
                 uniq.append(m)
         if not uniq:
             return 0
-        vecs = await self.embeddings.aembed_documents([m.content for m in uniq])
+        # C27：记忆腿**也切**。这条腿以前是四条入库路里最坏的——`read_file` 单次可回 2 万字符，
+        # `_compress` 把整条消息原样灌进来，而端点会把超长输入静默截断（只有前 ~3 千字进得了向量，
+        # 读数与口径见 `document_store/embed_split.py` 模块头）。一条消息 → N 个切片点，每点带自己
+        # 那段原文 + 这条消息的元数据。代价照 C4/C12 先例写在头里：**长消息的老整条点会与新碎点
+        # 并存**（点 id 由内容派生），dev 不做迁移清洗，要清按 `doc_type` + `user_id` 一次 `delete_scope`。
+        pairs = [(m, c) for m in uniq for c in split_for_embedding([m.content])]
+        vecs = await self.embeddings.aembed_documents([c for _, c in pairs])
         # C4 同族审（09-22）：派生式必须带 doc_type。这个类一次被建两个实例（`team.py:23-24`：
         # memory 与 kb 各一条），scope 只到 user/project 时同一段文本在两条切片上算出**同一个点 id**，
         # 于是 `role.kb.overflow(...)` 一旦被人调用就会顶掉记忆那条（payload 说是 kb、id 却是 memory 的）。
@@ -77,10 +84,10 @@ class LongTermMemory:
         # dev 数据不做迁移清洗。
         scope = f"{self.doc_type}/{self.user_id}/{self.project_id}"
         return await self.store.write([
-            Point(id=point_id(scope, m.content), text=m.content, dense=list(v), doc_type=self.doc_type,
+            Point(id=point_id(scope, c), text=c, dense=list(v), doc_type=self.doc_type,
                   user_id=self.user_id, session_id=self.session_id, project=self.project_id,
                   extra={"role": m.role, "cause_by": m.cause_by, "sent_from": m.sent_from})
-            for m, v in zip(uniq, vecs) if v])
+            for (m, c), v in zip(pairs, vecs) if v])
 
     async def _rerank(self, query: str, hits: list, k: int) -> list:
         """bge-reranker /v1/rerank（吸收自 rag/knowledge.py，源语义与降级留痕不变）：

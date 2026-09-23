@@ -10,7 +10,10 @@ P0-3: 租户隔离——从 CURRENT_USER ContextVar 取 user_id，避免"default
 """
 import uuid
 
+from codeharness.configs.settings import settings
+from codeharness.document_store.embed_split import split_for_embedding
 from codeharness.document_store.qdrant_store import Point, QdrantStore
+from codeharness.logs import logger
 from codeharness.provider.gateway import LLMGateway
 
 
@@ -37,7 +40,18 @@ class ExpStore:
         self.user_id = user_id or CURRENT_USER.get("default")
 
     async def save(self, action_tag: str, input_sig: str, output: str, score: float = 0.0):
-        dense = await self.embeddings.aembed_query(input_sig)
+        # C27：入库文本一律过唯一出口，不许再把整串直接发给端点（端点超长会**静默**截断，读数见
+        # `embed_split` 模块头）。经验这一条的单位是**一个点**——`exp_point_id` 同时就是 Redis 命中
+        # 计数的键，切成 N 个点会把计数打散，所以超限时取首块并**喊出来**：以前是端点默默只看了
+        # 前 ~3200 字（真文档复量，见 settings 那条注释），现在是已知、有界、带日志。
+        # ponytail: 天花板=签名超过 `EMBEDDING__MAX_CHARS` 的部分进不了向量（payload 文本仍是全文，
+        # 召回回来的内容不缺）。升级路径=一条经验存 N 个点、payload 里带 `exp_id` 做读侧去重，
+        # 只在 exp_pool 真开起来（`EXP_POOL__ENABLED`，今天默认关）且现场量到长签名之后才值得做。
+        chunks = split_for_embedding([input_sig])
+        if len(chunks) > 1:
+            logger.warning(f"经验签名 {len(input_sig)} 字超过 embedding 上限 "
+                           f"{settings.embedding.max_chars}，只有首块进向量（tag={action_tag}）")
+        dense = await self.embeddings.aembed_query(chunks[0])
         await self.store.write([Point(
             id=exp_point_id(action_tag, input_sig, self.user_id),
             text=input_sig, dense=list(dense), doc_type="exp", user_id=self.user_id,

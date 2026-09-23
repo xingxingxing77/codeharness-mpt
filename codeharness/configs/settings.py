@@ -7,10 +7,18 @@
 from typing import Optional
 from urllib.parse import quote
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from codeharness.configs.llm_config import LLMConfig
+
+# C27：embedding 端点**静默截断长输入**的观测点。两个读数：
+#   · 重复串前缀（旧探针，仓库外 `E:/tmp/ch_trunc2.py`/`.out`）：3600 字起尾句信号恰为 +0.0000、逐维相同；
+#   · **真文档复量**（`tests/manual_embed_truncation.py` 的 A 格，09-23 跑本机 bge-m3）：仓里 docs/*.md
+#     拼出的 39,325 字中文散文，全文向量与 `doc[:3200]` 逐维完全相同。
+# 取更保守的那个当下界依据——旧台账早写明「3600 是观测上限不是安全值，真中文 token 密度更高」，
+# 真文档量出来确实更早（3200 < 3600）。`EMBEDDING__MAX_CHARS` 的上限就钉在这里：超过它＝设了一个不再安全。
+EMBEDDING_OBSERVED_TRUNCATION_CHARS = 3200
 
 
 class EmbeddingConfig(BaseModel):
@@ -20,6 +28,24 @@ class EmbeddingConfig(BaseModel):
     base_url: str = "http://localhost:9998/v1"
     model: str = "bge-m3"
     dim: int = 1024
+    # C27：入库文本进端点前的**硬上限**（单位=字符数≈中文字数）。默认 1200——真文档量到的端点窗口
+    # 是 3200 字，取它的一半以下留余量：窗口按 token 算，同一字符数在不同文本上落点不同，
+    # 而块一旦超过窗口，多出来的那段就又只剩「词法腿看得见、语义问不到」。
+    max_chars: int = 1200
+
+    @field_validator("max_chars")
+    @classmethod
+    def check_max_chars(cls, v):
+        """C5 那条纪律：坏配置不许「能跑但行为不对」，要**当场拒**。
+
+        非正值不是「关掉切块」的开关——关掉它就等于回到本项要修的静默截断；超过观测截断点则形同
+        「以为设过了」。两者都在 settings 构造期抛，起不来比静默少一层保护便宜。"""
+        if v <= 0:
+            raise ValueError(f"EMBEDDING__MAX_CHARS 必须是正整数，收到 {v}（设 0 不等于不切，是要静默截断）")
+        if v > EMBEDDING_OBSERVED_TRUNCATION_CHARS:
+            raise ValueError(f"EMBEDDING__MAX_CHARS={v} 超过实测截断点 "
+                             f"{EMBEDDING_OBSERVED_TRUNCATION_CHARS} 字，这块上限就不再保尾段可达")
+        return v
 
 
 class RerankerConfig(BaseModel):

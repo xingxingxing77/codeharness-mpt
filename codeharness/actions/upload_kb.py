@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from codeharness.base.action import Action
+from codeharness.document_store.embed_split import split_for_embedding
 from codeharness.document_store.qdrant_store import Point, QdrantStore
 from codeharness.memory.longterm import point_id
 from codeharness.provider.gateway import LLMGateway
@@ -83,6 +84,11 @@ class UploadKB(Action):
 
         if not chunks:
             return {"uploaded_count": 0, "chunk_count": 0, "errors": errors}
+        # C27：进端点前过唯一出口。上游那个 256 的切块器只在有换行处生效，`.docx` 整篇一块、
+        # `.pdf` 一页一块且不看长度——不过这一道，超长切片的尾巴会被端点静默截掉（读数见
+        # `document_store/embed_split.py` 模块头）。`chunk_count` 从此报**切完之后**的数：
+        # 它回答的是「库里有多少个可检索切片」，不是「读出来几段」。
+        chunks = split_for_embedding(chunks)
         vectors = await embeddings.aembed_documents(chunks)
         points = [Point(id=point_id(scope, text), text=text, dense=list(vec), doc_type=doc_type,
                         user_id=user_id, project=CURRENT_PROJECT.get())

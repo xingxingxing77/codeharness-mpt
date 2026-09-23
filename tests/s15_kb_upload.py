@@ -9,7 +9,7 @@
 t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM——模型确实收到了那段字，
 但**没有任何生产代码会去填那个参数**（`UploadKB` 零调用者、kb 切片零读者）。这正是 §0 硬约定 4
 点名的「断言打在构造参数上」：门禁绿 ≠ 知识库能用（`docs/对照2:97` G 条同一句）。
-现在的六格按链路排：
+现在的八格按链路排：
   t1 真 Qdrant（gate 专属集合）+ 确定性替身 embedding：一份 .md 切成多块灌进 `doc_type="kb"`，
      召回**命中自己刚灌进去的切片**，且重传幂等（点数不翻倍）。
   t2 HTTP 端点门口三判（离线，store/embeddings 换替身）：multipart 上传 → 原件真落
@@ -23,6 +23,12 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
   t6 C16 的可见结局：向量库 / 向量模型端点各**真连一个死端口**取一次读数 → 503 且文案说出
      「原件已在 `kb/`、没切片」；两台都在线是阳性对照（200），store 抛真 bug 必须仍是 500
      （把异常一律降级成「服务不可用」就是这里要防的谎）。这一格不依赖任何在线服务。
+  t7 C27 的输入长度闸：端点会静默截断超长输入（本机 bge-m3 在真文档上量到「全文向量 = 前 3200 字
+     的向量」逐维相同），
+     所以入库前一律过 `document_store/embed_split.split_for_embedding`。四格=长度不变量（2 万字单段）、
+     换行优先、**真上传发给端点的文本**被裁、坏配置当场拒。
+  t8 C27 判据 ① 的结构不变量：三条入库路（知识库/记忆/经验池）发给端点的每条文本都必须带出口记号
+     ——记号做在出口函数上，绕开出口的写法直接红，不是 grep 源码文本。
 
 t1/t3 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
 不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
@@ -392,15 +398,174 @@ def t6_vector_service_down_says_so():
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def t7_long_input_cannot_reach_the_endpoint_whole():
+    r"""C27：embedding 端点会把超长输入**静默截断**——本机 bge-m3 在真中文文档上量到「全文向量
+    与它的前 3200 字的向量逐维完全相同」（`tests/manual_embed_truncation.py` A 格；更早那发用重复串
+    前缀量到的是 3600，两条读数与出处都在 `settings.py` 的 `EMBEDDING_OBSERVED_TRUNCATION_CHARS`
+    注释里）。四格都不依赖任何在线服务：
+
+      ① 长度不变量：2 万字单段无换行 → 逐块 ≤ H **且内容守恒**（改前这种输入必产出一块 2 万字）；
+      ② 换行优先：整行不被硬切拆开（否则「按段检索」这件事就没了），只有单行本身超上限才切；
+      ③ 生产路径真被裁：走 `UploadKB`，spy 记下**实际发给端点的文本**——少这一格，①② 可以在
+         纯函数里全绿而调用点压根没接（批次36「只跑了 s8 没跑 s7」的同族错）；
+      ④ 配置面：H 是端点属性、走 `EMBEDDING__MAX_CHARS`，坏值**当场拒**（非正、或超过观测截断点），
+         而不是「服务起得来、保护没了」。
+    """
+    from pydantic import ValidationError
+
+    from codeharness.configs.settings import EMBEDDING_OBSERVED_TRUNCATION_CHARS, EmbeddingConfig
+    from codeharness.configs.settings import settings
+    from codeharness.document_store.embed_split import split_for_embedding
+
+    h = settings.embedding.max_chars
+    assert 0 < h <= EMBEDDING_OBSERVED_TRUNCATION_CHARS, f"t7④：默认上限自身不合法：{h}"
+
+    whole = "甲" * 20000
+    chunks = split_for_embedding([whole])
+    assert len(chunks) > 1, f"t7①：2 万字单段只出 {len(chunks)} 块 = 整条压成一个向量"
+    assert all(0 < len(c) <= h for c in chunks), \
+        f"t7①：出口产出了超过上限 {h} 的块：{[len(c) for c in chunks]}"
+    assert "".join(chunks) == whole, "t7①：切完少字了（守恒破了，尾部被静默丢掉就是这么发生的）"
+
+    lines = ["乙" * 90 for _ in range(30)]              # 2729 字符 > H，但每行都远低于 H
+    chunks2 = split_for_embedding(["\n".join(lines)])
+    assert len(chunks2) > 1, f"t7②：{sum(map(len, lines))} 字没裁开"
+    assert all(any(l in c for c in chunks2) for l in lines), "t7②：有整行被硬切拆开了"
+
+    class _Store:
+        def __init__(self):
+            self.written = []
+
+        async def write(self, points):
+            self.written.extend(p.text for p in points)
+            return len(points)
+
+    class _Spy(HashEmbeddings):
+        def __init__(self):
+            self.sent = []
+
+        async def aembed_documents(self, texts):
+            self.sent.append(list(texts))
+            return await super().aembed_documents(texts)
+
+    spy, store = _Spy(), _Store()
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        out = asyncio.run(_action(store, spy, [_write_faq(tmp, "big.md", "丙" * 5000)]))
+        assert len(spy.sent) == 1, f"t7③：发端点不该只一次：{spy.sent}"
+        sent = spy.sent[0]
+        assert all(len(t) <= h for t in sent), \
+            f"t7③：{max(map(len, sent))} 字的切片原样发给了端点（出口没接上）"
+        assert len(sent) > 1 and out["chunk_count"] == len(sent) == len(store.written), \
+            f"t7③ 读数不自洽：发了 {len(sent)} 块，chunk_count={out['chunk_count']}，写了 {len(store.written)}"
+        assert "".join(sent) == "丙" * 5000, "t7③：发给端点的文本拼不回去，切块过程吞了字"
+        short = _Spy()
+        asyncio.run(_action(_Store(), short, [_write_faq(tmp, "faq.md", FAQ)]))
+        assert any(len(batch) > 1 for batch in short.sent) and \
+            all(len(t) <= h for batch in short.sent for t in batch), \
+            f"t7③ 阳性对照失效：正常四段 FAQ 的读数不对（{[len(b) for b in short.sent]}）"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    for bad in (0, -5, EMBEDDING_OBSERVED_TRUNCATION_CHARS + 1):
+        try:
+            EmbeddingConfig(max_chars=bad)
+            raise AssertionError(f"t7④：坏值 {bad} 竟然被接受了（非正/超过观测截断点要当场拒）")
+        except ValidationError:
+            pass
+    assert EmbeddingConfig(max_chars=1).max_chars == 1
+    print(f"  ok  t7 出口守住长度不变量（2 万字→{len(chunks)} 块、逐块 ≤{h} 且守恒）、整行不被拆、"
+          f"真上传发给端点的最长 {max(map(len, sent))} 字；坏配置三种（0 / -5 / "
+          f"{EMBEDDING_OBSERVED_TRUNCATION_CHARS + 1}）全部当场拒")
+
+
+def t8_every_ingestion_path_goes_through_the_exit():
+    """C27 判据 ①：**结构不变量**——四条入库路发给端点的文本必须逐条经过 `split_for_embedding`。
+
+    钉法不是在源码里 grep 那句调用（那种判据防不住「换了个变量名、但把原文发出去」，也只防得住
+    写法不像防得住行为）。这里**在出口上做记号**：把三个消费模块里的出口换成「切完给每块加一个
+    哨兵字符」的包装，再用替身 embeddings 记下真发出去的文本。哪条路绕开出口，它发出去的就是没有
+    哨兵的原文 ⇒ 那一格红；出口整个被摘掉（还原成 `aembed_documents(chunks)`）同样红。
+
+    `.docx`/`.pdf` 那两支不必单列：它们的文本从 `_texts_of` 出来，与 .md 共用 `UploadKB` 那一次调用。
+    """
+    from codeharness.actions import upload_kb as kb_mod
+    from codeharness.configs.settings import settings
+    from codeharness.document_store import exp_store as exp_mod
+    from codeharness.document_store.embed_split import split_for_embedding as real_split
+    from codeharness.memory import longterm as ltm_mod
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.document_store.exp_store import ExpStore
+
+    MARK = "\u205f"                      # U+205F：真文本里不会有的字符，出口走过的记号（写成转义，别用肉眼看不见的字面量）
+    mods = (kb_mod, ltm_mod, exp_mod)
+    saved = [getattr(m, "split_for_embedding") for m in mods]
+
+    def _marked(texts, max_chars: int = 0):
+        return [t + MARK for t in real_split(texts, max_chars)]
+
+    class _Store:
+        async def write(self, points):
+            return len(points)
+
+    class _Spy(HashEmbeddings):
+        def __init__(self):
+            self.sent = []
+
+        async def aembed_documents(self, texts):
+            self.sent.append(list(texts))
+            return await super().aembed_documents(texts)
+
+        async def aembed_query(self, q):
+            self.sent.append([q])
+            return await super().aembed_query(q)
+
+    tmp = Path(tempfile.mkdtemp())
+    long_text = "戊" * (settings.embedding.max_chars * 2 + 7)
+    try:
+        for m in mods:
+            m.split_for_embedding = _marked
+        spy = _Spy()
+        tok_p, tok_u = CURRENT_PROJECT.set("s15_t8"), CURRENT_USER.set("u_t8")
+        try:
+            asyncio.run(_action(_Store(), spy, [_write_faq(tmp, "long.md", long_text)]))
+            kb_batches = spy.sent.copy(); spy.sent.clear()
+            asyncio.run(LongTermMemory(project_id="s15_t8", embeddings=spy, user_id="u_t8",
+                                       store=_Store(), doc_type="memory")
+                        .overflow([Message(content=long_text, role="user")]))
+            ltm_batches = spy.sent.copy(); spy.sent.clear()
+            asyncio.run(ExpStore(embeddings=spy, user_id="u_t8", store=_Store())
+                        .save("SomeAction", long_text, "resp"))
+            exp_batches = spy.sent.copy()
+        finally:
+            CURRENT_PROJECT.reset(tok_p)
+            CURRENT_USER.reset(tok_u)
+        for name, batches in (("知识库 upload_kb", kb_batches), ("记忆 longterm.overflow", ltm_batches),
+                              ("经验池 exp_store.save", exp_batches)):
+            assert batches, f"t8：{name} 一次都没发端点——这格成了空转"
+            for batch in batches:
+                for t in batch:
+                    assert t.endswith(MARK), \
+                        f"t8：{name} 把没走出口的文本发给了端点（{len(t)} 字，端点在 ~3600 字以上静默截断）"
+        print(f"  ok  t8 三条入库路（知识库/记忆/经验池）发给端点的 {sum(len(b) for b in kb_batches + ltm_batches + exp_batches)} "
+              f"条文本全部带出口记号；pdf/docx 与 .md 共用知识库那一次调用")
+    finally:
+        for m, f in zip(mods, saved):
+            m.split_for_embedding = f
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     checks = [t1_ingest_then_recall, t2_endpoint_door, t3_role_thinks_with_kb,
               t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
-              t6_vector_service_down_says_so]
+              t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
+              t8_every_ingestion_path_goes_through_the_exit]
     for f in checks:
         f()
-    print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局）——"
+    print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
+          f"+ C27 的输入长度两道闸）——"
           f"其中 t1/t3 需要 Qdrant 在线，本次 {'已实跑' if live_qdrant() else '**跳过**'}；"
-          f"t6 四格都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
+          f"t6/t7/t8 都不依赖在线服务（死端口 + 替身），任何环境都必须跑到")
 
 
 if __name__ == "__main__":
