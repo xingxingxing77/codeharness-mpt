@@ -307,7 +307,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
   `s3b_runtime` 本轮 06:13 起跑、写到本段（06:34）仍未返回（它的长腿要真起沙箱跑 pytest），故治理阶段门记的
   **既有基线红 `s3b_runtime::t14` 本轮没有自测读数**，不要当成已复核。
   最近一次全量读数是治理驱动器 09-21 05:14 的阶段门（清单 1 = 29 条 **28 绿 + 1 既有基线红**），
-  原文在 `plan/governance-gate-stage4.md`；那是别的会话跑的，此处按指针引用。
+  原文在 `E:/codeharness-plan/governance-gate-stage4.md`（治理文档已于 2026-09-23 退役出 `plan/`）；那是别的会话跑的，此处按指针引用。
 - **探活式（缺外部服务就打印跳过、退出码仍然 0 —— 退 0 不等于验过）**，本轮逐件读源码点名 8 件：
   `s5_memory_rag`（t3/t5/t9 无 Redis、t12 无 Qdrant）、`s6_sop`（t1/t4 需供体 `E:/MetaGPT/prompts`）、
   `s7_platform`（redis 段：6379 不通则 t2–t9/t12/t13 整段跳）、`s9_benchmark`（t1 需源 `rag_bm` 数据集）、

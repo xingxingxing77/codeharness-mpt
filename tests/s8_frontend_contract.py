@@ -483,7 +483,7 @@ def t8_tool_approval_gate():
 
 def t9_request_deadline():
     """F2：req() 的 fetch 必须真带 deadline（源码级钉住；15s 到点与按钮复位的读数在浏览器取，
-    见 plan/governance-gate-stage4.md）。判据打在**信号是否进了 fetch 选项**，不是打在
+    见 E:/codeharness-plan/governance-gate-stage4.md）。判据打在**信号是否进了 fetch 选项**，不是打在
     「文件里出现过 AbortSignal」——挪个位置就等于没接。"""
     fe = (FE / "api" / "client.ts").read_text(encoding="utf-8")
     req_body = re.search(r"async function req<.*?\n\}", fe, re.S).group(0)
