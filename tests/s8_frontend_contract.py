@@ -1398,8 +1398,22 @@ def t21_hire_surface():
     api_ts = (FE / "api" / "client.ts").read_text(encoding="utf-8")
     for route in ("/tools", "/roles/draft", "/roles"):
         assert f"/api/sessions/${{sid}}{route}" in api_ts, f"B9 回归：client.ts 不再消费 {route}"
-    hr = (FE / "components" / "composer" / "HireRole.vue").read_text(encoding="utf-8")
+    hr = (FE / "components" / "HireRole.vue").read_text(encoding="utf-8")
     assert "paradigm === 'dynamic'" in hr, "B9 回归：招人入口不再只对 dynamic 线出现（classic 线点了必被拒）"
+    # 09-23 搬位：招人从中间列 composer 上方挪进右栏「成员」页签（中间列被它挤掉一屏）。
+    # 三件事一起钉：右栏真的挂了它、页签只对 dynamic 出现、中间列不再挂它——少一条就是"看着搬了其实没搬"。
+    dp = (FE / "components" / "DetailsPanel.vue").read_text(encoding="utf-8")
+    assert "import HireRole from './HireRole.vue'" in dp and "ui.rightView === 'team'" in dp, \
+        "B9 回归：右栏不再挂招人（或页签正文分支没了）"
+    assert "{ key: 'team', label: '成员' }" in dp and "v.key !== 'team' || store.current?.paradigm === 'dynamic'" in dp, \
+        "B9 回归：「成员」页签不再只对 dynamic 线过滤（classic/react 线点它必被后端拒）"
+    assert "shownViews" in dp and "v-for=\"v in shownViews\"" in dp, \
+        "B9 回归：页签列表还在用未过滤的 VIEWS（非 dynamic 线会看见这个入口）"
+    app = (FE / "App.vue").read_text(encoding="utf-8")
+    assert "<HireRole" not in app, "B9 回归：中间列 composer 又挂回招人（右栏那份会两份并存）"
+    assert "rightView: 'cards' as" in (FE / "stores" / "ui.ts").read_text(encoding="utf-8") \
+        and "'team'" in (FE / "stores" / "ui.ts").read_text(encoding="utf-8"), \
+        "B9 回归：ui.rightView 的联合类型没加 'team'（切到该页签会被 TS 判成非法值）"
     assert "api.hireTools(" in hr and "api.roleDraft(" in hr and "api.hireRole(" in hr, \
         "B9 回归：三件事不再由 HireRole 串起来（草案→勾选→确认）"
     assert "hireRole" not in hr.split("async function draft(")[-1].split("async function hire(")[0], \

@@ -3,7 +3,7 @@
     <div class="bar">
       <div class="tabs" role="tablist">
         <button
-          v-for="v in VIEWS"
+          v-for="v in shownViews"
           :key="v.key"
           class="tab"
           :class="{ on: ui.rightView === v.key }"
@@ -86,6 +86,11 @@
       </template>
     </div>
 
+    <!-- B9 招人：原先挂在中间列 composer 上方，搬进右栏当一屏（只有 dynamic 线有这个页签） -->
+    <div v-else-if="ui.rightView === 'team'" class="body">
+      <HireRole />
+    </div>
+
     <div v-else-if="ui.rightView === 'replay'" class="body">
       <!-- C11 时间旅行：后端每个 superstep 本来就落一份 checkpoint（AsyncSqliteSaver），
            这里只读不写。列表只回摘要，state 点一行才取一份（实测最单个会话 711 份、单份最大 62 KB）。
@@ -155,6 +160,7 @@ import { api } from '../api/client'
 import { useSessionStore } from '../stores/sessions'
 import { useUiStore } from '../stores/ui'
 import { useToastStore } from '../stores/toast'
+import HireRole from './HireRole.vue'
 import type { FileNode as FileNodeT } from '../types'
 import { moneyBoth, sumCosts } from '../utils/money'
 
@@ -169,8 +175,16 @@ const VIEWS = [
   { key: 'review', label: '变更' },
   { key: 'graph', label: '编排' },
   { key: 'trace', label: 'trace' },
-  { key: 'replay', label: '回放' }
+  { key: 'replay', label: '回放' },
+  { key: 'team', label: '成员' }
 ] as const
+
+/** 「成员」（招人）只对 dynamic 线出现：classic/react 线里没有任何边会指向新节点，
+ *  招进来是死成员、后端也拒 ⇒ 与其留一个点了必报错的入口，不如连页签都不给。
+ *  原先这块控件挂在中间列 composer 上方，把对话区挤掉一屏——搬进右栏后中间列只剩
+ *  QueueDock/GoalBar/ComposerCard 三件。 */
+const shownViews = computed(() =>
+  VIEWS.filter((v) => v.key !== 'team' || store.current?.paradigm === 'dynamic'))
 
 const tree = ref<FileNodeT[]>([])
 const mermaid = ref('')
