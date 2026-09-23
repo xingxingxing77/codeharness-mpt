@@ -101,24 +101,48 @@ class LongTermMemory:
                   extra={"role": m.role, "cause_by": m.cause_by, "sent_from": m.sent_from})
             for (m, c), v in zip(pairs, vecs) if v])
 
-    async def _rerank(self, query: str, hits: list, k: int) -> list:
-        """bge-reranker /v1/rerank（吸收自 rag/knowledge.py，源语义与降级留痕不变）：
-        粗排命中的文本送精排重排，失败即粗排原序前 k 条；未配置精排服务则直接原序。"""
+    async def rerank_scored(self, query: str, hits: list, k: int) -> list[tuple]:
+        """精排接缝（C23(b) 补全）。返回 `[(hit, relevance_score)]`，**保持精排给的相关性序**。
+
+        三处旧形状都不对，一并改掉：
+          · 路径：`{base_url}/rerank` 是 Xinference/TEI 那一类的约定，百炼给的是
+            `/compatible-api/v1/reranks`（复数）——实测单数 **404**。现在 base_url 指到哪个口就打哪个口，
+            结尾已是 `/rerank(s)` 的按原样用，否则才补 `/rerank`（两种约定都不必再加配置）。
+          · 鉴权：以前**一个头都不发**（`reranker.api_key` 是零读者死字段）⇒ 云端永远 401，
+            又被 `except Exception` 吞成「降级」。这正是 C8 判过的那条：白等一跳、静默少一层保护。
+          · 顺序：旧代码把结果按 `index` 排序再回来，那等于**把精排的相关性序丢掉、还原成粗排原序**
+            ——「重排」是个空壳。现在按返回序映射，只把 `index` 用作回指粗排列表的下标。
+        未配置精排（`base_url` 空）或调用失败 → 原序 + 分 `None`，失败只响一声（与 s5 t28/t32 成对）。
+        """
         texts = [h.payload["text"] for h in hits]
-        if not settings.reranker.base_url or not texts:
-            return hits[:k]
+        cfg = settings.reranker
+        if not cfg.base_url or not texts:
+            return [(h, None) for h in hits[:k]]
+        base = cfg.base_url.rstrip("/")
+        url = base if base.endswith(("/rerank", "/reranks")) else f"{base}/rerank"
+        headers = {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
         try:
             async with httpx.AsyncClient(timeout=20) as c:
-                r = await c.post(f"{settings.reranker.base_url}/rerank",
-                                 json={"model": settings.reranker.model,
-                                       "query": query, "documents": texts, "top_n": len(texts)})
+                r = await c.post(url, json={"model": cfg.model, "query": query,
+                                            "documents": texts, "top_n": len(texts)},
+                                 headers=headers)
                 r.raise_for_status()
-            order = sorted(r.json()["results"], key=lambda x: x["index"])
-            return [hits[i["index"]] for i in order][:k]
+                body = r.json()
+            # 兼容口在顶层给 `results`，DashScope 原生口包在 `output` 里——两个都认，
+            # 但不许第三个形状静默落在「解析不到 = 没精排」上：解析不到就抛，走同一声 warning。
+            results = body.get("results") or (body.get("output") or {}).get("results")
+            if results is None:
+                raise ValueError(f"响应里没有 results/output.results：{str(body)[:120]}")
+            return [(hits[i["index"]], i.get("relevance_score"))
+                    for i in results if 0 <= int(i["index"]) < len(hits)][:k]
         except Exception as e:
-            logger.warning(f"精排不可用，已降级为仅粗排（{settings.reranker.base_url}）："
-                           f"{type(e).__name__}: {e}")
-            return hits[:k]
+            logger.warning(f"精排不可用，已降级为仅粗排（{url}）：{type(e).__name__}: {e}")
+            return [(h, None) for h in hits[:k]]
+
+    async def _rerank(self, query: str, hits: list, k: int) -> list:
+        """旧签名：只重排、不看分（bge-reranker 吸收自 rag/knowledge.py，降级留痕语义不变）。
+        s5 t28/t32 钉的就是这一条——`rerank_scored` 是它的带分版本。"""
+        return [h for h, _ in await self.rerank_scored(query, hits, k)]
 
     @span("memory.recall", as_type="retriever")
     async def recall(self, query: str, k: int = 5) -> list[Message]:
@@ -134,9 +158,8 @@ class LongTermMemory:
         cfg = settings.recall_floor
         dense = await self.embeddings.aembed_query(query)
         scope = dict(doc_type=self.doc_type, user_id=self.user_id, project=self.project_id)
-        if cfg.mode == "off":
-            hits = await self.store.search(query, list(dense), k=k, **scope)
-        else:
+        width = k
+        if cfg.mode in ("score", "rank"):
             window = k * cfg.oversample
             if cfg.mode == "rank":
                 window = max(window, cfg.max_rank)   # 候选窗比名次线还窄 = 那条线静默失效
@@ -152,7 +175,26 @@ class LongTermMemory:
                 return []
             logger.debug(f"{self.doc_type} 召回下限({cfg.mode}) {len(probe)}→{len(keep)} 条")
             hits = await self.store.search(query, list(dense), k=k, only_ids=keep, **scope)
-        hits = await self._rerank(query, hits, k)
+        else:
+            if cfg.mode == "rerank":
+                # 向精排多要一批候选来打分：`reranker.recall_k` 这个字段从登记起零读者，这是第一次有读者
+                width = max(k, settings.reranker.recall_k)
+            hits = await self.store.search(query, list(dense), k=width, **scope)
+        scored = await self.rerank_scored(query, hits, width)
+        if cfg.mode == "rerank":
+            usable = [(h, s) for h, s in scored if s is not None]
+            if usable and len(usable) == len(scored):
+                hits = [h for h, s in usable if s >= cfg.min_score][:k]
+                if not hits:
+                    logger.info(f"{self.doc_type} 召回被精排下限砍空：最高 relevance="
+                                f"{max(s for _, s in usable):.4f} 未过 {cfg.min_score}"
+                                f"（档=rerank，候选 {len(usable)} 条）")
+            else:
+                # 「没精排」与「精排给了分但都不达标」是两件事，不许都写成砍空：前者退回粗排原序，
+                # 那一声 warning 已经在 `rerank_scored` 里响过了。
+                hits = [h for h, _ in scored][:k]
+        else:
+            hits = [h for h, _ in scored]
         # C21：payload 里的出处带回来。`Message.metadata` 是全系统现成的那个 dict（不是为这件事新造的字段），
         # 下游要归因就在上面读 `source`/`page`——`role_zero._kb_recall` 给每条切片挂一行
         # `〔来自 文件名 [第 N 页]〕`（C22），模型答完才说得出这段话是哪份文件里的。

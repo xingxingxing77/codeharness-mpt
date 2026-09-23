@@ -976,6 +976,11 @@ def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
                                         user_id="u_kb", project=PROJ))
         noisy = [h.score for h in hits if NOISE_MARK in h.payload["text"]]
         faqy = [h.score for h in hits if "重置密码" in h.payload["text"]]
+        # **这一格显式钉住要验的那一档**，不跟着 ambient 配置走：`.env` 现在为了省额度开的是 `rank`
+        # （名次档换 embedding 模型免标定），而这里验的是「代码默认那档 score + 0.40 的线」在这份真模型
+        # 夹具上真挡得住无关文档。门禁吃环境配置 = 换台机器跑的就不是同一件事。
+        keep = (floor.mode, floor.min_score, floor.oversample)
+        floor.mode, floor.min_score, floor.oversample = "score", 0.40, 3
         line = floor.min_score
         assert noisy and faqy, f"t12①前置失配：噪声/FAQ 切片没被 dense 腿取到（{len(noisy)}/{len(faqy)}）"
         assert max(noisy) < line < max(faqy), \
@@ -984,21 +989,21 @@ def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
 
         role = RoleZero({"name": "R", "profile": "p", "goal": "g"}, [], FakeLLM(["x"]), max_loops=2)
         role.kb = reader
-        keep = (floor.mode, floor.min_score, floor.oversample)
         try:
-            floor.mode, floor.min_score = "off", 0.0
+            floor.mode = "off"
             bare = asyncio.run(role._kb_recall(task))
             assert NOISE_MARK in bare, \
                 f"t12②现状不成立：不设下限时那份马拉松文档也没进来（夹具失效，③就成了假绿）：{bare[:200]}"
-            floor.mode, floor.min_score, floor.oversample = keep
+            floor.mode = "score"
             gated = asyncio.run(role._kb_recall(task))
         finally:
             floor.mode, floor.min_score, floor.oversample = keep
         assert NOISE_MARK not in gated, f"t12③失效：下限 {line} 没挡住无关文档（{gated[:200]}）"
         assert "〔来自 faq.md〕" in gated and "重置密码" in gated, \
             f"t12③阳性对照失效：真相关那条被一起砍了：{gated[:200]}"
-        print(f"  ok  t12 真 bge-m3 下无关文档 dense={max(noisy):.4f} < 下限 {line} < FAQ "
-              f"dense={max(faqy):.4f}：不设下限它进 prompt、设了就不进，而 FAQ 那条带着出处仍在")
+        print(f"  ok  t12 真模型（{settings.embedding.model}）下无关文档 dense={max(noisy):.4f} "
+              f"< 下限 {line} < FAQ dense={max(faqy):.4f}：不设下限它进 prompt、设了就不进，"
+              f"而 FAQ 那条带着出处仍在")
     finally:
         CURRENT_PROJECT.reset(tok_p)
         CURRENT_USER.reset(tok_u)

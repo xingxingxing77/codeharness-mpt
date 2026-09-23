@@ -147,17 +147,22 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 1. ~~**runner 的用量快照不合流**~~ —— **当晚闭合**（提交 `ed8e6e8` + `242d6a8`）：`on_chat_model_end` 每笔合流 store/落盘/SSE 三头；重启 resume 从落盘快照**续算**不覆盖；零用量漏账从"静默记 0"变成 `add_usage` warning（有 warning 才有可 grep 的账差）。新门禁 `tests/s8_runner_meter.py`（4 组）把"传给图的账本必须就是 runner 手上那个实例"钉成双向断言。冒烟复跑实证：跑动中 sessions.json 里的 cost 已在落且非零。那复跑当场又炸出**第十处**：`APIError: Model output became abnormal while generating a JSON response for response_format`——qwen MaaS **服务端**abort 掉 JSON 模式生成（这段错误文本不在任何本地包里），同一请求重发即成；`_acall` 原本只重 Timeout/ConnectionError/OSError，瞬态错直接吹掉整场会话。修法有个继承链坑：openai 的 `APIStatusError`（4xx/5xx，重了烧钱）是 **`APIError` 的子类**，判据必须 `isinstance(APIError) and not isinstance(APIStatusError)`（s2 t14 用真 SDK 异常类族两头钉）。
 2. ~~**embedding 端点没配**~~ —— **2026-09-16 闭合**（`0a62e4c`）：本机 ollama 的 bge-m3（`:11434/v1`，实测 1024 维）已写进 `.env`；`gateway.embeddings()` 必须 `check_embedding_ctx_length=False`（langchain 默认发 tiktoken token-id 数组，ollama 只收字符串，直接 400）。真语义路径由 s5 t25 门禁常驻验（探活式，不在线就跳）。**reranker 已改成显式 opt-in**（C8，2026-09-21）：
 `RerankerConfig.base_url` 缺省从 `http://localhost:9998/v1` 改成空串，未配置即**干净跳过**（不发 HTTP、不抛、
-不刷 warning）；本机确实没部署 `bge-reranker-v2-m3`，要精排就设 `RERANKER__BASE_URL`。
+不刷 warning）；本机一直没部署 `bge-reranker-v2-m3`，**2026-09-24 起 `.env` 指向百炼的 `qwen3.7-text-rerank`**
+（同域兼容口，URL 要写到 `/reranks` 这一级——`/rerank` 单数实测 404）。
 两条分支都有门禁：`s5 t32`（未配置=跳过）+ `s5 t28`（配了但服务离线=降级并留痕）。
-**召回相关性下限（C23，2026-09-23）**：`recall` 原先拿到什么回什么，不相关的切片照样进 prompt。
+**召回相关性下限（C23，2026-09-23/24）**：`recall` 原先拿到什么回什么，不相关的切片照样进 prompt。
 现在先跑一次 dense-only 宽窗（`RECALL_FLOOR__OVERSAMPLE`，默认 3）拿**可比的**余弦与名次，按
-`RECALL_FLOOR__MODE` 筛（`score` 默认、线 `MIN_SCORE=0.40`；`rank` 按 dense 原始名次；`off` 回到改前那条单发路径），
-**再**交 hybrid 只在筛剩的点里重排。两根纪律：① 线只能打在 dense 腿上——hybrid 那条是 RRF 名次分，
-跟任何相似度刻度都不可比（`s5 t34` 的 m2 变异就是这一条的反例）；② 这根线是 **embedding 端点的属性**，
-默认值标定在 C20 那张尺子上（真 bge-m3 + 生产切块 + RGB_En 300 问，工装
-`tests/manual_recall_floor_curve.py`，k=5 与 k=3 各一份产物），换模型或换量化必须重量——
-这一条不是推演：默认档翻开时两个用 `HashEmbeddings` 的门禁格当场红了，替身没有那个刻度。
-门禁 `s5 t34/t35`（两支各钉一次，含「现状会进 → 加了不进」与阳性对照）+ `s15 t12`（真 bge-m3 的 prompt 面）。
+`RECALL_FLOOR__MODE` 筛（`score`=余弦线 / `rank`=dense 名次 / `rerank`=送精排按 relevance 分筛 / `off`=改前那条单发），
+**再**交 hybrid 只在筛剩的点里重排。三根纪律：① 线只能打在 dense 腿或精排分上——hybrid 那条回的是 RRF **名次分**，
+跟任何相似度刻度都不可比（`s5 t34` 的 m2 变异就是反例）；② **`min_score` 的刻度随档变**：`score` 是余弦、
+`rerank` 是精排 relevance，都不是可以跨端点抄的数。代码默认 `score/0.40` 标定在**本机 bge-m3** + C20 那张尺子上
+（`tests/manual_recall_floor_curve.py`，k=5 与 k=3 各一份产物），③ 2026-09-24 起 `.env` 的向量端点已换成百炼
+`qwen3.7-text-embedding`（同域 OpenAI 兼容口，实测 1024 维、单批 **≤20 条**），**这根线在新刻度上没标过**
+（现测无关 0.1472 / 相关 0.6224，分离度比 bge-m3 宽 ⇒ 0.40 近乎不设防），所以 `.env` 暂时走
+`RECALL_FLOOR__MODE=rank`——名次是序数，**换 embedding 模型只有这一档免标定**；重标要烧额度
+（这把 key 两个模型各 1M token，精排还按 query×候选数计费），用户令「非必要不要」故未跑。
+门禁 `s5 t34/t35/t36`（三支各钉一次，含现状-阳性对照-结构格）+ `s15 t12`（真模型 prompt 面，**显式钉自己要验的那档**、
+不吃 ambient 配置）；`s5 t37` 是真端点精排那一发，**默认跳过**，`RERANK_LIVE=1` 才发。
 3. ~~**`qwen3.8-flash` 不在 `TOKEN_COSTS`**~~ —— **2026-09-16 闭合**（用户报价：输入 0.8 / 输出 2.7 元/百万 token）：表内注明该行是**人民币口径**（其余行美元，前端 "$" 符号是展示层遗留，不跨币种换算——归 S8 一并清）。缓存命中价（输入 0.1）未入账：MaaS 不回传 `cache_read` 字段，归 S9 计费口径对齐。
 4. ~~**LangGraph 会打 `Deserializing unregistered type codeharness.schema.Message from checkpoint`**，并声明"未来版本将拦截"~~ —— **2026-09-17 闭合**（S7）：`checkpoint.py` 三型 saver 统一注入 `JsonPlusSerializer(allowed_msgpack_modules=…)` 白名单；门禁 s7 t10 双向钉（未配必警=断言不空转，配了静默）。**C2（2026-09-21）改口径**：白名单只留真正进过 `TeamState` 的 Message 系（`Document`/`Documents` 原为已删的 `docs` 假通道而挂），t10 因此改成「Message 静默、**Document 照旧告警**」——反向那一格同时钉住白名单没被放宽成"什么都放行"。
 5. `structured` 的 `include_raw` 路径每次调用会打一条 pydantic 序列化 `UserWarning`（噪声，未影响结果）。

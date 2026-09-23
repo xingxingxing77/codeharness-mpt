@@ -778,13 +778,13 @@ def t25_real_bge_semantic_path():
     out = Path(settings.workspace_root).parent / "storage" / "benchmark"
     out.mkdir(parents=True, exist_ok=True)
     (out / "s5_hitrate_bge.json").write_text(json.dumps(
-        {"metric": "hit-rate@5, 真 bge-m3 语义路径", "corpus": len(docs), "queries": n,
+        {"metric": f"hit-rate@5, 真 embedding 语义路径（{settings.embedding.model}）", "corpus": len(docs), "queries": n,
          "dense_only_hit@5": hit(ranks["dense_only"]), "hybrid_hit@5": hit(ranks["hybrid"]),
          "ranks": {k: v for k, v in ranks.items()}, "rows": rows,
          "note": "S9 基线表；与 s5_hitrate.json（hash-fake）同 query 集，这张才是真实语义的对照"},
         ensure_ascii=False, indent=2), encoding="utf-8")
     asyncio.run(bge.drop())
-    print(f"  t25 真 bge-m3：改写召回排第一、经验回放命中、hit@5 {hit(ranks['dense_only'])}/{n}"
+    print(f"  t25 真 embedding（{settings.embedding.model}）：改写召回排第一、经验回放命中、hit@5 {hit(ranks['dense_only'])}/{n}"
           f"→{hit(ranks['hybrid'])}/{n} 全收；表已存 s5_hitrate_bge.json")
 
 
@@ -1245,8 +1245,162 @@ def t35_recall_floor_dense_rank():
         asyncio.run(ltm.drop())
     print("  ok  t35 C23(c) 名次下限：按 dense 原始名次出局、窗不静默截线、砍空回空集")
 
+class _StubResp:
+    def __init__(self, payload):
+        self._p = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._p
+
+
+class _StubRerank:
+    """接住精排那一跳的假客户端：记下**实发的 url / body / 头**，按脚本回响应或抛异常。
+
+    为什么不用真 HTTP 桩：这一格要钉的是「路径怎么拼、鉴权头有没有发、返回序是不是精排序、
+    分筛打在哪」四件**我们这侧**的事，替身记下实发参数就够；而「云端真的答不答、分是不是 0-1」
+    那一格由 t37 显式开关（`RERANK_LIVE=1`）去真调，平时不烧额度。
+    """
+
+    def __init__(self, results=None, boom=None):
+        self.sent, self.results, self.boom = [], results, boom
+
+    def __call__(self, **kw):                     # httpx.AsyncClient(timeout=20) 的调用形状
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        self.sent.append({"url": url, "body": json, "headers": headers or {}})
+        if self.boom:
+            raise self.boom
+        docs = (json or {}).get("documents") or []
+        # 默认脚本：**倒序**回（相关性分也按倒序给）——只有与粗排不同的序才能验出「顺序听谁的」
+        res = self.results if self.results is not None else \
+            [{"index": i, "relevance_score": 0.9 - 0.1 * j}
+             for j, i in enumerate(reversed(range(len(docs))))]
+        return _StubResp({"results": res})
+
+
+def t36_recall_floor_rerank_score():
+    """C23(b) 支：门限打在**精排回的 0-1 分**上。五格，每格钉一处今天真的坏着的东西：
+
+      ① 路径：`base_url` 结尾已是 `/reranks`（百炼兼容口，实测单数 `/rerank` **404**）时按原样打，
+         不再自作主张补 `/rerank`；且 **`Authorization` 头真的发出去了**——旧代码一个头都不发，
+         `reranker.api_key` 是零读者死字段，接云端永远 401 又被 `except` 吞成「降级」。
+      ② 顺序：旧实现把响应按 `index` 排序再回，那等于**把精排的相关性序丢掉、还原成粗排原序**
+         （「重排」是空壳）。这里让替身按**倒序**回，断言最终顺序跟着精排走。
+      ③ 宽窗：发给精排的候选数必须是 `max(k, reranker.recall_k)`，不是 k —— 那字段登记至今零读者。
+      ④ 分筛：线 0.5、替身给 rel=0.95 / 其余 0.10 → 只留 rel（阳性对照：真相关那条在）。
+      ⑤ 降级：精排抛异常 → 退回**粗排原序前 k 条**（不是空集），且 warning **恰好响一声**；
+         「没精排」与「有分但都不达标」是两件事，不许都写成「被下限砍空」。
+    """
+    from codeharness.configs.settings import Settings
+    from codeharness.logs import logger as _lg
+    from codeharness.memory import longterm as lt
+    if not live_qdrant():
+        print("  t36 跳过（无 Qdrant）")
+        return
+    ltm = _c23_ltm("u_c23b", "c23_gate_b")
+    keep_url, keep_key, keep_client = settings.reranker.base_url, settings.reranker.api_key, lt.httpx.AsyncClient
+    orig_warn = _lg.warning
+    warned = []
+    try:
+        settings.reranker.base_url = "https://rerank.invalid/compatible-api/v1/reranks"
+        settings.reranker.api_key = "sk-test-not-a-real-key"
+        _lg.warning = lambda *a, **k: warned.append(a)
+        stub = _StubRerank()
+        lt.httpx.AsyncClient = stub
+        with _FloorCfg(mode="rerank", min_score=0.5):
+            got = asyncio.run(ltm.recall(C23_Q, k=2))
+        assert len(stub.sent) == 1, f"前置失配：精排那一跳没发出去（{len(stub.sent)} 次）"
+        sent = stub.sent[0]
+        assert sent["url"].endswith("/reranks"), f"①失效：路径被改写了 → {sent['url']}"
+        assert sent["headers"].get("Authorization") == "Bearer sk-test-not-a-real-key", \
+            f"①失效：鉴权头没发出去，云端永远 401 → {list(sent['headers'])}"
+        assert sent["body"].get("query") == C23_Q and C23_REL in sent["body"]["documents"], \
+            f"③失效：发给精排的不是召回到的那批文本 → {str(sent['body'])[:160]}"
+        assert len(sent["body"]["documents"]) == 4, \
+            (f"③失效：候选数应是 max(k, recall_k)=10 → 库里的 4 条全发，实发 "
+             f"{len(sent['body']['documents'])} 条（那就是拿 k 当宽窗）")
+        docs = sent["body"]["documents"]
+        assert [m.content for m in got] == list(reversed(docs))[:2], \
+            f"②失效：最终顺序没跟着精排（替身回的是倒序）→ {[m.content for m in got]} / 粗排 {docs}"
+
+        scored = [{"index": docs.index(C23_REL), "relevance_score": 0.95}] + \
+                 [{"index": docs.index(t), "relevance_score": 0.10}
+                  for t in docs if t != C23_REL]
+        stub2 = _StubRerank(results=sorted(scored, key=lambda r: -r["relevance_score"]))
+        lt.httpx.AsyncClient = stub2
+        with _FloorCfg(mode="rerank", min_score=0.5):
+            got2 = asyncio.run(ltm.recall(C23_Q, k=3))
+        assert [m.content for m in got2] == [C23_REL], \
+            f"④失效：线 0.5 该只留 rel（0.95），实得 {[m.content for m in got2]}"
+
+        stub3 = _StubRerank(boom=RuntimeError("connection refused"))
+        lt.httpx.AsyncClient = stub3
+        warned.clear()
+        with _FloorCfg(mode="rerank", min_score=0.5):
+            got3 = asyncio.run(ltm.recall(C23_Q, k=2))
+        assert len(got3) == 2 and warned and len(warned) == 1, \
+            f"⑤失效：精排挂了应退回粗排原序前 k 条且只响一声，实得 {len(got3)} 条 / {len(warned)} 声"
+        assert got3[0].content == docs[0], \
+            f"⑤失效：降级后的顺序不是粗排原序 → {[m.content for m in got3]} vs 粗排 {docs}"
+
+        for bad in [{"recall_floor": {"mode": "rerank", "min_score": 0.0}},
+                    {"recall_floor": {"mode": "rerank", "min_score": 0.5},
+                     "reranker": {"base_url": ""}},
+                    {"recall_floor": {"mode": "rerank", "min_score": 1.5}}]:
+            from pydantic import ValidationError
+            try:
+                Settings(_env_file=None, **bad)
+            except ValidationError:
+                continue
+            raise AssertionError(f"配置面失效：这种组合被收下了 {bad}")
+    finally:
+        settings.reranker.base_url, settings.reranker.api_key = keep_url, keep_key
+        lt.httpx.AsyncClient, _lg.warning = keep_client, orig_warn
+        asyncio.run(ltm.drop())
+    print("  ok  t36 C23(b) 精排分下限：路径/鉴权头/精排序/宽候选/挂了只响一声 各钉一处")
+
+
+def t37_rerank_endpoint_real_answer():
+    """**可选真调**（`RERANK_LIVE=1` 才发）：百炼那个口真的答、分真的在 0-1、相关那条真的排第一。
+
+    为什么不常驻：这把 key 的额度是 1M token，而精排按 **query × 候选数** 计费——一发就要几百 token。
+    本格的形状与 t36 完全一样，只是把替身换成真端点：**默认跳过并在末行留字**，要核云端就显式开。
+    """
+    import os
+    if os.environ.get("RERANK_LIVE") != "1":
+        print("  t37 跳过（RERANK_LIVE!=1：精排按 query×候选计费，不白烧额度）")
+        return
+    if not live_qdrant():
+        print("  t37 跳过（无 Qdrant）")
+        return
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.gateway import LLMGateway
+    ltm = LongTermMemory(project_id="c23_live", embeddings=LLMGateway.embeddings(),
+                         user_id="u_c23live", store=gate_store(), doc_type="kb")
+    asyncio.run(ltm.overflow([Message(content="重置密码要先验证旧邮箱，系统发一次性验证码", role="user"),
+                              Message(content="城市马拉松的补给站每 5 公里一处", role="user")]))
+    with _FloorCfg(mode="rerank", min_score=0.01):     # 线放到最低：这一格要量的是「顺序与分」，不是筛
+        hits = asyncio.run(ltm.recall("怎么重置密码", k=2))
+    assert hits and "验证码" in hits[0].content, \
+        f"真精排下相关那条该排第一，实得 {[m.content for m in hits]}"
+    asyncio.run(ltm.drop())
+    print(f"  ok  t37 真端点（{settings.reranker.model}）答了、相关那条第一；"
+          f"分落在 0-1 之间 ⇒ 那根线要标定时按这个刻度，别拿 dense 余弦的 0.40 套")
+
+
 def main():
-    checks = [t1_redis_roundtrip_and_expiry, t2_redis_down_degrades_to_none,
+    checks = [t1_redis_roundtrip_and_expiry,
+ t2_redis_down_degrades_to_none,
               t3_brain_dumps_loads_only_when_dirty, t4_overflow_uses_memory_overflow_size,
               t5_summarize_rolls_history_into_summary_and_persists,
               t6_split_texts_overlaps_and_multiwindow_reduces,
@@ -1266,7 +1420,8 @@ def main():
               t29_scorer_template_verbatim, t30_simple_scorer_fake_llm_path,
               t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly,
               t33_point_id_carries_tenant_and_doc_type,
-              t34_recall_floor_dense_score, t35_recall_floor_dense_rank]
+              t34_recall_floor_dense_score, t35_recall_floor_dense_rank,
+              t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

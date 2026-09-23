@@ -156,15 +156,21 @@ class LLMGateway:
     
     @staticmethod
     def embeddings():
-        """bge-m3 embedding 工厂（1024 维，OpenAI 兼容端点）。向量模型不走 gateway。
+        """向量模型工厂（1024 维，OpenAI 兼容端点）。向量模型不走 gateway 的重试链。
 
         ⚠ `check_embedding_ctx_length=False`：langchain 默认先用 tiktoken 把输入编码成
-        token-id 数组再发——本机 ollama 的 /v1/embeddings 只收字符串，收数组直接
-        `400 invalid input type`（2026-09-16 实测）。直发原文，本地端点自己管分词。"""
+        token-id 数组再发——端点只收字符串，收数组直接 `400 invalid input type`
+        （2026-09-16 本机 ollama 实测）。直发原文，端点自己管分词。
+        ⚠ `chunk_size=20`：百炼（`qwen3.7-text-embedding`）**单批最多 20 条**，超了整批被拒
+        ——2026-09-24 换端点当场撞上：`<400> InternalError.Algo.InvalidParameter: batch size is
+        invalid, it should not be larger than 20.: input.contents`（`s5 t25` 一次发 24 条：
+        4 组语料 × 每组 1 真 + 5 近义）。
+        放在这一处而不是各调用点自己分批：四条入库路与两条召回腿共用这个工厂，
+        少一处就少一条「本机绿、云端 400」的路。"""
         from codeharness.configs.settings import settings
         return OpenAIEmbeddings(model=settings.embedding.model, base_url=settings.embedding.base_url,
                                 api_key=settings.embedding.api_key or "EMPTY",
-                                check_embedding_ctx_length=False)
+                                check_embedding_ctx_length=False, chunk_size=20)
 
     # ---- 源 BaseLLM 的公开面 --------------------------------------------------
     def format_msg(self, messages: Union[str, dict, BaseMessage, list]) -> list[BaseMessage]:

@@ -74,33 +74,35 @@ class RerankerConfig(BaseModel):
 
 
 class RecallFloorConfig(BaseModel):
-    """C23：召回的相关性下限。`memory/longterm.py::recall` 的闸门——**融合分不可比**这件事是这根闸
-    存在的理由，不是可以绕过去的细节：hybrid 那条腿的 score 是 RRF 名次分（`1/(60+rank)` 那一族），
-    拿它跟任何余弦刻度比都是自欺（`document_store/exp_store.py:7` 同一条口径，经验池因此走 dense-only
-    才敢跟 0.9 比）。所以下限一律打在 **dense 腿**上——它的 score 是真余弦、名次也是真名次。
+    """C23：召回的相关性下限。`memory/longterm.py::recall` 的闸门。
 
-    三种档：
-      · `off`   —— 今天的行为，一次 hybrid 原样返回（默认值待 C20 尺子量完再钉，见 `mode` 那行）；
-      · `score` —— (a) 支：dense 腿先取 `k*oversample` 当候选窗，余弦 < `min_score` 的直接出局，
-                   剩下的才交给 hybrid 排序；
-      · `rank`  —— (c) 支：同一个候选窗，但按 dense **原始名次** ≤ `max_rank` 出局。名次是序数、
-                   换任何 embedding 模型都还是「第几名」，所以这一支**不依赖标定**。
+    **先说清一件容易骗人的事：`min_score` 的刻度随 `mode` 变**——它是「哪个模型的哪条腿的分」的函数，
+    不是能从书上抄的常数：
+      · `mode=score`  → dense 腿的**余弦**（bge-m3 那一档已标定，见 `FLOOR_CALIBRATED_*`；换端点必重量）；
+      · `mode=rerank` → 精排回的 **relevance_score**（另一个刻度，本机**尚未标定**，只有 3 个样本点）；
+      · `mode=rank`   → 不用分，按 dense 名次（序数）⇒ **换 embedding 模型时只有这一档免标定**。
+    下限为什么不许打在 hybrid 的返回分上：那条腿是服务端 RRF **名次分**，与相似度不可比
+    （`document_store/exp_store.py:7` 同一口径——经验池因此只走 dense 才敢跟 0.9 比）。
 
-    ⚠ `score` 那根线是 **embedding 模型的属性不是常量**（同 `EmbeddingConfig.max_chars` 是端点属性）：
-    换模型或换量化，余弦刻度整个搬走，默认值必须由 C20 那把尺子（真 bge-m3 + 生产切块 + RGB_En 300 问）
-    重新量一次，标定读数钉在 `FLOOR_CALIBRATED_ON` 里。
+    四档：
+      · `off`    —— 改前那条单发路径，行为与既有判据逐字不变；
+      · `score`  —— (a) 支：dense 取 `k*oversample` 当候选窗，余弦 < 线 的出局，剩下的交 hybrid 重排；
+      · `rank`   —— (c) 支：同一个窗按 dense 原始名次 ≤ `max_rank` 出局，再交 hybrid 重排；
+      · `rerank` —— (b) 支：粗排取 `max(k, reranker.recall_k)` 条 → 送精排打分 → 按 relevance 筛 → 前 k。
+                    精排不可用（没配 / 调用失败）时**不许冒充有下限**：退回粗排原序前 k 条，
+                    那一声 warning 在 `rerank_scored` 里响，全场只响一次。
     """
 
-    mode: Literal["off", "score", "rank"] = "score"
-    oversample: int = 3        # dense 候选窗 = k × 此数（≥1；=1 即窗与最终条数同宽）
-    min_score: float = 0.40    # score 档的余弦下限：C20 尺子上「gold 零丢失」那一档（依据见上面的常量）
+    mode: Literal["off", "score", "rank", "rerank"] = "score"
+    oversample: int = 3        # dense 候选窗 = k × 此数（≥1；rerank 档不用它，它用 reranker.recall_k）
+    min_score: float = 0.40    # score 档的余弦下限：C20 尺子上「gold 零丢失」那一档（依据见上面常量）
     max_rank: int = 5          # rank 档的名次上限（≥1）
 
     @field_validator("min_score")
     @classmethod
     def check_min_score(cls, v):
         if v < 0 or v > 1:
-            raise ValueError(f"RECALL_FLOOR__MIN_SCORE 必须在 [0,1]（余弦刻度），收到 {v}")
+            raise ValueError(f"RECALL_FLOOR__MIN_SCORE 必须在 [0,1]（余弦与精排分都在这个刻度），收到 {v}")
         return v
 
     @model_validator(mode="after")
@@ -118,6 +120,11 @@ class RecallFloorConfig(BaseModel):
                 f"（{FLOOR_CALIBRATED_ON}；超过它连尺子上真相关的切片都进不来），收到 {self.min_score}")
         if self.mode == "rank" and self.max_rank < 1:
             raise ValueError(f"RECALL_FLOOR__MODE=rank 要求 MAX_RANK ≥1，收到 {self.max_rank}")
+        # rerank 档只判「线在刻度内」，**不判上界**：那根线还没标定（本机只有 3 个样本点），
+        # 拿未标定的数当上界比不设界更骗人。
+        if self.mode == "rerank" and self.min_score <= 0:
+            raise ValueError("RECALL_FLOOR__MODE=rerank 要求 0 < MIN_SCORE <= 1（精排 relevance 刻度，"
+                             f"未标定），收到 {self.min_score}")
         return self
 
 
@@ -239,6 +246,15 @@ class Settings(BaseSettings):
     # 源 config2.py 的 Config 级开关（repair.py 与 gateway 的重试层读它）
     repair_llm_output: bool = True
     multimodal_llm: Optional[LLMConfig] = None
+
+    @model_validator(mode="after")
+    def check_rerank_floor_needs_a_service(self):
+        """C23(b) 那条「不许出现第三种静默降级」的配置面：开了 `rerank` 档却没配精排服务，
+        等于**每一次 recall 都静默没有下限**（`rerank_scored` 会原样退回粗排序）。这种组合不许启动成功。"""
+        if self.recall_floor.mode == "rerank" and not self.reranker.base_url:
+            raise ValueError("RECALL_FLOOR__MODE=rerank 需要 RERANKER__BASE_URL：没配精排却有这道闸，"
+                             "每次 recall 都会静默降级成「无下限」（正是 C8 判过的那族）")
+        return self
 
 
 settings = Settings()
