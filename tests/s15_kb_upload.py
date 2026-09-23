@@ -926,12 +926,16 @@ NOISE_MARK = "补给站"
 
 
 def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
-    """C23 的 prompt 面，**真 bge-m3** + 真 Qdrant：库里多一份毫不相干的文档，它不该出现在给模型的那段里。
+    """C23 的 prompt 面，**真 embedding 端点**（`.env` 指哪个就是哪个）+ 真 Qdrant：
+    库里多一份毫不相干的文档，它不该出现在给模型的那段里。
 
-    为什么这一格非用真模型不可：下限那根线（`RECALL_FLOOR__MIN_SCORE=0.40`）是按 bge-m3 的余弦刻度
-    标定在 C20 那张尺子上的（依据与逐档代价写在 `configs/settings.py` 的 `FLOOR_CALIBRATED_*` 注释里），
+    为什么这一格非用真模型不可：下限那根线（本格**显式钉** `mode=score, min_score=0.40`，不吃 ambient
+    配置）是标定在真模型余弦刻度上的（依据与逐档代价写在 `configs/settings.py` 的 `FLOOR_CALIBRATED_*`），
     而 `HashEmbeddings` 是 bag-of-chars——中文之间的字符重叠天然把余弦顶到高位，拿它量这道闸，
     「过不过线」这件事根本没有意义（C20 用真 embedding 推翻假向量表，量的就是这类差别）。
+    ⚠ 0.40 是在**本机 bge-m3** 上量的（无关 0.33 / 相关 0.67）；换百炼 `qwen3.7-text-embedding` 后
+    同一夹具量到无关 0.1472 / 相关 0.6224，分离更开 ⇒ 这道线在新刻度上**还没重标**，
+    所以 `.env` 现在走免标定的 `rank` 档（见 C23 行与 §3-1）。
 
     三格：
       ① 前置读数：这份夹具真的考得动这道闸——噪声切片的 dense 分必须**在线以下**、FAQ 那条在**线以上**，
@@ -1014,11 +1018,12 @@ def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
-        # 已知慢，不是卡死：`observability.shutdown()` 会在 lifespan 退出时**同步** flush 队列，
-        # 而 `.env` 默认开着开关、本机 langfuse 容器停着 ⇒ 每退一次就多等一轮导出超时（t1/t3 真跑起来
-        # span 一多，整份门禁能从 30 秒涨到看不完）。要快跑就 `LANGFUSE__ENABLED=0`，账在 PLAN C28。
-        print("  ⚠ LANGFUSE__ENABLED=1 而端点多半没起：每组 TestClient 退出都会等一次 span flush；"
-              "嫌慢就加 `LANGFUSE__ENABLED=0` 再跑（判据不依赖它）")
+        # C28 之前这里是「整份看不完」：`observability.shutdown()` 在 lifespan 退出路径上无界等 flush
+        # （09-23 实测默认档跑到第九组 150 秒未出，`=0` 同一份 30 秒）。现在那次等待有界
+        # = `LANGFUSE__SHUTDOWN_GRACE_SEC`（默认 5s），到点认「没冲完」并喊一声，所以整份能跑完；
+        # 还想再快就 `LANGFUSE__ENABLED=0`（判据不依赖它）。
+        print(f"  ⚠ LANGFUSE__ENABLED=1 而端点多半没起：每组 TestClient 退出等一次有界 grace"
+              f"（{settings.langfuse.shutdown_grace_sec}s，C28）；嫌慢就加 `LANGFUSE__ENABLED=0`")
     checks = [t1_ingest_then_recall, t2_endpoint_door, t3_role_thinks_with_kb,
               t4_rejects_what_it_cannot_ingest, t5_no_regression_guard,
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
