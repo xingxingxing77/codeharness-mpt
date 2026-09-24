@@ -4,16 +4,20 @@
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s9_langfuse.py
   LF_LIVE=1 同上                     # 追加 t3：真模型一发 + 工具/手工 span 回读断言（花真钱，默认跳过）
 
-三组 + C28 一组：
+四组（t1/t4/t5 零成本）+ 探活：
 - t1 零成本断言（永远跑）：关=全 no-op；开了但 key 缺=仍 no-op；开+双 key=handler/会话上下文/
   span 装饰器就位；runner 接线处 `config["callbacks"]` 真被塞上（唯一注入点）。
 - **t4 有界停机（永远跑，不需要任何在线服务）**：C28——端点连不通时 `observability.shutdown()`
   必须在一个 grace 内回来；配「同批 span 直接调 SDK 的无界 shutdown 明显更久」的阳性对照，
   和「本地假端点真收到了导出」的反证（防「把可观测关掉当修慢」）。
+- **t5 进程退出尾巴（永远跑，不需要任何在线服务）**：C29——C28 只把等待挪出了 lifespan，
+  进程**整退**时那笔还在；判据打在**进程总墙钟**上，配「把反注册换成 no-op＝改前形状 ⇒ 钩子真跑、
+  墙钟明显更久」的阳性对照，与「钩子退出时真跑了才落 marker」的归因读数（真凶是 OTel
+  `TracerProvider.shutdown` 这个 atexit 钩子，不是 C28 猜的 `concurrent.futures` 非 daemon worker）。
 - t2 探活（Langfuse 可达才跑）：Basic auth 回读通路（v2/observations），不建 span、不花钱。
 - t3 可选活体（LF_LIVE=1）：真模型一发 + 一个本地工具调用 + 一个手工 span → flush → 回读该会话
   的三类 span：LLM generation / TOOL / 手工 retriever（真钱 ~一次 ping，默认跳过）。
-门禁不挂在外部服务上：Langfuse 不通则 t2/t3 整段跳过并明说（s7 姿势）；t1/t4 任何时候都必须跑到。
+门禁不挂在外部服务上：Langfuse 不通则 t2/t3 整段跳过并明说（s7 姿势）；t1/t4/t5 任何时候都必须跑到。
 """
 import asyncio
 import os
@@ -384,23 +388,139 @@ def t4_shutdown_is_bounded():
         obs._client = obs._handler = None
 
 
+# ---------------- t5 进程退出尾巴（C29，永远跑） ----------------
+_EXIT_SCRIPT = '''
+import atexit, os, sys, threading, time
+sys.path.insert(0, os.environ["CH_ROOT"])
+from codeharness import observability as obs
+from codeharness.configs.settings import settings
+settings.langfuse.enabled = True
+settings.langfuse.public_key, settings.langfuse.secret_key = "pk-lf-t5", "sk-lf-t5"
+settings.langfuse.host = os.environ["LF_HOST"]
+settings.langfuse.shutdown_grace_sec = 2
+# 归因仪器：provider 建起来**之前**包一层类方法 ⇒ atexit 钩子真在退出时跑了才落 marker。
+# 不用 `atexit._ncallbacks()`：3.13 上它数的是槽位数，unregister 之后不降（C28 就被它骗过一次）。
+try:
+    from opentelemetry.sdk.trace import TracerProvider as _TP
+    _orig_shutdown = _TP.shutdown
+
+    def _logged(self):
+        with open(os.environ["T5_MARK"], "a", encoding="utf-8") as fh:
+            fh.write("otel-tracerprovider-atexit-ran\\n")
+        return _orig_shutdown(self)
+
+    _TP.shutdown = _logged
+except Exception:
+    pass
+if os.environ["T5_KEEP_HOOK"] == "1":
+    atexit.unregister = lambda *a, **k: None       # 改前形状：反注册不生效 ⇒ 钩子留在退出路径上
+t0 = time.time()
+cli = obs.client()
+for i in range(40):
+    with cli.start_as_current_observation(name="t5-%d" % i, as_type="span"):
+        pass
+t_b = time.time()
+on_time = obs.shutdown()
+t_a = time.time()
+non_daemon = [th.name for th in threading.enumerate() if not th.daemon]
+print("T5|%.2f|%.2f|%s|%s" % (t_b - t0, t_a - t_b, on_time, ",".join(non_daemon)), flush=True)
+'''
+
+
+def _run_exit_probe(keep_hook: bool, cap=60):
+    """子进程走「建客户端 → 40 span → 本仓 `shutdown()`（grace=2，死端口）→ 退出」。
+
+    **总墙钟由父进程量**（`subprocess.run` 前后）——判据就是「进程整退」，不是 lifespan 那一格。
+    返回 dict：wall 总墙钟 / build 子进程自量的建客户端秒 / shut shutdown 秒 / on_time / non_daemon /
+    hook_ran（退出时 OTel 那个 atexit 钩子真跑了没）。cap 内没跑出读数返回 None。"""
+    import shutil
+    import subprocess
+    d = Path(tempfile.mkdtemp())
+    try:
+        script = d / "probe.py"
+        script.write_text(_EXIT_SCRIPT, encoding="utf-8")
+        mark = d / "mark.txt"
+        env = {**os.environ, "CH_ROOT": str(Path(__file__).resolve().parents[1]),
+               "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1", "REDIS__DB": "15",
+               "LANGFUSE__ENABLED": "1", "NO_PROXY": "127.0.0.1,localhost,::1",
+               "LF_HOST": os.environ.get("LF_DEAD_HOST", "http://127.0.0.1:1"),
+               "T5_KEEP_HOOK": "1" if keep_hook else "0", "T5_MARK": str(mark)}
+        t0 = time.time()
+        try:
+            r = subprocess.run([sys.executable, "-B", str(script)], env=env, capture_output=True,
+                               text=True, timeout=cap, errors="replace")
+        except subprocess.TimeoutExpired:
+            return None
+        wall = time.time() - t0
+        line = next((l for l in (r.stdout or "").splitlines() if l.startswith("T5|")), "")
+        if not line:
+            return None
+        _, build, shut, on_time, non_daemon = line.split("|")
+        return {"wall": wall, "build": float(build), "shut": float(shut),
+                "on_time": on_time, "non_daemon": non_daemon, "hook_ran": mark.exists()}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t5_process_exit_tail():
+    """C29：C28 只把等待挪出了 lifespan，**进程整退**时那笔还在（≈2.5s/轮）。四格，全本地零花费。
+
+    归因是量出来的、不是猜的：真凶是 OTel `TracerProvider.shutdown` 这个 **atexit 钩子**
+    （退出时又 join 一次卡在死端点上的导出 worker）。C28 猜的「解释器收尾 join `concurrent.futures`
+    的非 daemon worker」被第 ④ 格否掉。
+
+      ① 有界：本仓现状下「进程总墙钟 − 子进程自量的（建客户端 + grace）」≤ 1.5s（解释器启动 + 退出尾巴
+         加起来有上界）。改前形状在这台机上这一项是 2.7s+。
+      ② 阳性对照 = 「它真的会等」：把 `atexit.unregister` 换成 no-op（= 改前形状，钩子留在退出路径上），
+         同一差值必须 ≥ ① + 1.0s。少了这格，① 可以靠「根本没有钩子」恒绿。
+      ③ 归因闭合：改前形状那发 marker 必须存在、现状那发必须不存在——**钩子真跑了才算数**。
+      ④ 否掉旧假设：两发退出前除主线程外不许有非 daemon 线程（出现即要重新归因）。
+
+    端点在线时 span 照旧导得出去那一半由 t4③ 复用（同一条导出路径，本件一行没碰）。
+    """
+    fix = _run_exit_probe(keep_hook=False)
+    keep = _run_exit_probe(keep_hook=True)
+    assert fix and keep, f"子进程没跑出读数（现状={fix!r} / 改前={keep!r}）——先看是不是被 60s cap 打掉"
+    out_fix = fix["wall"] - (fix["build"] + fix["shut"])
+    out_keep = keep["wall"] - (keep["build"] + keep["shut"])
+    # 四格**收集式**报红（不是 fail-fast）：变异工装要靠「哪几格红」判特异性，只看得到第一格是不够的
+    fails = []
+    if out_fix > 1.5:
+        fails.append(f"①失效：进程整退在 grace 之外还花了 {out_fix:.2f}s（总墙钟 {fix['wall']:.2f}s − 建客户端 "
+                     f"{fix['build']:.2f}s − grace {fix['shut']:.2f}s；上限 1.5s）")
+    if out_keep - out_fix < 1.0:
+        fails.append(f"②失效：改前形状只比现状多花 {out_keep - out_fix:.2f}s（{out_keep:.2f}s vs "
+                     f"{out_fix:.2f}s）——差值不到 1s 就说明这里量不到「它会等」，① 的绿不能算修掉了什么")
+    if not (keep["hook_ran"] and not fix["hook_ran"]):
+        fails.append(f"③失效：钩子跑没跑与预期不符（改前 ran={keep['hook_ran']} / 现状 ran={fix['hook_ran']}）"
+                     "——归因没闭合，别拿墙钟差当结论")
+    if not (fix["non_daemon"] == "MainThread" and keep["non_daemon"] == "MainThread"):
+        fails.append(f"④失效：退出前出现非 daemon 线程（现状 {fix['non_daemon']!r} / 改前 "
+                     f"{keep['non_daemon']!r}）——C29 已实测尾巴不是它，出现即需重新归因")
+    assert not fails, "t5 四格：" + "｜".join(fails)
+    _ok("t5", f"进程整退：现状 {fix['wall']:.2f}s（grace 之外 {out_fix:.2f}s）/ 改前形状 "
+              f"{keep['wall']:.2f}s（grace 之外 {out_keep:.2f}s）⇒ 尾巴 {out_keep - out_fix:.2f}s 归 OTel 的 "
+              f"atexit 钩子（marker 只在改前形状出现={keep['hook_ran']}）；退出前非 daemon 线程只有主线程")
+
+
 def main():
     global LF_UP
     asyncio.run(t1_gate_states())
     t4_shutdown_is_bounded()                  # C28：不依赖外部服务，必须先跑
+    t5_process_exit_tail()                    # C29：同上，零网络零花费
     LF_UP = _langfuse_up()
     if not LF_UP:
         _skip("t2/t3", f"Langfuse 未起（{settings.langfuse.host}/api/public/health 不通）"
                        f"——起 E:\\langfuse 的 compose 后复跑")
-        print("\ns9_langfuse: 2/2 过（t1 零成本 + t4 有界停机），探活组待环境")
+        print("\ns9_langfuse: 3/3 过（t1 零成本 + t4 有界停机 + t5 退出尾巴），探活组待环境")
         return
     t2_api_readback()
     if os.getenv("LF_LIVE") != "1":
         _skip("t3", "需 LF_LIVE=1（发真模型调用，花真钱）")
-        print("\ns9_langfuse: 3/3 过（t1 + t4 + t2）")
+        print("\ns9_langfuse: 4/4 过（t1 + t4 + t5 + t2）")
         return
     asyncio.run(t3_live_roundtrip())
-    print("\ns9_langfuse: 4/4 全绿")
+    print("\ns9_langfuse: 5/5 全绿")
 
 
 if __name__ == "__main__":

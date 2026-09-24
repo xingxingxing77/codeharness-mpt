@@ -137,15 +137,18 @@ def shutdown() -> bool:
 
     两件必须同时做到的事，少一件就是假修：
       ① 整次 shutdown 放进 **daemon 线程**里等一个 grace，到点就走（SDK 自己的消费线程也是 daemon）；
-      ② 顺手把 SDK 注册在 **atexit** 上的那个 `shutdown` 试着反注册掉（`resource_manager.py:279`
-         `atexit.register(self.shutdown)`）——这一条**今天实测没做到**：包一层 `atexit.register` 看得清
-         客户端建起来时挂了 4 个（`certifi.exit_cacert_ctx`、OTel 的 `TracerProvider.shutdown`、
-         `PromptCacheTaskManager.shutdown`、`LangfuseResourceManager.shutdown`），而 `atexit.unregister`
-         之后注册数一次都没降（09-24 实测）。留下这条尝试是因为它便宜且方向对，不是因为有用。
-    ⚠ **所以本函数是有界「等待」，不是有界「耗时」**：放弃之后那份网络工作还在跑，进程退出时
-    `concurrent.futures` 的收尾会 join 它的非 daemon 工作线程——实测尾巴 ≈ 一次无界 shutdown 的长度
-    （40 个 span 量到 7.6s），且**不受 OTel 那两个超时环境变量约束**（`OTEL_BSP_EXPORT_TIMEOUT=1000`
-    与 `=30000` 两档总墙钟一样 9.8s，09-24 实测 ⇒ 想靠调小 timeout 消掉尾巴是走不通的）。
+      ② 把 **OTel 的 `TracerProvider.shutdown`** 那个 atexit 钩子反注册掉（C29 的归因结果）——退出
+         尾巴就是它：退出时它又 join 一次卡在死端点上的导出 worker。40 span / grace=2 实测（09-24，
+         子进程总墙钟）：摘它 **5.74s→3.71s**；而 C28 摘的 `LangfuseResourceManager.shutdown` 一秒
+         没省（5.90s），`PromptCacheTaskManager` / `certifi` 同样没省。
+    ⚠ **C29 顺手纠正 C28 的一条判据**：`atexit._ncallbacks()` 在 3.13 数的是**槽位数**，unregister
+    之后不降（`register`+`unregister` 实测仍是 1），所以 C28 记的「注册数一次都没降 ⇒ 没做到」
+    是**仪器坏了**推出来的错结论——`unregister` 一直是生效的，这条只能用墙钟量（本函数就这么量）。
+    ⚠ **C29 同时否掉 C28 的「尾巴归谁」假设**：原猜是解释器收尾 join `concurrent.futures` 的
+    **非 daemon** worker——实测退出前 `threading.enumerate()` 里活着的线程**全是 daemon**
+    （含 `OtelBatchSpanRecordProcessor`），清空 `concurrent.futures.thread._threads_queues` 也一秒没省
+    ⇒ 不是它。原读数（40 span 对着死端口 ≈7.6s、且不受 `OTEL_BSP_EXPORT_TIMEOUT` 约束——1000 与
+    30000 两档总墙钟一样 9.8s）现在是本函数治掉的那条尾巴。
     被修掉的真正症状是**每一次 lifespan 退出都等一轮**：s15 一份里六七个 TestClient ⇒ 改前逐个付
     （09-23 现取：整份 150 秒未出；改后 in-process 单次进出 1.01s，无界的旧形状同批 9.3s）。
     代价写在脸上并喊出来：grace 内没发完的那批 span 丢掉。这是本件**唯一**的降级形状，不静默。
@@ -170,10 +173,18 @@ def shutdown() -> bool:
     threading.Thread(target=_go, daemon=True, name="langfuse-shutdown").start()
     if done.wait(grace):
         return True
-    res = getattr(cli, "_resources", None)
-    hook = getattr(res, "shutdown", None)
+    # 退出尾巴的归因见 docstring ②：真凶是 OTel 这个**进程级** provider 的 atexit 钩子，
+    # 不是 `concurrent.futures` 的 join，也不是 C28 摘的那个 `LangfuseResourceManager.shutdown`。
+    # provider 拿不到就跳过（例如 langfuse 用了非全局 provider ⇒ `get_tracer_provider()` 回
+    # ProxyTracerProvider，它没有 shutdown）——这条反注册是**省时间**，不是正确性依赖。
+    try:
+        from opentelemetry import trace as _otel_trace
+        _prov = _otel_trace.get_tracer_provider()
+    except Exception:
+        _prov = None
+    hook = getattr(_prov, "shutdown", None)
     if hook is not None:
-        atexit.unregister(hook)                     # 见 docstring 的 ②：实测没做到，留着方向
+        atexit.unregister(hook)
     logger.warning(f"可观测停机只等 {grace}s：{settings.langfuse.host} 多半不可达，没发完的 span "
                    f"这批丢掉（要等久一点就调 LANGFUSE__SHUTDOWN_GRACE_SEC；不采就 LANGFUSE__ENABLED=0）")
     return False
