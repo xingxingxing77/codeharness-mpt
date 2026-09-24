@@ -214,9 +214,9 @@ async def _run_session(args, project: str, question: str, label: str):
         tok = _TOOL_K.set(args.tool_k)            # 只在这一次工具调用里拧 k，出来就摘
         try:
             out = await orig(query=query)
-        except BaseException as e:                # 不记这一笔的话：那次调用从读数里**整个消失**
-            # （09-25 k=6 那场就出现过「recall 记到一次工具侧调用、而 tool_calls 是空的」——
-            #  当时无从判断是模型没调还是工装吞了异常。吞掉的调用会让「核实次数」被读少。）
+        except BaseException as e:                # 不记这一笔的话：抛掉的那次调用会从读数里**整个消失**，
+            # 「核实次数」就被静默读少。这一格是**防护**，不是现证——09-25 那三场里没出现过这种形状
+            # （两档的 tool_calls 与「每腿实收的 k」逐场自洽），别把它当成已观测到的缺陷。
             rec = {"query": query, "raised": f"{type(e).__name__}: {e}", "sources": [], "chars": 0}
             tool_calls.append(rec)
             print(f"    工具这一发抛了：{rec['raised'][:160]}", flush=True)
