@@ -198,7 +198,7 @@ export const api = {
    *  `before` 传上一页末条的 checkpoint_id（**开区间**上界），与 B2 的事件回放同一套翻页语义。 */
   checkpoints: (sid: string, before = '', limit = 80) =>
     req<{ checkpoints: { checkpoint_id: string; step: number; source: string; ts: string;
-                         next: string[]; writes: string[]; tasks: string[] }[];
+                         next: string[]; tasks: string[] }[];   // 09-25 删 writes：langgraph 的 metadata 里就没这个键（见 runner._ckpt_page）
          has_more: boolean; next_before: string; reason?: string }>(
       'GET', `/api/sessions/${sid}/checkpoints?before=${encodeURIComponent(before)}&limit=${limit}`),
   /** 单份超步的完整 state。超过后端上限回 413（调用方按 status 分流，别猜文案）。

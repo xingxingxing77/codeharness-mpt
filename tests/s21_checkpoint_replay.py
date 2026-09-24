@@ -29,7 +29,7 @@ from server.events import SessionEventBus
 from server.runner import SessionRunner
 from server.sessions import SessionStore
 
-PAGE_FIELDS = {"checkpoint_id", "step", "source", "ts", "next", "writes", "tasks"}
+PAGE_FIELDS = {"checkpoint_id", "step", "source", "ts", "next", "tasks"}   # 09-25 删掉装死的 writes（langgraph 的 metadata 无此键）
 
 
 class S(TypedDict):
@@ -73,7 +73,10 @@ async def t1_page_semantics():
     for it in items:
         assert set(it) == PAGE_FIELDS, f"页项字段集漂移（前端吃这份形状）：{sorted(set(it) ^ PAGE_FIELDS)}"
         assert "values" not in it and "state" not in it, "列表页混进了整份黑板"
-    assert all(isinstance(it["writes"], list) for it in items), "writes 该是键名数组"
+    # 「谁在这一步干活」只有 tasks 一个真值源：旧写法读的是 `md.get("writes")`，而本机 langgraph 根本
+    # 不给这个键 ⇒ 那一格永远是空数组，前端那句「空则退回 tasks」又把死字段盖住了。删字段之后必须验它**有内容**：
+    assert any(it["tasks"] for it in items), "所有超步的 tasks 都是空的 ⇒ 这一栏没有信息，界面那列又是破的"
+    assert all(isinstance(it["tasks"], list) for it in items), "tasks 该是节点名数组"
 
     p2 = await runner._ckpt_page(app, cfg, 4, before={"configurable": {"thread_id": "s21",
                                                                       "checkpoint_id": page["next_before"]}})

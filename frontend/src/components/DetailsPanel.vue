@@ -111,7 +111,7 @@
       <div v-if="replay.reason" class="dim">{{ replay.reason }}</div>
       <template v-else>
         <table v-if="replay.rows.length" class="cpTable">
-          <thead><tr><th class="num">步</th><th>来源</th><th>下一步</th><th>产出</th><th class="num">时刻</th></tr></thead>
+          <thead><tr><th class="num">步</th><th>来源</th><th>下一步</th><th>节点</th><th class="num">时刻</th></tr></thead>
           <tbody>
             <tr v-for="cp in replay.rows" :key="cp.checkpoint_id"
                 class="cpRow" :class="{ on: cp.checkpoint_id === replay.open }"
@@ -120,7 +120,7 @@
               <td class="num">{{ cp.step }}</td>
               <td>{{ cp.source }}</td>
               <td>{{ cp.next.join('、') || '—' }}</td>
-              <td><span class="cpWrites">{{ (cp.writes.length ? cp.writes : cp.tasks).join(' ') || '—' }}</span></td>
+              <td><span class="cpWrites">{{ cp.tasks.join(' ') || '—' }}</span></td>
               <td class="num">{{ cpClock(cp.ts) }}</td>
             </tr>
           </tbody>
@@ -226,7 +226,7 @@ const totals = computed(() => ({
 /** C11 时间旅行：这一屏是本地态（分页游标 + 展开的那一份），不进 pinia——
  *  它不像 spans 那样被对话流共享，塞进 store 只是多一处要同步的记账。 */
 interface CpRow { checkpoint_id: string; step: number; source: string; ts: string;
-  next: string[]; writes: string[]; tasks: string[] }
+  next: string[]; tasks: string[] }
 const replay = reactive({
   rows: [] as CpRow[], hasMore: false, nextBefore: '', reason: '', open: '', state: '', busy: false
 })

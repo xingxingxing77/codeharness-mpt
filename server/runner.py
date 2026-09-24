@@ -231,16 +231,18 @@ class SessionRunner:
         这一层刻意**不带 values**：`aget_state_history` 会把每份 state 反序列化出来
         （langgraph 的接口就这样），但只在这一格内存里活着，出页即丢。真数据层实测最单个
         thread 有 711 份、单份最大 62 KB，整份跟着列表回给浏览器等于一次请求搬几十 MB。
-        `writes` 只留**键名**（谁产出了什么，节点级够用），值走详情端点按需取。"""
+        `writes` 这一格 09-25 删掉了，别当「实测为空」：本机 langgraph 的 `snap.metadata` 只有
+        `parents / source / step` 三个键（两节点小图现证，见 `plan/team-runtime.md` C11 行末），
+        旧写法 `sorted(writes) if isinstance(writes, dict) else []` 于是**永远**给前端一个空数组——
+        那是个装死的字段，而界面还写了「空则退回 tasks」的兜底，看着像有两条数据源。
+        这一步里谁干活由 `tasks` 给，那才是真值。"""
         out: list[dict] = []
         async for snap in graph.aget_state_history(config, before=before, limit=limit + 1):
             md = snap.metadata or {}
             conf = (snap.config or {}).get("configurable") or {}
-            writes = md.get("writes")
             out.append({"checkpoint_id": conf.get("checkpoint_id") or "",
                         "step": md.get("step"), "source": md.get("source"),
                         "ts": str(snap.created_at or ""), "next": list(snap.next or ()),
-                        "writes": sorted(writes) if isinstance(writes, dict) else [],
                         "tasks": [getattr(t, "name", "") for t in (snap.tasks or ())]})
         has_more = len(out) > limit
         page = out[:limit]
