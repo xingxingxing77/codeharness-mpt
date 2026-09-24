@@ -15,6 +15,8 @@ from typing import Any, ClassVar, Iterable, Optional, Type
 from pydantic import BaseModel, Field, create_model
 
 # 只补空字段的追问模板。刻意不做多轮闲聊，一次问齐。
+_KB_BLOCK = ("[知识库片段]\n{kb}\n"
+             "（以上来自本会话知识库，引用其中内容时请连那行的出处一起说；用不上就忽略）")
 _PATCH_TEMPLATE = """Only fill the following MISSING fields, based on the context.
 Return a markdown JSON object containing ONLY these keys.
 
@@ -87,10 +89,22 @@ class Action(BaseModel):
     async def _ask(self, schema: Type[BaseModel], prompt: str, system: Optional[str] = None) -> BaseModel:
         """全仓 structured 的**唯一出口**（接线台账 #1：actions/ 下不许再有直连 `llm.structured`）。
         `system` 给定走 [System, Human] 消息形态（对齐源 ActionNode 的双段 prompt），否则裸 prompt。
-        失败时由 gateway 的修复档兜底，仍失败则原样抛出。"""
+        失败时由 gateway 的修复档兜底，仍失败则原样抛出。
+
+        经典线（`roles/agent.py`）的知识库片段也从这里进：动作各自拼 prompt，只有这一处能盖住全部
+        36 个动作。`KB_CONTEXT` 没装（dynamic 线、离线测试、`enable_rag` 关）时**逐字保持改前形态**，
+        所以既有 prompt 判据一格都不受影响；装了才追加一段，出处标记与 C22 那条格式同源。
+        """
+        from codeharness.runtime import KB_CONTEXT
+        kb = KB_CONTEXT.get()
         if system is not None:
             from langchain_core.messages import HumanMessage, SystemMessage
-            prompt = [SystemMessage(content=system), HumanMessage(content=prompt)]
+            msgs = [SystemMessage(content=system), HumanMessage(content=prompt)]
+            if kb:
+                msgs.append(HumanMessage(content=_KB_BLOCK.format(kb=kb)))
+            prompt = msgs
+        elif kb:
+            prompt = prompt + "\n\n" + _KB_BLOCK.format(kb=kb)
         return await self.llm.structured(schema).ainvoke(prompt, tag=self.name)
 
     @staticmethod

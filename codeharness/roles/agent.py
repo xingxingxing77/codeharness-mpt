@@ -48,6 +48,7 @@ class Agent:
         self.max_loops = max_loops
         self.watch = watch or {"UserRequirement"}       # 对齐 _process_role_extra(:177) 默认订阅
         self.env_desc = env_desc
+        self.kb = None                                  # C3 行②那半账：经典线的知识库读者，装配期挂
         prefix = self.build_prefix()
         for a in actions:                                # 对齐 _process_role_extra(:173)
             a.prefix = prefix
@@ -164,6 +165,25 @@ class Agent:
         return "gate"
 
     # ---- 源 _act(:381-397) 逐行翻译 + self-heal 收口 ----
+    async def _kb_block(self, task: str) -> str:
+        """这一轮动作的知识库预取。补的是 C3 行②留的那半截账：dynamic 线从 C3 起就有读者，
+        classic/react 线没有 ⇒ 用户上传了文档、跑默认 paradigm 却一条都引用不到，而界面上不报错。
+
+        与 `RoleZero._kb_recall` 同一档位：检索链任何一环挂了都按「没有资料」继续，
+        不为一次召回打断整场（那会把已完成的工作与已花的钱一起陪葬，第十二处教训）。
+        """
+        from codeharness.configs.settings import settings
+        if self.kb is None or not settings.enable_rag or not task.strip():
+            return ""
+        try:
+            from codeharness.memory.longterm import format_kb_blocks
+            return format_kb_blocks(await self.kb.recall(task, k=3))
+        except Exception as e:
+            from codeharness.logs import logger
+            logger.warning(f"{self.profile['name']} 知识库召回失败，按无资料继续: "
+                           f"{type(e).__name__}: {e}")
+            return ""
+
     async def _act(self, s: AgentState):
         from langgraph.errors import GraphInterrupt
         action = self.actions[s["chosen"]]
@@ -191,6 +211,10 @@ class Agent:
         # 注：跨动作上下文走 trig.instruct_content 透传（下面 run(...)），不改 msg.content——
         # content 是下一动作的工作载荷（如 RunPythonCode 直接把它当代码执行），前缀散文会污染。
         # 「经典线记忆回喂进 prompt」是 _think 侧 system 上下文的事（对照1 §五-8），不在 _act 做。
+        # 知识库那条不一样：动作的 prompt 在 `Action._ask` 那个唯一出口上才成型，所以在这里取一次、
+        # 经 ContextVar 交给它（`runtime.KB_CONTEXT`）——**一次动作只检索一次**，补问轮复用同一份。
+        from codeharness.runtime import KB_CONTEXT
+        kb_tok = KB_CONTEXT.set(await self._kb_block(prompt))
         try:
             result = await action.run(Message(
                 content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,
@@ -213,6 +237,10 @@ class Agent:
             result = Message(content=f"[错误] {action.name} 执行失败: {type(e).__name__}: {e}",
                              role="user", cause_by=action.name, sent_from=self.profile["name"],
                              send_to={MESSAGE_ROUTE_TO_SELF})
+        finally:
+            # 挂在 try 上而不是 try 后：GraphInterrupt 那条要暂停整场、抛错那条要自愈，
+            # 两支都得把这份上下文摘掉——留着下一轮就会拿上一轮动作的知识库片段干活。
+            KB_CONTEXT.reset(kb_tok)
         if isinstance(result, Message):
             msg = result
         else:

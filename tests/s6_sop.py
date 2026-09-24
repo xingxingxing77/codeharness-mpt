@@ -928,6 +928,134 @@ def t22_fixbug_rewrite_chain():
     print("  t22 FIX_BUG 全链：按因产计划→REFINED 重写→评审→摘要，旧码置顶进 prompt、工单消费即删")
 
 
+def t24_classic_line_reads_the_knowledge_base():
+    """C3 行②留的那半截账：知识库读者此前只挂在 dynamic 线，而 **classic 才是默认 paradigm**
+    （`CreateSessionReq.paradigm="classic"`）⇒ 用户上传了文档、跑默认线一条都引用不到，界面上还不报错。
+    五格各钉一种坏法。零花费：kb 用桩、模型用 FakeLLM，不碰 Qdrant 也不碰端点。"""
+    import asyncio
+    import json
+    from pydantic import BaseModel
+
+    import codeharness.runtime as rt
+    from codeharness.base.action import Action
+    from codeharness.configs.settings import settings
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.schema import Message
+    from codeharness.team import classic_team, react_assembly
+
+    class Out(BaseModel):
+        text: str = "ok"
+
+    class Echo(Action):
+        name: str = "Echo"          # Action 是 pydantic 模型，覆盖字段必须带注解
+
+        async def run(self, msg):
+            await self._structured("任务正文：" + msg.content, Out)
+            return Message(content="done", cause_by=self.name)
+
+    class StubKB:
+        doc_type = "kb"
+
+        def __init__(self, msgs=(), boom=False):
+            self.msgs, self.boom, self.seen = list(msgs), boom, []
+
+        async def recall(self, query, k=5):
+            self.seen.append(query)
+            if self.boom:
+                raise ConnectionError("qdrant 没起")
+            return self.msgs
+
+    class NoStore:
+        async def search(self, *a, **kw):
+            return []
+
+    def state(text="机票能报多少"):
+        m = Message(content=text, role="user", cause_by="UserRequirement")
+        return {"name": "E", "inbox": [m], "memory": [], "action_cursor": 0,
+                "chosen": "Echo", "plan": ["Echo"], "loops": 0, "output": []}
+
+    # ① 装配面：classic 与 react 两条线每个角色都挂着 doc_type=kb 的读者；开关关掉就全不挂
+    probe = FakeLLM([json.dumps({"text": "x"})])
+    for label, agents in (("classic", classic_team(probe)), ("react", react_assembly(probe))):
+        bad = [a.profile["name"] for a in agents.values()
+               if getattr(a, "kb", None) is None or a.kb.doc_type != "kb"]
+        assert not bad, f"t24①失效（{label} 线）：这些角色没挂读者或挂错切片 {bad}"
+    keep_rag = settings.enable_rag
+    settings.enable_rag = False
+    try:
+        assert all(a.kb is None for a in classic_team(probe).values()), \
+            "t24①失效：`enable_rag=False` 时仍挂读者 ⇒ 那个开关在经典线上是摆设"
+    finally:
+        settings.enable_rag = keep_rag
+
+    # ② 一次动作只检索一次，且产出真进到动作的 prompt（带出处）
+    llm2 = FakeLLM([json.dumps({"text": "y"})])
+    agent = Agent({"name": "E", "profile": "p", "goal": "g"}, [Echo(llm=llm2)], llm2)
+    kb = StubKB([Message(content="航空客票单程上限一千八百元", metadata={"source": "差旅规定.md"})])
+    agent.kb = kb
+    asyncio.run(agent._act(state()))
+    assert kb.seen == ["机票能报多少"], \
+        f"t24②失效：一次动作发了 {len(kb.seen)} 次检索（要 1 次；补问轮不许再查）"
+    p1 = str(llm2.calls[-1])
+    assert "[知识库片段]" in p1 and "〔来自 差旅规定.md〕" in p1 and "一千八百" in p1, \
+        f"t24②失效：动作 prompt 里没带上片段或没带出处：{p1[-240:]}"
+
+    # ③ 跑完必须摘干净。**两版探法都被变异 n2 打回过，原因各记一笔**：
+    #    第一版在 `asyncio.run` 外面读 `KB_CONTEXT` —— `asyncio.run` 把协程包进 Task 时**复制** context，
+    #    Task 里 set 的值回不到外层，所以「忘了 reset」照样绿；
+    #    第二版改成「同 context 里连跑两个 `_act`」——还是绿，因为 `_act` 进门就 set（没订阅的那个
+    #    角色 set 成空串），把漏下来的值盖掉了。
+    #    真正会被污染的是**绕过 `_act` 直接跑动作的调用方**（本门禁的 `_run`、`plan_and_act` 都是这形状），
+    #    所以探针必须走那条路：`_act` 跑完，紧接着直接 `action.run(...)`，第二段 prompt 里不许有第一段。
+    llm5 = FakeLLM([json.dumps({"text": "a"}), json.dumps({"text": "b"})])
+    r1 = Agent({"name": "E1", "profile": "p", "goal": "g"}, [Echo(llm=llm5)], llm5)
+    r1.kb = StubKB([Message(content="航空客票单程上限一千八百元", metadata={"source": "差旅规定.md"})])
+
+    async def leak_probe():
+        await r1._act(state("第一轮的问题"))
+        first = str(llm5.calls[-1])
+        await Echo(llm=llm5).run(Message(content="第二轮的问题", role="user", cause_by="UserRequirement"))
+        return first, str(llm5.calls[-1])
+
+    first_prompt, direct_prompt = asyncio.run(leak_probe())
+    assert "〔来自 差旅规定.md〕" in first_prompt, \
+        "t24③失效：第一轮就没带上片段，这一场对照不了串味"
+    assert "〔来自 差旅规定.md〕" not in direct_prompt, \
+        "t24③失效：上一轮动作的知识库片段漏到了下一段——绕过 `_act` 的调用方会拿到别人的资料"
+
+    # ③ 没订阅的角色逐字保持改前形态（既有 prompt 判据一格都不该受影响）
+    llm3 = FakeLLM([json.dumps({"text": "z"})])
+    asyncio.run(Agent({"name": "E", "profile": "p", "goal": "g"},
+                      [Echo(llm=llm3)], llm3)._act(state()))
+    assert "知识库片段" not in str(llm3.calls[-1]), "t24③失效：没挂读者也往 prompt 里塞了一段"
+
+    # ④ 检索挂了不打断动作：降级成「没有资料」，动作照跑完
+    llm4 = FakeLLM([json.dumps({"text": "w"})])
+    down = Agent({"name": "E", "profile": "p", "goal": "g"}, [Echo(llm=llm4)], llm4)
+    down.kb = StubKB([], boom=True)
+    out = asyncio.run(down._act(state()))
+    assert "知识库片段" not in str(llm4.calls[-1]) and out["output"][-1].content == "done", \
+        "t24④失效：一次召回失败把动作打断了（或改走了报错分支）"
+
+    # ⑤ 读侧 query 上界：经典线传的可能是整份收件，超长要截且要喊出来
+    seen = []
+
+    class RecLLM:
+        async def aembed_query(self, q):
+            seen.append(len(q))
+            return [0.0] * 8
+
+    asyncio.run(LongTermMemory(embeddings=RecLLM(), store=NoStore(), doc_type="kb")
+                .recall("长" * 5000, k=3))
+    assert seen == [settings.embedding.max_chars], \
+        (f"t24⑤失效：query 没按端点窗口截（实发 {seen} 字，上限 "
+         f"{settings.embedding.max_chars}）——不截就是白烧额度 + 端点静默保头丢尾")
+    print("  t24 经典线/react 线的动作真带上知识库片段（装配两线各挂、一次动作只查一次、"
+          "跑完摘干净、没订阅逐字不变、挂了不打断、读侧 query 截到端点窗口）")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -939,7 +1067,8 @@ def main():
               t16_search_and_summarize_history, t17_role_profile_parity,
               t18_strategy_switch, t19_ext_api_acceptance,
               t20_structured_patch_live, t21_single_structured_seam,
-              t22_fixbug_rewrite_chain, t23_runcode_triage]
+              t22_fixbug_rewrite_chain, t23_runcode_triage,
+              t24_classic_line_reads_the_knowledge_base]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"

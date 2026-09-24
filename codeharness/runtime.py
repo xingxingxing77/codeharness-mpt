@@ -31,6 +31,14 @@ APPROVAL_IO: ContextVar[object] = ContextVar("approval_io", default=None)
 """待批通道：实现 `decision(aid)` / `request(item)` 的对象（server 注入 platforms.approval_store 适配器）。
 没装 = 内核直跑图（门禁与离线测试路径），此时 gate 一律放行——没有可问的人，挂起只会永久卡住。"""
 
+KB_CONTEXT: ContextVar[str] = ContextVar("kb_context", default="")
+"""经典线（`roles/agent.py`）这一轮动作的知识库片段，已排好版（每条带 `〔来自 文件名〕`）。
+装在 `Agent._act` 里、读在 `Action._ask` 里——**一次动作只检索一次**（`_ask` 会被补问轮再调一次，
+每次都查就是每次白烧一发 embed + 两次 Qdrant）。空串 = 这个角色没订阅知识库、或检索挂了、
+或 `enable_rag` 关着：`_ask` 于是逐字保持改前的 prompt。
+为什么用 ContextVar 而不是把文本塞进 `msg.content`：content 是下一动作的工作载荷
+（`RunPythonCode` 直接把它当代码执行），前缀散文会污染——那条注释写在 `_act` 头上，这里照旧绕开。"""
+
 
 def session_root(project: str | None = None) -> Path:
     """本会话工作目录 = `workspace_root/{project 或 CURRENT_PROJECT}`，与 server 的 `session.workspace`、

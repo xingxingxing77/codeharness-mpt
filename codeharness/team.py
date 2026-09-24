@@ -148,7 +148,8 @@ def classic_team(llm):
     from codeharness.actions.run_code import RunCode
     from codeharness.actions.debug_error import DebugError
     from codeharness.actions.summarize_code import SummarizeCode
-    return {
+    from codeharness.configs.settings import settings
+    agents = {
         # PM 前置 PrepareDocuments 照源 product_manager.py:45-46 的固定 SOP（BY_ORDER 表达），
         # requirements_filename 从此有生产者；Engineer 的 WriteCodeReview 照源 engineer.py:128-137
         # "每写完一文件即评审"，游标顺序 = 业务顺序（接线台账 #2/#3 收口，e2e 手写装配的同款形态）。
@@ -182,6 +183,17 @@ def classic_team(llm):
                            react_mode="REACT", max_loops=5,
                            watch={RequirementTag.SUMMARIZE_CODE}),
     }
+    # C3 行②留的那半截账：知识库读者此前只挂在 dynamic 线的 `default_team` 上，而 **classic 才是默认
+    # paradigm**（`CreateSessionReq.paradigm="classic"`）⇒ 用户上传了文档、跑默认线却一条都引用不到，
+    # 界面上还不报错。react 线走的就是本函数（`react_assembly` → `classic_team`），一并覆盖。
+    # 与 dynamic 线同一份口径：只给 doc_type，租户/项目由 LongTermMemory 现取 ContextVar（C31 同源）。
+    if settings.enable_rag:
+        from codeharness.memory.longterm import LongTermMemory
+        from codeharness.provider.gateway import LLMGateway
+        emb = LLMGateway.embeddings()
+        for a in agents.values():
+            a.kb = LongTermMemory(embeddings=emb, doc_type="kb")
+    return agents
 
 
 # ---------------- C1-③：现场招人（源无此能力，用户 2026-09-21 决策 #4 自建） ----------------
