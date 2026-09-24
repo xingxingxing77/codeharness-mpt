@@ -410,6 +410,112 @@ def t9_two_endpoints_one_ledger():
             srv.shutdown()
 
 
+def t10_cost_injection_end_to_end():
+    """C19 未验②：**图内那笔账到底能不能被 runner 读到**——整场会话端到端，零花费。
+
+    `cost.py` 那条 ⚠ 一直挂着这条：跑完读得到非零的前提是「角色手上的 manager 就是 runner
+    `self.costs[sid]` 那一份」，而此前只证到「同一个 manager 的快照带得出那些键」（构造对象），
+    没证过**注入链本身**。双账本正是当年「用量恒 0」的根因，所以这一格必须走真路径：
+
+      真 `create_app()` + 真 `SessionRunner` + 真 `_make_llm`（**不打桩工厂函数**，打了就是在测我自己
+      的桩）→ 网关指向一台本机 OpenAI 兼容桩（模型名取价表 CNY 行）→ 起一场 dynamic 线会话跑到终态
+      → 从 **GET 出口**读 `cost`。
+
+    四格各钉一种坏法：
+      ① pt/ct 非零 —— 注入断了就恒 0（历史上就是这个形状）；
+      ② 币种按价表算：CNY 桶 > 0 且 USD 桶 == 0（两桶不相加是 C12 的口径，这里顺带证明
+         「桩回的名字真被当模型名用了」）；
+      ③ 终态是 `finished` 而不是 `failed` —— 不然「跑完能看见」这句话没有意义；
+      ④ 快照里三笔无效调用计数键齐（`truncated/unknown_command/empty_output`）——C19/T4-③ 那三个
+         观测项与钱同路，路断在注入上它们也一起看不见。
+    反证（改真代码、不在门禁里）：把 `_make_llm(cost_manager, …)` 的注入摘掉 ⇒ ①② 当场红。
+    """
+    import json as _j
+    import shutil
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+    from tempfile import mkdtemp
+
+    import server.sessions as ss
+    from codeharness.configs.settings import settings
+
+    PT, CT = 137, 29                      # 手得上数：与价表 CNY 行相乘后仍要能核对非零
+    MODEL = "step-3.5-flash"              # 价表里落在 CNY 名单的那个名字
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            body = {"id": "chatcmpl-t10", "object": "chat.completion", "created": 1790000000,
+                    "model": MODEL,
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant", "content": "好的"}}],
+                    "usage": {"prompt_tokens": PT, "completion_tokens": CT,
+                              "total_tokens": PT + CT}}
+            out = _j.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Stub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    keep = (settings.llm.base_url, settings.llm.api_key, settings.llm.model, settings.llm.stream,
+            settings.enable_rag, settings.platform.auth_enabled, settings.platform.use_redis,
+            ss.SESSIONS_FILE)
+    tmp = Path(mkdtemp())
+    project = "s8t10_inject"
+    try:
+        settings.llm.base_url = f"http://127.0.0.1:{port}/v1"
+        settings.llm.api_key = "stub-key"
+        settings.llm.model = MODEL
+        settings.llm.stream = False         # 桩回一次性 JSON，流式那套要 SSE 分帧
+        settings.enable_rag = False         # 本格问账本注入，不掺向量腿（也不发任何 embedding）
+        settings.platform.auth_enabled = False
+        settings.platform.use_redis = False
+        ss.SESSIONS_FILE = tmp / "sessions.json"
+
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            sid = c.post("/api/sessions",
+                         json={"idea": "只回一句你好，不要调工具", "project_name": project,
+                               "paradigm": "dynamic"}).json()["id"]
+            assert c.post(f"/api/sessions/{sid}/start").status_code == 200, "起跑失败"
+            status, body = "", {}
+            for _ in range(120):                       # 上限 60s：桩是本地即时回，超时就是卡住了
+                time.sleep(0.5)
+                body = c.get(f"/api/sessions/{sid}").json()
+                status = str(body.get("status"))
+                if status != "running":
+                    break
+            cost = body.get("cost") or {}
+            assert status == "finished", f"③这一场没跑到 finished（实为 {status}），①②的读数不作数"
+            assert cost.get("total_prompt_tokens", 0) > 0 and cost.get("total_completion_tokens", 0) > 0, \
+                (f"①GET 出口的账本是空的：注入链断了（双账本，正是当年恒 0 的形状）——{cost}")
+            assert cost.get("cost_cny", 0) > 0 and cost.get("cost_usd") == 0, \
+                f"②币种不对（{MODEL} 在 CNY 名单里，两桶不相加）：{cost}"
+            missing = {"truncated_calls", "unknown_command_calls", "empty_output_calls"} - set(cost)
+            assert not missing, f"④三笔观测项有键没带出出口：缺 {missing}（{sorted(cost)}）"
+            _ok("t10", f"整场会话端到端：真装配跑到 {status}、GET 出口 pt={cost['total_prompt_tokens']} "
+                       f"ct={cost['total_completion_tokens']} ¥{cost['cost_cny']}（$ 保持 0）、"
+                       "三笔无效调用计数键都在 ⇒ 角色手上的 manager 就是 runner 那一份")
+    finally:
+        srv.shutdown()
+        (settings.llm.base_url, settings.llm.api_key, settings.llm.model, settings.llm.stream,
+         settings.enable_rag, settings.platform.auth_enabled, settings.platform.use_redis,
+         ss.SESSIONS_FILE) = keep
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(Path("workspace") / project, ignore_errors=True)
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -420,7 +526,8 @@ def main():
     asyncio.run(t7_span_timing())
     t9_two_endpoints_one_ledger()
     t8_two_currency_buckets()
-    print("\ns8_runner_meter: 9/9 全绿")
+    t10_cost_injection_end_to_end()      # C19 未验②：注入链端到端（要起本机桩，放最后）
+    print("\ns8_runner_meter: 10/10 全绿")
 
 
 if __name__ == "__main__":

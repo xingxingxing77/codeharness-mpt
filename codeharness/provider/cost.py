@@ -39,10 +39,11 @@ class CostManager(BaseModel):
     # T4-③：模型吐「本轮工具面里没有的命令」被回喂了几笔。与 truncated_calls 同族——都是
     # "这一发白花了"的只读计数，不参与金额口径。为什么要落在账本上：日志行只能让人 grep
     # 单场，而用量页要的是跨会话求和，那个出口只能有一个（另起一处就长出第二个游标）。
-    # ⚠ 有一条**没被本格证明**，别当已证：runner 读到非零的前提是"角色手上的 manager 就是
-    # runner `self.costs[sid]` 那一份"（`_make_llm` 注入，B8 的截断计数同吃这条）。t10③ 只测了
-    # "同一个 manager 的快照带出两键"，**没测那条注入链**——真端到端要起一场真会话读 GET 出口，
-    # 已登记为未验边界（PLAN §1 本棒那行）。
+    # 注入链今天证过了（09-25 新格 `tests/s8_runner_meter.py::t10`，零花费）：起本机 OpenAI 兼容桩
+    # 跑一整场 dynamic 线会话到 `finished`，从 **GET 出口**读到 pt=411/ct=87/¥0.00047 而 $ 保持 0
+    # ——「角色手上的 manager 就是 runner `self.costs[sid]` 那一份」不再只是一条注释（B8 的截断计数
+    # 同吃这条）。反证也跑了：把 `server/runner.py::_prepare` 里的 `_make_llm(cost_manager, …)` 换成
+    # `_make_llm(None, …)`，t10① 当场读到全零账本，正是当年「用量恒 0」的双账本形状。
     unknown_command_calls: int = 0
     # C19：正文空的调用（模型说完话但一个字没吐）。与上面两笔同族——只是计数，不参与金额口径。
     # 为什么要第三笔：2026-09-23 真云端实测 14 发里最贵那一发（¥0.914、24.5 万 completion token、
