@@ -378,10 +378,13 @@ def delete_feedback(sid: str, request: Request, key: str = Query(..., min_length
     return {"ok": True, "feedback": merged}
 
 
+# 分叉时一次最多拷多少份产物文件。比 `import_repo` 的 `MAX_IMPORT_NODES=20_000` 低一个量级，
+# 因为那一边只是把路径收进集合、这一边要真的搬字节——同一个数字在两边不是同一件事。
+MAX_FORK_FILES = 2000
+
+
 class ForkReq(BaseModel):
     from_cursor: str = Field(default="", max_length=64)
-
-
 @router.post("/{sid}/fork")
 async def fork_session(sid: str, req: ForkReq, request: Request, user: str = Depends(current_user)):
     """B3：从某一轮分叉出一条新会话（参照系的 branch 钮 = 消息级 branch）。
@@ -410,16 +413,30 @@ async def fork_session(sid: str, req: ForkReq, request: Request, user: str = Dep
                      goal=s.goal)
     n = store.update(n.id, role_defs=s.role_defs)
     src, dst = Path(s.workspace), Path(n.workspace)
-    copied = 0
+    copied, truncated = 0, False
     if src.is_dir():                      # 源目录可能压根没建过（只 create 没跑过的会话）
-        shutil.copytree(src, dst, dirs_exist_ok=True)
-        copied = sum(1 for _ in dst.rglob("*"))
+        # 上限照 B7/`import_repo` 那一族的口径：撞顶就**只拷前若干份并且说出去**。
+        # 此前是整份 `copytree`——`copied_files` 只是回执、没有任何上限，所以一次点击要在
+        # HTTP 请求里陪一个大会话目录（导入面实测出现过 12k 文件量级）走完全程：慢到像失败，
+        # 而用户以为没成就再点一次。按序走是为了「截断截在哪」可复现（rglob 是任意序）。
+        # ponytail: 截断按文件数不按字节数，也不剪 `.git/node_modules`；升级路径 = 先剪目录再计数。
+        for f in sorted(src.rglob("*")):
+            if copied >= MAX_FORK_FILES:
+                truncated = True
+                break
+            if f.is_dir():
+                continue
+            target = dst / f.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, target)
+            copied += 1
     for e in all_evs[:cut]:
         bus.publish(n.id, kind=e.kind, block=e.block, uuid=e.uuid, name=e.name,
                     value=e.value, role=e.role, extra=e.extra)
     bus.publish(n.id, kind="status",
                 value={"status": "created", "message": f"从 {s.id} 分叉（带 {cut} 条事件与产物）"})
-    return {**n.model_dump(), "forked_from": s.id, "carried_events": cut, "copied_files": copied}
+    return {**n.model_dump(), "forked_from": s.id, "carried_events": cut,
+            "copied_files": copied, "copied_truncated": truncated}
 
 
 @router.get("/{sid}/queue")

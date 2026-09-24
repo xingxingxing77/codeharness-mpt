@@ -155,13 +155,14 @@ export const useSessionStore = defineStore('sessions', {
     },
 
     /** B3：从某一轮分叉出新会话并**切过去**——留在源会话里看不见自己刚分出去的那场，
-     *  而分叉的意义就是接着那儿往下走。 */
-    async forkFrom(fromCursor: string) {
-      if (!this.currentId) return ''
+     *  而分叉的意义就是接着那儿往下走。返回整份响应而不只是 id：`copied_truncated` 得有人看见，
+     *  否则「产物只拷了一部分」这件事就只存在于后端日志里（F-E/B7 那族「上限要说出去」的口径）。 */
+    async forkFrom(fromCursor: string): Promise<Record<string, any>> {
+      if (!this.currentId) return {}
       const r = await api.forkSession(this.currentId, fromCursor)
       await this.loadSessions()
       this.select(r.id)
-      return r.id as string
+      return r
     },
 
     select(sid: string) {

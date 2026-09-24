@@ -28,18 +28,27 @@ import MessageIconActions from './MessageIconActions.vue'
 import DsIcon from '../ui/DsIcon.vue'
 import { blockText, type Turn } from '../../utils/turns'
 import { useSessionStore } from '../../stores/sessions'
+import { useToastStore } from '../../stores/toast'
 
 const props = defineProps<{ turn: Turn }>()
 const text = computed(() => (props.turn.closing ? blockText(props.turn.closing) : ''))
 
 const store = useSessionStore()
+const toast = useToastStore()
 const busy = ref(false)
 
 async function forkHere() {
   if (busy.value || !props.turn.endCursor) return
   busy.value = true
   try {
-    await store.forkFrom(props.turn.endCursor)
+    const r = await store.forkFrom(props.turn.endCursor)
+    if (!r?.id) return
+    // 截断必须说出去：源目录撞上限时后端只拷了前若干份，不吱声的分叉＝用户以为拿到了完整产物，
+    // 而缺的那部分是看不见的（与 B7「导入撞顶要印 truncated」同一条口径）。
+    toast.push(r.copied_truncated
+      ? `已分叉，但产物只带走前 ${r.copied_files} 份（源目录更大，其余没拷过来）`
+      : `已分叉：带走 ${r.carried_events} 条事件与 ${r.copied_files} 份产物`,
+      r.copied_truncated ? 'warn' : 'success')
   } finally {
     busy.value = false
   }

@@ -1261,6 +1261,10 @@ def t19_fork_surface():
        （前端 `applyEvent` 只认 `cursor <= lastCursor`，共用一份游标会把新会话的头几条吞掉。）
     ② 有**独立产物目录**——断言磁盘上真有一个新的 `workspace/{新 sid}/` 且源文件确实拷进来了。
     另钉 `from_cursor` 含本轮（切在本轮之后）与未知游标 422。
+    B3②（09-25）补第三句：**产物拷贝有上限、撞顶要说出去**——旧写法是整份 `copytree` 无上限，
+    一次点击可以在 HTTP 请求里陪一个大会话目录走完全程（导入面实测过 12k 文件量级），慢到像失败；
+    现在按 `MAX_FORK_FILES` 截断并回 `copied_truncated`，界面把它翻成人话。两格互为对照：
+    撞顶那场报截断、没撞顶那场**不许**报（否则「报截断」这条判据本身是恒真的）。
     """
     import server.sessions as ss
     from fastapi.testclient import TestClient
@@ -1313,12 +1317,40 @@ def t19_fork_surface():
             ks = c.get(f"/api/sessions/{kid}").json()
             assert ks["workspace"] != src.workspace, "产物目录没独立"
             copied = _P(ks["workspace"]) / "docs" / "requirement.md"
-            assert mid["copied_files"] >= 2 and copied.is_file() and \
+            # `copied_files` 从今天起数的是**拷过来的文件**（旧写法数的是「新目录里的所有条目」，
+            # 把 `docs/` 这个目录也算成一份 ⇒ 那份回执一直是虚高一格的假数）。
+            assert mid["copied_files"] == 1 and copied.is_file() and \
                 copied.read_text(encoding="utf-8") == "第一轮的产物", \
-                f"B3：源产物没真拷进新目录（{ks['workspace']}）"
+                f"B3：源产物没真拷进新目录（{ks['workspace']}），或回执不再只数文件：{mid.get('copied_files')}"
+            assert mid["copied_truncated"] is False, "小目录的分叉不该报截断"
             assert c.get(f"/api/sessions/{kid}").json()["idea"] == "分叉门禁", "分叉丢了议题"
             bad = c.post(f"/api/sessions/{sid}/fork", json={"from_cursor": "1234567890-000009"})
             assert bad.status_code == 422, f"未知游标该 422，实回 {bad.status_code}"
+
+            # ---- B3②（09-25）：拷贝**有上限、撞顶要说出去** ----
+            # 上限是「一次 HTTP 请求里搬多少份文件」的上限（旧写法整份 copytree、无上限：大会话目录
+            # 能把分叉拖到像失败，而用户会再点一次）。这里把档改小来验机制，不改生产值。
+            import server.api.sessions as sa_api
+            big = c.post("/api/sessions", json={"idea": "大目录源场", "project_name": "cap_src"}).json()
+            big_ws = _P(big["workspace"])
+            big_ws.mkdir(parents=True, exist_ok=True)
+            for i in range(5):
+                (big_ws / f"f{i}.md").write_text(f"第{i}份", encoding="utf-8")
+            keep_cap, sa_api.MAX_FORK_FILES = sa_api.MAX_FORK_FILES, 3
+            try:
+                cut3 = c.post(f"/api/sessions/{big['id']}/fork", json={"from_cursor": ""}).json()
+                kid3 = _P(c.get(f"/api/sessions/{cut3['id']}").json()["workspace"])
+                assert cut3["copied_files"] == 3 and cut3["copied_truncated"] is True, \
+                    f"B3②：上限没生效或没报截断（档 3）：{cut3.get('copied_files')}/{cut3.get('copied_truncated')}"
+                assert (kid3 / "f0.md").is_file() and not (kid3 / "f4.md").exists(), \
+                    "B3②：截断截在哪不可复现（拷进来的不是按序的前 3 份）"
+                sa_api.MAX_FORK_FILES = 9
+                whole = c.post(f"/api/sessions/{big['id']}/fork", json={"from_cursor": ""}).json()
+                assert whole["copied_files"] == 5 and whole["copied_truncated"] is False, \
+                    (f"B3②：没撞顶时也报了截断（阳性对照失配 ⇒ 上面那条红可能只是「永远报截断」）："
+                     f"{whole.get('copied_files')}/{whole.get('copied_truncated')}")
+            finally:
+                sa_api.MAX_FORK_FILES = keep_cap
     finally:
         settings.platform.use_redis = keep_redis
         ss.SESSIONS_FILE = keep_file
@@ -1333,8 +1365,14 @@ def t19_fork_surface():
     turns = (FE / "utils" / "turns.ts").read_text(encoding="utf-8")
     assert "b.endCursor" in turns and ".sort().at(-1)" in turns, \
         "B3 回归：轮末游标不再取「最后一个」——分叉点会切错一轮"
+    # 最后一米：后端报了截断，还得真到用户眼前（C16 那族的病就是断在最后一米）
+    assert "copied_truncated" in tt and "没拷过来" in tt, \
+        "B3② 回归：界面不再把「产物只拷了一部分」说出去（用户以为分叉带走了全部产物）"
+    assert "return r" in st and "return r.id as string" not in st, \
+        "B3② 回归：store 的 forkFrom 又把响应折回只留 id —— 截断字段在到组件之前就没了"
     _ok("t19", "B3 分叉三面同判：两条流各自计数（互不串台）+ 含端点切轮 + 全量分叉 + 产物目录真独立"
-               "（文件内容逐字对）+ 未知游标 422 + 前端 forkFrom/branch 钮在位")
+               "（文件内容逐字对）+ 未知游标 422 + 前端 forkFrom/branch 钮在位；"
+               "B3②：拷贝撞上限只带前 N 份并报 truncated（没撞顶的阳性对照仍 False）+ 界面把截断说出来")
 
 
 def t20_icon_names_resolve():
