@@ -259,12 +259,22 @@ def build_hired_role(defn: dict, llm):
     """档案 → 一个可进图的 RoleZero。工具集走 `TOOL_REGISTRY.select`（名字已校验过）。
 
     空工具集是合法形态：纯思考型成员（评审、总结）不碰任何工具。"""
+    from codeharness.configs.settings import settings
     from codeharness.roles.role_zero import RoleZero
     from codeharness.tools.tool_registry import TOOL_REGISTRY
-    return RoleZero({"name": defn["name"], "profile": defn.get("profile", ""),
+    role = RoleZero({"name": defn["name"], "profile": defn.get("profile", ""),
                      "goal": defn.get("goal", ""), "constraints": defn.get("constraints", "")},
                     TOOL_REGISTRY.select(*defn.get("tools", [])), llm,
                     max_loops=int(defn.get("max_loops", 8)))
+    # C24 行末那条余账：`_default_agents` 给队长与静态成员都挂了知识库读者（`team.py:36`），
+    # 现场招进来的没有 ⇒ 同一场会话里「我上传的文档，队长查得到、我招的人查不到」，而界面上看不出来。
+    # 租户与项目不传参，走 LongTermMemory 的 ContextVar 现取，与灌库侧、与队长那一份同源（C31 口径）。
+    # **只挂 kb 不挂 ltm**：成员的角色记忆是 C1-③ 的另一笔账（那里连 ltm 都没有），不在这里顺手改。
+    if settings.enable_rag:
+        from codeharness.memory.longterm import LongTermMemory
+        from codeharness.provider.gateway import LLMGateway
+        role.kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb")
+    return role
 
 
 async def draft_role_profile(llm, idea: str, teammates=None) -> dict:

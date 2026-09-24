@@ -16,6 +16,8 @@
   t7 摘成员（B9 余账）：能摘招进来的 / 摘不掉静态角色 / session.roles 同批去掉 / 下一次装配真没这个节点。
   t6 越界与热插都拒：classic 线招人 → 422（那条线没人点名新节点，招进来是死成员）；
      会话正在跑 → 409（生效点是下一次装配，不做图中热插）。
+  t8 成员也订阅知识库（C24 行末那条余账）：`build_hired_role` 挂上 `doc_type="kb"` 的读者、
+     租户与项目从 ContextVar 现取（与灌库侧同源）、`enable_rag=False` 时整条不挂。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -314,6 +316,41 @@ def t7_fire_role():
 
 
 
+def t8_hired_role_subscribes_to_the_knowledge_base():
+    """招进来的成员必须有知识库读者（C24 行末那条余账：队长查得到、成员查不到）。
+
+    这里只钉三件事：**挂上了**、**doc_type 是 kb**、**租户与项目从 ContextVar 现取**（与灌库侧同源，
+    C31 那条老病在这条新腿上的复发位）。**「读者真读得到东西」不在这里重复**——`_kb_recall` 与
+    `LongTermMemory.recall` 是队长与成员共用的同一段代码，那半已由 `s15 t3`（预取进 prompt）与
+    `s15 t15`（工具那条腿）钉过；在这里再跑一遍真图，测的是我搭的替身，不是产品。
+    """
+    from codeharness.configs.settings import settings
+    from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER
+    from codeharness.team import build_hired_role
+
+    tok_p, tok_u = CURRENT_PROJECT.set("s23_kb_proj"), CURRENT_USER.set("u_s23kb")
+    try:
+        role = build_hired_role(HIRED, FakeLLM(["x"]))
+        assert role.kb is not None, \
+            "t8①失效：成员没挂知识库读者 ⇒ 他那一轮的 `[知识库片段]` 永远是空的"
+        assert role.kb.doc_type == "kb", f"t8①挂的是别条切片：doc_type={role.kb.doc_type}"
+        assert (role.kb.user_id, role.kb.project_id) == ("u_s23kb", "s23_kb_proj"), \
+            (f"t8②失效：读者身上写死了租户/项目（{role.kb.user_id}/{role.kb.project_id}）"
+             f"，不是现取 ContextVar ⇒ 与灌库侧不同源，正是 C31 那一族")
+        keep = settings.enable_rag
+        settings.enable_rag = False
+        try:
+            assert build_hired_role(HIRED, FakeLLM(["x"])).kb is None, \
+                "t8③失效：`enable_rag=False` 时仍挂读者 ⇒ 那个开关在这条腿上是摆设"
+        finally:
+            settings.enable_rag = keep
+        print("  ok  t8 成员与队长共用同一份知识库读者口径（doc_type=kb、租户/项目现取 ContextVar、"
+              "enable_rag 关时整条不挂）")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+
+
 def main():
     t1_check_role_def()
     t2_tier_gate_and_rejections()
@@ -322,7 +359,8 @@ def main():
     t5_real_graph_hire_reachable()
     t6_no_hot_swap()
     t7_fire_role()
-    print("\ns23_hire_role: 7/7 全绿")
+    t8_hired_role_subscribes_to_the_knowledge_base()
+    print("\ns23_hire_role: 8/8 全绿")
     return 0
 
 
