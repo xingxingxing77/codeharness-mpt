@@ -193,6 +193,7 @@ def classic_team(llm):
         emb = LLMGateway.embeddings()
         for a in agents.values():
             a.kb = LongTermMemory(embeddings=emb, doc_type="kb")
+            a.ltm = LongTermMemory(embeddings=emb)      # C33：记忆腿（读同项目历史 + 超窗溢写）
     return agents
 
 

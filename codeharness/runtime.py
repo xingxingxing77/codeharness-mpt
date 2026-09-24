@@ -39,6 +39,11 @@ KB_CONTEXT: ContextVar[str] = ContextVar("kb_context", default="")
 为什么用 ContextVar 而不是把文本塞进 `msg.content`：content 是下一动作的工作载荷
 （`RunPythonCode` 直接把它当代码执行），前缀散文会污染——那条注释写在 `_act` 头上，这里照旧绕开。"""
 
+LTM_CONTEXT: ContextVar[str] = ContextVar("ltm_context", default="")
+"""同一条接缝的第二段：本角色在**同项目**更早的往来（`LongTermMemory(doc_type="memory")` 召回）。
+与 `KB_CONTEXT` 分开两个变量而不是拼成一段，是为了两件事各自可判、各自可关——
+知识库那条（C32）与记忆这条（C33）落库路径不同、出处标记也不同（记忆没有 `source`）。"""
+
 
 def session_root(project: str | None = None) -> Path:
     """本会话工作目录 = `workspace_root/{project 或 CURRENT_PROJECT}`，与 server 的 `session.workspace`、

@@ -1056,6 +1056,130 @@ def t24_classic_line_reads_the_knowledge_base():
           "跑完摘干净、没订阅逐字不变、挂了不打断、读侧 query 截到端点窗口）")
 
 
+def t25_classic_line_reads_and_writes_longterm_memory():
+    """C33：经典线/react 线的记忆腿（读同项目历史 + 超窗溢写）。补的是 t24 只接了知识库那条腿、
+    `Agent` 连 `ltm` 都没有那半截账（`RoleZero` 两条腿从 C3 起都有）。
+
+    与 `RoleZero` 同口径但**有一处刻意不同**：阈值与切片一样（`MEMORY_OVERFLOW_SIZE`＝条数、
+    写的是窗口外那一段），但**不裁 `s["memory"]`**——那条列表同时是下一动作的工作载荷
+    （BY_ORDER 的第 2+ 个动作靠 `memory[-1]` 取触发源），裁它是改编排语义，不属这笔账。
+    零花费：ltm 用桩、模型用 FakeLLM。"""
+    import asyncio
+    import json
+    from pydantic import BaseModel
+
+    from codeharness.base.action import Action
+    from codeharness.configs.settings import settings
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.schema import Message
+    from codeharness.team import classic_team, react_assembly
+
+    class Out(BaseModel):
+        text: str = "ok"
+
+    class Echo(Action):
+        name: str = "Echo"
+
+        async def run(self, msg):
+            await self._structured("任务正文：" + msg.content, Out)
+            return Message(content="done", cause_by=self.name)
+
+    class StubLTM:
+        doc_type = "memory"
+
+        def __init__(self, boom=False):
+            self.boom, self.flushed, self.reads = boom, [], []
+
+        async def overflow(self, msgs):
+            if self.boom:
+                raise ConnectionError("qdrant 没起")
+            self.flushed.append([m.content for m in msgs])
+            return len(msgs)
+
+        async def recall(self, query, k=5):
+            self.reads.append(query)
+            if self.boom:
+                raise ConnectionError("qdrant 没起")
+            return [Message(content="上次这个项目里机票上限按一千八百元执行")]
+
+    def msgs(n, tag="m"):
+        return [Message(content=f"{tag}{i}", role="user", cause_by="UserRequirement") for i in range(n)]
+
+    def new_state(mem, news_text):
+        return {"name": "E", "inbox": [Message(content=news_text, role="user",
+                                               cause_by="UserRequirement")],
+                "memory": mem, "action_cursor": 0, "chosen": "Echo", "plan": ["Echo"],
+                "loops": 0, "output": []}
+
+    def mk_agent(llm, ltm=None):
+        a = Agent({"name": "E", "profile": "p", "goal": "g"}, [Echo(llm=llm)], llm,
+                  watch={"UserRequirement"})
+        a.ltm = ltm
+        return a
+
+    # ① 装配面：两条线每个角色都挂着 doc_type=memory 的读者；开关关掉全不挂
+    probe = FakeLLM([json.dumps({"text": "x"})])
+    for label, agents in (("classic", classic_team(probe)), ("react", react_assembly(probe))):
+        bad = [a.profile["name"] for a in agents.values()
+               if getattr(a, "ltm", None) is None or a.ltm.doc_type != "memory"]
+        assert not bad, f"t25①失效（{label} 线）：这些角色没挂记忆读者或挂错切片 {bad}"
+    keep_rag = settings.enable_rag
+    settings.enable_rag = False
+    try:
+        assert all(a.ltm is None for a in classic_team(probe).values()), \
+            "t25①失效：`enable_rag=False` 时仍挂读者 ⇒ 那个开关在记忆腿上是摆设"
+    finally:
+        settings.enable_rag = keep_rag
+
+    # ② 读：一次动作召回一次，产出真进 prompt（带 `[历史记忆]` 抬头）
+    llm2 = FakeLLM([json.dumps({"text": "y"})])
+    ltm2 = StubLTM()
+    asyncio.run(mk_agent(llm2, ltm2)._act(new_state([], "机票能报多少")))
+    assert ltm2.reads == ["任务正文：机票能报多少"] or ltm2.reads == ["机票能报多少"], \
+        f"t25②失效：一次动作召回 {len(ltm2.reads)} 次（要 1 次）"
+    assert "[历史记忆]" in str(llm2.calls[-1]) and "一千八百" in str(llm2.calls[-1]), \
+        f"t25②失效：动作 prompt 里没带上历史记忆：{str(llm2.calls[-1])[-200:]}"
+
+    # ③ 写：超窗才写，写的是窗口外那一段，且**工作集一字不裁**
+    win = settings.memory_overflow_size
+    llm3 = FakeLLM([json.dumps({"text": "z"})])
+    ltm3 = StubLTM()
+    a3 = mk_agent(llm3, ltm3)
+    out = asyncio.run(a3._observe(new_state(msgs(win), "第 201 条")))
+    # 窗口留**最后** win 条 ⇒ 跨出去的是最老的那一条 m0（不是最新的新闻）
+    assert ltm3.flushed == [["m0"]], \
+        f"t25③失效：窗口外那一段没写对（实写 {ltm3.flushed}，要 [[\"m0\"]]）"
+    assert len(out["memory"]) == win + 1, \
+        f"t25③失效：工作集被裁了（{len(out['memory'])} 条，要 {win + 1}）——那会改 BY_ORDER 的取源语义"
+
+    # ④ 游标：第二次激活只写**新跨过**的那一段，不把同一批老消息重嵌一遍（白烧额度）
+    asyncio.run(a3._observe(new_state(out["memory"], "第 202 条")))
+    assert [f for batch in ltm3.flushed for f in batch] == ["m0", "m1"], \
+        f"t25④失效：两次激活实写 {ltm3.flushed}（要各写新跨出去的那条，不重复）"
+
+    # ⑤ 写挂了：不推进游标（下轮重试同一批）、不打断 `_observe`；读挂了：按「没有记忆」继续
+    llm4 = FakeLLM([json.dumps({"text": "w"})])
+    boom = StubLTM(boom=True)
+    a4 = mk_agent(llm4, boom)
+    out4 = asyncio.run(a4._observe(new_state(msgs(win), "第 201 条")))
+    assert boom.flushed == [] and len(out4["memory"]) == win + 1, \
+        "t25⑤失效：写失败被当成了成功（游标推进了或消息没了）"
+    asyncio.run(a4._observe(new_state(out4["memory"], "第 202 条")))
+    assert boom.flushed == [], "t25⑤失效：上一批失败后本批没重试（写成了空）"
+    llm5 = FakeLLM([json.dumps({"text": "v"})])
+    asyncio.run(mk_agent(llm5, StubLTM(boom=True))._act(new_state([], "机票能报多少")))
+    assert "[历史记忆]" not in str(llm5.calls[-1]) and "知识库片段" not in str(llm5.calls[-1]), \
+        "t25⑤失效：召回失败时 prompt 里出现了空段落（应逐字等于没挂的样子）"
+
+    # ⑥ 没挂 ltm 的角色逐字保持改前形态
+    llm6 = FakeLLM([json.dumps({"text": "u"})])
+    asyncio.run(mk_agent(llm6, None)._act(new_state([], "机票能报多少")))
+    assert "历史记忆" not in str(llm6.calls[-1]), "t25⑥失效：没订阅也往 prompt 里塞了一段"
+    print("  t25 经典线/react 线读写记忆腿都通（两线各挂、一次动作只召回一次、超窗才写且工作集不裁、"
+          "游标不重嵌、挂了不推进也不打断、没订阅逐字不变）")
+
+
 def main():
     checks = [t1_prompts_verbatim, t2_prompt_imports_and_consumers,
               t3_write_prd_three_branches, t4_action_templates_verbatim,
@@ -1068,7 +1192,8 @@ def main():
               t18_strategy_switch, t19_ext_api_acceptance,
               t20_structured_patch_live, t21_single_structured_seam,
               t22_fixbug_rewrite_chain, t23_runcode_triage,
-              t24_classic_line_reads_the_knowledge_base]
+              t24_classic_line_reads_the_knowledge_base,
+              t25_classic_line_reads_and_writes_longterm_memory]
     for c in checks:
         c()
     print(f"\nS6 门禁通过：{len(checks)} 组 —— 批1 prompt 逐字 2 组 + 批2a 十件 9 组 + 批2c 存储/类图 3 组"

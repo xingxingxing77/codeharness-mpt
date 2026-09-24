@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field, create_model
 # 只补空字段的追问模板。刻意不做多轮闲聊，一次问齐。
 _KB_BLOCK = ("[知识库片段]\n{kb}\n"
              "（以上来自本会话知识库，引用其中内容时请连那行的出处一起说；用不上就忽略）")
+_LTM_BLOCK = ("[历史记忆]\n{ltm}\n"
+              "（以上是本角色在同项目更早的往来，只作背景参考；与当前任务无关就忽略）")
 _PATCH_TEMPLATE = """Only fill the following MISSING fields, based on the context.
 Return a markdown JSON object containing ONLY these keys.
 
@@ -95,16 +97,18 @@ class Action(BaseModel):
         36 个动作。`KB_CONTEXT` 没装（dynamic 线、离线测试、`enable_rag` 关）时**逐字保持改前形态**，
         所以既有 prompt 判据一格都不受影响；装了才追加一段，出处标记与 C22 那条格式同源。
         """
-        from codeharness.runtime import KB_CONTEXT
-        kb = KB_CONTEXT.get()
+        from codeharness.runtime import KB_CONTEXT, LTM_CONTEXT
+        kb, ltm = KB_CONTEXT.get(), LTM_CONTEXT.get()
+        extra = "\n\n".join(t for t in (_KB_BLOCK.format(kb=kb) if kb else "",
+                                        _LTM_BLOCK.format(ltm=ltm) if ltm else "") if t)
         if system is not None:
             from langchain_core.messages import HumanMessage, SystemMessage
             msgs = [SystemMessage(content=system), HumanMessage(content=prompt)]
-            if kb:
-                msgs.append(HumanMessage(content=_KB_BLOCK.format(kb=kb)))
+            if extra:
+                msgs.append(HumanMessage(content=extra))
             prompt = msgs
-        elif kb:
-            prompt = prompt + "\n\n" + _KB_BLOCK.format(kb=kb)
+        elif extra:
+            prompt = prompt + "\n\n" + extra
         return await self.llm.structured(schema).ainvoke(prompt, tag=self.name)
 
     @staticmethod

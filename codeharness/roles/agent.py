@@ -49,6 +49,11 @@ class Agent:
         self.watch = watch or {"UserRequirement"}       # 对齐 _process_role_extra(:177) 默认订阅
         self.env_desc = env_desc
         self.kb = None                                  # C3 行②那半账：经典线的知识库读者，装配期挂
+        self.ltm = None                                 # 同上，记忆腿（读同项目历史 + 超窗溢写）
+        # 已经溢写出去的前缀条数。图 state 里的 memory 只增不减（它是下一动作的工作载荷，
+        # 裁它会改 BY_ORDER 行为），所以「哪一段跨过窗口了」只能由角色自己记账，
+        # 否则每次激活都把同一批老消息重嵌一遍——点 id 由内容派生，库里不会堆重复点，但额度会白烧。
+        self._ltm_flushed = 0
         prefix = self.build_prefix()
         for a in actions:                                # 对齐 _process_role_extra(:173)
             a.prefix = prefix
@@ -128,7 +133,42 @@ class Agent:
         if news:
             # 有新闻=新激活：按触发源选动作序；无新闻（续跑）保留本轮已定的 plan（游标走的是同一条序）
             out["plan"] = self.plans.get(news[-1].cause_by) or self.default_plan
+        await self._flush_memory(out["memory"])
         return out
+
+    async def _flush_memory(self, mem: list) -> None:
+        """超窗就把「窗口外那一段」写进长期记忆。阈值与切片口径与 `RoleZero._compress` 同一条
+        （`MEMORY_OVERFLOW_SIZE`＝条数，不是字数），**差别只有一处：不裁 `s["memory"]`**——
+        那条列表同时是下一动作的工作载荷（BY_ORDER 的第 2+ 个动作靠 `memory[-1]` 取触发源），
+        裁它是改编排语义，不属这笔账。
+        写失败不推进游标：下一批激活会连这段一起重试（点 id 由内容派生，重试不会在库里堆重复点）。
+        """
+        from codeharness.configs.settings import settings
+        if self.ltm is None or not settings.enable_rag:
+            return
+        end = len(mem) - settings.memory_overflow_size
+        if end <= self._ltm_flushed:
+            return
+        try:
+            await self.ltm.overflow(mem[self._ltm_flushed:end])
+            self._ltm_flushed = end
+        except Exception as e:                    # 与 _kb_block 同档：降级，不把角色跑死
+            from codeharness.logs import logger
+            logger.warning(f"{self.profile['name']} 长期记忆入库失败，本段留到下轮重试: "
+                           f"{type(e).__name__}: {e}")
+
+    async def _ltm_block(self, task: str) -> str:
+        """读同项目的历史（`RoleZero._ltm_recall` 的对应物）。挂了按「没有记忆」继续。"""
+        from codeharness.configs.settings import settings
+        if self.ltm is None or not settings.enable_rag or not task.strip():
+            return ""
+        try:
+            return "\n".join(m.content for m in await self.ltm.recall(task, k=3))
+        except Exception as e:
+            from codeharness.logs import logger
+            logger.warning(f"{self.profile['name']} 长期记忆召回失败，按无经验继续: "
+                           f"{type(e).__name__}: {e}")
+            return ""
 
     # ---- 源 _think(:340-379) 两模式（全部包 thought_block，前端每个思考步都有 Thought 块） ----
     async def _think(self, s: AgentState):
@@ -213,8 +253,9 @@ class Agent:
         # 「经典线记忆回喂进 prompt」是 _think 侧 system 上下文的事（对照1 §五-8），不在 _act 做。
         # 知识库那条不一样：动作的 prompt 在 `Action._ask` 那个唯一出口上才成型，所以在这里取一次、
         # 经 ContextVar 交给它（`runtime.KB_CONTEXT`）——**一次动作只检索一次**，补问轮复用同一份。
-        from codeharness.runtime import KB_CONTEXT
+        from codeharness.runtime import KB_CONTEXT, LTM_CONTEXT
         kb_tok = KB_CONTEXT.set(await self._kb_block(prompt))
+        ltm_tok = LTM_CONTEXT.set(await self._ltm_block(prompt))
         try:
             result = await action.run(Message(
                 content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,
@@ -241,6 +282,7 @@ class Agent:
             # 挂在 try 上而不是 try 后：GraphInterrupt 那条要暂停整场、抛错那条要自愈，
             # 两支都得把这份上下文摘掉——留着下一轮就会拿上一轮动作的知识库片段干活。
             KB_CONTEXT.reset(kb_tok)
+            LTM_CONTEXT.reset(ltm_tok)
         if isinstance(result, Message):
             msg = result
         else:
