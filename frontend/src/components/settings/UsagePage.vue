@@ -9,7 +9,7 @@
       <div class="u-cell"><b>{{ rows.length }}</b><span>会话</span></div>
       <div class="u-cell"><b>{{ fmt(total.pt) }}</b><span>输入 tokens</span></div>
       <div class="u-cell"><b>{{ fmt(total.ct) }}</b><span>输出 tokens</span></div>
-      <div class="u-cell"><b>{{ moneyBoth(total) }}</b><span>总成本（分币种·不换算）</span></div>
+      <div class="u-cell"><b>{{ moneyBoth(total) }}</b><span title="厂商回执原样累加：thinking 模型的 token 含其内部迭代，不等于本会话提示量；真账去厂商控制台核">总成本（分币种·不换算｜回执原样）</span></div>
       <!-- B4 的读面：票今天已经落库（`Session.feedback`），但只有会话自己看得见——
            聚到这一格才算「反馈这条链跑通了」。零=诚实的零，不藏格。认不出的值单列出来，
            免得第三种票被静默吞进「有用」或「无用」任何一档。 -->

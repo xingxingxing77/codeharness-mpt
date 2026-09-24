@@ -2,7 +2,7 @@
 
 覆盖 docs/施工1 的 S2 门禁三条（payload 快照 / FakeLLM 记账非零 / 不重复计数），
 另加源符号面对齐、repair 组合档、只读计量与预算不回潮、未支持厂商不静默退回。
-t16 例外：它起**本机 127.0.0.1 的一次性桩端点**（不联外网、不花钱），因为 C17 那族漏账
+t16/t17 例外：它们起**本机 127.0.0.1 的一次性桩端点**（不联外网、不花钱），因为 C17 那族漏账
 只在真 HTTP 真 SDK 解析的形状上才现形——拿替身喂判据正是本仓点名的病。
 
 跑法：
@@ -739,12 +739,126 @@ def t16_structured_failure_accounts():
         srv.shutdown()
 
 
+def t17_ratelimit_single_owner():
+    """C25：厂商 429 走**有界退避重发**，而且重试的归属只有一处。真 HTTP 桩 + 真 SDK，零外网零花费。
+
+    为什么给 429 开口（09-24 在 StepFun 上量，读数在 `plan/model-gateway.md` 的 C25 行）：厂商限的是
+    **在途请求数**（`limit: 5`），多角色线天然超它——in-flight 6 起 1/6 撞、8 起 3/8 撞；带退避重发之后
+    **6/6 与 8/8 全过**。被拒那一发没受理、不产生第二笔钱 ⇒ 它既不是「超时（再发可能更糟）」也不是
+    「鉴权/参数错（再发白烧）」，是「等一等就好」。
+    ⚠ 同一轮量出的另一半：openai SDK 自带 `max_retries=2`，改前一次「有界 3 次」在真 SDK 上是
+    **9 个请求**且一行日志不出（ADR-06 的「超时不重发」也被它绕过）⇒ 本格的判据看**桩收几次**
+    （与 t14 同口径：只看返回值的话「重发后成功」与「只发一次就成功」长得一样）。
+      ① 429 两次然后成功 → 桩收 3、内容对、退避喊 2 声；
+      ② 一直 429      → 桩收 3（**不是 9**）、明确抛 RateLimitError、喊 2 声；
+      ③ 400 对照       → 桩收 1、0 声（否则参数错会被重三遍）；
+      ④ 客户端超时     → 桩收 1、0 声（SDK 那层不许自己重发，`max_retries=0` 就钉在这格上）。
+    """
+    import json as _j
+    import threading
+    import time as _t
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from openai import APITimeoutError, BadRequestError, RateLimitError
+    from codeharness.logs import logger as _lg
+
+    mode = {"m": "ok", "n": 0}
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            mode["n"] += 1
+            m = mode["m"]
+            if m == "hang":
+                _t.sleep(6)                                   # 让客户端的 timeout 先响（服务端不回话）
+                return
+            if m == "429_always" or (m == "429_twice" and mode["n"] <= 2):
+                return self._send(429, {"error": {"message": "request limited concurrency reached, "
+                                                             "current: 6, limit: 5",
+                                                   "type": "rate_limit_error"}})
+            if m == "400":
+                return self._send(400, {"error": {"message": "invalid 'messages' field",
+                                                   "type": "invalid_request_error"}})
+            return self._send(200, {"id": "chatcmpl-s2-17", "object": "chat.completion",
+                                    "created": 1790000000, "model": "gpt-4o",
+                                    "choices": [{"index": 0, "finish_reason": "stop",
+                                                 "message": {"role": "assistant", "content": "收到"}}],
+                                    "usage": {"prompt_tokens": 5, "completion_tokens": 2,
+                                              "total_tokens": 7}})
+
+        def _send(self, code, body):
+            out = _j.dumps(body, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            # 不发 Connection: close 的话 httpx 那条连接在复用时会有「didn't stop after athrow()」那族噪音
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)         # 端口 0：不跟别人抢固定口
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    async def _one(m, client_timeout=30, outer_timeout=None):
+        """跑一发真调用，返回（桩收几次, 内容或异常, 退避 warning 几声）。"""
+        mode.update(m=m, n=0)
+        gw = LLMGateway(cfg=LLMConfig(api_type=LLMType.OPENAI,
+                                      base_url=f"http://127.0.0.1:{port}/v1",
+                                      api_key="stub", model="gpt-4o", max_token=64,
+                                      stream=False,        # 走 `_acall` 那一支（`LLMConfig.stream` 默认 True）
+                                      timeout=client_timeout))
+        warned, orig = [], _lg.warning
+
+        def _spy(*a, **k):
+            warned.append(str(a[0]) if a else "")
+        _lg.warning = _spy
+        try:
+            kw = {} if outer_timeout is None else {"timeout": outer_timeout}
+            got, err = await gw.aask("给我一句话", tag="s2t17", **kw), None
+        except Exception as exc:
+            got, err = None, exc
+        finally:
+            _lg.warning = orig
+        return mode["n"], (got, err), sum(1 for w in warned if "退避后重发" in w)
+
+    bad = []
+    try:
+        n, (got, err), w = asyncio.run(_one("429_twice"))
+        if not (n == 3 and got == "收到" and err is None and w == 2):
+            bad.append(f"17.① 429 两次该重发后成功：桩收 {n}（要 3）、内容 {got!r}、退避 warning {w} 声（要 2）、"
+                       f"异常 {err!r}")
+        n, (got, err), w = asyncio.run(_one("429_always"))
+        if not (n == 3 and isinstance(err, RateLimitError) and got is None and w == 2):
+            bad.append(f"17.② 一直 429 必须**有界**地明确失败：桩收 {n}（要 3；出现 9 就是 SDK 那层又在偷偷重发）、"
+                       f"异常 {type(err).__name__}（要 RateLimitError）、warning {w} 声（要 2）")
+        n, (got, err), w = asyncio.run(_one("400"))
+        if not (n == 1 and isinstance(err, BadRequestError) and w == 0):
+            bad.append(f"17.③ 参数错不许重发：桩收 {n}（要 1）、异常 {type(err).__name__}、"
+                       f"warning {w} 声（要 0）")
+        # ④ 客户端超时（`timeout=1`）比外层 deadline 先到，才测得到「SDK 那一层重不重发」：
+        #    两者同值的话外层会先把协程取消掉，这一格就变成恒真，抓不到 max_retries 被改回去
+        n, (got, err), w = asyncio.run(_one("hang", client_timeout=1, outer_timeout=20))
+        if not (n == 1 and isinstance(err, APITimeoutError) and w == 0):
+            bad.append(f"17.④ 超时不许自动重发（ADR-06 的口径，落到真 SDK 上）：桩收 {n}（要 1；"
+                       f"≥2 就是 `max_retries=0` 被摘了）、异常 {type(err).__name__}（要 APITimeoutError）、"
+                       f"warning {w} 声（要 0）")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    if bad:                       # 四格一次全报：变异工装要靠「哪几格红」判特异性，fail-fast 只看得到第一格
+        _fail(" ｜ ".join(bad))
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
               t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
               t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline,
-              t16_structured_failure_accounts]
+              t16_structured_failure_accounts, t17_ratelimit_single_owner]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -752,7 +866,7 @@ def main():
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
           f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑 / "
-          f"流式分支按 deadline 失败 / 坏结构化产出真 HTTP 落账与截断计数）")
+          f"流式分支按 deadline 失败 / 坏结构化产出真 HTTP 落账与截断计数 / 429 有界退避与重试归属单点）")
 
 
 if __name__ == "__main__":

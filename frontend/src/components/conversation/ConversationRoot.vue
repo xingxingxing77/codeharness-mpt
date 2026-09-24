@@ -11,7 +11,10 @@
            跑起来后头部要看得出「此刻是谁在干活」，否则流里全是 Think 行、根本分不出人。 -->
       <AgentChip v-if="agentLabel" :label="agentLabel" :running="store.isRunning" />
       <span class="grow" />
-      <span class="cost">{{ moneyBoth(store.cost) }}</span>
+      <!-- C25②：这颗金额是**厂商回执原样累加**的。thinking 模型（StepFun `step-3.5-flash` 实测）把内部
+           迭代也计进 pt/ct，同一条 prompt 它报 59 万而 7B 报 1.2k ⇒ 账面能显出几百元这种荒谬数。
+           只补一句口径，不改数也不折算（真账去厂商控制台核）。 -->
+      <span class="cost" title="按厂商回执原样累加：thinking 模型的 token 含其内部迭代，不等于本会话提示量">{{ moneyBoth(store.cost) }}</span>
       <button
         class="iconBtn"
         :class="{ on: ui.rightPanel && ui.rightView === 'cards' }"

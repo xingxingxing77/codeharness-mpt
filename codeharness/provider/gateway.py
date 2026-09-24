@@ -66,6 +66,11 @@ class LLMGateway:
             max_tokens=cfg.max_token,                 # ⚠ 源字段是 max_token（单数）
             streaming=cfg.stream,
             timeout=cfg.timeout or None,
+            # ⚠ 09-24 实测才钉上：SDK 自带 `max_retries=2`（langchain 的默认是 None=用 SDK 默认），
+            # 于是「有界 3 次」在真 SDK 上是 **9 个请求**（本地 429 桩现证：桩收 9 次、7.29s），
+            # 而 SDK 那一层**一行日志都不出**——ADR-06 拍的「超时不自动重发」也被它绕过了
+            # （openai SDK 重连的就是超时/连接错/429/5xx）。重试的归属必须只有一处：`_acall`。
+            max_retries=0,
         )
         if cfg.stream:
             # 没有它，OpenAI 兼容端点的流式响应末块不回 token_usage → add_usage(0,0) → 整条线账为 0
@@ -419,25 +424,42 @@ def _retryable(exc: BaseException) -> bool:
       for response_format`——同一请求重发即成，典型瞬态）。
 
     ⚠ 继承链坑：openai 的 APIStatusError 是 APIError 的子类——按类型族重试会把 401/400 也重了，
-    重试只是烧钱；`APITimeoutError` 同理是 `APIConnectionError` 的子类，也得单独扣掉。"""
+    重试只是烧钱；`APITimeoutError` 同理是 `APIConnectionError` 的子类，也得单独扣掉。
+
+    **429 是第三档，09-24 量出来才敢加**（C25；读数在 `plan/model-gateway.md` 的 C25 行）：厂商并发上限
+    是**在途请求数**（StepFun `limit: 5`），in-flight 6 起 1/6 撞、8 起 3/8 撞，而**退避重发后 6/6 与
+    8/8 全过**——被拒的那一发没受理、不产生第二笔钱，所以它既不是「超时（再发可能更糟）」也不是「鉴权错
+    （再发白烧）」，是「等一等就好」。只认 429 这一个状态码，其余 status 错仍回 False。"""
     from openai import APIError, APIStatusError, APITimeoutError
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, APITimeoutError)):
         return False
     if isinstance(exc, (ConnectionError, OSError)):
         return True
-    return isinstance(exc, APIError) and not isinstance(exc, APIStatusError)
+    if isinstance(exc, APIStatusError):
+        return exc.status_code == 429
+    return isinstance(exc, APIError)
 
 
 async def _acall(fn, *args, timeout: int = 0, **kwargs):
     """指数退避重试（源在 `general_api_base` 里手写的 tenacity 语义，这里统一收口）。
 
-    重试判据见 `_retryable`。流式路径不走这里——半截断流重放会让前端重复上屏，交由上层重新发起整轮。"""
+    重试判据见 `_retryable`。流式路径不走这里——半截断流重放会让前端重复上屏，交由上层重新发起整轮。
+    ⚠ 每次退避都记一行 warning：ADR-06 补记 2 只要了「重发用尽之后那声响」（在 `runner._fail`），
+    但 429 的形状是**会话照旧成功、只是慢**——只登记终态的话，排障时「端点在退避」与「代码在绕圈」
+    长得一模一样，而这两件事的处置方式相反。"""
     from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
+
+    def _warn(retry_state):
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        logger.warning(f"模型调用第 {retry_state.attempt_number} 次失败，退避后重发："
+                       f"{type(exc).__name__}: {str(exc)[:180]}")
+
     result = {}
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception(_retryable),
+        before_sleep=_warn,
         reraise=True,
     ):
         with attempt:
