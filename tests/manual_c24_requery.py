@@ -21,6 +21,12 @@
     F:/anaconda/python.exe -B tests/manual_c24_requery.py --probe-only
   ... 去掉 --probe-only 跑两场；--only discriminate|control 单跑一场
 
+**C24 未验②（「工具多给几条会不会改变核实次数」）用同一份工装量**：`--tool-k 6 --only discriminate`
+跑一档，再不带该参数跑同档基线，两场的「工具调用次数 / 每次带回几份多少字 / ¥」对起来读。
+这一档的 pass/fail 只有两条（都是机械的）：旋钮落在**工具那条腿**、预取那条**不许被牵连**；
+「这场一次都没调」在这一档是**读数**不是红（判红＝拿模型脾气当验收，正是 09-24 被否掉的那半条）。
+拧的是工装不是产品——产品那档今天没有配置项，为一次测量加一档配置是反过来的。
+
 **这一份不算门禁**：挂在真服务与真凭据上，服务/端点缺席直接 exit 非 0 说「没跑成」。
 只碰自己的集合 `c24requery`（跑完 drop）与 `workspace/c24_*`，不碰生产集合、不碰 db0、不碰 `.env`。
 """
@@ -30,6 +36,7 @@ import json
 import os
 import sys
 import time
+from contextvars import ContextVar
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -111,6 +118,33 @@ class _Gated:
         return getattr(self._gw, k)
 
 
+_TOOL_K: "ContextVar[int]" = ContextVar("c24_tool_k", default=0)
+
+
+def _install_tool_k(k: int):
+    """把**工具那条腿**的 k 拧一档（预取那条不动）——C24 未验②问的是「多给几条会不会少核实一次」。
+
+    拧的是工装而不是产品：产品那档今天没有配置项，为一次测量加一档配置是反过来的（先量，量出
+    结论再决定要不要有这一档）。实现只两件：给 `LongTermMemory.recall` 包一层记实收的 k，
+    并在 `_TOOL_K` 有值时改它——那把旗只在工具的 coroutine 外面 set（见 `_run_session` 里的 `spy`），
+    所以同一个进程、同一次 `asyncio.run` 里的预取那条腿不受影响（每腿实收的 k 由 ks 现证，不靠推断）。
+    返回 `(restore, ks)`；`k` 为 0 或与产品同档时直接返回 `(None, [])`，不去包那一层。
+    """
+    import codeharness.memory.longterm as lt
+    ks: list[tuple] = []
+    if not k or k == 3:
+        return None, ks
+    orig = lt.LongTermMemory.recall
+
+    async def patched(self, query, k=5):
+        in_tool = _TOOL_K.get()
+        ks.append(("tool" if in_tool else "prefetch", self.doc_type, in_tool or k))
+        return await orig(self, query, k=in_tool or k)
+
+    lt.LongTermMemory.recall = patched
+    return (lambda: setattr(lt.LongTermMemory, "recall", orig)), ks
+
+
 async def _probe(gw) -> None:
     """一发最小调用：量今天这个 thinking 模型多少钱，再决定跑不跑两场。"""
     from langchain_core.messages import HumanMessage
@@ -177,11 +211,23 @@ async def _run_session(args, project: str, question: str, label: str):
     orig = search_knowledge_base.coroutine
 
     async def spy(query: str) -> str:
-        out = await orig(query=query)
+        tok = _TOOL_K.set(args.tool_k)            # 只在这一次工具调用里拧 k，出来就摘
+        try:
+            out = await orig(query=query)
+        except BaseException as e:                # 不记这一笔的话：那次调用从读数里**整个消失**
+            # （09-25 k=6 那场就出现过「recall 记到一次工具侧调用、而 tool_calls 是空的」——
+            #  当时无从判断是模型没调还是工装吞了异常。吞掉的调用会让「核实次数」被读少。）
+            rec = {"query": query, "raised": f"{type(e).__name__}: {e}", "sources": [], "chars": 0}
+            tool_calls.append(rec)
+            print(f"    工具这一发抛了：{rec['raised'][:160]}", flush=True)
+            raise
+        finally:
+            _TOOL_K.reset(tok)
         tool_calls.append({"query": query, "sources": _sources(out), "chars": len(out)})
         return out
 
     search_knowledge_base.coroutine = spy
+    restore_k, ks = _install_tool_k(args.tool_k)   # C24 未验②：只拧工具那条腿的 k，预取不动
     tok_p, tok_u = CURRENT_PROJECT.set(project), CURRENT_USER.set(USER)
     try:
         role = RoleZero({"name": "R", "profile": "p", "goal": question},
@@ -195,10 +241,13 @@ async def _run_session(args, project: str, question: str, label: str):
             {"configurable": {"thread_id": f"c24-{label}"}})
     finally:
         search_knowledge_base.coroutine = orig
+        if restore_k:
+            restore_k()
         CURRENT_PROJECT.reset(tok_p)
         CURRENT_USER.reset(tok_u)
     c = cm.get_costs()
     return {"label": label, "question": question, "tool_calls": tool_calls, "llm_turns": gw.turns,
+            "recall_ks": ks, "tool_k": args.tool_k,
             # 第一发的 prompt 里预取带回的那几份——没有它，「首轮资料不够」这句话就没法现证
             "prefetch_sources": _sources(gw.prompts[0]) if gw.prompts else [],
             "cost_cny": round(c.cost_cny, 4), "prompt_tokens": c.total_prompt_tokens,
@@ -206,11 +255,72 @@ async def _run_session(args, project: str, question: str, label: str):
             "truncated_calls": cm.truncated_calls, "unknown_command_calls": cm.unknown_command_calls}
 
 
+# 今天判别场里模型自己组织的那句 query（09-25 00:1x 现测），与用户原话同表对比：
+# 拿同一句「它会怎么问」去量档，比拿用户原话量更接近真实用法。
+Q_MODEL = "代收费包含哪些项目 机场建设费燃油附加费是否属于代收费 机票报销上限"
+KS = (3, 6)
+
+
+async def _recall_table(project: str) -> int:
+    """零模型地量「多给几条」这一半：同一句 query 按 k=3 与 k=6 各召一遍，比带回几份、多少字。
+
+    为什么这一格能单独成立：`k` 改的是**一次已经决定要发的检索**的产出，它改不了「要不要发」——
+    所以「多给几条会不会少核实一次」里能被决定性证伪的只有前半句（多给是否多带回）。后半句要拿
+    多次会话的调用数分布才有形状，单场 0/1 次不构成结论（见 C24 行 09-24 的四场：3/1/0/0 次）。
+    """
+    from codeharness.document_store.qdrant_store import QdrantStore
+    from codeharness.tools import search_knowledge_base
+
+    st = QdrantStore()
+    pts, _ = await st.client.scroll(st.collection, limit=100, with_payload=True)
+    npts = len(pts)
+    print(f"  集合 {st.collection} 里 kb 点共 {npts} 个（档 6 {'够' if npts >= 6 else '不够'}拿满："
+          f"不够的话 k=6 与 k=3 的差别天然被库规模封住）")
+    tok_p, tok_u = CURRENT_PROJECT.set(project), CURRENT_USER.set(USER)
+    rows = []
+    try:
+        for q in (Q_DISC, Q_MODEL):
+            row = {"query": q}
+            for k in KS:
+                tok = _TOOL_K.set(k)               # 走的是产品那件工具本身，只把档换掉
+                try:
+                    out = await search_knowledge_base.coroutine(query=q)
+                finally:
+                    _TOOL_K.reset(tok)
+                row[f"k{k}"] = {"份": len(_sources(out)), "字": len(out),
+                                "退化": out.startswith("[知识库检索")}
+            rows.append(row)
+            print(f"    「{q[:26]}…」→ " + " ｜ ".join(
+                f"k={k}：{row[f'k{k}']['份']} 份 / {row[f'k{k}']['字']} 字" for k in KS))
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+    bad = []
+    for row in rows:
+        a, b = row[f"k{KS[0]}"], row[f"k{KS[1]}"]
+        if a["退化"] or b["退化"]:
+            bad.append(f"query「{row['query'][:20]}」有一条腿退化成不可用文案：{row}")
+        if b["份"] < a["份"] or b["字"] < a["字"]:
+            bad.append(f"档提到 {KS[1]} 反而带回更少（不单调＝筛子或旋钮有洞）：{row}")
+    if bad:
+        print("  判据未绿：" + "；".join(bad))
+        return 2
+    print(f"  判据（recall-only）：两档都未退化、k 单调不减；「多给是否多带回」见上表，"
+          f"「是否少核实一次」这一档不判（要多次会话的分布，见本文件 docstring）")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe-only", action="store_true")
     ap.add_argument("--only", choices=["discriminate", "control"], default="")
     ap.add_argument("--max-loops", type=int, default=3)
+    ap.add_argument("--tool-k", type=int, default=0,
+                    help="只拧**工具那条腿**的 k（预取仍 k=3）；0 或与产品同档则不干预。"
+                         "C24 未验②用它量「多给几条会不会少核实一次」")
+    ap.add_argument("--recall-only", action="store_true",
+                    help="不跑会话（零模型、零 ¥），只把工具在同几条 query 上按 k=3/6 各召一遍，"
+                         "量「多给几条到底多带回多少」——未验②里能被决定性证伪的那一半")
     args = ap.parse_args()
 
     from codeharness.configs.settings import settings
@@ -243,13 +353,18 @@ def main() -> int:
             await _ingest(emb, pj)
         return st
 
-    gw_probe = LLMGateway()
-    asyncio.run(_probe(gw_probe))
+    if not args.recall_only:                        # 探针那一发也是真模型的钱，recall-only 档不付
+        asyncio.run(_probe(LLMGateway()))
     if args.probe_only:
         print("只探针，没跑会话（花费见上一行）")
         return 0
 
     store = asyncio.run(boot())
+    if args.recall_only:                            # C24 未验②的决定性那一半：**一分钱模型都不花**
+        rc = asyncio.run(_recall_table(PROJ_D if args.only != "control" else PROJ_C))
+        asyncio.run(store.drop())
+        settings.qdrant.collection_prefix = prod_prefix
+        return rc
     results = []
     try:
         if args.only in ("", "discriminate"):
@@ -269,7 +384,8 @@ def main() -> int:
               f"{r['tool_calls']}\n"
               f"    模型 {r['llm_turns']} 发 / ¥{r['cost_cny']} / pt={r['prompt_tokens']} "
               f"ct={r['completion_tokens']} / 无效调用 截断{r['truncated_calls']} "
-              f"未知命令{r['unknown_command_calls']}")
+              f"未知命令{r['unknown_command_calls']}"
+              + (f"\n    每腿实收的 k：{r['recall_ks'] or '（未干预，与产品同档 k=3）'}" if r["tool_k"] else ""))
     print(f"  合计 ¥{total:.4f} / 闸 ¥{GATE_CNY}")
 
     disc = next((r for r in results if r["label"] == "判别场"), None)
@@ -290,8 +406,23 @@ def main() -> int:
         for c in r["tool_calls"]:
             if not c["sources"] or c["chars"] < 40:
                 bad.append(f"{r['label']} 有一次调用没带回带出处的切片：{c}")
-    if runs and not any(r["tool_calls"] for r in runs):
+    if runs and not any(r["tool_calls"] for r in runs) and not args.tool_k:
         bad.append("两场里模型一次都没主动调用 ⇒ 这个口今天没人用（机制通了但没通电）")
+    if args.tool_k:
+        # C24 未验②档：这一趟只把两件事判红——旋钮真落到**工具那条腿**、预取那条**不许被牵连**。
+        # 「这场一次都没调」在这一档是**读数**（它可能就是「多给几条就少核实一次」的答案），不判红；
+        # 代价是这种场次里旋钮无从现证，所以那一条要显式印出来，不悄悄放过。
+        legs = [e for r in runs for e in r["recall_ks"]]
+        for leg, dt, k in legs:
+            want = args.tool_k if leg == "tool" else 3
+            if k != want:
+                bad.append(f"②那条腿的 k 不对：{leg}/{dt} 实收 {k}，应 {want}——旋钮串到别的腿上了")
+        if not any(e[0] == "tool" for e in legs):
+            print(f"  ②未现证：k={args.tool_k} 这一档里模型一次都没调工具 ⇒ 旋钮落没落地无从取证，"
+                  f"这一趟的结论只能是「这场没核实」，不能写成「多给几条不影响」")
+        else:
+            print(f"  ②现证：工具那条腿实收 k={args.tool_k}、预取那条仍 k=3"
+                  f"（各腿实收见上一行的「每腿实收的 k」）")
     if disc is not None and ctrl is not None and not bad:
         extra = sorted({s for c in disc["tool_calls"] for s in c["sources"]}
                        - set(disc["prefetch_sources"]))
