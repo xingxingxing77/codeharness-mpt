@@ -40,6 +40,25 @@ def split_for_embedding(texts: Sequence[str], max_chars: int = 0) -> list[str]:
     return out
 
 
+def clamp_query(text: str) -> str:
+    """读侧的同一道界（C35）：查询串超过端点窗口就截头，并且**喊一声**。
+
+    为什么不复用 `split_for_embedding`：入库要「一段话变多个点」，读侧是「一个问句对一个向量」——
+    切成多块再平均是另一件事，也没在新刻度上标过。
+    为什么必须显式截：端点**保头丢尾且不给任何信号**（超窗后向量逐维相同，见本模块头），
+    所以不截的后果不是报错，而是「换个说法就召不回」，看着像模型笨。
+    两条召回腿（`LongTermMemory.recall` 与 `ExpStore.search`）共用这一处，不许各抄一份——
+    C27 当年就是靠「唯一出口」才让「绕开出口」变成一件会红的事。
+    """
+    h = settings.embedding.max_chars
+    if len(text) <= h:
+        return text
+    from codeharness.logs import logger
+    logger.warning(f"召回 query 超长，按端点窗口截断：{len(text)}→{h} 字"
+                   f"（不截就是端点静默保头丢尾）")
+    return text[:h]
+
+
 def _cut(text: str, h: int) -> list[str]:
     chunks: list[str] = []
     buf: list[str] = []

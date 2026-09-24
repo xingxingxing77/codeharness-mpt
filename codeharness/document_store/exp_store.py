@@ -11,7 +11,7 @@ P0-3: 租户隔离——从 CURRENT_USER ContextVar 取 user_id，避免"default
 import uuid
 
 from codeharness.configs.settings import settings
-from codeharness.document_store.embed_split import split_for_embedding
+from codeharness.document_store.embed_split import clamp_query, split_for_embedding
 from codeharness.document_store.qdrant_store import Point, QdrantStore
 from codeharness.logs import logger
 from codeharness.provider.gateway import LLMGateway
@@ -60,7 +60,9 @@ class ExpStore:
     async def search(self, action_tag: str, query: str, k: int = 2) -> list[dict]:
         """dense 余弦召回（经验复用问的是"是不是同一个问题"，不是词法覆盖），按分数降序；
         向量近但动作不同的经验不是同一条经验，action_tag 收窄留在本件做。"""
-        dense = await self.embeddings.aembed_query(query)
+        # C35：这里的 query 是**用户原话**（`manager.py:69` 传 req），可以是几千字——
+        # 与 `LongTermMemory.recall` 共用同一个出口截，不各抄一份
+        dense = await self.embeddings.aembed_query(clamp_query(query))
         hits = await self.store.search(query, list(dense), k=k * 4, hybrid=False,
                                        doc_type="exp", user_id=self.user_id)
         out = [{"id": str(h.id), "action_tag": h.payload.get("action_tag"),

@@ -1398,6 +1398,51 @@ def t37_rerank_endpoint_real_answer():
           f"分落在 0-1 之间 ⇒ 那根线要标定时按这个刻度，别拿 dense 余弦的 0.40 套")
 
 
+def t38_both_recall_legs_clamp_their_query():
+    """C35：两条召回腿发给端点的 query 都必须过同一个上界出口。
+
+    判据打在**实发长度**上（spy 替身记下端点收到的串长），不是 grep 源码文本——C27 的 t8 已经立过
+    这条：结构不变量要「出口打记号 + spy 记实发」，grep 只能证明字面在，不能证明它在链上。
+    两条腿都要量，因为 C32 只截了 `LongTermMemory.recall` 那一条，而经验池那条收的是**用户原话**
+    （`manager.py:69` 把 req 直接传进 `ExpStore.search`），漏的那半正是最长的那种输入。
+    """
+    from codeharness.configs.settings import settings
+    from codeharness.document_store.exp_store import ExpStore
+    from codeharness.memory.longterm import LongTermMemory
+
+    limit = settings.embedding.max_chars
+    sent = []
+
+    class SpyEmb:
+        dim = 64
+
+        async def aembed_query(self, q):
+            sent.append(len(q))
+            return [0.0] * 64
+
+        async def aembed_documents(self, ts):
+            return [[0.0] * 64 for _ in ts]
+
+    class NoStore:
+        async def search(self, *a, **kw):
+            return []
+
+    long_q = "长" * (limit + 500)
+    short_q = "重置密码的流程是什么"
+    for label, run in (("kb 腿", lambda q: LongTermMemory(embeddings=SpyEmb(), store=NoStore(),
+                                                         doc_type="kb").recall(q, k=3)),
+                       ("经验池腿", lambda q: ExpStore(embeddings=SpyEmb(), user_id="u38",
+                                                       store=NoStore()).search("RunCode", q))):
+        sent.clear()
+        asyncio.run(run(long_q))
+        assert sent == [limit], f"t38失效（{label}）：超窗 query 实发 {sent} 字，要恰好 {limit}"
+        sent.clear()
+        asyncio.run(run(short_q))
+        assert sent == [len(short_q)], \
+            f"t38失效（{label}）：短 query 被改了（实发 {sent}，要原样 {len(short_q)}）"
+    print(f"  ok  t38 两条召回腿实发给端点的 query 都截到 {limit} 字上限、短问句原样通过")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -1421,7 +1466,8 @@ def main():
               t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly,
               t33_point_id_carries_tenant_and_doc_type,
               t34_recall_floor_dense_score, t35_recall_floor_dense_rank,
-              t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer]
+              t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer,
+              t38_both_recall_legs_clamp_their_query]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

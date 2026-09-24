@@ -13,7 +13,7 @@ import uuid
 import httpx
 
 from codeharness.configs.settings import settings
-from codeharness.document_store.embed_split import split_for_embedding
+from codeharness.document_store.embed_split import clamp_query, split_for_embedding
 from codeharness.document_store.qdrant_store import Point, QdrantStore
 from codeharness.logs import logger
 from codeharness.observability import span
@@ -178,15 +178,9 @@ class LongTermMemory:
         `screen_dense`）。`off` 是今天这条单发路径，行为与判据逐字不变。
         """
         cfg = settings.recall_floor
-        # 读侧也上界（C27 那套管的是入库侧）：经典线传进来的可以是整份收件（几千字），不 clamp 就是
-        # 「按字数白烧 embedding 额度 + 端点静默保头丢尾」（截断窗口实测 ~3200 字，见
-        # `document_store/embed_split` 模块头）。取入库同一个窗口，并且**喊一声**再截——悄悄改会让
-        # 「这条 query 到底看了多少字」在事后无从考证。
-        limit = settings.embedding.max_chars
-        if limit and len(query) > limit:
-            logger.warning(f"召回 query 超长，按端点窗口截断：{len(query)}→{limit} 字（{self.doc_type} 腿）")
-            query = query[:limit]
-        dense = await self.embeddings.aembed_query(query)
+        # 读侧上界（C32 起、C35 收成一处）：经典线传的可以是整份收件，不截就是
+        # 「按字数白烧额度 + 端点静默保头丢尾」。与经验池那条腿共用 `clamp_query`。
+        dense = await self.embeddings.aembed_query(clamp_query(query))
         scope = dict(doc_type=self.doc_type, user_id=self.user_id, project=self.project_id)
         width = k
         if cfg.mode in ("score", "rank"):
