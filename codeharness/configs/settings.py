@@ -55,6 +55,34 @@ class EmbeddingConfig(BaseModel):
     # 是 3200 字，取它的一半以下留余量：窗口按 token 算，同一字符数在不同文本上落点不同，
     # 而块一旦超过窗口，多出来的那段就又只剩「词法腿看得见、语义问不到」。
     max_chars: int = 1200
+    # C34：这一腿**不过 gateway 的 `_acall` 重试链**，但它从来就有 openai SDK 自己的重试档——
+    # langchain 字段默认 `max_retries=2`，实测「恒回 500 的本机桩收到 3 发」（工装见本项台账）。
+    # 提成显式配置的理由：LLM 腿必须归零（SDK 层叠 tenacity 是 9 发且一行日志不出，C25 就是这么收的），
+    # 而这里 SDK 那层是**唯一**一层——归零等于让「瞬时抖一下」变成用户上传失败/召回按无资料继续。
+    max_retries: int = 2
+    # 超时上限。改前 langchain 的 `request_timeout` 默认 None ⇒ httpx `Timeout(timeout=None)`，
+    # **行为实测没有上限**（桩睡 25 秒照样成功回来）⇒ 端点挂住会把整场上传无限钉住。
+    # 60 秒是 LLM 腿那 300 秒（`const.LLM_API_TIMEOUT`）的收紧版：一次请求最多 20 条短文本，
+    # 同时留足本机冷加载模型的时间。最坏 3 发 = 180 秒，与 `_act` 的工具超时同一量级。
+    timeout: int = 60
+
+    @field_validator("max_retries")
+    @classmethod
+    def check_max_retries(cls, v):
+        if v < 0:
+            raise ValueError(f"EMBEDDING__MAX_RETRIES 不能为负；要「一次都不重发」请显式设 0，收到 {v}")
+        return v
+
+    @field_validator("timeout")
+    @classmethod
+    def check_timeout(cls, v):
+        """C5/C27 那条纪律：坏配置当场拒，不许「能跑但行为不对」。
+        这一格的特殊之处是 **0 和负值不是「关掉超时」而是「不设上限」**——那正是本项要修的静默挂死，
+        所以宁可起不来，也不能让一个笔误把保护摘掉。"""
+        if v <= 0:
+            raise ValueError(f"EMBEDDING__TIMEOUT 必须 >0：0/负值不等于关掉超时，而是回到"
+                             f"「端点挂住就一直等」的无上限状态，收到 {v}")
+        return v
 
     @field_validator("max_chars")
     @classmethod

@@ -739,6 +739,114 @@ def t16_structured_failure_accounts():
         srv.shutdown()
 
 
+def t18_embedding_leg_has_explicit_bounds():
+    """C34：向量这条腿**不过 `_acall`，但一直有 openai SDK 自己那层重试**——两档都要显式钉住，
+    而且「有超时」必须是**行为读数**不是属性读数（改前实测：`Timeout(timeout=None)`、桩睡 25 秒照样成功，
+    也就是端点挂住就能把上传无限钉住）。
+
+    四格：① 恒 500 的桩实收 `max_retries+1` 发（重试档真在链上）；② 建出来的客户端两档都非默认继承；
+    ③ 把 timeout 设成 2 秒、桩睡 6 秒 ⇒ 客户端必须**先于**桩醒过来放弃（这才叫上限存在）；
+    ④ 坏配置当场拒（`timeout<=0` 不是「关掉超时」而是「不设上限」，正是要修的那个状态）。
+    """
+    import json as _j
+    import threading
+    import time as _t
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from openai import APITimeoutError, InternalServerError
+    from codeharness.configs.settings import EmbeddingConfig, settings
+
+    mode = {"m": "500", "n": 0, "sleep": 0.0}
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            mode["n"] += 1
+            if mode["m"] == "hang":
+                _t.sleep(mode["sleep"])
+            if mode["m"] == "500":
+                return self._send(500, {"error": {"message": "stub boom", "type": "server_error"}})
+            return self._send(200, {"object": "list", "data":
+                                    [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+                                    "model": "stub"})
+
+        def _send(self, code, body):
+            out = _j.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    keep = (settings.embedding.base_url, settings.embedding.api_key,
+            settings.embedding.timeout, settings.embedding.max_retries)
+    settings.embedding.base_url = f"http://127.0.0.1:{port}/v1"
+    settings.embedding.api_key = "stub"
+
+    async def _one():
+        mode.update(n=0)
+        emb = LLMGateway.embeddings()
+        try:
+            await emb.aembed_documents(["一条会失败的文本"])
+            return "ok"
+        except Exception as e:
+            return type(e).__name__
+
+    try:
+        # ① 重试档真接到客户端：把配置设成 **1**（故意不等于 langchain 的默认 2）再数桩收几发——
+        # 设成 2 的话「摘掉工厂那行 kwarg」与「工厂传了值」两种代码都收 3 发，格子就没牙（恒等式陷阱）。
+        settings.embedding.max_retries = 1
+        mode.update(m="500")
+        err = asyncio.run(_one())
+        assert err == "InternalServerError", f"t18①失效：桩恒 500 时抛的不是那一族（{err}）"
+        n1 = mode["n"]
+        assert n1 == 2, (f"t18①失效：配置 max_retries=1 应发 2 次，桩实收 {n1} 发"
+                         f"（收到 3 发说明工厂没把配置传下去、吃的是 langchain 默认 2）")
+        # ② 两档都显式带下去，且 timeout 不再是「不设上限」那个 None
+        emb = LLMGateway.embeddings()
+        assert emb.max_retries == settings.embedding.max_retries, "t18②失效：max_retries 没传到客户端"
+        to = emb.async_client._client._client.timeout
+        assert to.read is not None and to.connect is not None, \
+            f"t18②失效：httpx 侧又是 Timeout(timeout=None)——那正是改前的无上限状态（{to}）"
+        assert float(to.read) == float(settings.embedding.timeout), \
+            f"t18②失效：配置 {settings.embedding.timeout}s，客户端 read={to.read}"
+        # ③ 行为层：上限 2 秒、桩睡 6 秒 ⇒ 必须客户端先放弃。
+        #    这一格把 max_retries 设 0 —— 不然「3 发 × 2 秒 + 退避」会超过桩的 6 秒，
+        #    量出来的就不是超时上限而是重试总量（两档要各量各的）。
+        settings.embedding.timeout, settings.embedding.max_retries = 2, 0
+        mode.update(m="hang", sleep=6.0)
+        t0 = _t.time()
+        err3 = asyncio.run(_one())
+        spent = _t.time() - t0
+        assert err3 in ("APITimeoutError",), \
+            f"t18③失效：桩睡 6 秒而客户端上限 2 秒，抛出来的却是 {err3}（说明超时没生效）"
+        assert spent < mode["sleep"], \
+            (f"t18③失效：等满 {spent:.1f}s 才回来——上限没起作用（桩只睡了 {mode['sleep']}s）")
+        assert mode["n"] == 1, f"t18③失效：设了 0 次重发却收了 {mode['n']} 发"
+        settings.embedding.timeout, settings.embedding.max_retries = keep[2], keep[3]
+        # ④ 坏配置当场拒：0/负值不是「关掉超时」而是「回到不设上限」
+        for bad in ({"timeout": 0}, {"timeout": -5}, {"max_retries": -1}):
+            try:
+                EmbeddingConfig(**bad)
+            except ValueError:
+                continue
+            raise AssertionError(f"t18④失效：坏配置 {bad} 没被当场拒（能起不来比静默摘保护便宜）")
+        print(f"  t18 向量腿两档都显式且真生效（配置 max_retries=1 时桩实收 {n1} 发；"
+              f"上限 2s 时 {spent:.1f}s 就放弃而不是等满桩的 6s，且只发 {mode['n']} 发；坏配置拒）")
+    finally:
+        settings.embedding.base_url, settings.embedding.api_key = keep[0], keep[1]
+        settings.embedding.timeout, settings.embedding.max_retries = keep[2], keep[3]
+        srv.shutdown()
+        srv.server_close()
+
+
 def t17_ratelimit_single_owner():
     """C25：厂商 429 走**有界退避重发**，而且重试的归属只有一处。真 HTTP 桩 + 真 SDK，零外网零花费。
 
@@ -858,7 +966,8 @@ def main():
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
               t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
               t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline,
-              t16_structured_failure_accounts, t17_ratelimit_single_owner]
+              t16_structured_failure_accounts, t17_ratelimit_single_owner,
+              t18_embedding_leg_has_explicit_bounds]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

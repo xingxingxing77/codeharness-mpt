@@ -161,7 +161,15 @@ class LLMGateway:
     
     @staticmethod
     def embeddings():
-        """向量模型工厂（1024 维，OpenAI 兼容端点）。向量模型不走 gateway 的重试链。
+        """向量模型工厂（1024 维，OpenAI 兼容端点）。
+
+        ⚠ 「向量模型不走 gateway 的重试链」这句**只对一半**（C34 改准）：它不过 `_acall`/tenacity
+        那一层，但 openai SDK 自己有一层重试，langchain 字段默认就是 2 次——实测恒回 500 的本机桩
+        收到 3 发。所以这里两档都**显式钉**而不是留继承：`max_retries` 与 `timeout`。
+        为什么这一腿不照 LLM 腿归零：LLM 腿归零是因为两层叠起来 9 发且一行日志不出（C25）；
+        这里 SDK 层是唯一一层，归零就把「瞬时抖一下」变成了用户上传失败。
+        为什么必须有 `timeout`：改前是 None ⇒ httpx `Timeout(timeout=None)`，**实测无上限**
+        （桩睡 25 秒照样成功），端点挂住会把整场上传无限钉住。
 
         ⚠ `check_embedding_ctx_length=False`：langchain 默认先用 tiktoken 把输入编码成
         token-id 数组再发——端点只收字符串，收数组直接 `400 invalid input type`
@@ -175,7 +183,9 @@ class LLMGateway:
         from codeharness.configs.settings import settings
         return OpenAIEmbeddings(model=settings.embedding.model, base_url=settings.embedding.base_url,
                                 api_key=settings.embedding.api_key or "EMPTY",
-                                check_embedding_ctx_length=False, chunk_size=20)
+                                check_embedding_ctx_length=False, chunk_size=20,
+                                max_retries=settings.embedding.max_retries,
+                                timeout=settings.embedding.timeout)
 
     # ---- 源 BaseLLM 的公开面 --------------------------------------------------
     def format_msg(self, messages: Union[str, dict, BaseMessage, list]) -> list[BaseMessage]:
