@@ -752,6 +752,10 @@ def t9_whitelist_never_lies():
                 f"t9②：给用户看的那行还挂着异常类名前缀：{line[:180]}"
             assert "没有入库" in line and OPTIONAL_READERS[suffix] in line, \
                 f"t9②：门口那两句人话没原样到达用户：{line[:180]}"
+            # 界面侧现证（09-24 无头 1286 真传 .docx/.pdf 看见的）：`.kbMsg` 是纯文本 + pre-line，
+            # markdown 的星号粗体与反引号会原样显示成星号/反引号——只看关键词的门禁看不见这件事。
+            assert "**" not in line and chr(96) not in line, \
+                f"t9②：给用户看的纯文本行里带了 markdown 标记（界面会原样显示）：{line[:180]}"
             refused.append(suffix)
 
     # ③ 端点门口那一格：store/embeddings 全换替身 ⇒ 真 HTTP 语义、零在线服务

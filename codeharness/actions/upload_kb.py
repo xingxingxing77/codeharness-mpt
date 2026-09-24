@@ -42,8 +42,11 @@ def door_refusal(suffix: str) -> str:
     if reader_available(suffix):
         return ""
     mod = OPTIONAL_READERS.get(suffix, "?")
-    return (f"{suffix} 这台机器暂时读不了：缺读取组件 `{mod}`（补法 `pip install {mod}`）"
-            f"——这份文档**没有入库**，也没落进 kb/，补好组件再传一次")
+    # 这一句是**给用户看的纯文本**（`.kbMsg` 只有 white-space: pre-line，不过 markdown）：
+    # 09-24 无头 1286 真传 .docx/.pdf 才看见 `**没有入库**` 与反引号在原样显示成星号和反引号——
+    # 门禁只看关键词，看不见渲染，所以这里禁 markdown 标记（判据 s15 t9② 已钉上）。
+    return (f"{suffix} 这台机器暂时读不了：缺读取组件 {mod}（补法 pip install {mod}）"
+            f"——这份文档没有入库，也没落进 kb/，补好组件再传一次")
 
 
 def _texts_of(path: Path) -> list[tuple[str, dict]]:

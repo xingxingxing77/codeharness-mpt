@@ -898,6 +898,11 @@ def t15_kb_upload_entry():
     assert "r.errors" in body and "errs.length" in body and "head" in body, \
         "B12 回归：上传结果不再同时报「摄入了多少」与「被拒哪几条」（部分成功被说成全成/全败）"
     assert "await load()" in body, "B12 回归：传完不刷新文件树（原件就在 kb/ 里，看不见等于没传）"
+    # 「摄取中…」这句只在摄取期间成立：响应一落地就该换回「加入知识库」。此前它一直挂到
+    # `load()` 返回，而 load() 并行等 `/graph`（2026-09-24 隔离实例 8794 实测 2.2~2.3s，
+    # 同形状的 `/workspace/files` 只有 4ms）——按钮替那次图刷新背了 4 秒，用户看到「还在传」。
+    assert body.index("kbBusy.value = false") < body.index("await load()"), \
+        "B12 回归：kbBusy 只在 finally 里清，「摄取中…」被 load() 里那发 /graph 拖长了两秒"
     assert "kbInput.value.value = ''" in body, "B12 回归：不清 input.value，同名文件第二次选不中"
     # C16 的最后一米：后端非 2xx（含向量服务不可达那格 503）时，界面必须把 detail 原文显示出来。
     # 浏览器导航本轮被自动模式挡，所以这一格只能钉在源码判据上——它钉的是「原文有没有走到那行字」，

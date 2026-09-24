@@ -350,6 +350,7 @@ async function doUploadKb() {
                     err: errs.length > 0 }
     kbChosen.value = []
     if (kbInput.value) kbInput.value.value = ''    // 不清 value，同名文件第二次选不中（change 不再触发）
+    kbBusy.value = false    // 摄取已回话，`load()` 里那发 /graph 实测 2.2s——别让「摄取中…」替它背这段时间
     await load()
   } catch (e) {
     kbMsg.value = { text: (e as Error).message, err: true }

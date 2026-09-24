@@ -4,6 +4,8 @@
  *  node frontend/scripts/shot.mjs --width 1280 --height 900 \
  *       --url http://127.0.0.1:8718/ --out shots/w1280.png [--eval "JS表达式"] [--wait-for "JS条件"]
  *  --eval 的返回值会被打印（--probe 语义）；不给 --out 就只探针不截图。
+ *  --upload 'input[type=file]=a.docx,b.pdf' 在 --eval 之前把文件塞进文件框（CDP，触发原生 change），
+ *  用来取「真二进制从界面进后端」那一格读数——文件对话框点不了，MCP 的 upload_file 又要求元素可见。
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -31,6 +33,9 @@ const OPT = {
   eval: arg('eval') || (arg('eval-file') ? fs.readFileSync(arg('eval-file'), 'utf8') : ''),
   waitFor: arg('wait-for'),
   theme: arg('theme'), // light | dark —— 截图前把主题钉住
+  upload: arg('upload'),   // "css选择器=文件[,文件]" —— CDP 塞进 <input type=file>，触发原生 change
+  preEval: arg('pre-eval') || (arg('pre-eval-file')
+    ? fs.readFileSync(arg('pre-eval-file'), 'utf8') : ''),   // 上传前先跑（点开会话/面板/页签）
   // A1：无头 Chrome 默认按 `prefers-reduced-motion: reduce` 报，于是**所有动画都被媒体查询关掉**
   // （读出来的 animationName 全是 none）。要读动效本身必须显式覆盖，否则探针会把「环境把动效关了」
   // 误报成「代码没写动效」——这正是 A1 三处源值最容易得出的假结论。
@@ -187,6 +192,28 @@ async function main() {
         `document.body.toggleAttribute('data-ds-dark-theme', ${OPT.theme === 'dark'}); document.documentElement.style.colorScheme=${JSON.stringify(OPT.theme || 'light')}; 1`
       )
       await sleep(120)
+    }
+
+    if (OPT.preEval) {
+      const v = await cdp.expr(`(async () => { ${OPT.preEval} })()`)
+      console.log('pre:', typeof v === 'string' ? v : JSON.stringify(v))
+    }
+
+    // --upload "css选择器=文件1[,文件2]"：走 CDP 的 DOM.setFileInputFiles，Chrome 照原生方式
+    // 派发 input/change，所以 Vue 的 @change 处理器会真的跑到 —— 这是「真二进制从界面进后端」
+    // 唯一不点系统文件框就能走通的入口（内置浏览器面板 746 CSS px 时详情列合法收 0 宽，
+    // MCP 的 upload_file 选不到那颗钮，见 plan/frontend.md 的 A1/B12 未验边界）。
+    if (OPT.upload) {
+      const at = OPT.upload.indexOf('=')
+      if (at < 1) throw new Error('--upload 的形状是 "css选择器=文件路径[,第二个]"')
+      const sel = OPT.upload.slice(0, at).trim()
+      const files = OPT.upload.slice(at + 1).split(',').map((f) => path.resolve(f.trim()))
+      await cdp.send('DOM.enable')
+      const { root } = await cdp.send('DOM.getDocument', { depth: -1 })
+      const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: sel })
+      if (!nodeId) throw new Error(`--upload 找不到输入框：${sel}`)
+      await cdp.send('DOM.setFileInputFiles', { nodeId, files })
+      await sleep(400)
     }
 
     if (OPT.eval) {
