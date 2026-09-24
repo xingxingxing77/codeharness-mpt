@@ -1375,6 +1375,126 @@ def t19_fork_surface():
                "B3②：拷贝撞上限只带前 N 份并报 truncated（没撞顶的阳性对照仍 False）+ 界面把截断说出来")
 
 
+def t23_run_after_fork():
+    """B3①（09-25，零花费）：分叉出的会话**真跑第二跑**——此前只验了它有自己的流与产物目录。
+
+    「分叉能用」真正的意思是**接着那儿往下走得通**，所以这一格走全链：源场跑一跑 → 分叉 → 子场再跑
+    一跑，四件各钉一种坏法：
+      ① 子场跑到 `finished`（起不来或半途 failed 都不算「跑得通」）；
+      ② 第二跑的事件只出现在**子场**的流里，源场的流一字不变（t19 在「跑之前」验过不串台，
+         真正会露馅的是跑之后），且子场游标仍单调；
+      ③ 源场的产物目录**逐字节不变**（两场合写一份工作区才是最坏的形状）；
+      ④ 子场带过来的前文真在磁盘上（逐字对得上，不是空目录）。
+    模型端点用本机 OpenAI 兼容桩（与 `s8_runner_meter::t10` 同一形状），`enable_rag` 关掉——
+    本格问「分叉后能不能接着跑」，不掺向量腿。
+    """
+    import json as _j
+    import shutil
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path as _P
+
+    import server.sessions as ss
+    from codeharness.configs.settings import settings
+    from fastapi.testclient import TestClient
+    from server.app import create_app
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            body = {"id": "chatcmpl-t23", "object": "chat.completion", "created": 1790000000,
+                    "model": settings.llm.model,
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant", "content": "好的"}}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}}
+            out = _j.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    def run_to_end(cc, sid, budget=90.0):
+        t0 = time.time()
+        st = ""
+        while time.time() - t0 < budget:
+            st = str(cc.get(f"/api/sessions/{sid}").json().get("status"))
+            if st not in ("running", "awaiting_human"):
+                return st
+            time.sleep(0.5)
+        return st
+
+    def snap(root):
+        p = _P(root)
+        return {} if not p.is_dir() else {str(f.relative_to(p)): f.read_bytes()
+                                          for f in p.rglob("*") if f.is_file()}
+
+    srv = HTTPServer(("127.0.0.1", 0), _Stub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    keep = (ss.SESSIONS_FILE, settings.platform.use_redis, settings.platform.auth_enabled,
+            settings.enable_rag, settings.llm.base_url, settings.llm.model, settings.llm.stream)
+    tmp = Path(tempfile.mkdtemp())
+    proj = "s8forkrun"
+    try:
+        ss.SESSIONS_FILE = tmp / "sessions.json"
+        settings.platform.use_redis = settings.platform.auth_enabled = False
+        settings.enable_rag = False
+        settings.llm.base_url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        settings.llm.stream = False
+        with TestClient(create_app()) as cc:
+            p = cc.post("/api/sessions", json={"idea": "源场：先跑一跑再分叉",
+                                                "project_name": proj, "paradigm": "dynamic"}).json()
+            assert cc.post(f"/api/sessions/{p['id']}/start").status_code == 200, "源场起跑失败"
+            assert run_to_end(cc, p["id"]) == "finished", "①前置失配：源场自己没跑到 finished"
+            seed = _P(p["workspace"]) / "docs"
+            seed.mkdir(parents=True, exist_ok=True)
+            (seed / "前文.md").write_text("第一跑留下的产物", encoding="utf-8")
+            before = snap(p["workspace"])
+            ev_before = [e.cursor for e in cc.app.state.bus.history(p["id"])]
+
+            kid = cc.post(f"/api/sessions/{p['id']}/fork", json={"from_cursor": ""}).json()["id"]
+            assert cc.post(f"/api/sessions/{kid}/start").status_code == 200, "子场起跑失败"
+            st = run_to_end(cc, kid)
+            assert st == "finished", f"①分叉出的会话第二跑没跑到终态（实为 {st}）"
+            carried = _P(cc.get(f"/api/sessions/{kid}").json()["workspace"]) / "docs" / "前文.md"
+            assert carried.is_file() and carried.read_text(encoding="utf-8") == "第一跑留下的产物", \
+                f"④子场没带来源场的产物（分叉＝空目录 ⇒ 第二跑根本读不到前文）：{carried}"
+            assert snap(p["workspace"]) == before, \
+                "③子场的第二跑动了源场的产物目录（两场合写一份工作区）"
+            # ③的阳性对照（这条断言不许是恒真的）：真往源场目录塞一份东西，同一套比较必须报不等。
+            # 为什么对照做在门禁里而不是靠变异工装：变异「子场沿用源场 project」在 Windows 上根本
+            # 走不到这一格——两场合写同一份 sqlite 会先炸 `PermissionError [WinError 32]`（09-25 现证）。
+            probe = _P(p["workspace"]) / "_对照.txt"
+            probe.write_text("子场不该碰这里", encoding="utf-8")
+            try:
+                dirty = snap(p["workspace"])
+            finally:
+                probe.unlink()      # 不管断言红不绿都得清：留着它，下一次跑 `before` 就带上脏文件，
+                shutil.rmtree(_P(p["workspace"]) / "_子场残留", ignore_errors=True)   # 对照会假红成「恒真」
+            assert dirty != before, "③恒真：源场目录被改了都没报出来，这条断言没有牙"
+            assert snap(p["workspace"]) == before, "③对照没复原（清理漏了，下一格会假绿）"
+            ev_after = [e.cursor for e in cc.app.state.bus.history(p["id"])]
+            assert ev_after == ev_before, \
+                f"②子场第二跑的事件串进了源场的流（源场多出 {len(ev_after) - len(ev_before)} 条）"
+            kid_ev = [e.cursor for e in cc.app.state.bus.history(kid)]
+            assert len(kid_ev) > len(ev_before), \
+                f"②子场跑完却没发出新事件（流里还是搬来的那些：{len(kid_ev)} 条）"
+            assert kid_ev == sorted(kid_ev), f"②子场第二跑之后游标不再单调：{kid_ev[:6]}"
+        _ok("t23", "B3① 分叉出的会话真跑第二跑：跑到 finished、第二跑只进子场的流且游标仍单调、"
+                   "源场目录逐字节不变、带过来的前文逐字对得上")
+    finally:
+        srv.shutdown()
+        (ss.SESSIONS_FILE, settings.platform.use_redis, settings.platform.auth_enabled,
+         settings.enable_rag, settings.llm.base_url, settings.llm.model, settings.llm.stream) = keep
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(_P("workspace") / proj, ignore_errors=True)
+
+
 def t20_icon_names_resolve():
     """F-G：活组件按名字要的图标，必须真能在 `GLYPHS` 里取到。
 
@@ -1631,7 +1751,8 @@ def main():
               t12_offline_banner_and_turn_error_row, t13_size_cap_and_truncation_reach_the_user,
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
               t17_goal_surface, t18_steer_queue, t19_fork_surface,
-              t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface)
+              t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface,
+              t23_run_after_fork)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")
