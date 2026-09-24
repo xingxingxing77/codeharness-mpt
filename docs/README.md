@@ -155,12 +155,15 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 `RECALL_FLOOR__MODE` 筛（`score`=余弦线 / `rank`=dense 名次 / `rerank`=送精排按 relevance 分筛 / `off`=改前那条单发），
 **再**交 hybrid 只在筛剩的点里重排。三根纪律：① 线只能打在 dense 腿或精排分上——hybrid 那条回的是 RRF **名次分**，
 跟任何相似度刻度都不可比（`s5 t34` 的 m2 变异就是反例）；② **`min_score` 的刻度随档变**：`score` 是余弦、
-`rerank` 是精排 relevance，都不是可以跨端点抄的数。代码默认 `score/0.40` 标定在**本机 bge-m3** + C20 那张尺子上
-（`tests/manual_recall_floor_curve.py`，k=5 与 k=3 各一份产物），③ 2026-09-24 起 `.env` 的向量端点已换成百炼
-`qwen3.7-text-embedding`（同域 OpenAI 兼容口，实测 1024 维、单批 **≤20 条**），**这根线在新刻度上没标过**
-（现测无关 0.1472 / 相关 0.6224，分离度比 bge-m3 宽 ⇒ 0.40 近乎不设防），所以 `.env` 暂时走
-`RECALL_FLOOR__MODE=rank`——名次是序数，**换 embedding 模型只有这一档免标定**；重标要烧额度
-（这把 key 两个模型各 1M token，精排还按 query×候选数计费），用户令「非必要不要」故未跑。
+`rerank` 是精排 relevance，都不是可以跨端点抄的数。代码默认曾长期是 `score/0.40`，标定在**本机 bge-m3**
++ C20 那张尺子上（`tests/manual_recall_floor_curve.py`，k=5 与 k=3 各一份产物）。③ 2026-09-24 起
+`.env` 的向量端点是百炼 `qwen3.7-text-embedding`（同域 OpenAI 兼容口，实测 1024 维、单批 **≤20 条**），
+**这根线已在新刻度上重标**：同一把尺子重跑 300 问（k=5 与生产那一档 k=3，产物按模型名落盘
+`recall_floor_curve_qwen3.7-text-embedding_k{5,3}.json`），gold 那条切片的 dense 分 p05=**0.647**、
+无关切片 0.1472 ⇒ 代码默认与 `.env` 现在都是 **`score/0.55`**（候选池每问 15→4.98，代价 1~2/300，
+0.65 起才下坡：丢 14/300 且砍空率 1.7%）。标定实发 **286,551 token / 批的闸 400,000**，闸装在工装里、
+按端点回的真 usage 计。旧的 0.40 与过渡档 `rank` 都退场了——`rank` 那一档仍留在配置面，
+换端点来不及重标时它是那个「名次是序数、免标定」的落点。
 门禁 `s5 t34/t35/t36`（三支各钉一次，含现状-阳性对照-结构格）+ `s15 t12`（真模型 prompt 面，**显式钉自己要验的那档**、
 不吃 ambient 配置）；`s5 t37` 是真端点精排那一发，**默认跳过**，`RERANK_LIVE=1` 才发。
 3. ~~**`qwen3.8-flash` 不在 `TOKEN_COSTS`**~~ —— **2026-09-16 闭合**（用户报价：输入 0.8 / 输出 2.7 元/百万 token）：表内注明该行是**人民币口径**（其余行美元，前端 "$" 符号是展示层遗留，不跨币种换算——归 S8 一并清）。缓存命中价（输入 0.1）未入账：MaaS 不回传 `cache_read` 字段，归 S9 计费口径对齐。

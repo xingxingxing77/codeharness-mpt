@@ -23,15 +23,25 @@ EMBEDDING_OBSERVED_TRUNCATION_CHARS = 3200
 # C23：`RECALL_FLOOR__MIN_SCORE` 的标定依据与上界。这根线是 **embedding 端点的属性**，不是可以从书上
 # 抄的常数：超过它就连「真相关」的切片也进不了 prompt，而症状只是「知识库里没资料」——所以它和
 # `EMBEDDING__MAX_CHARS` 一样钉在一次实测上（`tests/manual_recall_floor_curve.py`，C20 那张尺子：
-# 本机真 bge-m3 + 生产切块 + RGB_En 300 问，k=5 与生产那一档 k=3 各跑一次，读数
-# `storage/benchmark/recall_floor_curve_k{5,3}.json`）。换模型/换量化必须重量。
-#   · gold 那条切片的 dense 分下界（RGB_En p05）= 0.5918 —— 线画到那儿就开始吃真相关；
-#   · 实测代价（`gold_lost_vs_base`，基线 top-k 里有 gold 而这一档没有）：0.40 → 两个 k 都是 **0**；
-#     0.45 → k=3 丢 1/300；0.50 → 丢 2/300；0.60 → 丢 19/300（hit@3 从 .95 掉到 .90）。
-# 所以默认取 **0.40**（零丢失里最高的那档），上界钉在 **0.50**：再往上就是上面那条实测下坡路。
-FLOOR_CALIBRATED_ON = ("bge-m3:latest (ollama, 1024d) @ RGB_En 300 问 / k=5 与 k=3 两档，"
-                       "工装 tests/manual_recall_floor_curve.py")
-FLOOR_CALIBRATED_MAX_SCORE = 0.50
+# 生产切块 + RGB_En 300 问，k=5 与生产那一档 k=3 各跑一次）。换模型/换量化必须重量。
+# **当前档 = 百炼 `qwen3.7-text-embedding`**（09-24 重标，读数
+# `storage/benchmark/recall_floor_curve_qwen3.7-text-embedding_k{5,3}.json`）：
+#   · gold 那条切片的 dense 分下界（RGB_En p05）= **0.647**；中文那两栏更高（CRUD 0.6962 / RGB 0.7524）
+#     ⇒ 绑定约束是英文那栏。无关切片同刻度实测 0.1472 ⇒ 线放 0.55 两侧都有余量；
+#   · 实测代价 `gold_lost_vs_base`（基线 top-k 里有 gold 而这一档没有）：0.40/0.45/0.50 → k=5 全 0；
+#     **0.55 → k=5 丢 1/300、k=3 丢 2/300**；0.60 → 丢 3/300；**0.65 → 丢 14/300、砍空率 1.7%、
+#     hit@3 从 .9767 掉到 .9333** —— 下坡路从 0.65 开始；
+#   · 收益是候选池（每问留下几条，k=5）：15 → 13.69（0.40）/ 7.25（0.50）/ **4.98（0.55）**/ 2.57（0.65）。
+# 所以默认取 **0.55**：代价仍在 1~2/300 那一档里的最高线，同时把候选池砍掉三分之二；
+# 上界钉在 **0.60**，再往上就是上面那条实测下坡路。
+#   · **别拿 hit@1 的档间差当收益**：同码重跑的噪声底本轮实测 k=5 = 0.02、k=3 = 0.0034（bge-m3 那轮
+#     0.0067），表里 0.40→0.55 的 hit@1 摆动（.6667→.69）整段都在噪声里。站得住的只有候选池与
+#     gold 丢失这两个确定量——这条与 C23 那轮「差点把噪声写成结论」是同一个坑，别第二次踩。
+# 历史档（本机 bge-m3，09-23 量）：p05=0.5918、默认 0.40、上界 0.50。那个刻度今天不是生产端点，
+# 数字留着只为说明「换端点必重量」这件事本身（旧两份 `recall_floor_curve_k{5,3}.json` 未覆写）。
+FLOOR_CALIBRATED_ON = ("qwen3.7-text-embedding (百炼 compatible-mode, 1024d) @ RGB_En 300 问 / "
+                       "k=5 与 k=3 两档，工装 tests/manual_recall_floor_curve.py（09-24 重标）")
+FLOOR_CALIBRATED_MAX_SCORE = 0.60
 
 
 class EmbeddingConfig(BaseModel):
@@ -95,7 +105,7 @@ class RecallFloorConfig(BaseModel):
 
     mode: Literal["off", "score", "rank", "rerank"] = "score"
     oversample: int = 3        # dense 候选窗 = k × 此数（≥1；rerank 档不用它，它用 reranker.recall_k）
-    min_score: float = 0.40    # score 档的余弦下限：C20 尺子上「gold 零丢失」那一档（依据见上面常量）
+    min_score: float = 0.55    # score 档的余弦下限：新刻度上「代价仍在 1~2/300 里」的最高档（依据见上面常量）
     max_rank: int = 5          # rank 档的名次上限（≥1）
 
     @field_validator("min_score")
