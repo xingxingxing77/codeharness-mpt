@@ -44,6 +44,7 @@ EXPECTED_TOOLS = {          # 注册面全名册：新工具必须写明"是谁�
     "write_file", "read_file",                          # S4 文件对（带会话边界）
     "execute_shell_async", "terminal_command",          # shell 对（沙箱/保态终端）
     "search_internet",                                  # 联网唯一出口
+    "search_knowledge_base",                            # C24：知识库检索从「每轮预取」变成模型可主动调
     "open_file", "goto_line", "scroll_down", "scroll_up", "create_file",
     "edit_file_by_replace", "insert_content_at_line", "append_file",
     "search_dir", "search_file", "find_file",           # Editor 命令面 11 只（接线台账 #7）
@@ -249,7 +250,10 @@ def _capture_warnings():
 
 def t15_registry_and_tools_share_one_source():
     assert {t.name for t in REGISTRY} == set(TOOL_REGISTRY.tools) == EXPECTED_TOOLS
-    assert sorted(TOOL_REGISTRY.tags()) == ["edit", "file", "git", "terminal", "web"]
+    # `retrieval` 是 C24 加的第三只 tag（知识库检索从「每轮预取」变成模型可主动调的工具）
+    assert sorted(TOOL_REGISTRY.tags()) == ["edit", "file", "git", "retrieval", "terminal", "web"]
+    assert [t.name for t in TOOL_REGISTRY.select("retrieval")] == ["search_knowledge_base"], \
+        "tag=retrieval 选出来的不是那件检索工具"
 
 
 def t16_select_unions_names_and_tags_without_duplicates():
@@ -629,7 +633,7 @@ async def _c6_select(min_tools, topk=6, recall_topk=12, use_llm=False, llm=None,
 
 
 def t39_recall_dormant_on_today_roster():
-    """C6 的默认档必须是「什么都不做」：今天名册 18 只 ≤ `min_tools=30` ⇒ 返回**同一个对象**。
+    """C6 的默认档必须是「什么都不做」：今天名册 19 只 ≤ `min_tools=30` ⇒ 返回**同一个对象**。
 
     判 identity 不判相等：`role_zero.py` 那个 `json.dumps` 吃的是 dict 的键序与内容，
     返回一个「等值的新 dict」也算通过，但键序漂了 prompt 就变了——休眠档要的是逐字不变。
@@ -741,8 +745,9 @@ def t43_roster_unchanged_by_c6():
 
     为什么单独一格：把阈值凑过去的最省事写法就是多注册几只假工具，而 `EXPECTED_TOOLS`
     是登记制守卫（t1）——真有人这么干，那一格会红，但这格把「为什么不许」写在现场。
+    18→19 那一次是 C24 的 `search_knowledge_base`（新能力面，走 t1 登记），不是 C6 凑阈值。
     """
-    assert set(TOOL_REGISTRY.tools) == EXPECTED_TOOLS and len(EXPECTED_TOOLS) == 18, \
+    assert set(TOOL_REGISTRY.tools) == EXPECTED_TOOLS and len(EXPECTED_TOOLS) == 19, \
         f"名册变了：{sorted(set(TOOL_REGISTRY.tools) ^ EXPECTED_TOOLS)}（C6 只裁 prompt，不加工具）"
 
 
@@ -962,7 +967,7 @@ def main():
         time.sleep(0.25)
     leftovers = [str(p.relative_to(BASE)) for p in BASE.rglob("*")] if BASE.exists() else []
     assert not BASE.exists(), f"自测留下了句柄或文件: {leftovers[:8]}"
-    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（全名册 EXPECTED_TOOLS 18 只登记/名字与 tag 并集去重/"
+    print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（全名册 EXPECTED_TOOLS 19 只登记/名字与 tag 并集去重/"
           f"未知 key 告警跳过/漏 @tool 不登记/SweAgent 取法）+ 越界防护 3 组（兄弟会话目录前缀回归/"
           f"父目录与绝对路径/scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）"
           f"+ shell 2 组 + 搜索 3 组（canned HTML 真解析/配 key 走 serper/失败降级，全程零外网）"

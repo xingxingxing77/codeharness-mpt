@@ -179,21 +179,11 @@ class RoleZero:
 
         C22：每条切片单独挂一行**可 grep 的来源标记**（`.pdf` 带页码）。C21 只把出处接到了数据面
         （`Message.metadata`），而模型读的是这段文本——没有标记时它答完没法归因、用户也没法拿它去核。
-        C21 之前入库的老切片没有 `source` ⇒ 标「出处未登记」，**不拿文件名格式凑一个假出处**。
+        排版现在住在 `longterm.format_kb_blocks`：C24 那件模型可主动调的检索工具用同一个函数。
         """
         try:
-            blocks = []
-            for m in await self.kb.recall(task, k=3):
-                meta = m.metadata or {}
-                src, page = str(meta.get("source") or ""), meta.get("page")
-                if not src:
-                    where = "〔出处未登记〕"       # 老点：承认不知道，比编一个名字诚实
-                elif page in (None, ""):
-                    where = f"〔来自 {src}〕"
-                else:
-                    where = f"〔来自 {src} 第 {page} 页〕"
-                blocks.append(f"{where}\n{m.content}")
-            return "\n".join(blocks)
+            from codeharness.memory.longterm import format_kb_blocks
+            return format_kb_blocks(await self.kb.recall(task, k=3))
         except Exception as e:
             logger.warning(f"{self.profile['name']} 知识库召回失败，按无资料继续: "
                            f"{type(e).__name__}: {e}")
@@ -300,7 +290,7 @@ class RoleZero:
         # 会让 prompt 里「经验」两个字骗人（A4 那批就是靠 prompt 文本判读写路的）。
         kb = await self._kb_recall(s["task"]) if self.kb is not None else ""
 
-        # C6：名册长过 `TOOL_RECALL__MIN_TOOLS` 才开始裁工具块（默认 30，今天 18 只 ⇒ 逐字不变）。
+        # C6：名册长过 `TOOL_RECALL__MIN_TOOLS` 才开始裁工具块（默认 30，今天 19 只 ⇒ 逐字不变）。
         # query 传本轮任务文本，不学源那样留 force 开关（源的 think 主路径因此从没跑过两级召回）。
         tool_block = await select_for_prompt(self.tools, s["task"], llm=self.llm)
         tool_info = json.dumps({n: {"description": t.description} for n, t in tool_block.items()},

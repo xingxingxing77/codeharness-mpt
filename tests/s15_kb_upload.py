@@ -37,11 +37,15 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
   t10 C21 的归因与下架：每条切片都带 `source`（空串算坏）、同一段话在两份文件里必须是**两条点各带各的出处**
      （`point_id` 不带 source 时后写的会连出处一起顶掉），按 `source` 下架一份之后别份一字未动、
      共享段仍召得回。
+  t15 C24 的自主检索：`search_knowledge_base` 进名册/带 tag/挂 readonly 审批档/docstring 有「关键词：」；
+     真图里 FakeLLM 脚本让它「先查一次不够、再查一次」→ 断言那次工具调用真发生（kb.recall 从 1 次变 2 次）、
+     产出带 `〔来自 faq.md〕` 回喂进下一轮 prompt；**对照组**=不需要再查的那场只 1 次；另两格钉「换租户召不回」
+     与「Qdrant 挂了回带类名的降级文案而不抛」。全格零花费（替身 embedding + FakeLLM），只吃 Qdrant。
   t13 C30 的下架路由：store 层自 C21 起就能按 `source` 删（t10 现证），缺的是 HTTP 口。四格——删得干净、
      **兄弟文档条数不变**、不存在的 source 明确 404（不是静默 ok）、**跨会话同名文档删不到**；
      外加 `source` 带路径分隔 → 400，以及「删完重传同一份」的幂等现证（C30 行里那条未验边界）。
 
-t1/t3/t10/t13 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
+t1/t3/t10/t13/t14/t15 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
 不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
 真 bge-m3 的语义改写召回不在这里（那是 s5 t25 的形状），本门禁只钉「链路通不通」。
 """
@@ -932,13 +936,13 @@ def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
     """C23 的 prompt 面，**真 embedding 端点**（`.env` 指哪个就是哪个）+ 真 Qdrant：
     库里多一份毫不相干的文档，它不该出现在给模型的那段里。
 
-    为什么这一格非用真模型不可：下限那根线（本格**显式钉** `mode=score, min_score=0.40`，不吃 ambient
+    为什么这一格非用真模型不可：下限那根线（本格**显式钉** `mode=score, min_score=0.55`，不吃 ambient
     配置）是标定在真模型余弦刻度上的（依据与逐档代价写在 `configs/settings.py` 的 `FLOOR_CALIBRATED_*`），
     而 `HashEmbeddings` 是 bag-of-chars——中文之间的字符重叠天然把余弦顶到高位，拿它量这道闸，
     「过不过线」这件事根本没有意义（C20 用真 embedding 推翻假向量表，量的就是这类差别）。
-    ⚠ 0.40 是在**本机 bge-m3** 上量的（无关 0.33 / 相关 0.67）；换百炼 `qwen3.7-text-embedding` 后
-    同一夹具量到无关 0.1472 / 相关 0.6224，分离更开 ⇒ 这道线在新刻度上**还没重标**，
-    所以 `.env` 现在走免标定的 `rank` 档（见 C23 行与 §3-1）。
+    线的刻度：09-24 在百炼 `qwen3.7-text-embedding` 上重标过（C20 那张尺子 300 问，gold 那条的
+    dense 分 p05=0.647、0.55 档代价 1~3/300、0.65 起下坡）⇒ 本格钉的就是这个新默认；旧 bge-m3
+    的 0.40 已作废，同一夹具在新刻度上是无关 0.1472 / 相关 0.6224。
 
     三格：
       ① 前置读数：这份夹具真的考得动这道闸——噪声切片的 dense 分必须**在线以下**、FAQ 那条在**线以上**，
@@ -983,12 +987,16 @@ def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
                                         user_id="u_kb", project=PROJ))
         noisy = [h.score for h in hits if NOISE_MARK in h.payload["text"]]
         faqy = [h.score for h in hits if "重置密码" in h.payload["text"]]
-        # **这一格显式钉住要验的那一档**，不跟着 ambient 配置走：`.env` 现在为了省额度开的是 `rank`
-        # （名次档换 embedding 模型免标定），而这里验的是「代码默认那档 score + 0.40 的线」在这份真模型
-        # 夹具上真挡得住无关文档。门禁吃环境配置 = 换台机器跑的就不是同一件事。
+        # **这一格显式钉住要验的那一档**，不跟着 ambient 配置走：门禁吃环境配置 = 换台机器跑的就不是
+        # 同一件事。钉的值必须等于代码默认（09-24 起默认就是新刻度上的 0.55）——有人改默认而没来改这一格，
+        # 下面那句 assert 当场红，这格就不会悄悄变成「验了一个没人用的线」。
         keep = (floor.mode, floor.min_score, floor.oversample)
-        floor.mode, floor.min_score, floor.oversample = "score", 0.40, 3
+        floor.mode, floor.min_score, floor.oversample = "score", 0.55, 3
         line = floor.min_score
+        from codeharness.configs.settings import RecallFloorConfig
+        assert line == RecallFloorConfig.model_fields["min_score"].default, \
+            (f"t12 钉的线 {line} 与代码默认 "
+             f"{RecallFloorConfig.model_fields['min_score'].default} 不一致——改默认要同批改这一格")
         assert noisy and faqy, f"t12①前置失配：噪声/FAQ 切片没被 dense 腿取到（{len(noisy)}/{len(faqy)}）"
         assert max(noisy) < line < max(faqy), \
             (f"t12①夹具考不动这道闸：噪声 top={max(noisy):.4f}、FAQ top={max(faqy):.4f}、"
@@ -1254,6 +1262,142 @@ def t14_kb_tenant_is_the_same_on_both_sides():
         asyncio.run(store.drop())
 
 
+def t15_kb_search_is_a_tool_the_model_can_call():
+    """C24：检索从「每轮预取一次」变成模型可主动调的工具。五格各钉一种坏法。
+
+    全格**零花费**：向量用 `HashEmbeddings` 替身、模型用 `FakeLLM` 脚本（工具内部那次现取的
+    embedding 客户端也被替身顶掉），只有 Qdrant 是真的，且是自己的集合 `s15gate_c24`。
+    下限那根线是端点属性、hash 刻度带不动 ⇒ 整格挂 `uncalibrated_embeddings()`（与 t3 同一处理）。
+    """
+    if not live_qdrant():
+        print("  skip t15（Qdrant 不在线）")
+        return
+    from codeharness.configs.settings import settings
+    from codeharness.environment.team_graph import build_team
+    from codeharness.memory import longterm as lt
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider import gateway as gw
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.tools import search_knowledge_base
+    from codeharness.tools._approval import TOOL_TIER
+    from codeharness.tools.tool_registry import TOOL_REGISTRY
+
+    # ① 进不了名册的工具等于没写（T3 轮那条判据）：登记、tag、审批档、关键词行四样都要在
+    tool = next((t for t in TOOL_REGISTRY.all() if t.name == "search_knowledge_base"), None)
+    assert tool is not None, "t15①失效：`search_knowledge_base` 没进 TOOL_REGISTRY"
+    assert "search_knowledge_base" in TOOL_REGISTRY.by_tag.get("retrieval", {}), "t15①tag=retrieval 没登记"
+    assert TOOL_TIER.get("search_knowledge_base") == "readonly", \
+        f"t15①审批档不对：{TOOL_TIER.get('search_knowledge_base')!r}——只读面挂 readonly，"\
+        f"否则「再查一次」每场都要人批，这件能力等于没给"
+    assert "关键词：" in (tool.description or ""), \
+        "t15①docstring 少了「关键词：」那行（实测：没它中文任务召不回英文命名的工具）"
+
+    class _FakeGW:                        # 工具里 `LLMGateway.embeddings()` 每次现建，替身顶上
+        @staticmethod
+        def embeddings():
+            return HashEmbeddings()
+
+    keep = (settings.qdrant.collection_prefix, settings.qdrant.url, gw.LLMGateway)
+    recalls: list[str] = []
+    tool_calls: list[str] = []
+    orig_recall = lt.LongTermMemory.recall
+    orig_tool = tool.coroutine
+
+    async def spy(self, query, k=5):
+        recalls.append(self.doc_type)
+        return await orig_recall(self, query, k=k)
+
+    async def tool_spy(query: str) -> str:
+        got = await orig_tool(query=query)
+        tool_calls.append(got)
+        return got
+
+    tmp = Path(tempfile.mkdtemp())
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_kb")
+    lt.LongTermMemory.recall = spy
+    tool.coroutine = tool_spy
+    settings.qdrant.collection_prefix = "s15gate_c24"
+    gw.LLMGateway = _FakeGW
+    store = QdrantStore()
+    thought_end = json.dumps({"thought": "答完收工", "commands": [{"command_name": "end", "args": {}}]},
+                             ensure_ascii=False)
+    thought_requery = json.dumps(
+        {"thought": "预取那几条没写退款天数，再查一次知识库",
+         "commands": [{"command_name": "search_knowledge_base",
+                       "args": {"query": "退款 7 天 全额"}}]}, ensure_ascii=False)
+
+    def run(script, thread):
+        llm = FakeLLM(script)
+        role = RoleZero({"name": "R", "profile": "p", "goal": "g"}, [tool], llm, max_loops=3)
+        # 预取那条读者按生产形状建（`team.py:24`：只给 doc_type，租户/项目走 ContextVar）——
+        # 工具与它必须同源，否则 C31 修掉的「两处各算一次同一个身份」会从这条新腿复发
+        role.kb = LongTermMemory(embeddings=HashEmbeddings(), doc_type="kb")
+        g = build_team({"R": role}, sop={RequirementTag.USER_REQUIREMENT: ["R"]})
+        asyncio.run(g.ainvoke(
+            {"messages": [Message(content="退款几天内能全额？", role="user",
+                                  cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")],
+             "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False},
+            {"configurable": {"thread_id": thread}}))
+        return llm
+
+    try:
+        asyncio.run(store.drop())
+        out = asyncio.run(_action(store, HashEmbeddings(), [_write_faq(tmp)]))
+        assert out["uploaded_count"] >= 2, f"t15 前置失配（没灌进切片）：{out}"
+        with uncalibrated_embeddings():
+            tool_calls.clear()
+            recalls.clear()
+            llm_a = run([thought_requery, thought_end], "s15-t15-a")
+            a_calls, a_recalls = list(tool_calls), recalls.count("kb")
+            tool_calls.clear()
+            recalls.clear()
+            llm_b = run([thought_end], "s15-t15-b")
+            b_calls, b_recalls = list(tool_calls), recalls.count("kb")
+            # ④ 租户同源：换个用户名，这份文档就该召不回（工具读的是 ContextVar 那一份 scope）
+            CURRENT_USER.set("bob")
+            other = asyncio.run(tool.ainvoke({"query": "退款 7 天 全额"}))
+            CURRENT_USER.set("u_kb")
+            own = asyncio.run(tool.ainvoke({"query": "退款 7 天 全额"}))
+        prompt_a = str(llm_a.calls[-1])
+        # ② 判别场：**直接量工具被调了几次**（第一版拿 kb.recall 的总数减预取次数推，
+        # 结果红在「3 次 ≠ 2 次」——两场 think 各预取一次、工具再加一次，那条推算法把轮数当死了）
+        assert len(a_calls) == 1, \
+            f"t15②失效：模型这一场里 `search_knowledge_base` 被调用 {len(a_calls)} 次（要的是 1 次）"
+        assert "退款政策" in a_calls[0] and "〔来自 faq.md〕" in a_calls[0], \
+            f"t15②失效：工具调了但没把那条切片带回来/没带出处：{a_calls[0][:120]}"
+        assert "退款政策" in prompt_a and "〔来自 faq.md〕" in prompt_a, \
+            "t15②失效：工具产出没回喂进下一轮 prompt（查到了也白查）"
+        # ③ 对照场：不需要再查的那一场里，这个口一次都没被用过
+        # ③ 对照场：不需要再查的那一场里，这个口一次都没被用过。
+        # **不在这里查 prompt**：预取本来就会把 FAQ 那几条（含「退款政策」那段）带进去，
+        # 拿「prompt 里有没有那段字」当对照判据会把预取的正常产出算成工具产出——第一版就是这么红的。
+        # 工具被调几次由 `tool_spy` 直接量，② 那条断言（1 次且带出处）已经证明这个计数不是恒 0。
+        assert not b_calls, f"t15③对照组不成立：没让它再查也调了 {len(b_calls)} 次"
+        assert "〔来自 faq.md〕" in own, f"t15④失效：本租户自己的文档召不回：{own[:120]}"
+        assert "〔来自 faq.md〕" not in other, f"t15④失效：bob 召到了 u_kb 的文档：{other[:120]}"
+        # ⑤ 挂了要说人话且不抛（与 `_kb_recall` 同档），但类名照原样带出去——不写成「存储不可用」的谎
+        settings.qdrant.url = "http://127.0.0.1:1"
+        try:
+            down = asyncio.run(tool.ainvoke({"query": "退款"}))
+        except Exception as e:
+            down = f"[抛出来了 {type(e).__name__}]"
+        assert down.startswith("[知识库检索暂不可用:"), \
+            f"t15⑤失效：降级文案形状不对（抛了或说了别的话）：{down[:120]}"
+        assert re.search(r"\b\w*(Error|Exception)\b", down), \
+            f"t15⑤失效：降级文案没带出真实异常类名（只剩一句「服务不可用」的谎）：{down[:120]}"
+        print(f"  ok  t15 检索可被模型主动调：判别场工具 1 次且带出处回喂（该场 kb 检索共 {a_recalls} 次="
+              f"每轮预取+工具）、对照场工具 0 次（kb 检索 {b_recalls} 次）、换租户召不回、"
+              f"Qdrant 挂了回带类名的降级文案而不抛")
+    finally:
+        lt.LongTermMemory.recall = orig_recall
+        tool.coroutine = orig_tool
+        settings.qdrant.collection_prefix, settings.qdrant.url, gw.LLMGateway = keep
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1269,13 +1413,14 @@ def main():
               t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies,
               t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled,
               t12_recall_floor_keeps_unrelated_doc_out_of_prompt, t13_kb_doc_removal_route,
-              t14_kb_tenant_is_the_same_on_both_sides]
+              t14_kb_tenant_is_the_same_on_both_sides,
+              t15_kb_search_is_a_tool_the_model_can_call]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限 + C30 的下架单份路由 + C31 的租户两侧同源）——"
-          f"其中 t1/t3/t10/t13/t14 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
-          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那五格**'} / "
+          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限 + C30 的下架单份路由 + C31 的租户两侧同源 + C24 的可主动调检索工具）——"
+          f"其中 t1/t3/t10/t13/t14/t15 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
+          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那六格**'} / "
           f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
           f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")
 

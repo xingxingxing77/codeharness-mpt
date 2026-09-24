@@ -18,11 +18,14 @@ TIERS = ("readonly", "workspace_write", "full_access")
 TIER_RANK = {name: i for i, name in enumerate(TIERS)}
 PERMISSION_DEFAULT = "readonly"     # 会话档认不出时按最严处理：多问一次，不放行
 
-# 工具名取自 TOOL_REGISTRY 全量视图（实测 18 个，tags 全为 None，所以只能按名字定档）
+# 工具名取自 TOOL_REGISTRY 全量视图（实测 19 个，tags 全为 None，所以只能按名字定档）
 TOOL_TIER = {
     "read_file": "readonly", "open_file": "readonly", "goto_line": "readonly",
     "scroll_down": "readonly", "scroll_up": "readonly", "search_dir": "readonly",
     "search_file": "readonly", "find_file": "readonly",
+    # C24：模型可主动调的知识库检索。只读本会话自己灌进去的切片、不出网、不写盘 ⇒ 与 read_file 同档；
+    # 挂在 readonly 会话上也要能用，否则「再查一次」每回都要人批，这件能力等于没给。
+    "search_knowledge_base": "readonly",
     "write_file": "workspace_write", "create_file": "workspace_write",
     "append_file": "workspace_write", "edit_file_by_replace": "workspace_write",
     "insert_content_at_line": "workspace_write",

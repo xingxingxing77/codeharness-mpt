@@ -69,6 +69,33 @@ async def search_internet(query: str) -> str:
     return (text or "[搜索无结果]")[:8000]
 
 
+@register_tool(tags=["retrieval"])
+@tool
+async def search_knowledge_base(query: str) -> str:
+    """在本会话的知识库里按语义再查一次，返回「出处 + 原文片段」列表。首轮预取没答上、或要换个说法核实那份文档时用；只查本会话自己上传的文档，不联网（联网用 search_internet）。
+    关键词：查知识库、知识库里、文档里、那份文档、资料里怎么说、手册里、再查一次、再找一下、出处、依据、原文、有没有写过、kb、knowledge。
+    示例：search_knowledge_base(query="差旅报销的额度上限是多少")"""
+    from codeharness.configs.settings import settings
+    if not settings.enable_rag:
+        return "[知识库检索未启用：本部署关掉了 RAG（settings.enable_rag=False）]"
+    # 读者每次现建、不缓存成模块级单例：客户端会绑在首个事件循环上，而门禁一个进程里跑多个 asyncio.run。
+    # 租户与项目都不传 —— 走 LongTermMemory 的 ContextVar 兜底（CURRENT_USER/CURRENT_PROJECT），
+    # 与灌库侧、与每轮预取那条读者同源（C31 修的就是「两处各算一次同一个身份」）。
+    # ponytail: 一次调用 = 一对新客户端（Qdrant + embeddings），连接靠 GC 收。上限是「模型高频调它」；
+    # 真到那一步再给 QdrantStore 加进程级 client 复用，现在不为没出现的调用方造池子。
+    from codeharness.logs import logger
+    from codeharness.memory.longterm import LongTermMemory, format_kb_blocks
+    from codeharness.provider.gateway import LLMGateway
+    kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb")
+    try:
+        blocks = format_kb_blocks(await kb.recall(query, k=3))
+    except Exception as e:
+        # 与 _kb_recall 同一档位：检索挂了不打断这场。类名照原样带出去，不写成「存储不可用」的谎（C16）
+        logger.warning(f"知识库检索工具失败: {type(e).__name__}: {e}")
+        return f"[知识库检索暂不可用: {type(e).__name__}: {e}]"
+    return (blocks or "[知识库里没有与这句相关的切片]")[:8000]
+
+
 from codeharness.tools.libs import terminal as _terminal      # noqa: F401  副作用：terminal_command 登记
 from codeharness.tools.libs import editor_tools as _editor    # noqa: F401  副作用：Editor 11 命令登记（台账 #7）
 from codeharness.tools.libs import git as _git                # noqa: F401  副作用：git 两件登记（台账 #8）

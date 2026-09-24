@@ -41,6 +41,28 @@ def screen_dense(hits: list, cfg) -> list[str]:
     return [str(h.id) for h in hits[:cfg.max_rank]]
 
 
+def format_kb_blocks(msgs: list) -> str:
+    """把召回回来的切片排成「一行出处 + 正文」的块（C22 那行口径，逐字沿用）。
+
+    单独成函数是因为它从 C24 起有**两个读者**：每轮预取的 `RoleZero._kb_recall`，和模型可主动调的
+    `search_knowledge_base`。两处各抄一份，改日就是「预取那条带出处、自主查那条不带」——同一种信息
+    两种呈现，而模型归因只认文本。C21 之前入库的老切片没有 `source` ⇒ 标「出处未登记」，
+    **不拿文件名格式凑一个假出处**。
+    """
+    blocks = []
+    for m in msgs:
+        meta = m.metadata or {}
+        src, page = str(meta.get("source") or ""), meta.get("page")
+        if not src:
+            where = "〔出处未登记〕"       # 老点：承认不知道，比编一个名字诚实
+        elif page in (None, ""):
+            where = f"〔来自 {src}〕"
+        else:
+            where = f"〔来自 {src} 第 {page} 页〕"
+        blocks.append(f"{where}\n{m.content}")
+    return "\n".join(blocks)
+
+
 class LongTermMemory:
     def __init__(self, project_id: str = "", embeddings=None, user_id: str = "",
                  session_id: str = "", store: QdrantStore | None = None,
