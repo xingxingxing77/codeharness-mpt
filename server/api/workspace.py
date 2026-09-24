@@ -180,8 +180,14 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
         target.write_bytes(data)
         written.append(target)
 
-    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER
     tok = CURRENT_PROJECT.set(workspace.name)       # 与 import_repo 同一接缝：切片按项目隔离
+    # C31：**租户也要一起注**。原先只注了 project，而 `UploadKB` 取 `CURRENT_USER.get()` 拿到的是
+    # ContextVar 的兜底值 `"default"`；runner 那边却把它设成 `session.user_id`（auth 开＝真实用户名）
+    # ⇒ 召回按用户名筛、库里那条是 `default`，**整条召空**（09-24 实测：alice 的票灌一份，payload
+    # 写的是 `default`，以 alice 召回 0 条 / 以 default 召回 1 条）。写侧与读侧必须从**同一个来源**
+    # 取租户，这里就是 `current_user` 依赖给出的那个人；auth 关时它恒 `"default"`，payload 逐字节不变。
+    tok_u = CURRENT_USER.set(user)
     try:
         from codeharness.actions.upload_kb import UploadKB
         try:
@@ -193,6 +199,7 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
             raise HTTPException(503, _kb_down(written, errors, exc)) from exc
     finally:
         CURRENT_PROJECT.reset(tok)
+        CURRENT_USER.reset(tok_u)
     result["errors"] = errors + result["errors"]
     result["written"] = [p.name for p in written]
     return result
@@ -224,6 +231,7 @@ async def remove_kb_doc(sid: str, source: str, request: Request, user: str = Dep
         raise HTTPException(400, "source 只能是文件名，不能带路径分隔")
     store = QdrantStore()
     tok = CURRENT_PROJECT.set(workspace.name)              # 与 upload_kb 同一接缝：切片按项目隔离
+    tok_u = CURRENT_USER.set(user)                         # C31：与灌库侧同一份租户（两边都从请求推）
     try:
         uid = CURRENT_USER.get() or "default"
         try:
@@ -244,4 +252,5 @@ async def remove_kb_doc(sid: str, source: str, request: Request, user: str = Dep
                                      f"（检查 QDRANT__URL）") from exc
     finally:
         CURRENT_PROJECT.reset(tok)
+        CURRENT_USER.reset(tok_u)
     return {"source": name, "deleted": n}

@@ -1129,6 +1129,131 @@ def t13_kb_doc_removal_route():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+class _AuthEnv:
+    """auth 开/关的隔离环境（会话表 + 用户表 + 开关，收尾恢复）。形状照 `s10_auth.py::_Env`。"""
+
+    def __init__(self, auth_on: bool):
+        import server.auth as auth_mod
+        import server.sessions as ss
+        from codeharness.configs.settings import settings
+        self._settings = settings
+        self.auth_mod, self.ss = auth_mod, ss
+        self.keep_sess, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+        self.keep_users, auth_mod.USERS_FILE = auth_mod.USERS_FILE, ss.SESSIONS_FILE.parent / "users.json"
+        self.keep = (settings.platform.auth_enabled, settings.platform.use_redis)
+        settings.platform.auth_enabled, settings.platform.use_redis = auth_on, False
+
+    def __enter__(self):
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        self.client = TestClient(create_app())
+        self.client.__enter__()
+        return self.client
+
+    def __exit__(self, *exc):
+        self._settings.platform.auth_enabled, self._settings.platform.use_redis = self.keep
+        self.client.__exit__(*exc)
+        self.ss.SESSIONS_FILE = self.keep_sess
+        self.auth_mod.USERS_FILE = self.keep_users
+
+
+def t14_kb_tenant_is_the_same_on_both_sides():
+    """C31：kb 切片**写进去的租户**必须与**召回时筛的租户**是同一个值。
+
+    症状实测过（09-24，`.c31_probe.py`，零花费）：auth 开时用 alice 的票灌一份 kb，切片 payload 写的
+    是 `user_id="default"`（灌库端点原先**从不设** `CURRENT_USER`，`UploadKB` 取到的是 ContextVar 的
+    兜底值），而 runner 把它设成 `session.user_id`（auth 开＝真实用户名）⇒ 同一份数据以 alice 召回
+    **0 条**（以 default 召回 1 条）。auth 关时两边都是 `default`，所以一直没露。
+
+    四格：
+      ① **auth 开**：真 HTTP 灌库，从 Qdrant **读回** payload —— `user_id` 必须是票上那个人；
+      ② **auth 关**（兼容格）：仍是 `"default"`——既有 payload 逐字节不变，不许为了修 ① 动默认档；
+      ③ **产品症状**：同一份数据以 alice 召回**非空**（修前 0 条），且以 bob 召回为空（隔离没被修坏）；
+      ④ **下架侧同源**：auth 开时 alice 能删掉自己那份（200 且回读 0 条）——删除侧不取请求租户的话，
+         它会在 `default` 租户下找这份，回 404。
+    """
+    if not live_qdrant():
+        print("  skip t14（Qdrant 不在线）")
+        return
+    import codeharness.actions.upload_kb as mod
+    from codeharness.configs.settings import settings
+    from codeharness.memory.longterm import LongTermMemory
+    from qdrant_client import models as m
+
+    class _GW:                                              # 只换 embedding 工厂（零外网零花费）
+        @staticmethod
+        def embeddings():
+            return HashEmbeddings()
+
+    PA, PB = "s15_c31_a", "s15_c31_b"
+    store = QdrantStore(collection=GATE_COLL)
+    keep = (mod.LLMGateway, settings.qdrant.collection_prefix, settings.recall_floor.mode)
+
+    async def payload_users(project: str) -> list:
+        flt = m.Filter(must=[m.FieldCondition(key=k, match=m.MatchValue(value=v))
+                             for k, v in (("doc_type", "kb"), ("project", project),
+                                          ("source", "faq.md"))])
+        pts, _ = await store.client.scroll(GATE_COLL, scroll_filter=flt, limit=50, with_payload=True)
+        return sorted({p.payload.get("user_id") for p in pts})
+
+    async def recall_as(user: str, project: str) -> int:
+        mem = LongTermMemory(embeddings=HashEmbeddings(), store=store, doc_type="kb")
+        tok_p, tok_u = CURRENT_PROJECT.set(project), CURRENT_USER.set(user)
+        try:
+            return len(await mem.recall("重置密码怎么弄", k=3))
+        finally:
+            CURRENT_PROJECT.reset(tok_p)
+            CURRENT_USER.reset(tok_u)
+
+    try:
+        asyncio.run(store.drop())
+        mod.LLMGateway = _GW
+        settings.qdrant.collection_prefix = GATE_COLL       # 路由里 `QdrantStore()` 现取这个值
+        settings.recall_floor.mode = "off"                  # 本格只问租户，不掺相关性下限
+
+        with _AuthEnv(auth_on=True) as c:                   # ① auth 开
+            tok = c.post("/api/auth/register",
+                         json={"username": "alice", "password": "secret1"}).json()["token"]
+            h = {"Authorization": f"Bearer {tok}"}
+            s = c.post("/api/sessions", json={"idea": "c31", "project_name": PA}, headers=h).json()
+            assert s["user_id"] == "alice", f"t14①前提：会话归属应是 alice，实为 {s}"
+            r = c.post(f"/api/sessions/{s['id']}/workspace/upload_kb", headers=h,
+                       files=[("files", ("faq.md", FAQ, "text/markdown"))])
+            assert r.status_code == 200, f"t14①灌库失败：{r.status_code} {r.text[:200]}"
+            got = asyncio.run(payload_users(PA))
+            assert got == ["alice"], \
+                (f"t14①失效：auth 开时切片写的租户是 {got}（应 ['alice']）——写侧没从请求取租户，"
+                 "而读侧筛的是用户名 ⇒ 整条召空")
+            n_alice = asyncio.run(recall_as("alice", PA))   # ③ 产品症状
+            n_bob = asyncio.run(recall_as("bob", PA))
+            assert n_alice > 0, "t14③失效：自己灌进去的知识库召不回来（C31 的症状还在）"
+            assert n_bob == 0, f"t14③失效：别人的租户也召到了 {n_bob} 条——隔离被修坏了"
+            # ④ 下架侧同样要从请求取租户：不取的话它在 default 租户下找这份，会回 404
+            r = c.delete(f"/api/sessions/{s['id']}/workspace/kb_doc", params={"source": "faq.md"},
+                         headers=h)
+            assert r.status_code == 200 and r.json()["deleted"] > 0, \
+                (f"t14④失效：auth 开时下架自己那份失败（{r.status_code} {r.text[:160]}）"
+                 "——删除侧没从请求取租户")
+            assert asyncio.run(payload_users(PA)) == [], "t14④失效：下架没真删掉"
+
+        with _AuthEnv(auth_on=False) as c:                  # ② auth 关（兼容格）
+            s = c.post("/api/sessions", json={"idea": "c31off", "project_name": PB}).json()
+            r = c.post(f"/api/sessions/{s['id']}/workspace/upload_kb",
+                       files=[("files", ("faq.md", FAQ, "text/markdown"))])
+            assert r.status_code == 200, f"t14②灌库失败：{r.status_code} {r.text[:200]}"
+        got_off = asyncio.run(payload_users(PB))
+        assert got_off == ["default"], \
+            f"t14②失效：auth 关时租户变成 {got_off}（应 ['default']）——默认档的 payload 不许动"
+        print(f"  ok  t14 kb 的租户两侧同源：auth 开时写进去的是票上那个人（alice）——以 alice 召回 "
+              f"{n_alice} 条、以 bob 召回 {n_bob} 条、下架自己那份 200 且回读 0 条；"
+              f"auth 关时仍是 default（payload 逐字节兼容）")
+    finally:
+        mod.LLMGateway, settings.qdrant.collection_prefix, settings.recall_floor.mode = keep
+        for p in (PA, PB):
+            shutil.rmtree(Path("workspace") / p, ignore_errors=True)
+        asyncio.run(store.drop())
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1143,13 +1268,14 @@ def main():
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
               t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies,
               t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled,
-              t12_recall_floor_keeps_unrelated_doc_out_of_prompt, t13_kb_doc_removal_route]
+              t12_recall_floor_keeps_unrelated_doc_out_of_prompt, t13_kb_doc_removal_route,
+              t14_kb_tenant_is_the_same_on_both_sides]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限 + C30 的下架单份路由）——"
-          f"其中 t1/t3/t10/t13 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
-          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那四格**'} / "
+          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限 + C30 的下架单份路由 + C31 的租户两侧同源）——"
+          f"其中 t1/t3/t10/t13/t14 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
+          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那五格**'} / "
           f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
           f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")
 
