@@ -37,8 +37,11 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
   t10 C21 的归因与下架：每条切片都带 `source`（空串算坏）、同一段话在两份文件里必须是**两条点各带各的出处**
      （`point_id` 不带 source 时后写的会连出处一起顶掉），按 `source` 下架一份之后别份一字未动、
      共享段仍召得回。
+  t13 C30 的下架路由：store 层自 C21 起就能按 `source` 删（t10 现证），缺的是 HTTP 口。四格——删得干净、
+     **兄弟文档条数不变**、不存在的 source 明确 404（不是静默 ok）、**跨会话同名文档删不到**；
+     外加 `source` 带路径分隔 → 400，以及「删完重传同一份」的幂等现证（C30 行里那条未验边界）。
 
-t1/t3/t10 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
+t1/t3/t10/t13 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
 不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
 真 bge-m3 的语义改写召回不在这里（那是 s5 t25 的形状），本门禁只钉「链路通不通」。
 """
@@ -1015,6 +1018,117 @@ def t12_recall_floor_keeps_unrelated_doc_out_of_prompt():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def t13_kb_doc_removal_route():
+    """C30：「下架**单份**知识库文档」在 store 层自 C21 起就做得到（t10 现证），缺的是 HTTP 路由
+    与界面入口。这一格钉路由本身——四格 + 一格参数校验，全部打在**真请求 + 真 Qdrant** 上：
+
+      ① **删得干净**：DELETE 之后本会话本租户里 `source=a.md` 的切片数 = 0，且回执 `deleted` 就是删掉的那个数；
+      ② **兄弟文档条数不变**（先删后插那族的老病：响应 200 而数据被多删）；
+      ③ **不存在的 source 明确失败**（404），不是静默回 ok——「删了 0 条」与「删掉了」在界面上长得一样；
+      ④ **跨会话删不到别人的**：另一个会话下**同名** `a.md` 的点一条不许少（过滤器由会话推、不由参数拼）；
+      ⑤ `source` 带路径分隔 → 400（不许拿它拼出越界或跨租户的过滤器）。
+
+    顺带把 C30 行里那条「未验边界」现证掉：删完之后**重传同一份**走 C3 的内容派生 id ⇒ 点数回到原值，
+    既不堆积也没有删漏的残留。
+
+    **不碰生产集合**：路由里 `QdrantStore()` 现取 `settings.qdrant.collection_prefix`，本格临时指到 gate 集合。
+    """
+    if not live_qdrant():
+        print("  skip t13（Qdrant 不在线）")
+        return
+    from fastapi.testclient import TestClient
+    from qdrant_client import models as m
+
+    from codeharness.configs.settings import settings
+
+    PA, PB = "s15_c30_a", "s15_c30_b"
+    tmp = Path(tempfile.mkdtemp())
+    store = QdrantStore(collection=GATE_COLL)
+    keep = None
+
+    async def count(project: str, source: str) -> int:
+        must = [m.FieldCondition(key=k, match=m.MatchValue(value=v))
+                for k, v in (("doc_type", "kb"), ("user_id", "default"), ("project", project)) if v]
+        if source:
+            must.append(m.FieldCondition(key="source", match=m.MatchValue(value=source)))
+        return (await store.client.count(GATE_COLL, count_filter=m.Filter(must=must))).count
+
+    async def seed(project: str, *files) -> None:
+        """用**生产写入路**灌（`UploadKB` + 真 store）：`source` 与 `point_id` 的派生要和线上是同一份。"""
+        tok = CURRENT_PROJECT.set(project)
+        try:
+            out = await _action(store, HashEmbeddings(), files)
+        finally:
+            CURRENT_PROJECT.reset(tok)
+        assert out["errors"] == [] and out["uploaded_count"] > 0, f"t13 造数失败：{out}"
+
+    try:
+        import server.sessions as ss
+        keep = (ss.SESSIONS_FILE, settings.platform.use_redis, settings.qdrant.collection_prefix)
+        ss.SESSIONS_FILE = Path(tempfile.mkdtemp()) / "sessions.json"
+        settings.platform.use_redis = False
+        settings.qdrant.collection_prefix = GATE_COLL     # 路由里 `QdrantStore()` 现取这个值
+        asyncio.run(store.drop())
+        fa = _write_faq(tmp, "a.md", FAQ)
+        fb = _write_faq(tmp, "b.md", FAQ + "\n青隼站的月台在雨天会亮起三十七盏灯。\n")
+        tok_u = CURRENT_USER.set("default")               # 灌库侧与 HTTP 侧读的是同一个兜底值
+        try:
+            asyncio.run(seed(PA, fa, fb))
+            asyncio.run(seed(PB, fa))                     # 另一个会话下**同名** a.md
+        finally:
+            CURRENT_USER.reset(tok_u)
+        a0 = asyncio.run(count(PA, "a.md"))
+        b0 = asyncio.run(count(PA, "b.md"))
+        other0 = asyncio.run(count(PB, "a.md"))
+        assert a0 > 0 and b0 > 0 and other0 > 0, f"t13 造数不足：a={a0} b={b0} 别人的 a={other0}"
+
+        from server.app import create_app
+        with TestClient(create_app()) as c:
+            def mk(proj: str) -> str:
+                r = c.post("/api/sessions", json={"idea": "kb", "project_name": proj})
+                assert r.status_code == 200, r.text[:160]
+                s = r.json()
+                # 路由的 project 取自 `workspace.name`——这条前提不成立整格就是假的
+                assert Path(s["workspace"]).name == proj, f"t13 前提变了：workspace={s['workspace']}"
+                return s["id"]
+
+            sid_a, sid_b = mk(PA), mk(PB)
+            url = "/api/sessions/{}/workspace/kb_doc"
+
+            r = c.delete(url.format(sid_a), params={"source": "没有这份.md"})
+            assert r.status_code == 404, f"t13③不存在的 source 没明确失败：{r.status_code} {r.text[:160]}"
+            assert asyncio.run(count(PA, "a.md")) == a0, "t13③404 那一发动了库"
+
+            r = c.delete(url.format(sid_a), params={"source": "../a.md"})
+            assert r.status_code == 400, f"t13⑤带路径的 source 没被拒：{r.status_code} {r.text[:160]}"
+            assert asyncio.run(count(PA, "a.md")) == a0, "t13⑤400 那一发动了库"
+
+            r = c.delete(url.format(sid_a), params={"source": "a.md"})
+            assert r.status_code == 200, f"t13①下架失败：{r.status_code} {r.text[:160]}"
+            body = r.json()
+            assert body["source"] == "a.md" and body["deleted"] == a0, \
+                f"t13①回执对不上：{body}（造数时 a.md 是 {a0} 条）"
+            assert asyncio.run(count(PA, "a.md")) == 0, "t13①下架后 a.md 还有切片"
+            assert asyncio.run(count(PA, "b.md")) == b0, \
+                f"t13②兄弟文档被多删：b.md {b0}→{asyncio.run(count(PA, 'b.md'))}"
+            assert asyncio.run(count(PB, "a.md")) == other0, \
+                f"t13④删到别的会话去了：对方的 a.md {other0}→{asyncio.run(count(PB, 'a.md'))}"
+
+            asyncio.run(seed(PA, fa))                      # C30 行里那条未验边界：删完重传同一份
+            again = asyncio.run(count(PA, "a.md"))
+            assert again == a0, f"t13 重传同一份后点数变了（幂等坏了或删漏了残留）：{a0}→{again}"
+        print(f"  ok  t13 下架单份（HTTP）：a.md {a0} 条删净且回执对得上、兄弟 b.md {b0} 条一字未动、"
+              f"另一会话同名 a.md {other0} 条没被带走、不存在的 source 404、带路径的 400；"
+              f"删完重传同一份回到 {again} 条（C3 的内容派生 id 仍在，无残留）")
+    finally:
+        if keep is not None:
+            ss.SESSIONS_FILE, settings.platform.use_redis, settings.qdrant.collection_prefix = keep
+        for p in (PA, PB):
+            shutil.rmtree(Path("workspace") / p, ignore_errors=True)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1029,13 +1143,13 @@ def main():
               t6_vector_service_down_says_so, t7_long_input_cannot_reach_the_endpoint_whole,
               t8_every_ingestion_path_goes_through_the_exit, t9_whitelist_never_lies,
               t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled,
-              t12_recall_floor_keeps_unrelated_doc_out_of_prompt]
+              t12_recall_floor_keeps_unrelated_doc_out_of_prompt, t13_kb_doc_removal_route]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限）——"
-          f"其中 t1/t3/t10 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
-          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那三格**'} / "
+          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限 + C30 的下架单份路由）——"
+          f"其中 t1/t3/t10/t13 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
+          f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那四格**'} / "
           f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
           f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")
 

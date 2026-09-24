@@ -58,8 +58,20 @@
         </VButton>
       </div>
       <div v-if="kbMsg.text" class="kbMsg" :class="{ err: kbMsg.err }">{{ kbMsg.text }}</div>
+      <!-- C30 下架单份知识库文档：删除不可逆，所以先出一个**带「取消」**的确认条（不是点一下就发）。
+           只加这一个动作位与这一条确认，文件树的几何不动。 -->
+      <div v-if="kbDown" class="kbConfirm">
+        <div>从知识库下架「{{ kbDown.name }}」？别份文档不受影响，工作区 kb/ 下的原件保留。</div>
+        <div v-if="kbDownErr" class="kbMsg err">{{ kbDownErr }}</div>
+        <div class="kbConfirmFoot">
+          <VButton size="s" variant="ghost" @click="kbDown = null">取消</VButton>
+          <VButton size="s" variant="danger" :disabled="kbDownBusy" @click="doRemoveKb">
+            {{ kbDownBusy ? '下架中…' : '下架' }}
+          </VButton>
+        </div>
+      </div>
       <div v-if="!tree.length" class="dim">{{ store.current ? '工作区为空' : '未选择会话' }}</div>
-      <FileNode v-for="n in tree" :key="n.path" :n="n" :depth="0" @open="openFile" />
+      <FileNode v-for="n in tree" :key="n.path" :n="n" :depth="0" @open="openFile" @remove="kbDown = $event" />
     </div>
 
     <div v-else-if="ui.rightView === 'review'" class="body">
@@ -314,6 +326,10 @@ const kbInput = ref<HTMLInputElement>()
 const kbChosen = ref<File[]>([])
 const kbBusy = ref(false)
 const kbMsg = ref<{ text: string; err: boolean }>({ text: '', err: false })
+/** C30：待确认下架的那份（非空 = 确认条在屏幕上）。确认之前一个请求都不发。 */
+const kbDown = ref<FileNodeT | null>(null)
+const kbDownBusy = ref(false)
+const kbDownErr = ref('')
 
 function pickKb(e: Event) {
   kbChosen.value = Array.from((e.target as HTMLInputElement).files || [])
@@ -339,6 +355,28 @@ async function doUploadKb() {
     kbMsg.value = { text: (e as Error).message, err: true }
   } finally {
     kbBusy.value = false
+  }
+}
+
+/** C30 下架单份知识库文档：**先确认再发**（删除不可逆，误点一次就得重新上传一遍）。
+ *  结果写回与上传同款的那条消息行——用户点完要在落点上看见话，不是一个两秒就消失的 toast。
+ *  失败照后端原文（404=这份不在知识库里 / 503=向量服务连不上），不换固定文案。
+ *  原件不动，所以下架完只要刷文件树（`load()`），不另造一个「知识库列表」的假壳子。 */
+async function doRemoveKb() {
+  const n = kbDown.value
+  if (!store.currentId || !n || kbDownBusy.value) return
+  kbDownBusy.value = true
+  kbDownErr.value = ''
+  try {
+    const r = await api.removeKbDoc(store.currentId, n.name)
+    kbMsg.value = { text: `已从知识库下架 ${r.source}（删掉 ${r.deleted} 条切片）\n原件仍在工作区 kb/ 下`,
+                    err: false }
+    kbDown.value = null
+    await load()
+  } catch (e) {
+    kbDownErr.value = (e as Error).message
+  } finally {
+    kbDownBusy.value = false
   }
 }
 
@@ -380,11 +418,19 @@ watch(() => store.currentId, () => {
 })
 onMounted(load)
 
+/** 知识库文档 = 落在 `<会话工作区>/kb/` 那一层的文件（`upload_kb` 只往这一层写原件，
+ *  `GET /workspace/files` 扫的是整棵树，所以它们是树里的普通行）。只认**段名**：
+ *  后端给的是 Windows 的 `\`，前端别处（`workspaceUrl`）也是先归一化再判。 */
+function isKbDoc(p: string) {
+  const parts = (p || '').replace(/\\/g, '/').split('/')
+  return parts.length >= 2 && parts[parts.length - 2] === 'kb'
+}
+
 /** 文件树用原生 <details> 递归：深度个位数，不值得为它写虚拟滚动 */
 const FileNode = defineComponent({
   name: 'FileNode',
   props: { n: { type: Object as () => FileNodeT, required: true }, depth: { type: Number, required: true } },
-  emits: ['open'],
+  emits: ['open', 'remove'],
   setup(props, { emit }) {
     const row = (label: string, icon: string) =>
       h('span', { class: 'frow' }, [h(DsIcon, { name: icon, size: 14 }), h('span', { class: 'fname' }, label)])
@@ -392,10 +438,24 @@ const FileNode = defineComponent({
       return () =>
         h('details', { class: 'fdir' }, [
           h('summary', null, [row(props.n.name, 'folder')]),
-          ...(props.n.children || []).map((c) => h(FileNode, { n: c, depth: props.depth + 1, onOpen: (x: FileNodeT) => emit('open', x) }))
+          ...(props.n.children || []).map((c) => h(FileNode, {
+            n: c, depth: props.depth + 1,
+            onOpen: (x: FileNodeT) => emit('open', x),
+            onRemove: (x: FileNodeT) => emit('remove', x)
+          }))
         ])
     }
-    return () => h('button', { class: 'ffile', onClick: () => emit('open', props.n) }, [row(props.n.name, 'file')])
+    // C30：kb/ 下那份原件挂一个「下架」动作位（只加动作，行的几何不动）。
+    // 只在这一层给——工作区里别处的文件没进过知识库，挂上去就是个点了必报 404 的假控件。
+    const kb = isKbDoc(props.n.path)
+    return () => h('div', { class: 'fwrap' }, [
+      h('button', { class: 'ffile', onClick: () => emit('open', props.n) }, [row(props.n.name, 'file')]),
+      ...(kb ? [h('button', {
+        class: 'fkb', type: 'button', title: `从知识库下架 ${props.n.name}`,
+        'aria-label': `从知识库下架 ${props.n.name}`,
+        onClick: (e: Event) => { e.stopPropagation(); emit('remove', props.n) }
+      }, '下架')] : [])
+    ])
   }
 })
 </script>
@@ -629,6 +689,53 @@ const FileNode = defineComponent({
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* C30：文件行 + 它的动作位（只有 kb/ 下那些行有动作位）。
+   无动作位时这一层就是个普通容器，`.ffile` 仍占满整行 ⇒ 老几何一字未动。 */
+.panel :deep(.fwrap) {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.panel :deep(.fwrap .ffile) {
+  flex: 1 1 auto;
+  min-width: 0;              /* 不加它，`.fname` 的 ellipsis 会被 flex 撑破 */
+}
+
+.panel :deep(.fkb) {
+  flex: none;
+  padding: 2px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.panel :deep(.fkb:hover) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.kbConfirm {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.kbConfirmFoot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .trace {

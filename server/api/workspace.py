@@ -196,3 +196,52 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
     result["errors"] = errors + result["errors"]
     result["written"] = [p.name for p in written]
     return result
+
+
+@router.delete("/{sid}/workspace/kb_doc")
+async def remove_kb_doc(sid: str, source: str, request: Request, user: str = Depends(current_user)):
+    """按 source 下架**单份**知识库文档（C30）：只掉这份文件灌进去的切片，别份一字不动。
+
+    上传错一份之后原先只有「整体清库」或手跑脚本两条路；store 层 `delete_scope(source=…)` 自 C21
+    起就拼得出来（s15 t10 现证删得干净、不误伤兄弟文档），缺的只是这条路由与界面入口。
+
+    三件事一起做，缺一件就是半截：
+      ① `source` 只取 basename（`../`、绝对路径在这里被剥掉，与 `upload_kb` 门口同一口径）；
+      ② 过滤器**永远**由会话推出来的 `doc_type`/`user_id`/`project` 打头（`_filters` 的固定前缀），
+         `source` 只是跟在后面的一个字段 ⇒ 这个参数**拼不出跨租户过滤器**——不靠调用方自觉；
+      ③ 先数一次：本会话本租户的 kb 切片里没有这份文件就 **404**。「删了 0 条」与「删掉了」在界面上
+         长得一样，正是本仓反复判过的那种坏形状（不存在的 source 不许静默 ok）。
+
+    **原件不动**：`kb/` 那份是摄取留下的证据（C16 的取证口径），下架只动知识库里的切片。
+    向量服务连不上 → 503 且说清「没有下架、库里仍是原样」（照 C16：连接级失败翻成看得懂的话，
+    其余异常一个字都不吞）。
+    """
+    from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER
+    from codeharness.document_store.qdrant_store import QdrantStore
+    workspace = _ws(request, sid, user).resolve()          # 先定归属：越权在这里就 404
+    name = (source or "").strip()
+    if not name or Path(name).name != name:
+        raise HTTPException(400, "source 只能是文件名，不能带路径分隔")
+    store = QdrantStore()
+    tok = CURRENT_PROJECT.set(workspace.name)              # 与 upload_kb 同一接缝：切片按项目隔离
+    try:
+        uid = CURRENT_USER.get() or "default"
+        try:
+            n = 0
+            if await store.client.collection_exists(store.collection):
+                flt = store._filters("kb", uid, project=workspace.name, source=name)
+                n = (await store.client.count(store.collection, count_filter=flt)).count
+            if not n:
+                raise HTTPException(404, f"知识库里没有 {name} 这份文档")
+            await store.delete_scope(doc_type="kb", user_id=uid, project=workspace.name, source=name)
+        except HTTPException:
+            raise                                          # 404 是我们自己的结论，不是「连不上」
+        except Exception as exc:
+            if not _unreachable(exc):
+                raise                                      # 真 bug 一个字都不许吞（C16 同一口径）
+            raise HTTPException(503, f"向量服务连不上：{type(exc).__name__}: {str(exc)[:80]}\n"
+                                     f"{name} 没有下架，知识库里仍是原样；起好服务后再点一次"
+                                     f"（检查 QDRANT__URL）") from exc
+    finally:
+        CURRENT_PROJECT.reset(tok)
+    return {"source": name, "deleted": n}

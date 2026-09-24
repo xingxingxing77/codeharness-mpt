@@ -136,6 +136,12 @@ export const api = {
     return req<{ uploaded_count: number; chunk_count: number; errors: string[]; written: string[] }>(
       'POST', `/api/sessions/${sid}/workspace/upload_kb`, fd, KB_UPLOAD_TIMEOUT_MS)
   },
+  /** C30 下架单份知识库文档：只掉这一份的切片，别份一字不动（原件仍在工作区 `kb/` 下——那是取证）。
+   *  `source` 走 query 而不是路径段：文件名里的分隔符/空格不做转义就是另一类 bug。
+   *  不存在的 source 后端回 **404**（不是静默 ok），调用方照原文显示。 */
+  removeKbDoc: (sid: string, source: string) =>
+    req<{ source: string; deleted: number }>(
+      'DELETE', `/api/sessions/${sid}/workspace/kb_doc?${new URLSearchParams({ source })}`),
   /** B5 目标三动作（`setGoal` 兼作 create/edit：后端按「原来有没有目标」分）。 */
   setGoal: (sid: string, objective: string) =>
     req<Session>('POST', `/api/sessions/${sid}/goal`, { objective }),

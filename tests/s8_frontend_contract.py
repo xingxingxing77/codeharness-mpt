@@ -909,9 +909,38 @@ def t15_kb_upload_entry():
         "不换行就糊成一条看不完的横条"
     assert 'accept=' not in dp and ".docx" not in dp and "20MB" not in dp, \
         "B12：前端把后缀白名单或大小上限抄成了第二份（会漂），拒因照后端原文显示就够"
+
+    # ---- C30 下架单份知识库文档：三侧同判（与 B12 同形状，因为它是同一条链的反向动作） ----
+    assert '@router.delete("/{sid}/workspace/kb_doc")' in ws, \
+        "C30 回归：workspace.py 里没有 kb_doc 的删除路由（界面那个动作位就又成了假控件）"
+    assert 'Path(name).name != name' in ws, \
+        "C30 回归：source 的 basename 判据没了——`../` 这类串会进过滤器"
+    assert re.search(r'_filters\("kb", uid, project=workspace\.name, source=name\)', ws), \
+        "C30 回归：过滤器不再由会话推出来的 doc_type/user_id/project 打头——source 一旦能拼过滤器就能跨租户"
+    assert re.search(r'delete_scope\(doc_type="kb", user_id=uid, project=workspace\.name, source=name\)', ws), \
+        "C30 回归：删那一步与数那一步的 scope 不一致（数的是一套、删的是另一套）"
+    assert 'HTTPException(404, f"知识库里没有' in ws, \
+        "C30 回归：不存在的 source 静默回 ok 了——「删了 0 条」与「删掉了」在界面上长得一样"
+    rk = re.search(r"removeKbDoc:[\s\S]{0,320}", fe)
+    assert rk and "/workspace/kb_doc" in rk.group(0), "C30 回归：client.ts 不再消费 kb_doc"
+    assert "URLSearchParams" in rk.group(0), \
+        "C30：source 没走 URLSearchParams——文件名里的 `&`/空格会把这个 query 拼坏"
+    down = re.search(r"async function doRemoveKb\(.*?\n\}", dp, re.S)
+    assert down, "C30 回归：DetailsPanel 里没有 doRemoveKb（后端那条路由又没有入口了）"
+    body = down.group(0)
+    assert "api.removeKbDoc" in body and "await load()" in body, \
+        "C30：下架没调 removeKbDoc / 下架后不刷文件树"
+    assert "if (!store.currentId || !n || kbDownBusy.value) return" in body, \
+        "C30：确认之前就发请求了——`kbDown` 为空必须直接 return（删除不可逆，先确认再发是这一格的要点）"
+    assert re.search(r'v-if="kbDown"[\s\S]{0,600}?取消', dp), \
+        "C30：确认条上没有「取消」（删除不可逆，用户得有退路）"
+    assert "isKbDoc" in dp and "从知识库下架" in dp, \
+        "C30：文件树上没有给 `kb/` 那份文件的「下架」动作位"
     _ok("t15", "B12：upload_kb 三侧同判（后端门口三判+四字段 → client.ts multipart+长档 → "
                "界面 errors 与成功数一起说 + 传完刷新树），白名单不在前端重抄；"
-               "C16 追加：非 2xx 的 detail 必须原样走到 .kbMsg（catch 用 e.message + pre-line 分行）")
+               "C16 追加：非 2xx 的 detail 必须原样走到 .kbMsg（catch 用 e.message + pre-line 分行）；"
+               "C30 追加：kb_doc 下架三侧同判（路由 + basename/会话 scope/404 → client.ts 转义 query → "
+               "界面先确认再发且确认条带取消）")
 
 
 def t16_max_tokens_notice():
