@@ -1,9 +1,12 @@
 """C24 判据的真读数工装：**检索能不能被模型主动调**——不是预取多一条，是它想说「我再查一次」时有这个口。
 
-两场各取一个读数，缺一场这格就没有区分力：
-  · 判别场：首轮预取的那几条答不上问题（答案在库里，但用词与用户那句话差得远），
-    断言 `search_knowledge_base` **真被模型调用**、真召回到那条切片、产出真带出处回到下一轮 prompt；
-  · 对照场：预取就已经答得上的那句话，断言这场里该工具**零调用**。
+两场各取一个读数（判别场问两件事、对照场问预取就够答的那件），**判据三件**（09-24 用户拍定改的，
+理由见 `main()` 里那段注释）：
+  ① 每一次工具调用都必须**真召回到切片且带出处**（不许空转、不许丢出处）；
+  ② 至少有一场是模型**自发**调的（口通了还得真有人用，只挂在名册里不算通电）；
+  ③ 预取够不够用、这一场查了几次——只作**行为读数**打印，不做 pass/fail。
+原判据里「对照场零调用」那半条被实测否掉（预取已带回答案时 thinking 模型仍会自己核实 1~3 次）；
+「零调用」这个形状断言仍然成立、留在确定性的 `s15 t15③`（FakeLLM 脚本，量的是形状不是模型脾气）。
 
 花钱的规矩（`plan/PLAN.md` §3 那张卡片批的就是这条）：
   · **硬闸 ¥2.0**（StepFun 侧累计，`LLM_SPEND_GATE_CNY` 可改小做预量），闸装在工装里、发钱之前判，
@@ -271,30 +274,36 @@ def main() -> int:
 
     disc = next((r for r in results if r["label"] == "判别场"), None)
     ctrl = next((r for r in results if r["label"] == "对照场"), None)
+    runs = [r for r in results if r]
     bad = []
-    if disc is not None:
-        got = sorted({s for c in disc["tool_calls"] for s in c["sources"]})
-        added = sorted(set(got) - set(disc["prefetch_sources"]))
-        print(f"  判别场两跳形状：预取带回 {disc['prefetch_sources'] or '（空）'} → 工具补上 "
-              f"{added or '（没有新的一份）'}（工具共带回 {got}）")
-        if not disc["tool_calls"]:
-            bad.append("判别场里模型一次都没调 `search_knowledge_base`——「想再查一次」这个口今天没被用上")
-        elif not added:
-            bad.append("判别场调了，但没带回**预取之外**的那一份文档 ⇒ 「首轮资料不够、必须再查」这半条"
-                       "没成立（口是通的，夹具没把两跳分开）")
-    if ctrl is not None:
-        if not ctrl["prefetch_sources"]:
-            bad.append(f"对照场预取就是空的，谈不上「不需要再查」（{ctrl['prefetch_sources']}）"
-                       f"——先修夹具，别拿它当对照组")
-        elif ctrl["tool_calls"]:
-            bad.append(f"对照场预取已带回答案却仍调了 {len(ctrl['tool_calls'])} 次——"
-                       f"对照组不成立（这是模型行为，不是代码坏了：见台账）")
+    for r in runs:
+        print(f"  行为读数｜{r['label']}：预取带回 {r['prefetch_sources'] or '（空）'} → 工具 "
+              f"{len(r['tool_calls'])} 次 "
+              f"{[(c['query'][:22], c['sources'], c['chars']) for c in r['tool_calls']]}")
+    # **判据（09-24 用户拍定改的）**：原文那半条「对照组=不需要再查的会话里该工具零调用」被实测否掉
+    # ——预取已经把答案带回时，thinking 模型仍会自己核实 1~3 次。改成三条**都能被本工装发出来**的形状：
+    #   ① 每一次调用都必须真召回到切片且带出处（不许空转、不许丢出处）；
+    #   ② 至少有一场是模型**自发**调的（口通了还得有人用，只挂在名册里不算通电）；
+    #   ③ 预取够不够用、这一场查了几次——只作行为读数打印，不做 pass/fail（那是模型行为不是链的对错）。
+    # 「零调用」那半条在 FakeLLM 面上仍然成立且留在 `s15 t15③`——脚本是确定的，量的是形状不是脾气。
+    for r in runs:
+        for c in r["tool_calls"]:
+            if not c["sources"] or c["chars"] < 40:
+                bad.append(f"{r['label']} 有一次调用没带回带出处的切片：{c}")
+    if runs and not any(r["tool_calls"] for r in runs):
+        bad.append("两场里模型一次都没主动调用 ⇒ 这个口今天没人用（机制通了但没通电）")
+    if disc is not None and ctrl is not None and not bad:
+        extra = sorted({s for c in disc["tool_calls"] for s in c["sources"]}
+                       - set(disc["prefetch_sources"]))
+        print(f"  两跳那条没做成 pass/fail（新刻度的 dense 会把同义改写直接桥进预取）："
+              f"工具在判别场补出预取之外的文档 = {extra or '无'}")
     if bad:
         print("\n判据未绿：" + "；".join(bad))
         return 2
-    print("\n判据：判别场真调用且带回预取之外的那一份（两跳成立）、对照场预取够用且零调用"
-          if disc and ctrl else "\n判据：只跑了单场，另一场没取读数（本工装按单场结论不算全绿）")
-    return 0
+    print("\n判据：每次调用都真召回到带出处的切片、且至少一场是模型自发调的"
+          "（预取够不够与调用次数只作行为读数）"
+          if disc and ctrl else "\n单场读数：另一场没跑，本工装按单场结论不算全绿")
+    return 0 if disc and ctrl else 2
 
 
 if __name__ == "__main__":
