@@ -49,6 +49,7 @@
  *  报文检视做不了——我们没把 prompt/响应原文落盘，见 utils/trajectory.ts 的天花板注释。 */
 import { computed } from 'vue'
 import { producedLabel, type TrajRow } from '../../utils/trajectory'
+import { anchorKeyOf } from '../../utils/cpJump'
 import { formatLatencySeconds, formatMessageClock } from '../../utils/messageChrome'
 import { moneyBoth, sumCosts } from '../../utils/money'
 
@@ -63,7 +64,12 @@ const totals = computed(() => ({
   ...props.rows.reduce((a, r) => ({ pt: a.pt + r.pt, ct: a.ct + r.ct }), { pt: 0, ct: 0 }),
   ...sumCosts(props.rows)
 }))
-const jumpKey = (r: TrajRow) => r.blocks.at(-1)?.key || ''
+/** 产出块的最后一块当作跳转目标；键必须过 `anchorKeyOf`——用户块在 DOM 上带 `user:` 前缀，
+ *  裸 `b.key` 找不到元素，而滚动失败是**静默**的（点了没反应，没有报错可看）。 */
+const jumpKey = (r: TrajRow) => {
+  const b = r.blocks.at(-1)
+  return b ? anchorKeyOf(b) : ''
+}
 
 function jump(r: TrajRow) {
   const key = jumpKey(r)

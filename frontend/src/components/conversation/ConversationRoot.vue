@@ -132,6 +132,15 @@ async function jumpToBlock(key: string) {
   el?.scrollIntoView({ block: 'center' })
 }
 
+/** 右栏（回放的超步行）递过来的口令：先清再跳，清早于跳是为了下一次点同一行仍能触发。
+ *  元素找不到就什么都不做——那一块可能压根没加载（对话流是游标翻页的，超步却能翻到更老的场），
+ *  这时候不假装滚到了，也不弹错：右栏那颗按钮自己会把「就近/没有对应块」写在旁边。 */
+watch(() => ui.jumpKey, (k) => {
+  if (!k) return
+  ui.jumpKey = ''
+  void jumpToBlock(k)
+})
+
 const scrollEl = ref<HTMLElement>()
 const flowEl = ref<HTMLElement>()
 const seatEl = ref<HTMLElement>()

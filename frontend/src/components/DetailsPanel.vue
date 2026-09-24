@@ -129,6 +129,15 @@
         <button v-if="replay.hasMore" class="cpMore" :disabled="replay.busy" @click="loadCp(replay.nextBefore)">
           {{ replay.busy ? '加载中…' : '加载更早' }}
         </button>
+        <!-- C11 第四件（09-25）：超步 → 对话流。两边没有共同主键，映射是按「节点名 + 时刻」凑的
+             （utils/cpJump.ts），所以三档必须各自说出去：精确命中 / 就近（这一步没产出块）/
+             没有对应块（此时按钮置灰，不假装跳到了）。跳转走 ui.jumpKey，中栏对话流消费后清回空串。 -->
+        <div v-if="openRow" class="cpLocate">
+          <button class="cpMore" :disabled="!cpAnchor.key" @click="locateInChat">
+            {{ cpAnchor.exact ? '在对话流里定位' : '在对话流里定位（就近）' }}
+          </button>
+          <span>{{ cpAnchorHint }}</span>
+        </div>
         <pre v-if="replay.state" class="code stateBox">{{ replay.state }}</pre>
       </template>
     </div>
@@ -175,6 +184,7 @@ import { useToastStore } from '../stores/toast'
 import HireRole from './HireRole.vue'
 import type { FileNode as FileNodeT } from '../types'
 import { moneyBoth, sumCosts } from '../utils/money'
+import { pickCpAnchor } from '../utils/cpJump'
 
 const store = useSessionStore()
 const ui = useUiStore()
@@ -268,6 +278,26 @@ async function openCp(cp: CpRow) {
     // 413 是"这份太大不在浏览器里展开"，不是出错——与 /workspace/file 同一族，按状态码分流
     replay.state = err.status === 413 ? err.message : `读取失败：${err.message}`
   }
+}
+
+/** C11 第四件：展开的那一行 → 对话流里的锚点。两边没有共同主键，映射是按节点名与时刻凑的
+ *  （`utils/cpJump.ts`），所以「凑」这件事必须显示出来而不是暗着兜：精确命中是一种文案、
+ *  就近是另一种、根本没有对应块时按钮置灰并说清为什么（置灰的按钮按不动，比跳错到别处诚实）。 */
+const openRow = computed(() => replay.rows.find((r) => r.checkpoint_id === replay.open))
+const cpAnchor = computed(() => (openRow.value
+  ? pickCpAnchor(store.blockList, openRow.value)
+  : { key: '', exact: false }))
+const cpAnchorHint = computed(() => {
+  const n = openRow.value?.step
+  if (!cpAnchor.value.key) return `第 ${n} 步之前没有已加载的块——对话流是翻页的，往上翻一页再点`
+  return cpAnchor.value.exact
+    ? `第 ${n} 步的节点产出的那一块`
+    : `第 ${n} 步没产出对话块，跳它之前最近的一块`
+})
+
+function locateInChat() {
+  // 口令写进 ui store，中栏消费完自己清回空串——清掉才允许「连点同一行也再滚一次」
+  if (cpAnchor.value.key) ui.jumpKey = cpAnchor.value.key
 }
 
 function pick(k: string) {
@@ -854,6 +884,30 @@ const FileNode = defineComponent({
 
 .cpMore:disabled {
   cursor: default;
+}
+
+/* 展开那一行下面的「定位」动作位。按钮刻意复用 .cpMore（同一张表里的行内动作，
+   尺寸/hover/焦点环都只有一套），这里只补三件：横向排、别撑满、禁用时看得出来。 */
+.cpLocate {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.cpLocate .cpMore {
+  width: auto;
+  padding: 0 12px;
+}
+
+.cpLocate .cpMore:disabled {
+  opacity: 0.45;
+}
+
+.cpLocate span {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .stateBox {

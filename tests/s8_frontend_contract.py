@@ -1743,6 +1743,54 @@ def t22_feedback_surface():
                "（按下态＝outline 字形 + 颜色 token，照参照系；Fill 别名不许复燃）")
 
 
+def t24_checkpoint_to_chat_jump():
+    """C11 第四件：右栏「步」那一行 → 中栏对话流里它产出的那一块。
+
+    这条映射是**凑的**（超步那侧只有节点名与时刻，块那侧只有 role/ts，两边没有共同主键），
+    所以这里判的不是「算得准不准」（那是 `frontend/scripts/check_cp_jump.mjs` 的活，纯函数、
+    三档各有断言），而是**三件同批接线有没有各就各位**：右栏算锚点 → `ui.jumpKey` 递口令 →
+    中栏消费并清回空串。少任何一环，症状都是「点了没反应」——DOM 层面的跳转失败
+    连个报错都不给，比跳错更难发现。
+
+    本格是**文本级**的（与 s8 全部结构格同族）：把那一行整行注掉仍然绿——变异 p5 第一版就是这么暴露的。
+    要防住得引 AST 解析器，不值；跳转逻辑的真牙在 `frontend/scripts/check_cp_jump.mjs`（10 格，
+    反向验证 n1–n4 各红各的档）。这里只保证三处接线不会哪一处悄悄断。
+    """
+    cj = (FE / "utils" / "cpJump.ts").read_text(encoding="utf-8")
+    assert "export function pickCpAnchor" in cj and "export function anchorKeyOf" in cj, \
+        "C11 回归：锚点键换算不再是**一处**——两个跳转方各拼一次前缀必然分叉"
+    # 前缀的真值源在 ChatNode 的模板里。它一改而 anchorKeyOf 没跟，症状是「跳用户发言静默失效」
+    cn = (FE / "components" / "conversation" / "ChatNode.vue").read_text(encoding="utf-8")
+    assert "'user:' + b.key" in cn, "C11 回归：ChatNode 的锚点前缀变了，`anchorKeyOf` 得跟着改（本门钉的就是这一对）"
+    assert "user:${b.key}" in cj, "C11 回归：anchorKeyOf 不再拼 ChatNode 那个 `user:` 前缀"
+
+    ui = (FE / "stores" / "ui.ts").read_text(encoding="utf-8")
+    assert "jumpKey: ''" in ui, "C11 回归：口令字段被删了？右栏写、中栏读都靠它"
+    cr = (FE / "components" / "conversation" / "ConversationRoot.vue").read_text(encoding="utf-8")
+    assert "watch(() => ui.jumpKey" in cr, "C11 回归：中栏不再消费口令，右栏那颗按钮点了什么都没有"
+    body = cr.split("watch(() => ui.jumpKey")[1].split("})")[0]
+    assert "if (!k) return" in body, "C11 回归：清空口令时 watcher 也会进一次回调，不挡掉就是空跳"
+    assert body.index("ui.jumpKey = ''") < body.index("jumpToBlock(k)"), \
+        "C11 回归：改成「跳完再清」的话，连点同一行第二次是同一个值 ⇒ watcher 不再触发，只滚得动一次"
+
+    dp = (FE / "components" / "DetailsPanel.vue").read_text(encoding="utf-8")
+    for token, why in (
+        ("pickCpAnchor(store.blockList", "右栏不再算锚点（按钮这侧断链）"),
+        (":disabled=\"!cpAnchor.key\"", "没有对应块时按钮仍可点 ⇒ 静默不跳，用户只会以为界面坏了"),
+        ("'在对话流里定位（就近）'", "兜底那一档没被说出去 ⇒ 用户会把「就近」当成「对话流缺这块」"),
+        ("ui.jumpKey = cpAnchor.value.key", "口令不再递给中栏"),
+        ("replay.rows.find", "动作位不跟着展开的那一行走（会在没展开时冒出来）"),
+    ):
+        assert token in dp, f"C11 回归：{why}"
+
+    tt = (FE / "components" / "conversation" / "TrajectoryTable.vue").read_text(encoding="utf-8")
+    assert "anchorKeyOf(b)" in tt and "r.blocks.at(-1)?.key" not in tt, \
+        ("C11 回归：台账行的跳转换回裸 `b.key` —— 落到用户块时 DOM 里根本没这个锚点，"
+         "点了静默没反应（这条是本轮顺手修的，别再改回去）")
+    _ok("t24", "C11 第四件三处同批：右栏算锚点（三档各有文案、无目标即置灰）→ ui.jumpKey 递口令 → "
+               "中栏先清再跳（连点同一行仍会滚）；锚点前缀与 ChatNode 同一真值源，台账行也走同一处")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1752,7 +1800,7 @@ def main():
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
               t17_goal_surface, t18_steer_queue, t19_fork_surface,
               t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface,
-              t23_run_after_fork)
+              t23_run_after_fork, t24_checkpoint_to_chat_jump)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")
