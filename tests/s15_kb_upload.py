@@ -1039,6 +1039,8 @@ def t13_kb_doc_removal_route():
       ③ **不存在的 source 明确失败**（404），不是静默回 ok——「删了 0 条」与「删掉了」在界面上长得一样；
       ④ **跨会话删不到别人的**：另一个会话下**同名** `a.md` 的点一条不许少（过滤器由会话推、不由参数拼）；
       ⑤ `source` 带路径分隔 → 400（不许拿它拼出越界或跨租户的过滤器）。
+      ⑥ **集合都不存在**时仍回 404（不是 500/503）——钉的是路由里那道 `collection_exists` 守卫，
+         它此前零判据：「这个会话从没灌过库」与「这台 Qdrant 连集合都没有」是两件事，都该说成 404。
 
     顺带把 C30 行里那条「未验边界」现证掉：删完之后**重传同一份**走 C3 的内容派生 id ⇒ 点数回到原值，
     既不堆积也没有删漏的残留。
@@ -1129,8 +1131,28 @@ def t13_kb_doc_removal_route():
             asyncio.run(seed(PA, fa))                      # C30 行里那条未验边界：删完重传同一份
             again = asyncio.run(count(PA, "a.md"))
             assert again == a0, f"t13 重传同一份后点数变了（幂等坏了或删漏了残留）：{a0}→{again}"
+
+            # ⑥ **集合根本不存在**时也要 404，不许退化成 500/503。路由里那道 `collection_exists`
+            # 守卫（`server/api/workspace.py:239`）此前**零判据**——它挡的是「这个会话从没灌过库、
+            # 这台 Qdrant 上连集合都没有」那一档；摘掉它，`count()` 会拿 Qdrant 的 404 异常往外抛，
+            # 而 `_unreachable()` 不认它是连接级失败 ⇒ 一个字都没吞的 500（09-25 读码现证这条形状，
+            # 记在 `plan/rag-knowledge.md` C30 行末）。TestClient 默认把服务端异常直接抛给调用方，
+            # 所以这里自己接住并折算成状态码，让「红」长得像 ⑥ 而不是一坨 traceback。
+            keep_prefix = settings.qdrant.collection_prefix
+            settings.qdrant.collection_prefix = "s15_c30_missing"      # 从没建过的集合名
+            try:
+                try:
+                    rr = c.delete(url.format(sid_a), params={"source": "a.md"})
+                    code, txt = rr.status_code, rr.text[:160]
+                except Exception as exc:                                # noqa: BLE001
+                    code, txt = 0, f"{type(exc).__name__}: {str(exc)[:150]}"
+                assert code == 404, \
+                    f"t13⑥集合不存在时下架没回 404：{code} {txt}——那道守卫得有格子守着"
+            finally:
+                settings.qdrant.collection_prefix = keep_prefix
         print(f"  ok  t13 下架单份（HTTP）：a.md {a0} 条删净且回执对得上、兄弟 b.md {b0} 条一字未动、"
-              f"另一会话同名 a.md {other0} 条没被带走、不存在的 source 404、带路径的 400；"
+              f"另一会话同名 a.md {other0} 条没被带走、不存在的 source 404、带路径的 400、"
+              f"**集合都不存在时也是 404**（不是 500）；"
               f"删完重传同一份回到 {again} 条（C3 的内容派生 id 仍在，无残留）")
     finally:
         if keep is not None:
