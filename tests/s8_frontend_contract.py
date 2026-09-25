@@ -1268,6 +1268,8 @@ def t19_fork_surface():
     一次点击可以在 HTTP 请求里陪一个大会话目录走完全程（导入面实测过 12k 文件量级），慢到像失败；
     现在按 `MAX_FORK_FILES` 截断并回 `copied_truncated`，界面把它翻成人话。两格互为对照：
     撞顶那场报截断、没撞顶那场**不许**报（否则「报截断」这条判据本身是恒真的）。
+    09-25 补第三档：**不动生产上限**、灌 `上限+50` 份真文件，钉「回执数 == 磁盘数 == 上限」与
+    「截在哪可复现」，并把分叉墙钟印出来（这条上限的存在理由就是墙钟，没读数就等于没被消掉）。
     """
     import server.sessions as ss
     from fastapi.testclient import TestClient
@@ -1354,6 +1356,35 @@ def t19_fork_surface():
                      f"{whole.get('copied_files')}/{whole.get('copied_truncated')}")
             finally:
                 sa_api.MAX_FORK_FILES = keep_cap
+
+            # ---- B3② 余账（09-25）：**生产那档 2000 从没在真数量上撞过**（上面两档是把上限改小到 3
+            # 来验机制）。这一档不动生产值，灌 `MAX_FORK_FILES + 50` 份真文件，钉三件事：
+            # ① 回执正好等于上限、且说清了截断；② **磁盘上的文件数与回执对得上**（回执自说自话是
+            # 本仓点名的病：`copied_files` 旧值就把目录算成一份过）；③ 截在哪按序可复现（第 2001 份
+            # 必须不在）。顺带把**墙钟**印出来——这条上限存在的理由就是「一次点击在 HTTP 请求里
+            # 陪一个大会话目录走完全程，慢到像失败」，没有读数就等于没人知道它被消掉了多少。
+            import time as _t
+
+            n_cap = sa_api.MAX_FORK_FILES
+            real = c.post("/api/sessions", json={"idea": "真大会话分叉",
+                                                 "project_name": "cap_real"}).json()
+            real_ws = _P(real["workspace"])
+            real_ws.mkdir(parents=True, exist_ok=True)
+            names = [f"art{i:05d}.md" for i in range(n_cap + 50)]
+            for nm in names:
+                (real_ws / nm).write_text(nm, encoding="utf-8")
+            t0 = _t.time()
+            r2 = c.post(f"/api/sessions/{real['id']}/fork", json={"from_cursor": ""}).json()
+            wall = _t.time() - t0
+            kid4 = _P(c.get(f"/api/sessions/{r2['id']}").json()["workspace"])
+            got = sorted(p.name for p in kid4.rglob("*") if p.is_file())
+            assert r2["copied_files"] == n_cap and r2["copied_truncated"] is True, \
+                f"B3②：生产那档没撞顶或没报截断：{r2.get('copied_files')}/{r2.get('copied_truncated')}"
+            assert len(got) == n_cap, \
+                f"B3②：回执说 {n_cap} 份，磁盘上真拷过来 {len(got)} 份（回执与磁盘对不上）"
+            assert got == sorted(names)[:n_cap] and names[n_cap] not in got, \
+                "B3②：截断截在哪不可复现（拷过来的不是按序的前若干份，或第 N+1 份漏进来了）"
+            print(f"   B3② 真规模：源目录 {len(names)} 份 → 分叉墙钟 {wall:.2f}s、拷 {n_cap} 份并如实报截断")
     finally:
         settings.platform.use_redis = keep_redis
         ss.SESSIONS_FILE = keep_file
