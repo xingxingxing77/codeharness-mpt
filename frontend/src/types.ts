@@ -119,6 +119,10 @@ export interface FileNode {
   size?: number
   ext?: string
   children?: FileNode[]
+  /** B4：这棵子树到了深度/节点预算的顶上，`children` 是**被截断**的而不是空的（后端只在这个
+   *  时候带它）。字段今天没有消费者——树渲染照旧只画 children——但接口上必须有名字，
+   *  否则「少了东西」与「本来就空」在下一次读代码时又分不出来。 */
+  truncated?: boolean
 }
 
 export interface Health {

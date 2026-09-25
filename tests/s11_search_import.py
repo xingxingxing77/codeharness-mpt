@@ -127,13 +127,29 @@ def t4_import_repo_cross_session_guard():
             assert "本会话" in r.text, f"400 该说明边界是本会话工作区（旧口径只判到 workspace_root）：{r.text[:200]}"
             r = c.post(f"/api/sessions/{a.id}/workspace/import_repo", json={"repo_path": str(Path(a.workspace))})
             assert r.status_code == 200, f"auth 开、导入自己会话应 200，实际{r.status_code}: {r.text[:200]}"
+            # B11 存在性 oracle：边界判定必须在**存在性判定之前**。原先先判 `is_dir()`、后判边界，
+            # 两句 400 文案不同 ⇒ 已登录用户拿绝对路径就能枚举宿主上哪些目录存在
+            # （「必须是已存在的目录」= 存在，「必须在…内」= 不存在）。判据：边界外的**存在**目录
+            # 与**不存在**路径必须得到同一句话——两句不同就是 oracle 又开了。
+            outside_exists = c.post(f"/api/sessions/{a.id}/workspace/import_repo",
+                                    json={"repo_path": str(Path(a.workspace).parent)})   # 存在、但在边界外
+            outside_missing = c.post(f"/api/sessions/{a.id}/workspace/import_repo",
+                                     json={"repo_path": "C:\\s11-no-such-dir-xyz"})       # 不存在、也在边界外
+            assert outside_exists.status_code == 400 and outside_missing.status_code == 400, \
+                f"边界外应一律 400：存在={outside_exists.status_code} 不存在={outside_missing.status_code}"
+            assert outside_exists.json()["detail"] == outside_missing.json()["detail"], \
+                (f"B11 存在性 oracle 又开了：边界外的『存在』与『不存在』答的不是同一句话 —— "
+                 f"{outside_exists.json()['detail']!r} vs {outside_missing.json()['detail']!r}")
+            assert "本会话" in outside_exists.json()["detail"], \
+                f"边界外那句该说边界，而不是别的：{outside_exists.json()['detail']!r}"
         finally:
             c.app.dependency_overrides.clear()
             settings.platform.auth_enabled = False       # 反证：auth 关时同一跨目录请求回到旧口径、仍许
         r = c.post(f"/api/sessions/{a.id}/workspace/import_repo",
                    json={"repo_path": str(Path(b.workspace)), "save_name": "from_b"})
         assert r.status_code == 200, f"auth 关跨会话应仍 200（公共模板目录的合法用法不破），实际{r.status_code}"
-    print("✅ auth 开跨会话 400（文案含「本会话」）+ 本会话 200；auth 关同一请求 200")
+    print("✅ auth 开跨会话 400（文案含「本会话」）+ 本会话 200；边界外「存在」与「不存在」两句 400 文案相同"
+          "（B11 存在性 oracle 已关）；auth 关同一请求 200")
 
 
 def t5_import_repo_scale_guard():

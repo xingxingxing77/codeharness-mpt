@@ -249,18 +249,40 @@ class LLMGateway:
                 if usage is not None:
                     resp.usage_metadata = usage
                 return resp
-            # deadline 口径与非流式一致（整次调用一条），挂死的连接不再无限等：外层 RoleZero 的
-            # 180s 工具超时管不到模型调用本身。超时抛 asyncio.TimeoutError；**不做半包重试**——
-            # 半截已经上屏，重放就是重复渲染（_acall 注释里同一句纪律）。
-            resp = await (asyncio.wait_for(_collect(), deadline) if deadline else _collect())
+            # deadline 口径：**整次调用一条**（`wait_for` 包住整个 astream）。⚠ 别把它与非流式
+            # 那条读成同一个：`_acall` 的 deadline 在 tenacity **每一次 attempt 之内**，所以非流式
+            # 最坏能花 3×deadline（B6 里发现旧注释自称「与非流式一致」，与实现相反，一并改准）。
+            # 挂死的连接不再无限等：外层 RoleZero 的 180s 工具超时管不到模型调用本身。
+            # **不做半包重试**——半截已经上屏，重放就是重复渲染（`_acall` 注释里同一句纪律）。
+            try:
+                resp = await (asyncio.wait_for(_collect(), deadline) if deadline else _collect())
+            except TimeoutError:
+                self._timeout_lost("流式", deadline, tag)     # B6：这一发大概率花了钱，账上却是零
+                raise
         else:
-            resp = await _acall(model.ainvoke, msgs, timeout=deadline)
+            try:
+                resp = await _acall(model.ainvoke, msgs, timeout=deadline)
+            except TimeoutError:                              # 同一族（重试耗尽后那一发同样没有回执）
+                self._timeout_lost("非流式", deadline, tag)
+                raise
 
         if stream:
             log_llm_stream("\n")
         if self.cfg.calc_usage:                       # ⚠ 单点计数：cost 只在这里更新
             self.cost_manager.add_usage(resp, model=self.cfg.model, tag=tag)
         return resp
+
+    def _timeout_lost(self, kind: str, deadline, tag: str):
+        """B6：超时被取消的那一发——**钱大概率已经花了，账本上却是零**，至少要留一声可 grep 的响。
+
+        为什么必然漏：流式路的 `resp` 是 `_collect()` 里的局部量，`wait_for` 一取消就没人把它
+        返回出来 ⇒ 下面那句 `add_usage` 永不执行；而非流式在重试耗尽后直接抛上去，同样不进账。
+        厂商侧按 ADR-06 自己的口径是「超时＝大概率已受理已计费」，于是这一发成了账上唯一看不见的支出。
+        同族另两条腿都补过（structured 的 except 支路、非流式的截断计数），只有这两支没补。
+        `cost.py` 那条「零用量必须可见」够不到这里——**它是被调了才会喊**，而这一发根本没人调它。
+        不在这里编造 token：没有回执就没有数，能做的只有让它可 grep（本仓对漏账一贯的形状）。"""
+        logger.warning(f"{kind}调用超时（deadline={deadline}s）被取消：厂商侧大概率已受理已计费，"
+                       f"这一发没有 usage 回执、不进账 (model={self.cfg.model}, tag={tag})")
 
     async def aask(self, msg: Union[str, list], system_msgs: Optional[list[str]] = None,
                    stream: bool = False, tag: str = "", timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> str:

@@ -133,3 +133,15 @@ class LLMConfig(BaseModel):
         if not 0 < v <= 1:
             raise ValueError(f"compress_threshold 必须在 (0, 1] 区间，收到 {v}")
         return v
+
+    @field_validator("timeout")
+    @classmethod
+    def check_timeout(cls, v):
+        """同类里唯一**没有** validator 的数值字段，而它的 0 会同时摘掉两层上限：
+        `gateway._build` 的 `timeout=cfg.timeout or None` → SDK 侧 `Timeout(None)`（本机实测无上限），
+        `ainvoke` 的 `deadline = timeout or self.cfg.timeout` → 连 `wait_for` 都不套。
+        一处配置写错（`LLM__TIMEOUT=0`）就成了「挂住的连接可以无限等」——与 `check_context_length`
+        那条同族，非正值一律当「没设」，回落源默认 `LLM_API_TIMEOUT`。
+        ⚠ 要「本次调用用配置值」走的是**调用参数** `USE_CONFIG_TIMEOUT=0`（`ainvoke(..., timeout=0)`
+        → `deadline = 0 or cfg.timeout`），与本字段的值域是两件事，别一起改。"""
+        return v if v and v > 0 else LLM_API_TIMEOUT

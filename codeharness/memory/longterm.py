@@ -58,7 +58,16 @@ def format_kb_blocks(msgs: list) -> str:
         elif page in (None, ""):
             where = f"〔来自 {src}〕"
         else:
-            where = f"〔来自 {src} 第 {page} 页〕"
+            # B10：`PyPDFLoader` 给的 `page` 是 `enumerate(pdf.pages)` 的 **0 起下标**
+            # （langchain_community/document_loaders/parsers/pdf.py 里那句 `"page": page_number`），
+            # 直接印就是「第 0 页」，而上面 `page in (None, "")` 兜不住 0（0 != None、0 != ""）。
+            # 显示统一 +1 ⇒ 首页 = 第 1 页。`page` 在 payload 里**仍是 0 起**：改它等于改数据口径，
+            # 而读侧只有这一处显示它。认不出的形状照原样印，不猜。
+            try:
+                n = int(page) + 1
+            except (TypeError, ValueError):
+                n = page
+            where = f"〔来自 {src} 第 {n} 页〕"
         blocks.append(f"{where}\n{m.content}")
     return "\n".join(blocks)
 

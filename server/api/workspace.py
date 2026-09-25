@@ -12,6 +12,8 @@ router = APIRouter(prefix="/api/sessions", tags=["workspace"])
 MAX_PREVIEW_BYTES = 5 * 1024 * 1024     # 文本预览上限：超了不读，直接 413（不另做下载通道）
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024     # 单个上传文档上限（知识库摄取一次最多 20 个 × 20MB）
 MAX_UPLOAD_FILES = 20
+MAX_TREE_DEPTH = 8                      # 文件树递归深度上限（正常产物树 3~4 层）
+MAX_TREE_NODES = 2000                   # 整棵树序列化的节点预算（环与大树都由它兜底）
 
 
 def _ws(request: Request, sid: str, user: str) -> Path:
@@ -24,15 +26,59 @@ def _ws(request: Request, sid: str, user: str) -> Path:
 
 @router.get("/{sid}/workspace/files")
 def files(sid: str, request: Request, user: str = Depends(current_user)):
-    root = _ws(request, sid, user)
+    root = _ws(request, sid, user).resolve()
+    budget = [MAX_TREE_NODES]
 
-    def node(p: Path) -> dict:
+    def node(p: Path, depth: int) -> dict | None:
+        """一个节点；不该出现在这棵树里就回 None（调用方滤掉）。
+
+        B4：`is_dir()` 认**链接/junction**，而同一个文件里的 `file()`（下面那条路由）早就按
+        `resolve()` + `is_relative_to(root)` 判过边界（注释还专门写着「startswith 会放行兄弟目录」）
+        ——树这条腿一次都没判。不判的三层后果：链接指到工作区外 ⇒ 那个目录的结构、文件名、
+        字节数被序列化给这个用户；指到祖先/成环 ⇒ RecursionError → 500；`node_modules` 那种大树
+        每次开面板全量走一遍。这里三层一起钉：
+          ① 落点 `resolve()` 后必须在 root 内（判的是**真落点**，与 `file()` 同一口径）；
+          ② 深度上限 ③ 整树节点预算——②③ 是给「链到 root 内部的祖先」这种环兜底的。
+        到顶不是把节点删掉，是**当成空目录**并带 `truncated`：界面与读代码的人都该知道少了东西，
+        而不是看见一个「本来就空」的目录。链接**本身**不是罪——`kb/` 里放个指向同工作区别处的
+        软链接是合法用法，所以判据是落点而不是「有没有链接」。
+        """
+        if budget[0] <= 0:
+            return None
+        try:
+            real = p.resolve()
+        except OSError:
+            return None
+        if not real.is_relative_to(root):
+            return None
+        budget[0] -= 1
         if p.is_dir():
-            return {"name": p.name, "path": str(p), "type": "dir",
-                    "children": [node(c) for c in sorted(p.iterdir())]}
-        return {"name": p.name, "path": str(p), "type": "file", "size": p.stat().st_size}
+            if depth >= MAX_TREE_DEPTH:
+                return {"name": p.name, "path": str(p), "type": "dir", "children": [],
+                        "truncated": True}
+            try:
+                entries = sorted(p.iterdir())
+            except OSError:
+                entries = []                        # 读不动的目录按空处理，不能让一个 500 打断整棵
+            kids = []
+            for c in entries:
+                if budget[0] <= 0:
+                    break
+                child = node(c, depth + 1)
+                if child is not None:
+                    kids.append(child)
+            out = {"name": p.name, "path": str(p), "type": "dir", "children": kids}
+            if budget[0] <= 0:
+                out["truncated"] = True             # 预算到顶：这棵子树少了东西
+            return out
+        try:
+            size = p.stat().st_size
+        except OSError:
+            return None                             # 断链/竞态删除：跳过这一条，而不是整棵树 500
+        return {"name": p.name, "path": str(p), "type": "file", "size": size}
 
-    return {"exists": root.exists(), "tree": [node(c) for c in sorted(root.iterdir())]}
+    return {"exists": root.exists(), "tree": [n for n in (node(c, 0) for c in sorted(root.iterdir()))
+                                              if n is not None]}
 
 
 @router.get("/{sid}/workspace/file")
@@ -71,8 +117,6 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
     body = await request.json()
     workspace = _ws(request, sid, user)                    # 先定归属（越权 404），边界用它
     repo_path = Path(str(body.get("repo_path", ""))).resolve()
-    if not repo_path.is_dir():
-        raise HTTPException(400, "repo_path 必须是已存在的目录")
     from codeharness.configs.settings import settings
     if settings.platform.auth_enabled:
         # N1：auth 开 = 只许导入本会话目录。原先只判到 workspace_root，用户 A 可以把
@@ -81,8 +125,13 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
     else:
         boundary = Path(session_root()).resolve().parent   # auth 关：导入公共模板目录是合法用法
         where = "workspace_root"
+    # B11：**边界判定必须在存在性判定之前**。原先先判 `is_dir()`、再判边界，两句 400 文案又不同
+    # ⇒ 已登录用户拿绝对路径就能枚举宿主上哪些目录存在（存在=「必须是已存在的目录」、
+    # 不存在=「必须在…内」）。倒过来之后，「不在边界内」与「不存在」在边界外只剩同一句话。
     if not repo_path.is_relative_to(boundary):
         raise HTTPException(400, f"repo_path 必须在{where}内")
+    if not repo_path.is_dir():
+        raise HTTPException(400, "repo_path 必须是已存在的目录")
     # save_name 原样拼成 `{会话根}/{save_name}.json` 交给 load_from 读：`../` 可越界读任意 .json
     # （探针实测：../别的会话/repo 会把那个会话的图并进本次产物，N1 隔离在此失效）。
     # 判据与会话目录名同源（sessions.py `_single_dir_name`）。
@@ -169,13 +218,24 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
         if reason := door_refusal(target.suffix.lower()):
             errors.append(f"{name}: {reason}")        # 拒在门口：原件**不落盘**（C26——原先 .docx 先落进
             continue                                   # kb/ 再在摄取时抛 ModuleNotFoundError，用户以为进去了）
-        data = await f.read()
+        # B3：上限必须在**读之前**立。旧写法是 `data = await f.read()` 之后才判 `len(data)`——
+        # 守卫管的是落盘，不是读取，而前端按口径故意不抄第二份判据（client.ts）⇒ 后端是唯一一道，
+        # 而它在读完之后才立：任意登录用户传一个几百 MB 的 .txt，这一个请求就把整个响应体拉进内存
+        # （`MAX_UPLOAD_FILES=20` 还能把这件事叠 20 次）。两条腿都补齐：
+        #   ① `f.size` 是 multipart 解析器给的声明长度——有就当场拒，一个字节都不读；
+        #   ② 没有它（部分上传实现给 None）就用 `read(上限+1)` 当上界：**无论走哪条路，
+        #      进内存的字节数都有界**，且「多读一字节」是判「超过」的最小代价。
+        if f.size is not None and f.size > MAX_UPLOAD_BYTES:
+            errors.append(f"{name}: {f.size / 1048576:.1f}MB 超过单文件上限 "
+                          f"{MAX_UPLOAD_BYTES // 1048576}MB")
+            continue
+        data = await f.read(MAX_UPLOAD_BYTES + 1)
         if not data:
             errors.append(f"{name}: 空文件")
             continue
         if len(data) > MAX_UPLOAD_BYTES:
-            errors.append(f"{name}: {len(data) / 1048576:.1f}MB 超过单文件上限 "
-                          f"{MAX_UPLOAD_BYTES // 1048576}MB")
+            errors.append(f"{name}: 超过单文件上限 {MAX_UPLOAD_BYTES // 1048576}MB"
+                          f"（读到上限那一刀就停，未落盘）")
             continue
         target.write_bytes(data)
         written.append(target)

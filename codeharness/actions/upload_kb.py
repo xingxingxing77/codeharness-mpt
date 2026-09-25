@@ -139,5 +139,28 @@ class UploadKB(Action):
             points.append(Point(id=point_id(f"{scope}/{src}", text), text=text, dense=list(vec),
                                 doc_type=doc_type, user_id=user_id, project=CURRENT_PROJECT.get(),
                                 extra=extra))
+        await _purge_old(store, doc_type, user_id, pairs)     # B2：先删这份文件的旧切片，再灌
         written = await store.write(points)
         return {"uploaded_count": written, "chunk_count": len(pairs), "errors": errors}
+
+
+async def _purge_old(store, doc_type: str, user_id: str, pairs: list) -> None:
+    """B2：同一份文件**重新上传（内容改过）**必须先删掉它上一版灌进去的切片，再灌新的。
+
+    点 id 由 `point_id(f"{scope}/{src}", text)` 派生 ⇒ 文本一改就是新的一枚，旧的那枚没人删；
+    而全仓 `delete_scope` 只有两个调用者（下架单份那条路由、`LongTermMemory.drop()`，后者零生产
+    调用者）⇒ **摄取路径上一次删除都没有**。症状是那种最讨嫌的「两份都对」：磁盘上 `kb/x.md`
+    是新版，库里新旧两版并存，召回同时返回互相矛盾的两段，`chunk_count` 越传越大，界面还一路
+    显示「成功」（s15 t13 那格只现证过「下架后重传同一份」的幂等，重传**改过的**那一份从没被问过）。
+
+    删法与会话推出来的三个维度打头（`doc_type`/`user_id`/`project` 由**调用方**取自 CURRENT_*，
+    `source` 只取 basename）——与 C30 那条下架路由同一口径，删不出这份文件之外。
+
+    顺序是**先删后灌**，代价写在头里：删完到灌成功之间那一小段里服务挂了，这份文档在索引里
+    是空的（原件仍在 `kb/`，端点那条 503 文案已经写着「原件没有切片、起好服务后重传即可」，
+    重传即恢复）；反过来「先灌后删」做不到——按 `source` 删会把刚写进去的新切片一起带走。
+    """
+    for src in {Path(str(m.get("source") or "")).name for _, m in pairs}:
+        if src:
+            await store.delete_scope(doc_type=doc_type, user_id=user_id,
+                                     project=CURRENT_PROJECT.get(), source=src)

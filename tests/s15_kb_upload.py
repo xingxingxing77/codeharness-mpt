@@ -44,8 +44,13 @@ t2 拿手工 `kb_context="FAQ: ..."` 构造一个 `TalkAction` 再喂 FakeLLM—
   t13 C30 的下架路由：store 层自 C21 起就能按 `source` 删（t10 现证），缺的是 HTTP 口。四格——删得干净、
      **兄弟文档条数不变**、不存在的 source 明确 404（不是静默 ok）、**跨会话同名文档删不到**；
      外加 `source` 带路径分隔 → 400，以及「删完重传同一份」的幂等现证（C30 行里那条未验边界）。
+  t16 B2 的重传清旧：t10/t13 只证过**幂等**（重传同一份不堆积），「重传**改过的**那一份」从没被问过
+     ——点 id 由内容派生 ⇒ 文本一改就是新的一枚、旧的那枚没人删。四格：上一版正文一个字不剩 /
+     新版真在库 / 兄弟文档一字未动 / 原样重传计数不变的阳性对照。
+  t2④ B3：单文件上限必须在**读之前**立。判据打在 `UploadFile.read` 的实参上（声明了长度的超限件
+     一次都不读、正常件读的是 `read(上限+1)`），不是「413 了就算」——旧写法读完再判也 413。
 
-t1/t3/t10/t13/t14/t15 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
+t1/t3/t10/t13/t14/t15/t16 需要 Qdrant 在线（`docker start codeharness-qdrant`，或 `docker compose up qdrant`）；
 不在线时这两格打印跳过并返回——**跳过会被印在末行里**，不许拿它冒充通过。
 真 bge-m3 的语义改写召回不在这里（那是 s5 t25 的形状），本门禁只钉「链路通不通」。
 """
@@ -184,6 +189,9 @@ def t2_endpoint_door():
             written.extend(p.text for p in points)
             return len(points)
 
+        async def delete_scope(self, **kw):     # B2：摄取现在会先按 source 清上一版
+            del kw
+
     class _GW:
         @staticmethod
         def embeddings():
@@ -218,8 +226,57 @@ def t2_endpoint_door():
             assert not (ws.parent / "evil.md").exists(), "t2②脏文件名跑出了 kb/ 目录"
             assert (ws / "kb" / "faq.md").read_text(encoding="utf-8") == FAQ, "t2②原件内容被改过"
             assert any("重置密码" in t for t in written), f"t2③盘上有文件却没进摄取：{written[:2]}"
+
+            # t2④ B3：单文件上限必须在**读之前**立，且每次读的实参有界——判据打在 read 的实参上
+            # （「413 了」这种弱判据对旧写法照样绿：`await f.read()` 也 413，只是它先把整个响应体
+            # 拉进了内存）。上限压到 8 字节，三格：
+            #   ① 声明了长度的超限件：`f.size` 先挡 ⇒ **一次都不读**、也没落盘；
+            #   ② 正常件走的是 `read(上限+1)`（=9）而不是裸 `read()` ⇒ 这条路径上任何一次读都有界；
+            #   ③ 第二道判据（`len(data) > 上限`）真在链上：让 spy 谎报「多给了 16 字节」，
+            #      同一句拒因必须出现。③ 是合成形状（真 read 不会多给），它钉的是「有人把
+            #      `read(MAX+1)` 改回 `read()` 或删掉二次判据时还拦得住」。
+            import starlette.datastructures as _sd
+
+            import server.api.workspace as wsm
+            reads, inflate = [], [False]
+            real_read = _sd.UploadFile.read
+
+            async def spy_read(self, size=-1):
+                reads.append(size)
+                data = await real_read(self, size)
+                return data + b"z" * 16 if inflate[0] else data
+
+            keep_max = wsm.MAX_UPLOAD_BYTES
+            _sd.UploadFile.read = spy_read
+            try:
+                wsm.MAX_UPLOAD_BYTES = 8
+                reads.clear()
+                rsp = c.post(f"/api/sessions/{sid}/workspace/upload_kb",
+                             files=[("files", ("big.md", "x" * 4096, "text/markdown"))])
+                b = rsp.json()
+                assert rsp.status_code == 200 and b["uploaded_count"] == 0, f"t2④超限件：{b}"
+                assert any("超过单文件上限" in e for e in b["errors"]), f"t2④拒因不对：{b['errors']}"
+                assert reads == [], f"t2④超限件仍被读了（`f.size` 先挡那条没生效）：{reads}"
+                assert not (ws / "kb" / "big.md").exists(), "t2④超限件落盘了"
+
+                reads.clear()
+                c.post(f"/api/sessions/{sid}/workspace/upload_kb",
+                       files=[("files", ("small.md", "# 小\n", "text/markdown"))])
+                assert reads == [9], f"t2④正常件的读不是有界的 read(上限+1)：{reads}"
+
+                inflate[0] = True
+                rsp = c.post(f"/api/sessions/{sid}/workspace/upload_kb",
+                             files=[("files", ("lie.md", "# 谎\n", "text/markdown"))])
+                inflate[0] = False
+                b = rsp.json()
+                assert any("超过单文件上限" in e for e in b["errors"]), \
+                    f"t2④第二道判据不在链上了（read 多给的字节没被拦）：{b['errors']}"
+                assert not (ws / "kb" / "lie.md").exists(), "t2④第二道判据拦住了却没挡住落盘"
+            finally:
+                _sd.UploadFile.read = real_read
+                wsm.MAX_UPLOAD_BYTES = keep_max
         print(f"  ok  t2 门口三判（越界名剥成 basename、.exe 拒并给原因）、原件真落 kb/、"
-              f"摄取吃到的就是盘上那份（{len(written)} 块）")
+              f"摄取吃到的就是盘上那份（{len(written)} 块）、单文件上限在读之前立且读的实参有界")
     finally:
         mod.QdrantStore, mod.LLMGateway = saved
         if keep is not None:
@@ -365,6 +422,9 @@ def t6_vector_service_down_says_so():
             self.written.extend(p.text for p in points)
             return len(points)
 
+        async def delete_scope(self, **kw):     # B2：摄取现在会先按 source 清上一版
+            del kw
+
     class _GW:
         @staticmethod
         def embeddings():
@@ -484,6 +544,9 @@ def t7_long_input_cannot_reach_the_endpoint_whole():
             self.written.extend(p.text for p in points)
             return len(points)
 
+        async def delete_scope(self, **kw):     # B2：摄取现在会先按 source 清上一版
+            del kw
+
     class _Spy(HashEmbeddings):
         def __init__(self):
             self.sent = []
@@ -551,6 +614,9 @@ def t8_every_ingestion_path_goes_through_the_exit():
     class _Store:
         async def write(self, points):
             return len(points)
+
+        async def delete_scope(self, **kw):     # B2：摄取现在会先按 source 清上一版
+            del kw
 
     class _Spy(HashEmbeddings):
         def __init__(self):
@@ -707,6 +773,9 @@ def t9_whitelist_never_lies():
         async def write(self, points):
             self.written.extend(p.text for p in points)
             return len(points)
+
+        async def delete_scope(self, **kw):     # B2：摄取现在会先按 source 清上一版
+            del kw
 
     class _Spy(HashEmbeddings):
         def __init__(self):
@@ -919,15 +988,22 @@ def t11_recall_lines_are_labeled():
 
     out = rendered([Message(content="甲段正文", metadata={"source": "faq.md"}),
                     Message(content="乙段正文", metadata={"source": "report.pdf", "page": 3}),
+                    Message(content="首段正文", metadata={"source": "report.pdf", "page": 0}),
                     Message(content="丙段正文")])          # 老切片：C21 之前入库，没有 source
     assert "〔来自 faq.md〕" in out, f"t11①纯文件名那一档没标出来：{out}"
-    assert "〔来自 report.pdf 第 3 页〕" in out, f"t11②页码丢了（pdf 归因到页才算能核）：{out}"
+    # B10：`page` 是 `PyPDFLoader` 那个 `enumerate()` 的 **0 起下标**，显示统一 +1。
+    # 这一格原来手搓 `page: 3` 就看不见错位（3 != None/""，照原样印也是「第 3 页」）；
+    # 真正会露馅的是**首页**：`page: 0` 旧写法印「第 0 页」，而 `page in (None, "")` 兜不住 0。
+    assert "〔来自 report.pdf 第 4 页〕" in out, f"t11②页码没按 0 起下标 +1 换算：{out}"
+    assert "〔来自 report.pdf 第 1 页〕" in out, f"t11②首页印成了「第 0 页」（B10）：{out}"
+    assert "第 0 页" not in out, f"t11②0 起下标没换算就印出去了：{out}"
     assert "〔出处未登记〕" in out and "〔来自 〕" not in out and "〔来自 \n" not in out, \
         f"t11③老点被标成了假出处：{out}"
-    assert out.count("〔") == 3 and all(x in out for x in ("甲段正文", "乙段正文", "丙段正文")), \
+    assert out.count("〔") == 4 and all(x in out for x in ("甲段正文", "乙段正文", "首段正文", "丙段正文")), \
         f"t11④标记数不等于块数、或标记把正文吞了：{out}"
     assert "〔" not in rendered([]) and rendered([]) == "", "t11⑤空召回不该产出任何标记行"
-    print("  ok  t11 三种 metadata 形状各得一行标记（文件名 / 带页码 / 老点未登记），标记数=块数、正文不吞")
+    print("  ok  t11 三种 metadata 形状各得一行标记（文件名 / 带页码 / 老点未登记），页码按 0 起下标 +1（首页=第 1 页）、"
+          "标记数=块数、正文不吞")
 
 
 NOISE_DOC = ("城市马拉松的补给站怎么摆：每 5 公里一处，饮用水与电解质饮料交替供应；"
@@ -1424,6 +1500,76 @@ def t15_kb_search_is_a_tool_the_model_can_call():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def t16_reupload_modified_doc_drops_the_old_slices():
+    """B2：同一份文件**重传改过的版本**时，上一版灌进去的切片必须被清掉。
+
+    `s15` t10 那句「原样重传不堆积」与 t13 的「下架后重传**同一份**回到原条数」都只证了**幂等**
+    ——「重传**改过的**那一份」从没被问过。点 id 由 `point_id(f"{scope}/{src}", text)` 派生 ⇒
+    文本一改就是新的一枚，而全仓 `delete_scope` 只有下架路由与 `LongTermMemory.drop()` 两个调用者
+    ⇒ 摄取路径上一次删除都没有。症状是最讨嫌的「两份都对」：磁盘上是新版、库里新旧并存，
+    召回同时返回互相矛盾的两段（用户按旧版办事）、`chunk_count` 越传越大、界面一路显示成功。
+    四格（要真 Qdrant：按 `source` 过滤是服务端 payload filter，替身 store 演不出这个语义）：
+      ① 改过的那份重传后，**上一版的正文一个字都不在库里**（按 source 数，不是按总数猜）；
+      ② 「没了」不是「被清空」——新版真在库里、真召得回；
+      ③ 兄弟文档一字未动（删的判据是 source，不是整库）；
+      ④ 阳性对照：**没改过**重传，计数不变（否则①可能是「每次重传都清库」造出来的假绿）。
+    """
+    if not live_qdrant():
+        print("  skip t16（Qdrant 不在线）")
+        return
+    from qdrant_client import models as m
+
+    V1 = "# 手册\n\n旧版：退款要走线下窗口，带纸质单据与本人身份证。\n"
+    V2 = "# 手册\n\n新版：退款在订单页一键申请，原路返回，无需纸质单据。\n"
+    OTHER = "# 别份\n\n青隼站的月台在雨天会亮起三十七盏灯，这是另一份文件里的话。\n"
+    tmp = Path(tempfile.mkdtemp())
+    store = QdrantStore(collection=GATE_COLL)
+    emb = HashEmbeddings()
+    user = "u_b2"
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_b2")
+
+    async def texts(source: str) -> list[str]:
+        must = [m.FieldCondition(key=k, match=m.MatchValue(value=v))
+                for k, v in (("doc_type", "kb"), ("user_id", user), ("project", PROJ),
+                             ("source", source)) if v]
+        pts, _ = await store.client.scroll(GATE_COLL, limit=100, with_payload=True,
+                                           scroll_filter=m.Filter(must=must))
+        return sorted(p.payload["text"] for p in pts)
+
+    try:
+        asyncio.run(store.drop())
+        f = _write_faq(tmp, "manual.md", V1)
+        fo = _write_faq(tmp, "other.md", OTHER)
+        out = asyncio.run(_action(store, emb, [f, fo]))
+        assert out["errors"] == [] and out["uploaded_count"] > 0, f"t16 前置摄取失败：{out}"
+        v1 = asyncio.run(texts("manual.md"))
+        assert any("线下窗口" in t for t in v1), f"t16 前置：第一版没进库：{v1}"
+        other_before = asyncio.run(texts("other.md"))
+
+        _write_faq(tmp, "manual.md", V2)                     # 改过的版本重传（同名、同 source）
+        out2 = asyncio.run(_action(store, emb, [f]))
+        assert out2["errors"] == [], f"t16 重传失败：{out2}"
+        after = asyncio.run(texts("manual.md"))
+        assert not any("线下窗口" in t for t in after), \
+            f"t16① 上一版切片还在库里（新旧并存，召回会同时返回互相矛盾的两段）：{after}"
+        assert any("一键申请" in t for t in after), f"t16② 新版没进库：{after}"
+        assert asyncio.run(texts("other.md")) == other_before, \
+            f"t16③ 重传一份却动了别份的切片：{asyncio.run(texts('other.md'))}"
+
+        n = len(after)
+        out3 = asyncio.run(_action(store, emb, [f]))         # ④ 阳性对照：原样重传
+        assert out3["errors"] == [], out3
+        assert len(asyncio.run(texts("manual.md"))) == n, \
+            f"t16④ 原样重传把点数从 {n} 改了（幂等被破坏 ⇒ ①的读数不作数）"
+        print(f"  ok  t16 改过的文档重传后上一版 {len(v1)} 片全清、新版 {n} 片在库且兄弟文档 "
+              f"{len(other_before)} 片一字未动；原样重传计数不变")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        asyncio.run(store.drop())
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1440,12 +1586,14 @@ def main():
               t10_slices_are_attributable_and_deletable, t11_recall_lines_are_labeled,
               t12_recall_floor_keeps_unrelated_doc_out_of_prompt, t13_kb_doc_removal_route,
               t14_kb_tenant_is_the_same_on_both_sides,
-              t15_kb_search_is_a_tool_the_model_can_call]
+              t15_kb_search_is_a_tool_the_model_can_call,
+              t16_reupload_modified_doc_drops_the_old_slices]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
-          f"+ C26 的白名单两态 + C22 的来源标记 + C23 的相关性下限 + C30 的下架单份路由 + C31 的租户两侧同源 + C24 的可主动调检索工具）——"
-          f"其中 t1/t3/t10/t13/t14/t15 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
+          f"+ C26 的白名单两态 + C22 的来源标记（含页码 0 起下标换算）+ C23 的相关性下限 + C30 的下架单份路由 + "
+          f"C31 的租户两侧同源 + C24 的可主动调检索工具 + B2 的重传改版清旧切片）——"
+          f"其中 t1/t3/t10/t13/t14/t15/t16 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
           f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那六格**'} / "
           f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
           f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")

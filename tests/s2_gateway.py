@@ -158,6 +158,19 @@ def t5_fake_llm_accounts():
     # aask 必须经 ainvoke，否则又回到不记账的老路
     if not f.calls:
         _fail("5. FakeLLM.aask 没走 ainvoke")
+    # B8：structured 那一支回的正文必须是**那段 JSON**。给空串会让 `cost.add_usage` 判成
+    # 「花了钱没产出」⇒ 替身场子里每次结构化思考都给 empty_output_calls +1——一个**正向假读数**
+    # （比读到 0 更坏，而 §4 第 4 条禁的正是拿 FakeLLM 的读数当真结论）。
+    class _S(BaseModel):
+        ok: bool
+
+    f2 = FakeLLM(responses=['{"ok": true}'])
+    got = asyncio.run(f2.structured(_S).ainvoke("问一段"))
+    if got.ok is not True or len(f2.cost_manager.records) != 1:
+        _fail(f"5. FakeLLM.structured 没走记账出口: {got} / {len(f2.cost_manager.records)} 笔")
+    if f2.cost_manager.empty_output_calls != 0:
+        _fail(f"5. 替身把结构化那一发记成了「花了钱没产出」："
+              f"empty_output_calls={f2.cost_manager.empty_output_calls}（B8 的正向假读数）")
 
 
 # ---------- 6. 源 repair 符号面必须齐备且签名兼容 ----------
@@ -550,6 +563,7 @@ class _StreamStub:
 def t15_stream_deadline():
     import time
     from codeharness import logs as _logs
+    from codeharness.const import LLM_API_TIMEOUT
 
     async def _quiet(factory):                   # 打字机回调在门禁里不需要，别刷屏
         orig = _logs._llm_stream_log
@@ -590,8 +604,45 @@ def t15_stream_deadline():
     if r.content != "012345" or len(g2.cost_manager.records) != 1:
         _fail(f"15. 正常流被改动影响: content={r.content!r} records={len(g2.cost_manager.records)}")
 
-    # ④ cfg.timeout=0（不走 wait_for 那条分支）不破
-    g3 = _gw(cfg=LLMConfig(model="gpt-4o", api_key="sk-test", timeout=0))
+    # ⑤ B6：超时被取消的那一发**必须留一声可 grep 的响**。厂商侧按 ADR-06 自己的口径是
+    #    「超时＝大概率已受理已计费」，而流式的 `resp` 是 `_collect()` 的局部量、非流式在重试
+    #    耗尽后直接抛 ⇒ 两条路的 `add_usage` 都不执行，账上彻底看不见这一发。判据打在
+    #    `gateway.logger` 上（与 cost.py 那条「漏账必须可见」同一形状，不新造计数键）。
+    from codeharness.provider import gateway as _gwmod
+
+    class _Rec:
+        def __init__(self):
+            self.warnings = []
+
+        def warning(self, m):
+            self.warnings.append(str(m))
+
+        def info(self, m):
+            pass
+
+    rec, saved_logger = _Rec(), _gwmod.logger
+    _gwmod.logger = rec
+    try:
+        g5 = _gw(reply="x")
+        g5._model = _StreamStub(n=1, gap=0, hang=True)
+        try:
+            asyncio.run(_quiet(lambda: g5.ainvoke("q", stream=True, timeout=1)))
+            _fail("15⑤. 挂死的流式没按 deadline 失败")
+        except asyncio.TimeoutError:
+            pass
+    finally:
+        _gwmod.logger = saved_logger
+    if not any("超时" in w and "不进账" in w for w in rec.warnings):
+        _fail(f"15⑤. 超时取消那一发没有留下可 grep 的账差（B6 未修好）：{rec.warnings}")
+
+    # ④ 坏配置不许是「两层上限都摘掉」（低危那条）：`timeout=0` 在**构造期**就回落源默认，
+    #    与 max_token/context_length 同档。要触发「deadline 为 0 就不套 wait_for」那条防御分支
+    #    只能绕过校验赋值（pydantic 默认不校验赋值）——那条分支本身也在这里跑一次。
+    if LLMConfig(model="gpt-4o", api_key="sk-test", timeout=0).timeout != LLM_API_TIMEOUT:
+        _fail(f"15④. timeout 非正值没回落默认（0 会同时摘掉 SDK 超时与 wait_for）："
+              f"{LLMConfig(model='gpt-4o', api_key='sk-test', timeout=0).timeout}")
+    g3 = _gw(cfg=LLMConfig(model="gpt-4o", api_key="sk-test"))
+    g3.cfg.timeout = 0                          # 绕过 validator，测那条防御分支
     g3._model = _StreamStub(n=3, gap=0.02)
     r3 = asyncio.run(_quiet(lambda: g3.ainvoke("q", stream=True)))
     if r3.content != "012":

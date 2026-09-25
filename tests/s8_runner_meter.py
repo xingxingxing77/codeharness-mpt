@@ -149,6 +149,47 @@ async def t4_ensure_graph_single_ledger():
     _ok("t4", "_ensure_graph 重建路径：单一账本实例传进图，重启后从落盘快照续算")
 
 
+async def t11_park_keeps_the_live_ledger():
+    """B1：停在待人工处（`_park`）时**账本必须还读得到**。
+
+    `_park` 走 `_forget(sid, terminal=False)`，而 park 的约定恰恰是「图还活着、断点已落、
+    等 resume」——图里那个 gateway 仍持着 `_prepare` 建的那**同一个** CostManager 继续累计。
+    旧写法在 `_forget` 里无条件 `costs.pop` ⇒ runner 从此刻起读不到这本活账：`_sync_cost` /
+    `_trace_span` 拿 `cm is None` 静默 return、`_publish_status` 发 `"cost": {}`（前端
+    `if (v.cost)` 里 `{}` 是真值 ⇒ 顶栏被覆盖成 0，刷新又跳回批准前那个数）、`_publish_max_tokens`
+    读同一本账连截断提示一起丢。判据三格 + 阳性对照：
+      ① park 之后 `sid in runner.costs` **且是图里那个实例**（不是重建出来的第二本）；
+      ② park 之后的 `_sync_cost` 仍真把账写进 store、`_publish_status` 发出的是真快照而不是空 dict；
+      ③ 阳性对照：`terminal=True`（散会）照旧清干净——「不清」不等于「永不回收」。
+    """
+    tmp, store, bus, runner, s = await _make_runner()
+    cm = CostManager()
+    runner.costs[s.id] = cm
+    runner.projects[s.id] = "meter_proj"
+    runner.graphs[s.id] = (object(), {"configurable": {}})      # park 的前置：图还在
+    cm.update_cost(700, 40, "gpt-4o")
+    runner._park(s.id, {"question": "要哪个方案？"})              # terminal=False
+
+    assert s.id in runner.costs, \
+        "停在待人工处时账本被 _forget 清了 ⇒ 图里那本活账 runner 再也读不到（B1 复发）"
+    assert runner.costs[s.id] is cm, "留下的不是图里那个实例（那就是第二本账，恒 0 的根因）"
+    assert runner.graphs.get(s.id), "park 的约定是留图供 resume，这里被清了"
+
+    runner._sync_cost(s.id)                                     # ① 读得到 + 真写进 store
+    got = store.get(s.id).cost
+    assert got["total_prompt_tokens"] == 700 and got["total_completion_tokens"] == 40, got
+    runner._publish_status(store.get(s.id), "parked")
+    evs = [e for e in bus.history(s.id) if e.kind == "status"]
+    assert evs and evs[-1].value["cost"].get("total_prompt_tokens") == 700, \
+        f"park 之后发的 status 里账本是空的（前端那半格的根因）：{evs[-1].value if evs else None}"
+
+    runner._forget(s.id, terminal=True)                         # ③ 阳性对照：散会照旧清干净
+    assert s.id not in runner.costs and s.id not in runner.graphs, \
+        "terminal=True 必须照旧清（不清不是永不回收）"
+    _ok("t11", "park（terminal=False）留住图里那本活账：dict 在、实例是同一个、"
+               "store 与 SSE 两路都读得到；terminal=True 仍照旧清干净")
+
+
 def t5_lifespan_unwires_seams():
     """停机必须成对拆（冒烟复现实测：TestClient 出 with 后留着 aiosqlite 的
     `_connection_worker_thread`——checkpoint.close_all 的 docstring 写着「server 应在
@@ -521,13 +562,14 @@ def main():
     t2_seeded_ledger()
     asyncio.run(t3_midrun_sync())
     asyncio.run(t4_ensure_graph_single_ledger())
+    asyncio.run(t11_park_keeps_the_live_ledger())
     t5_lifespan_unwires_seams()
     t6_events_history_bounded()
     asyncio.run(t7_span_timing())
     t9_two_endpoints_one_ledger()
     t8_two_currency_buckets()
     t10_cost_injection_end_to_end()      # C19 未验②：注入链端到端（要起本机桩，放最后）
-    print("\ns8_runner_meter: 10/10 全绿")
+    print("\ns8_runner_meter: 11/11 全绿")
 
 
 if __name__ == "__main__":

@@ -76,7 +76,8 @@ PARKED = [{"question": "要哪个方案？"}]
 
 
 def _install(runner, team, project):
-    async def fake_prepare(session, proj, cost_manager):
+    async def fake_prepare(session, proj, cost_manager, persist_roles=True):
+        # persist_roles 是 B7 之后的新形参（只读回放不注册、不回写 roles）——替身要跟生产同签名
         return team, {"configurable": {"thread_id": proj}}, {"messages": []}
 
     runner._prepare = fake_prepare

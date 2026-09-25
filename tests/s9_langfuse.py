@@ -9,7 +9,8 @@
   span 装饰器就位；runner 接线处 `config["callbacks"]` 真被塞上（唯一注入点）。
 - **t4 有界停机（永远跑，不需要任何在线服务）**：C28——端点连不通时 `observability.shutdown()`
   必须在一个 grace 内回来；配「同批 span 直接调 SDK 的无界 shutdown 明显更久」的阳性对照，
-  和「本地假端点真收到了导出」的反证（防「把可观测关掉当修慢」）。
+  和「本地假端点真收到了导出」的反证（防「把可观测关掉当修慢」）；**④** SDK 自己抛错那一支
+  返回值必须诚实（回 False + 恰好一声 warning，别把「不知道发完没有」说成「按时冲完」）。
 - **t5 进程退出尾巴（永远跑，不需要任何在线服务）**：C29——C28 只把等待挪出了 lifespan，
   进程**整退**时那笔还在；判据打在**进程总墙钟**上，配「把反注册换成 no-op＝改前形状 ⇒ 钩子真跑、
   墙钟明显更久」的阳性对照，与「钩子退出时真跑了才落 marker」的归因读数（真凶是 OTel
@@ -377,6 +378,28 @@ def t4_shutdown_is_bounded():
         # 看到默认 provider 已存在就不换 ⇒ **导出端点被这个进程的第一个客户端钉死**。①/② 已把它
         # 钉在死端口上，本进程里再改 `settings.langfuse.host` 是收不到的（09-24 实测：桩一个请求没收到）。
         # 这条不是测试技巧，是运维事实：**换 host 要重启进程**。
+        # ④ SDK 的 `shutdown()` **自己抛错**那一支：返回值必须诚实（低危那条）。
+        #    改前那一支只打 debug 且照样回 True，等于把「这批 span 发完没有**不知道**」说成
+        #    「按时冲完」——而本函数 docstring 写着这个返回值存在的唯一目的就是让门禁能断言
+        #    「不许静默」。造法：把 `_client` 换成 `shutdown()` 必抛的替身（开关走真配置）。
+        from codeharness.logs import logger as _lg
+
+        class _Boom:
+            def shutdown(self):
+                raise RuntimeError("t4-sdk-shutdown-boom")
+
+        obs._client, obs._handler = _Boom(), None
+        warned2 = []
+        orig_w = _lg.warning
+        _lg.warning = lambda *a, **k: warned2.append(a)
+        try:
+            on_boom = obs.shutdown()
+        finally:
+            _lg.warning = orig_w
+        assert on_boom is False, \
+            f"④失效：SDK 抛错时回了 {on_boom}（「不知道」被说成了「按时冲完」）"
+        assert len(warned2) == 1, f"④失效：SDK 抛错那一声是 {len(warned2)} 声（要恰好一声、可 grep）"
+
         verdict = _live_export_verdict(cap=70)
         assert verdict and verdict[0] == "FLUSH_OK" and int(verdict[2]) >= 1, \
             (f"③失效：子进程导出判定 {verdict!r}（格式 FLUSH_OK|flush秒|含marker请求数|总请求数）"
@@ -385,6 +408,7 @@ def t4_shutdown_is_bounded():
         _ok("t4", f"有界停机 {b1:.2f}s/{b2:.2f}s ≤4s、承认没冲完={on1 is False}、各喊一声={w1}/{w2}；"
                   f"无界旧形状子进程 25s 内跑完={raw is not None}"
                   f"（{f'{raw:.2f}s，比有界多 {raw - b1:.2f}s' if raw is not None else '没跑完'}）；"
+                  f"SDK 抛错那一支诚实回 False 并喊一声；"
                   f"在线真导出：{verdict[2]}/{verdict[3]} 个请求含该 span、flush {verdict[1]}s "
                   "⇒ 修的是等待，不是采集")
     finally:

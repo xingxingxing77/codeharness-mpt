@@ -146,6 +146,12 @@ class QdrantStore:
         return list(res.points)
 
     async def delete_scope(self, *, doc_type: str = "", user_id: str = "default", **scope) -> None:
+        """按过滤器删一批点。⚠ 集合还没建过时**直接返回**：`client.delete` 打在一个不存在的集合上
+        是 404 异常，而「没有这个集合」与「这个集合里没有这些东西」对调用方是同一件事
+        （B2 之后**摄取路径每次上传都要先删一遍同 source 的旧切片**，首次上传时集合必然不存在
+        ——不挡这一道，第一次灌库就会被自己的清理动作打死）。"""
+        if not await self.client.collection_exists(self.collection):
+            return
         await self.client.delete(self.collection, points_selector=m.FilterSelector(
             filter=self._filters(doc_type, user_id, **scope)), wait=True)
 

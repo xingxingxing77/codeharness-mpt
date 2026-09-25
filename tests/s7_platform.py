@@ -473,12 +473,118 @@ async def t13_dual_runner_fakellm_line():
         ss.SESSIONS_FILE = keep
 
 
+async def t14_control_listener_survives_a_dropped_pubsub():
+    """B5：跨 worker 停止的监听断了，必须**留日志并重连**，不许静默退出。
+
+    旧写法 `except Exception: return`（注释的理由是「停机时连接被关是预期路径，不留孤儿任务栈」）
+    顺手把日志也留没了。后果可查：监听一旦因 Redis 抖动退出，跨 worker 的「停止」就无声失效，
+    而 `stop()` 那半程**已经**把状态写成 stopping、PUBLISH 完返回 True ⇒ 会话钉死在 stopping、
+    一行日志都没有，只能重启进程（t3 旁边那条 `awaiting_human` 分支就是上一轮同一个病的修复现场）。
+    三格：
+      ① 订阅流断掉之后监听任务**不许结束**（`_ctl_task.done()` 必须为假）；
+      ② 必须留下一条 warning（抓 `server.runner.logger`，与 `_fail` 那条 `[session-failed]` 同形）；
+      ③ 重连之后跨 worker 停止**照旧到位**（真 PUBLISH → 持任务的 worker 真取消）——少了这格，
+         ②可能只是「进程活着但通道死了」的假活。
+    造断线的办法是在监听任务真正跑起来**之前**把客户端换成「第一次订阅必断」的代理：`create_task`
+    不 await 就不跑，这个窗口是确定的，不必去猜 redis 的断连时序。
+    """
+    from platforms.session_store import RedisSessionStore
+    from platforms.event_store import RedisEventBus
+    import server.runner as runner_mod
+    from server.runner import SessionRunner
+    import server.sessions as ss
+
+    class _DeadPubsub:
+        def __init__(self, exc):
+            self._exc = exc
+
+        async def subscribe(self, *a, **kw):
+            raise self._exc                       # 模拟 Redis 抖一下：订阅这一跳就断
+
+        async def aclose(self):
+            return None
+
+    class _FlakyClient:
+        def __init__(self, real, exc):
+            self.real, self.exc, self.calls = real, exc, 0
+
+        def pubsub(self):
+            self.calls += 1
+            return _DeadPubsub(self.exc) if self.calls == 1 else self.real.pubsub()
+
+        async def publish(self, *a, **kw):
+            return await self.real.publish(*a, **kw)
+
+        async def aclose(self):
+            await self.real.aclose()
+
+    class _Rec:
+        def __init__(self):
+            self.warnings = []
+
+        def warning(self, m):
+            self.warnings.append(str(m))
+
+        def info(self, m):
+            pass
+
+        def error(self, m):
+            self.warnings.append(str(m))
+
+    keep_sess, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    # `enable_redis_control` 自己按 settings 建客户端 ⇒ 这里把 db 钉到 15（不靠外面那个环境变量）
+    keep_db, settings.redis.db = settings.redis.db, TEST_DB.db
+    bus = RedisEventBus(TEST_DB)
+    bus.start()
+    rec, saved_logger = _Rec(), runner_mod.logger
+    runner_mod.logger = rec
+    store = RedisSessionStore(TEST_DB)
+    a, b = SessionRunner(store, bus), SessionRunner(store, bus)
+    try:
+        b.enable_redis_control()
+        a.enable_redis_control()
+        flaky = _FlakyClient(a._ctl, ConnectionError("redis 抖了一下"))
+        a._ctl = flaky                            # 任务还没跑：这一换是确定的
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if flaky.calls >= 2:                  # 断一次（2s 退避）后重连成功
+                break
+        assert flaky.calls >= 2, f"监听没重连（只订阅了 {flaky.calls} 次）"
+        assert not a._ctl_task.done(), "监听任务在断线后结束了——跨 worker 停止从此无声失效"
+        assert any("监听断了" in w for w in rec.warnings), f"断线没留任何日志（B5）：{rec.warnings}"
+
+        s = store.create("监听重连", project_name="s7ctl2")
+        stopped = asyncio.Event()
+
+        async def _job():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                stopped.set()
+                raise
+        b.tasks[s.id] = asyncio.create_task(_job())
+        store.update(s.id, status="running")
+        assert await a.stop(s.id) is True
+        await asyncio.wait_for(stopped.wait(), timeout=5)     # ③ 重连之后通道真活着
+        _ok("t14", "监听断线不退出：留 warning + 2s 重连，且重连后跨 worker 停止照旧到位")
+    finally:
+        runner_mod.logger = saved_logger
+        a._ctl_task.cancel()
+        b._ctl_task.cancel()
+        await a._ctl.aclose()
+        await b._ctl.aclose()
+        await bus.aclose()
+        ss.SESSIONS_FILE = keep_sess
+        settings.redis.db = keep_db
+
+
 async def _redis_suite():
     _flush_test_db()
     for fn in (t2_dual_worker_replay, t3_cross_worker_stop, t4_cross_worker_chat,
                t5_quota_no_oversell, t6_metering_over_redis_bus, t7_trace_spans,
                t8_field_level_concurrency, t9_app_wires_redis_mode,
-               t12_sse_reconnect_continuity, t13_dual_runner_fakellm_line):
+               t12_sse_reconnect_continuity, t13_dual_runner_fakellm_line,
+               t14_control_listener_survives_a_dropped_pubsub):
         print(f"  … {fn.__name__}", flush=True)
         try:
             # 看门狗：redis 路的任何一条卡死 60s 直接点名——挂住的门禁比失败的门禁更难查
@@ -499,7 +605,7 @@ def main():
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 13/13 全绿（双配置）")
+    print("\ns7_platform: 14/14 全绿（双配置）")
 
 
 if __name__ == "__main__":

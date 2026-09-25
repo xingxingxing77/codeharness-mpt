@@ -43,10 +43,16 @@ class FakeLLM:
         class _Structured:
             async def ainvoke(self, prompt, **kw):
                 outer.calls.append(prompt)
-                m = schema.model_validate_json(outer._next())
+                payload = outer._next()
+                m = schema.model_validate_json(payload)
                 # structured 也走记账出口——真网关同款洞（「动态范式每轮思考不进账」）当年只修了
                 # LLMGateway，FakeLLM 这半边一直静默记 0；t13 端到端门禁现形（S8 第十六处）。
-                resp = AIMessage(content="")
+                # ⚠ 正文必须是**那段 JSON**，不许是空串（B8）：真网关 json_schema 档回的正文就是
+                # JSON（`LLMGateway.structured` 的 `_parse` 读的正是 `raw.content`）。给空串等于让
+                # `cost.add_usage` 判成「花了钱没产出」⇒ 替身场子里**每一次结构化思考**都给
+                # `empty_output_calls` +1。那比读到 0 更坏：它是一个**正向假读数**，而 §4 第 4 条
+                # 禁的正是拿 FakeLLM 的读数当真结论。
+                resp = AIMessage(content=payload)
                 resp.response_metadata = {"token_usage": {"prompt_tokens": 10, "completion_tokens": 5}}
                 outer.cost_manager.add_usage(resp, model="gpt-4o", tag=kw.get("tag", "structured"))
                 return m

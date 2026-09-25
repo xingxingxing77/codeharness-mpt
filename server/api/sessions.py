@@ -631,7 +631,10 @@ async def session_checkpoints(sid: str, request: Request, before: str = "",
     `/events/history` 一致：`before`=更早一侧的**开区间**上界（传上一页末条的 checkpoint_id）。
     """
     _owned(request, sid, user)
-    packed = await _get(request, "runner")._ensure_graph(sid)
+    # B7：只读路由走**不注册**的重建——原先这条 GET 会把整个团队图挂进 runner 的
+    # graphs/projects/costs（这三张表只有 _forget 清，而 _forget 只由 run/stop 调），
+    # 于是「看一眼旧会话的回放」就永久占住一个完整装配，并顺手 store.update(roles=…)。
+    packed = await _get(request, "runner")._ensure_graph(sid, register=False)
     if not packed:
         # 图重建不出来（会话没装配过 / LLM 未配）。回空但不装死：reason 让界面说清为什么是空的
         return {"checkpoints": [], "has_more": False, "next_before": "", "reason": "无法重建图，读不到超步"}
@@ -652,7 +655,7 @@ async def session_checkpoint_detail(sid: str, checkpoint_id: str, request: Reque
     from fastapi.responses import Response
 
     _owned(request, sid, user)
-    packed = await _get(request, "runner")._ensure_graph(sid)
+    packed = await _get(request, "runner")._ensure_graph(sid, register=False)   # B7：只读重建，不注册
     if not packed:
         raise HTTPException(409, "无法重建图，读不到超步")
     graph, config = packed

@@ -126,8 +126,9 @@ def flush():
 
 def shutdown() -> bool:
     """长驻进程退出钩子：等 flush，但**最多等 `LANGFUSE__SHUTDOWN_GRACE_SEC` 秒**（C28）。
-    返回 `True` = 按时冲完；`False` = grace 用尽、这批里有没发出去的 span（调用方不必处理，
-    给它一个可读的值是为了让门禁能断言「不许静默」，而不是去猜日志）。
+    返回 `True` = 按时冲完；`False` = 这一批**不敢说发完了**——grace 用尽、或 SDK 的 shutdown
+    自己抛了（后者连发没发完都不知道，别回 True 把它说成「按时冲完」）。调用方不必处理，
+    给它一个可读的值是为了让门禁能断言「不许静默」，而不是去猜日志。
 
     为什么不直接调 SDK 的 `shutdown()`：它 = `flush()`（三个 `Queue.join()`）
     + `_stop_and_join_consumer_threads()`（逐个 `Thread.join()`），**四处都不带超时**；构造期传的
@@ -161,18 +162,25 @@ def shutdown() -> bool:
     from codeharness.logs import logger
     grace = settings.langfuse.shutdown_grace_sec
     done = threading.Event()
+    failed = threading.Event()
 
     def _go():
         try:
             cli.shutdown()
         except Exception as e:                      # 端点挂了不该把停机路径抛出 traceback
-            logger.debug(f"可观测 shutdown 抛错（不影响退出）: {type(e).__name__}: {e}")
+            # ⚠ 这一支从前只打 debug 且照样回 True（B 低危那条）：而返回值按本函数 docstring 是
+            # 「可读信号，唯一的目的是让门禁能断言不许静默」——SDK 抛错时我们**根本不知道**
+            # 那批 span 发完没有，回 True 就是把「不知道」说成「按时冲完」。改法两半：
+            # 置 failed 让返回值诚实（False），日志提到 warning 让它可 grep。
+            logger.warning(f"可观测 shutdown 抛错：这一批 span 发没发完不知道（不影响退出）: "
+                           f"{type(e).__name__}: {e}")
+            failed.set()
         finally:
             done.set()
 
     threading.Thread(target=_go, daemon=True, name="langfuse-shutdown").start()
     if done.wait(grace):
-        return True
+        return not failed.is_set()
     # 退出尾巴的归因见 docstring ②：真凶是 OTel 这个**进程级** provider 的 atexit 钩子，
     # 不是 `concurrent.futures` 的 join，也不是 C28 摘的那个 `LangfuseResourceManager.shutdown`。
     # provider 拿不到就跳过（例如 langfuse 用了非全局 provider ⇒ `get_tracer_provider()` 回

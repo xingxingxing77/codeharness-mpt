@@ -50,7 +50,11 @@ def cost_snapshot(cm) -> dict:
 
 
 class SessionRunner:
-    def __init__(self, store, bus, llm_defaults: dict | None = None, chat_factory=None):
+    def __init__(self, store, bus, chat_factory=None):
+        """⚠ 这里**不再收 `llm_defaults`**：它从建类起就是个装死参数（`__init__` 收下、类体里没有
+        任何一处赋给 self，真消费者读的是 `app.state.llm_defaults`）。「看起来有条通路其实没人接」
+        与 `metadata.writes` 死字段同族，而它比那个更容易骗人：`app.py` 确实在传，读代码的人
+        会以为会话级的模型默认值是从这儿进 runner 的。（调用点全部是关键字或两个位置参数，删掉安全。）"""
         self.store, self.bus = store, bus
         self.tasks: dict[str, asyncio.Task] = {}
         self.graphs: dict[str, tuple] = {}        # sid -> (graph, config)——resume 用
@@ -113,10 +117,10 @@ class SessionRunner:
 
         self._ctl = aioredis.from_url(settings.redis.to_url(), decode_responses=True)
 
-        async def _listen():
+        async def _consume():
             pubsub = self._ctl.pubsub()
-            await pubsub.subscribe("ch:ctl")
             try:
+                await pubsub.subscribe("ch:ctl")
                 async for msg in pubsub.listen():
                     if msg.get("type") != "message":
                         continue
@@ -128,10 +132,31 @@ class SessionRunner:
                         t = self.tasks.get(cmd.get("sid"))
                         if t and not t.done():
                             t.cancel()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                return      # 停机时连接被关是预期路径，不留孤儿任务栈
+            finally:
+                try:
+                    await pubsub.aclose()       # 重连前把这条专用连接还回去，否则每断一次漏一条
+                except Exception:
+                    pass                        # 连接已经断了：这条清理失败不许掩盖上面那个真原因
+
+        async def _listen():
+            """⚠ 这条分支**不许静默退出**（B5）。旧写法是 `except Exception: return`，注释的理由是
+            「停机时连接被关是预期路径，不留孤儿任务栈」——它顺手把日志也留没了。后果是可查的：
+            监听一旦因 Redis 抖动退出，跨 worker 的「停止」就无声失效，而 `stop()` 那半程**已经**把
+            状态写成 stopping、PUBLISH 完返回 True ⇒ 会话**钉死在 stopping**、一行日志都没有，
+            只能重启进程（旁边 :97-104 就是上一轮「把会话钉死在 stopping」的修复现场，同一条路上
+            另一半还是黑的）。所以这里两点都补：异常留 warning，且**重连**而不是退出——
+            这条路只该由进程退出（lifespan 的 `_ctl_task.cancel()`）结束。"""
+            while True:
+                try:
+                    await _consume()
+                    # listen() 正常结束 = 订阅流被关（不是取消）：同样是断线，落到下面重连
+                    raise ConnectionError("ch:ctl 订阅流结束")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"ch:ctl 监听断了，2s 后重连（这期间跨 worker 的『停止』不可达）："
+                                   f"{type(exc).__name__}: {exc}")
+                    await asyncio.sleep(2)
 
         self._ctl_task = asyncio.get_running_loop().create_task(_listen())
 
@@ -144,9 +169,16 @@ class SessionRunner:
         return True
 
     # ---- 人工回答（interrupt → resume） -------------------------------------
-    async def _ensure_graph(self, sid: str):
+    async def _ensure_graph(self, sid: str, *, register: bool = True):
         """取 (graph, config)。进程内字典命中是快路径；**未命中则按会话记录重建**——
-        断点已落持久化 checkpointer，靠 thread_id 就能续上，不必是创建它的那个对象。"""
+        断点已落持久化 checkpointer，靠 thread_id 就能续上，不必是创建它的那个对象。
+
+        `register=False` = **只读重建**（C11 回放面那两个 GET 走这条，B7）：不把重建结果挂进
+        `graphs/projects/costs`，也不回写 `roles`。挂进去的代价不是内存，是**永久占用**——
+        这三张表只有 `_forget` 清，而 `_forget` 只由 run/stop 调（断点态还刻意留着），
+        于是「看一眼旧会话的回放」就把一个完整团队图钉在进程里一辈子；`_prepare` 里那句
+        `store.update(roles=…)` 还会让只读路由顺手写库。只读那条路重建出来的图只用一次
+        （`aget_state` / `aget_state_history`），用完即弃，下一次请求再重建。"""
         packed = self.graphs.get(sid)
         if packed:
             return packed
@@ -154,17 +186,24 @@ class SessionRunner:
         session = self.store.get(sid)
         if not session:
             return None
-        project = self.projects[sid] = session.project_name or sid
-        self.costs.setdefault(sid, _seeded_ledger(session.cost or {}))
-        team, config, _init = await self._prepare(session, project, self.costs[sid])
-        # 重建出来的图只用于 resume：init 不能再喂一遍，否则等于重开一个线程
+        project = session.project_name or sid
+        cm = self.costs.get(sid) or _seeded_ledger(session.cost or {})
+        team, config, _init = await self._prepare(session, project, cm, persist_roles=register)
+        # 重建出来的图只用于 resume / 只读回放：init 不能再喂一遍，否则等于重开一个线程
+        if not register:
+            return team, config
+        self.projects[sid] = project
+        self.costs.setdefault(sid, cm)
         self.graphs[sid] = (team, config)
         return self.graphs[sid]
 
-    async def _prepare(self, session, project: str, cost_manager):
+    async def _prepare(self, session, project: str, cost_manager, persist_roles: bool = True):
         """按会话三态装配三件套：sop=N7 模板线（9.3 扩展入口）；dynamic=S9.1 对照的 RoleZero 线；
         classic=默认经典线。resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的
-        （第十一处教训）。thread_id 必须带会话唯一值：多会话共用模板不能在 checkpointer 里串台。"""
+        （第十一处教训）。thread_id 必须带会话唯一值：多会话共用模板不能在 checkpointer 里串台。
+
+        `persist_roles=False`（只读回放，B7）：一列都不回写。装配出口那三个赋值原先无条件做，
+        而 `store.update(roles=…)` 是**写库**——只读路由顺手写库正是 B7 那条的另一半。"""
         from codeharness.const import RequirementTag
         from codeharness.environment.team_graph import SOP
         from codeharness.team import prepare_project, _make_llm, classic_team
@@ -210,9 +249,11 @@ class SessionRunner:
                           if r in agents), "")
         # 装配出口回填：前端直聊下拉与 /chat 的目标校验都读这两个值。原先前端硬编码
         # ProductManager/Engineer2/DataAnalyst——一个都不在装配里，追问会被 route 静默丢掉。
-        if names != list(session.roles) or entry != session.entry_role:
-            self.store.update(session.id, roles=names, entry_role=entry)
-        session.roles, session.entry_role = names, entry
+        # ⚠ 只读回放（B7）连这一列也不写：`store.update` 是**写库**，而这两个 GET 不该有写。
+        if persist_roles:
+            if names != list(session.roles) or entry != session.entry_role:
+                self.store.update(session.id, roles=names, entry_role=entry)
+            session.roles, session.entry_role = names, entry
         chat = self.chats.get(session.id)
         if chat is not None and entry:
             chat.default_target = entry                 # 空目标也要落在真节点上
@@ -360,11 +401,25 @@ class SessionRunner:
                     var.reset(tok)
 
     def _forget(self, sid: str, terminal: bool):
-        """散会才清 graphs（断点已落 checkpointer 才安全）；awaiting_human 时必须留着供 resume。"""
+        """散会（`terminal=True`）才清图与整场的进程态；**停在待人工处（`terminal=False`）只扫在途表**。
+
+        B1：`costs` 从前无条件清，而 `_park` 的约定恰恰是「图还活着、断点已落 checkpointer、等 resume」
+        ——图里那个 gateway 仍持着 `_prepare` 建的那**同一个** CostManager 继续累计。把它从进程字典里
+        抹掉之后 runner 就再也读不到它，下游三处全哑：`_sync_cost` 与 `_trace_span` 拿到 `cm is None`
+        静默 return，`_publish_status` 发的是 `"cost": {}`，而前端 `if (v.cost)` 里 `{}` 是**真值**
+        ⇒ 顶栏金额被覆盖成 0，刷新又跳回批准前那个数；`_publish_max_tokens` 读同一本账，B8 那条截断
+        提示一起丢。最硬的不对称就在隔壁：`_resume` 早就为被丢掉的 `chats` 写了 `or self._make_chat(sid)`
+        兜底，同一个坑只填了一边——而账本没有「重建兜底」这种补法（重建出来的是第二本，图里那本是活的）。
+        `_last_span`/`_trunc_reported` 同理：它们是**这一跑**的增量基线，清了会让 resume 后的 trace
+        增量从 0 起算（虚高一笔）、截断提示重报一次。
+
+        注意这不是「永不回收」：`_settle` 的正常收口、`_fail`、取消、以及 stop 的那两条路都走
+        `terminal=True`，断点态只是**留到这一场真正结束**为止。"""
         self.chats.pop(sid, None)
-        self.costs.pop(sid, None)
-        self._last_span.pop(sid, None)
-        self._trunc_reported.pop(sid, None)
+        if terminal:
+            self.costs.pop(sid, None)
+            self._last_span.pop(sid, None)
+            self._trunc_reported.pop(sid, None)
         # 中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净，否则永久留着
         for k in [k for k in self._call_t0 if k[0] == sid]:
             self._call_t0.pop(k, None)

@@ -526,11 +526,20 @@ export const useSessionStore = defineStore('sessions', {
                                  { goal: v.objective || '', goal_done_at: v.done_at || '' })
       } else if (ev.kind === 'status') {
         const v = ev.value || {}
-        if (v.cost) this.cost = v.cost
+        // B1：`{}` 在 JS 里是**真值**。后端读不到账本时会发一个空 cost（`"cost": {}`），
+        // 旧写法 `if (v.cost)` 于是把顶栏金额覆盖成 0，而刷新（GET 拿落盘记录）又跳回
+        // 批准前那个数——一个只出现在这一屏的假读数。空对象是「这一发没带账本」，
+        // 不是「账本是 0」，不许当读数用。
+        const hasCost = !!v.cost && Object.keys(v.cost).length > 0
+        if (hasCost) this.cost = v.cost
         if (v.message) this.logs.push(`[status] ${v.message}`)
         if (v.status) {
           this.status = v.status
-          if (this.current) this.mergeSessionLocal(this.current.id, { status: v.status, cost: v.cost })
+          if (this.current) {
+            const patch: Partial<Session> = { status: v.status }
+            if (hasCost) patch.cost = v.cost
+            this.mergeSessionLocal(this.current.id, patch)
+          }
           // 终态才重拉 trace：tok/s 与 StatsLine 的用量要等这一跑收口才完整，
           // 而中间态每步都在同步成本，每次拉就是打一串尖峰请求。
           if (['finished', 'stopped', 'failed'].includes(v.status)) void this.loadTrace(this.currentId)

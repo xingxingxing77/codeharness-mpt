@@ -62,7 +62,7 @@ def create_app() -> FastAPI:
             store = SessionStore()
             runner_extra = (None, False)
         log_bridge = LogBridge(bus)
-        runner = SessionRunner(store, bus, llm_defaults or {}, chat_factory=chat_factory)
+        runner = SessionRunner(store, bus, chat_factory=chat_factory)
         runner.trace, redis_mode = runner_extra
         if redis_mode:
             runner.enable_redis_control()               # 跨 worker stop：PUBLISH ch:ctl + 本 worker 监听

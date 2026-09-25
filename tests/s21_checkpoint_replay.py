@@ -12,6 +12,8 @@
      图重建不出来时列表回空但带 `reason`（不装死）、详情回 409、`limit` 值域 422。
   t3 采集是免费的这件事不许被忘掉：断言「没写进 checkpoint 的东西读不出来」——
      端点只读 saver，跑完会话后再也不 ainvoke 一次，历史条数不许变。
+  t4 B7：回放面那两条 GET 走**不注册**的只读重建——三张表零注册、store.update 零调用
+     （原先看一眼回放就把完整团队图永久钉进 runner，还顺手写库）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -109,7 +111,7 @@ async def t2_endpoints():
         with TestClient(create_app()) as c:
             sid = c.post("/api/sessions", json={"idea": "回放", "project_name": "s21ep"}).json()["id"]
             runner = c.app.state.runner
-            runner._ensure_graph = lambda _sid: asyncio.sleep(0, (app, cfg))   # 注入真图
+            runner._ensure_graph = lambda _sid, **kw: asyncio.sleep(0, (app, cfg))   # 注入真图
 
             r = c.get(f"/api/sessions/{sid}/checkpoints?limit=5")
             assert r.status_code == 200, r.text[:120]
@@ -139,7 +141,7 @@ async def t2_endpoints():
             assert c.get(f"/api/sessions/{sid}/checkpoints?limit=501").status_code == 422
 
             # 图重建不出来：列表空但有 reason，详情 409——都不许装成"这个会话没有历史"
-            runner._ensure_graph = lambda _sid: asyncio.sleep(0, None)
+            runner._ensure_graph = lambda _sid, **kw: asyncio.sleep(0, None)
             empty = c.get(f"/api/sessions/{sid}/checkpoints")
             assert empty.status_code == 200 and empty.json()["checkpoints"] == [] \
                 and empty.json().get("reason"), f"重建失败时列表没给 reason：{empty.text[:120]}"
@@ -163,15 +165,64 @@ async def t3_read_only():
     _ok("t3", f"只读成立：连读 3 轮 + aget_state 之后仍是 {after} 份，端点路径上不产生新 checkpoint")
 
 
+async def t4_read_only_rebuild_registers_nothing():
+    """B7：回放面那两条 GET 只许**借**一个图——不许挂进 runner，也不许写库。
+
+    `_ensure_graph` 原先只有一条路：慢路径把重建结果写进 `graphs/projects/costs`，而这三张表
+    只有 `_forget` 清、`_forget` 只由 run/stop 调（断点态还刻意留着）⇒「看一眼旧会话的回放」
+    就把一个完整团队图永久钉在进程里；顺带 `_prepare` 里那句 `store.update(roles=…)` 让
+    只读路由写了库。判据（`_prepare` 打桩，量的就是 runner 自己那半）：
+      ① `register=False`：三张表一个键都没多、**`store.update` 一次都没被调**（spy 打在 store 上，
+         不靠桩自证——桩里手写一遍「我不写」是测替身，不是测产品）；
+      ② 阳性对照：同一支 spy 手工调一次 `store.update` 必须被记到（否则①可能只是 spy 坏了），
+         且 `register=True` 那条正路照旧注册（不是「什么都不做所以没副作用」）；
+      ③ 只读那条路每次都给得出 (graph, config)，`persist_roles=False` 真传进了 `_prepare`。
+    """
+    store = SessionStore(path=Path(tempfile.mkdtemp()) / "sessions.json")
+    runner = SessionRunner(store, SessionEventBus())
+    s = store.create("只读回放", project_name="s21_ro")
+    seen, updates = [], []
+    real_update = store.update
+    store.update = lambda *a, **kw: (updates.append((a, kw)), real_update(*a, **kw))[1]
+
+    async def fake_prepare(session, project, cost_manager, persist_roles=True):
+        seen.append(persist_roles)
+        return object(), {"configurable": {"thread_id": project}}, None
+
+    runner._prepare = fake_prepare
+    packed = await runner._ensure_graph(s.id, register=False)
+    assert packed, "只读重建拿不到 (graph, config)"
+    assert not runner.graphs and not runner.costs and not runner.projects, \
+        (f"只读路由把重建结果挂进了 runner（B7：这三张表只有 _forget 清）——"
+         f"graphs={list(runner.graphs)} costs={list(runner.costs)} projects={list(runner.projects)}")
+    assert updates == [], f"只读重建写库了（store.update 被调）：{updates}"
+    assert seen == [False], f"persist_roles=False 没传到 _prepare：{seen}"
+
+    # ② spy 的阳性对照：手工走一次 `store.update`（=被 spy 截住的那个入口）必须被记到，
+    #    否则①的「零调用」可能只是 spy 挂错了地方——那才是真正的假绿。
+    store.update(s.id, status="awaiting_human")
+    assert updates, "spy 根本没记到任何 update ⇒ ①那一格是假绿"
+    updates.clear()
+
+    packed2 = await runner._ensure_graph(s.id)                  # ② 正路：照旧注册
+    assert packed2 and runner.graphs.get(s.id) and runner.costs.get(s.id) and runner.projects.get(s.id), \
+        f"register=True 却没注册（正路被改坏了）：graphs={list(runner.graphs)}"
+    assert seen[-1] is True, f"正路没让 _prepare 回写 roles：{seen}"
+    assert store.get(s.id).status.value == "awaiting_human", "stub 那步会话记录没写进去"
+    _ok("t4", "只读重建（register=False）：三张表零注册 + store.update 零调用；"
+              "正路照旧注册且 persist_roles=True（spy 有阳性对照）")
+
+
 def main():
     try:
         asyncio.run(t1_page_semantics())
         asyncio.run(t2_endpoints())
         asyncio.run(t3_read_only())
+        asyncio.run(t4_read_only_rebuild_registers_nothing())
     finally:
         # 不关连接的话解释器会被 aiosqlite 的后台线程吊住（C2 那轮的收官教训：断言全过但永不退出）
         asyncio.run(close_all())
-    print("\ns21_checkpoint_replay: 3/3 全绿")
+    print("\ns21_checkpoint_replay: 4/4 全绿")
     return 0
 
 
