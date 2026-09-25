@@ -648,6 +648,36 @@ def t15_stream_deadline():
     if r3.content != "012":
         _fail(f"15. timeout=0 分支异常: {r3.content!r}")
 
+    # ⑥ SDK 层超时要留**同一声响**（09-26 审查补的那半格）：`wait_for` 抛的是内置 `TimeoutError`，
+    #    而 `openai.APITimeoutError` **不是**它的子类（MRO: APITimeoutError→APIConnectionError→
+    #    APIError，本机实测 `issubclass(...) is False`；httpx 的 `TimeoutException` 同理）。
+    #    `_retryable` 早就把这两族并列成「超时」并据此**不重发**，可原先两处 `except TimeoutError`
+    #    只接得住第一种 ⇒ **SDK 先超时**的那一发既不重发、也不留账差，静默成了账上看不见的支出
+    #    ——C42 要治的事换了个入口又进来。判据同 ⑤：`gateway.logger` 上必须有一条可 grep 的账差。
+    from openai import APITimeoutError
+
+    class _SdkTimeoutModel:
+        def bind(self, **kw):
+            return self
+
+        async def ainvoke(self, msgs, **kw):
+            raise APITimeoutError(request=None)
+
+    rec2, saved2 = _Rec(), _gwmod.logger
+    _gwmod.logger = rec2
+    try:
+        g6 = _gw(reply="x")
+        g6._model = _SdkTimeoutModel()
+        try:
+            asyncio.run(g6.ainvoke("q"))          # 非流式：重试判据不重发，直接抛上来
+            _fail("15⑥. SDK 超时那一发没抛出来（桩没生效，这一格是空转）")
+        except APITimeoutError:
+            pass
+    finally:
+        _gwmod.logger = saved2
+    if not any("超时" in w and "不进账" in w for w in rec2.warnings):
+        _fail(f"15⑥. SDK 层超时（APITimeoutError）没留下可 grep 的账差：{rec2.warnings}")
+
 
 # ---------- 16. 坏结构化产出也要落账（C17：漏账 = 截断提示没东西可发） ----------
 def t16_structured_failure_accounts():
@@ -1026,7 +1056,8 @@ def main():
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
           f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑 / "
-          f"流式分支按 deadline 失败 / 坏结构化产出真 HTTP 落账与截断计数 / 429 有界退避与重试归属单点）")
+          f"流式分支按 deadline 失败（内置 TimeoutError 与 SDK 的 APITimeoutError 两条腿各留一声账差） / "
+          f"坏结构化产出真 HTTP 落账与截断计数 / 429 有界退避与重试归属单点）")
 
 
 if __name__ == "__main__":

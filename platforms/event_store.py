@@ -20,6 +20,7 @@ import redis
 import redis.asyncio as aioredis
 
 from codeharness.configs.settings import RedisConfig, settings
+from codeharness.logs import logger
 from server.events import Event, MAX_EVENTS_PER_SESSION, norm_cursor
 
 STREAM = "ch:ev:{}"
@@ -84,23 +85,48 @@ class RedisEventBus:
             self._flusher = asyncio.get_running_loop().create_task(self._flush_loop())
 
     async def _flush_loop(self):
+        """ring → Redis 的搬运工，**必须自己活下来**——C41 的同族另一半（09-26 审查）。
+
+        原先只有 `try/finally`（`finally` 只管 `_inflight`），`xadd` 一抛异常就穿出
+        `while True`：flusher 任务当场死掉，而 `self._flusher` 仍持着那个死任务
+        （`start()` 只在 `is None` 时建，也不会重建）⇒ 这一次 Redis 抖动之后，
+        **所有 SSE 活流与 `/events/history` 永远读不到新事件、零日志、不重启不恢复**。
+        同文件的 `_reader`（订阅侧）与 `runner._listen` 都老老实实 catch + 重连，只有这里没有。
+
+        两处纪律：① 没写出去的条目按**原序放回队首**再重试，不能丢（`popleft` 已经把它们
+        从 ring 里摘走了）；② 失败后退到 1s，别拿 20ms 的节拍刷屏。停机只该由 `aclose()` 的
+        `cancel()` 结束 —— `CancelledError` 照旧 re-raise。"""
         while True:
-            batch = []
-            with self._lock:
-                while self._ring:
-                    batch.append(self._ring.popleft())
-            if batch:
-                self._inflight += 1
-                try:
-                    for sid, ev in batch:
-                        key = STREAM.format(sid)
-                        eid = await self.client.xadd(key, {"d": json.dumps(ev.model_dump(), ensure_ascii=False)},
-                                                     maxlen=self.maxlen, approximate=True)
-                        ev.seq = dec_id(eid)                    # seq 由服务端承接（XADD id 单调）
-                        ev.cursor = pad_eid(eid)                # 前端去重/续传只认这个串
-                finally:
-                    self._inflight -= 1
-            await asyncio.sleep(0.02)                           # 攒批窗口：20ms 对 SSE 无感
+            batch, done = [], 0
+            try:
+                with self._lock:
+                    while self._ring:
+                        batch.append(self._ring.popleft())
+                if batch:
+                    self._inflight += 1
+                    try:
+                        # ⚠ `done` 只在**真写出去**之后 +1，不许用 enumerate：它的下标在执行体之前
+                        # 就递增了，失败那一条会被算进「已完成」，于是 `batch[done:]` 把它划掉、白丢。
+                        for sid, ev in batch:
+                            key = STREAM.format(sid)
+                            eid = await self.client.xadd(key, {"d": json.dumps(ev.model_dump(), ensure_ascii=False)},
+                                                         maxlen=self.maxlen, approximate=True)
+                            ev.seq = dec_id(eid)                    # seq 由服务端承接（XADD id 单调）
+                            ev.cursor = pad_eid(eid)                # 前端去重/续传只认这个串
+                            done += 1
+                    finally:
+                        self._inflight -= 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                rest = batch[done:]
+                with self._lock:
+                    self._ring.extendleft(reversed(rest))
+                logger.warning(f"事件刷盘失败（{len(rest)} 条已放回队首待重试，这段窗口内 SSE 活流与 "
+                               f"/events/history 读不到新事件）：{type(exc).__name__}: {exc}")
+                await asyncio.sleep(1)                              # Redis 不在时退到 1s
+                continue
+            await asyncio.sleep(0.02)                               # 攒批窗口：20ms 对 SSE 无感
 
     async def flush_now(self):
         """测试/停机用：把 ring 里的积压刷干净（生产靠 flusher 自转）。

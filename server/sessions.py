@@ -1,5 +1,6 @@
 """会话注册表 + JSON 持久化。字段一字不差对齐 types.ts:1-15；状态机含 stopping（源枚举漏项已补）。"""
 import json
+import secrets
 import time
 import uuid
 from enum import Enum
@@ -79,10 +80,27 @@ class SessionStore:
             self._persist()
 
     def _persist(self):
+        """整份重写落盘。**临时名必须一次性**——F-D 的同族第二处（`auth.py` 的 `_save_users`
+        早就为此改过，`server/sessions.py` 漏了同一条，09-26 审查）。
+
+        为什么这里今天就会撞：本函数有**两个线程**的调用方——四个 `def` 端点
+        （`patch_session`/`put_feedback`/`hire_role`/`fire_role`）跑在 FastAPI 线程池里，
+        而 runner 的 `store.update` 跑在事件循环线程里。原先写死 `sessions.tmp`：先完成的那笔
+        把文件 `replace` 走，后一笔的 `replace` 直接 `FileNotFoundError`（没人捕获 ⇒ 500）；
+        更坏的是两笔交错 truncate + write 会落半截 JSON，下次启动 `json.loads` 当场炸、
+        **整份会话表报废**。每笔用自己的 scratch 之后，最坏结果是「后写覆盖先写」（丢一次更新），
+        而不是写出坏文件。
+        `replace` 撞上别人正开着文件时 Windows 回 `PermissionError`，按 `auth.py` 同款重试。"""
         data = [s.model_dump() for s in self._sessions.values()]
-        tmp = self.path.with_suffix(".tmp")
+        tmp = self.path.with_suffix(f".{secrets.token_hex(8)}.tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        for backoff in (0.02, 0.05, 0.1, 0.2):
+            try:
+                tmp.replace(self.path)
+                return
+            except PermissionError:
+                time.sleep(backoff)
+        tmp.replace(self.path)          # 第五次还不行就照实抛，别静默当成功
 
     def create(self, idea: str, n_round: int = 5,
                project_name: str = "", llm_override: Optional[dict] = None,

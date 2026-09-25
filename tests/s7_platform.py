@@ -168,6 +168,104 @@ def t11_start_409_store_view():
         ss.SESSIONS_FILE = keep
 
 
+def t15_project_name_cannot_escape_workspace():
+    """S1（09-26 审查）：`project_name` 直接拼成 `workspace/{name}`，而 `_single_dir_name` 只判
+    `Path(v).name != v`——`Path("..").name == ".."` 让它**放行 `..`**，于是 `session.workspace`
+    变成 `workspace/..`，`resolve()` 就是**仓库根**；`_ws()` 正是拿 `session.workspace` 当 root，
+    文件树与 `/workspace/file` 随之把整个仓（`.env` 就在里面）暴露给这个用户。
+    同族第二条绕过：校验跑在**没 strip 的值**上，而 create 路由取 `req.project_name.strip()`
+    ⇒ `" .. "` 通过校验、strip 完照样是 `..`。
+
+    两格判据：① 六种越界写法必须在**建会话之前**被 422 挡下、零会话落库（不是「建了再修」）；
+    ② 合法名建出来的 `session.workspace` 的 `resolve()` 必须仍在 `WORKSPACE_ROOT` 之内
+    ——这才是口径，名字怎么写只是手段。"""
+    import server.sessions as ss
+    from server.settings import WORKSPACE_ROOT
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        import server.app as sa
+        with TestClient(sa.create_app()) as c:
+            before = len(c.get("/api/sessions").json())
+            for bad in ("..", " .. ", ".", "a/b", "a\\b", "../x"):
+                r = c.post("/api/sessions", json={"idea": "越界", "project_name": bad})
+                assert r.status_code == 422, \
+                    f"project_name={bad!r} 应 422，实际 {r.status_code}: {r.text[:120]}"
+            assert len(c.get("/api/sessions").json()) == before, "被拒的名字居然建出了会话"
+            r = c.post("/api/sessions", json={"idea": "合法", "project_name": " s7 ok "})
+            assert r.status_code == 200, f"合法名（含首尾空格）被误拒：{r.text[:120]}"
+            body = r.json()
+            ws = Path(body["workspace"]).resolve()
+            root = WORKSPACE_ROOT.resolve()
+            assert ws != root and ws.is_relative_to(root), \
+                f"会话工作区落到 workspace 之外或根部（越界已现形）：{ws}"
+            assert body["project_name"] == "s7 ok", f"名字没归一：{body['project_name']!r}"
+        _ok("t15", "project_name 越界六种写法全 422 且零落库；合法名归一后 workspace 仍在 WORKSPACE_ROOT 内")
+    finally:
+        ss.SESSIONS_FILE = keep
+
+
+def t16_event_flusher_survives_a_failing_xadd():
+    """S3（09-26 审查）：`RedisEventBus._flush_loop` 原先只有 `try/finally`（`finally` 只管
+    `_inflight`），`xadd` 一抛异常就穿出 `while True` ⇒ flusher 任务当场死掉，而 `self._flusher`
+    仍持着那个死任务（`start()` 只在 `is None` 时建、不重建）⇒ 一次 Redis 抖动之后
+    **所有 SSE 活流与 `/events/history` 永远读不到新事件**、零日志、不重启不恢复。
+    同文件的 `_reader`（订阅侧）与 `runner._listen` 都 catch + 重连，只有这一处没有——C41 的同族另一半。
+
+    用桩客户端，**不依赖在线 Redis**。三格：① 前两发 xadd 抛错时事件**不许丢**（放回队首重试，
+    最终真写进 stream）；② flusher 任务不许结束；③ 失败要留可 grep 的响，且 `cancel()` 仍能收场
+    （停机只该由 `aclose()` 结束）。修复前 ① ② ③ 全红：第一发就抛，任务带异常结束、事件一条没写。"""
+    async def _case():
+        from collections import deque
+        from platforms.event_store import RedisEventBus
+        import codeharness.logs as _lgs
+
+        bus = RedisEventBus.__new__(RedisEventBus)          # 不给 __init__ 连真 Redis 的机会
+        bus.maxlen, bus._ring, bus._lock, bus._inflight = 100, deque(), threading.Lock(), 0
+
+        class _FlakyClient:
+            def __init__(self):
+                self.calls, self.written = 0, []
+
+            async def xadd(self, key, fields, maxlen=0, approximate=True):
+                self.calls += 1
+                if self.calls <= 2:                        # 头两发必炸：模拟 Redis 抖动
+                    raise RuntimeError("redis 抖了一下")
+                self.written.append(fields["d"])
+                return f"{1758800000000 + self.calls}-0"
+
+        bus.client = _FlakyClient()
+        warned = []
+        orig = _lgs.logger.warning
+        _lgs.logger.warning = lambda *a, **k: warned.append(a)      # event_store 与本处是同一个 logger 对象
+        bus._flusher = asyncio.get_running_loop().create_task(bus._flush_loop())
+        try:
+            bus.publish("sZ", kind="report", value="v1")
+            bus.publish("sZ", kind="report", value="v2")
+            for _ in range(80):                             # 失败退避 1s，最多等 4s
+                if len(bus.client.written) >= 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(bus.client.written) == 2, \
+                f"抖动之后事件没写进 stream（flusher 死了？）：written={len(bus.client.written)} calls={bus.client.calls}"
+            assert not bus._flusher.done(), "flusher 任务已结束——下一次抖动后再没人搬运事件"
+            assert any("事件刷盘失败" in str(w) for w in warned), \
+                f"刷盘失败没留可 grep 的响（零日志=排障时看不见）：{warned}"
+            bus._flusher.cancel()
+            try:
+                await bus._flusher
+            except asyncio.CancelledError:
+                pass
+            assert bus._flusher.cancelled(), "停机路径：cancel() 之后任务该收场"
+        finally:
+            _lgs.logger.warning = orig
+            if not bus._flusher.done():
+                bus._flusher.cancel()
+
+    asyncio.run(_case())
+    _ok("t16", "xadd 抖动：两条事件放回队首后仍写出、flusher 不退出、warning 留痕、cancel 可收场")
+
+
 # ---------------- redis 部分 ----------------
 async def t2_dual_worker_replay():
     from platforms.event_store import RedisEventBus
@@ -597,15 +695,17 @@ def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
     t11_start_409_store_view()
+    t15_project_name_cannot_escape_workspace()
+    t16_event_flusher_survives_a_failing_xadd()
     global REDIS_UP
     REDIS_UP = _redis_up()
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 3/3 过（进程内路 t1+t10+t11），redis 路待环境")
+        print("\ns7_platform: 5/5 过（进程内路 t1+t10+t11+t15+t16），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 14/14 全绿（双配置）")
+    print("\ns7_platform: 16/16 全绿（双配置）")
 
 
 if __name__ == "__main__":

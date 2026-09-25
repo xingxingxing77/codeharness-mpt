@@ -59,8 +59,15 @@ def _require_reader(suffix: str):
 
 
 def read_data(data_path: Path) -> Union[pd.DataFrame, list]:
-    """按后缀分派读取。表格类返回 DataFrame，文档类返回 LangChain Document 列表。"""
-    suffix = data_path.suffix
+    """按后缀分派读取。表格类返回 DataFrame，文档类返回 LangChain Document 列表。
+
+    ⚠ `suffix` 必须**先归一成小写**（09-26 审查）：门口那三道（`upload_kb` 的白名单、
+    `reader_available`、`_require_reader`）全部按 `.lower()` 判，只有这里拿原文——
+    于是 `FAQ.MD`/`Manual.PDF` 这类 Windows 上常见的**大写扩展名**在门口放行、到这里掉进
+    最后一个 `else` 抛 `NotImplementedError: File format not supported.`（那句会被摄取件
+    原样拼进给用户看的 errors[]）。同一份白名单不能只在门口归一。
+    """
+    suffix = data_path.suffix.lower()
     if ".xlsx" == suffix:
         data = pd.read_excel(data_path)
     elif ".csv" == suffix:

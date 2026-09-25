@@ -52,9 +52,19 @@ class CreateSessionReq(BaseModel):
     @field_validator("project_name")
     @classmethod
     def _single_dir_name(cls, v: str) -> str:
-        # 名字直接拼成 workspace/{name}：会话目录、产物仓与前端文件树的根都是它，带分隔就能越界
-        if v and Path(v).name != v:
-            raise ValueError("project_name 不能包含路径分隔")
+        """名字直接拼成 `workspace/{name}`：会话目录、产物仓与前端文件树的根都是它，带分隔就能越界。
+
+        ⚠ 两道都得判，缺一条就是一个洞（09-26 审查）：
+          · `Path("..").name == ".."` —— 只判 `name != v` 那半句会**放行 `..`**，而 `workspace/..`
+            就是**仓库根**；`_ws()` 拿 `session.workspace` 当 root，文件树与 `/workspace/file`
+            随之把整个仓暴露出去（`.env` 就在里面）。
+          · 校验必须落在 **strip 之后**的值上：create 路由取的是 `req.project_name.strip()`，
+            而 `Path(" .. ").name` 没有分隔符 ⇒ `" .. "` 从前面溜过去、strip 完照样是 `..`。
+        这里先 strip 再判、并把 strip 后的值当返回值（路由那句 `.strip()` 于是只是幂等冗余）。
+        """
+        v = v.strip()
+        if v in (".", "..") or Path(v).name != v:
+            raise ValueError("project_name 不能是 `.`/`..`，也不能包含路径分隔")
         return v
 
     @field_validator("llm")

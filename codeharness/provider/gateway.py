@@ -256,14 +256,16 @@ class LLMGateway:
             # **不做半包重试**——半截已经上屏，重放就是重复渲染（`_acall` 注释里同一句纪律）。
             try:
                 resp = await (asyncio.wait_for(_collect(), deadline) if deadline else _collect())
-            except TimeoutError:
-                self._timeout_lost("流式", deadline, tag)     # B6：这一发大概率花了钱，账上却是零
+            except Exception as exc:
+                if _is_timeout(exc):
+                    self._timeout_lost("流式", deadline, tag)   # B6：这一发大概率花了钱，账上却是零
                 raise
         else:
             try:
                 resp = await _acall(model.ainvoke, msgs, timeout=deadline)
-            except TimeoutError:                              # 同一族（重试耗尽后那一发同样没有回执）
-                self._timeout_lost("非流式", deadline, tag)
+            except Exception as exc:                          # 同一族（重试耗尽后那一发同样没有回执）
+                if _is_timeout(exc):
+                    self._timeout_lost("非流式", deadline, tag)
                 raise
 
         if stream:
@@ -470,6 +472,24 @@ def _retryable(exc: BaseException) -> bool:
     if isinstance(exc, APIStatusError):
         return exc.status_code == 429
     return isinstance(exc, APIError)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """这一发算不算「超时」——**两种形状都要认**（09-26 审查补的那半格）。
+
+    C42 只接了第一种：`wait_for` 抛的内置 `TimeoutError`。但 SDK 自己也有超时——
+    `openai.APITimeoutError` 的 MRO 是 `APITimeoutError → APIConnectionError → APIError`，
+    **不是** `TimeoutError` 的子类（本机实测 `issubclass(APITimeoutError, TimeoutError) is False`；
+    httpx 的 `TimeoutException` 同理）。而 `_retryable` 早就把这两族并列成「超时」并据此**不重发**：
+    于是**SDK 层先超时**的那一发既不重发、也不留 `_timeout_lost` 那声账差，
+    静默成了账上看不见的支出——C42 要治的那件事换了个入口又进来了。
+
+    ⚠ 只用于「要不要留账差」，不参与重试判据（那是 `_retryable` 的事，两处口径别合并）。
+    """
+    from openai import APITimeoutError
+
+    import httpx
+    return isinstance(exc, (TimeoutError, APITimeoutError, httpx.TimeoutException))
 
 
 async def _acall(fn, *args, timeout: int = 0, **kwargs):

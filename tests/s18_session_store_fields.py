@@ -137,6 +137,69 @@ def t2_concurrent_field_updates_no_loss(store, sid):
     print("  t2 两线程各改 status / cost，两个新值都在（互不丢失）")
 
 
+def t3_file_persist_scratch_is_unique(_store, _sid):
+    """S2（09-26 审查）：文件版 `SessionStore._persist` 原先写死 `sessions.tmp`——F-D 的同族第二处
+    （`server/auth.py::_save_users` 早就为此改成一次性随机名，`server/sessions.py` 漏了同一条）。
+
+    为什么今天就会撞：本函数有**两个线程**的调用方——四个 `def` 端点（`patch_session`/
+    `put_feedback`/`hire_role`/`fire_role`）跑在 FastAPI 线程池里，而 runner 的 `store.update`
+    跑在事件循环线程里。共用一支 scratch 时：先完成的那笔把文件 `replace` 走，后一笔的 `replace`
+    直接 `FileNotFoundError`（没人捕获 ⇒ 500）；更坏的是两笔交错 truncate + write 会落**半截 JSON**，
+    下次启动 `json.loads` 当场炸、整份会话表报废。
+
+    两格：① scratch 名**每次都不同**（确定性判据，不看线程调度运气）；② 8 线程 ×8 次并发写之后：
+    无异常、落盘仍是可解析的完整会话表、盘上**不留** `.tmp` 残骸。"""
+    import json as _json
+    from server.sessions import SessionStore
+
+    d = Path(tempfile.mkdtemp())
+    p = d / "sessions.json"
+
+    seen: list = []
+    real_write = Path.write_text
+
+    def spy(self, data, **kw):
+        if self.name.endswith(".tmp"):
+            seen.append(self.name)
+        return real_write(self, data, **kw)
+
+    Path.write_text = spy
+    try:
+        st = SessionStore(path=p)
+        st.create(idea="a", project_name="p1")
+        st._persist()
+        st._persist()
+    finally:
+        Path.write_text = real_write
+    assert len(seen) >= 3 and len(set(seen)) == len(seen), \
+        f"scratch 名被复用（并发写同一支 .tmp 就会写坏 / 报 500）：{seen}"
+
+    store2 = SessionStore(path=p)             # 重开一次：顺带证明上一轮落盘可解析
+    sid2 = store2.list()[0].id
+    errors: list = []
+
+    def writer(i):
+        try:
+            for _ in range(8):
+                store2.update(sid2, cost={"who": i})
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+
+    th = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(30)
+    assert not any(t.is_alive() for t in th), "有线程没在 30s 内收尾"
+    assert not errors, f"并发 _persist 抛错（写死 .tmp 就是这条）：{errors}"
+    data = _json.loads(p.read_text(encoding="utf-8"))
+    assert isinstance(data, list) and data and data[0].get("id"), f"落盘不是完整会话表：{str(data)[:120]}"
+    left = sorted(x.name for x in d.iterdir() if x.name.endswith(".tmp"))
+    assert not left, f"盘上留了 .tmp 残骸（该被 replace 走）：{left}"
+    print(f"  t3 scratch 名逐次唯一（{len(seen)} 支）；8 线程 ×8 次并发 _persist 无异常、"
+          f"落盘仍是完整 JSON、零 .tmp 残骸")
+
+
 def main():
     print("=" * 60)
     print("S18: RedisSessionStore.update 字段级 HSET（B3）")
@@ -170,16 +233,17 @@ def main():
         assert store.r.flushdb(), "清库没生效——判据会受残留数据干扰"
         sid = store.create(idea="s18", project_name=f"s18-{int(time.time())}").id
         fails = []
-        for fn in (t1_only_passed_fields_are_written, t2_concurrent_field_updates_no_loss):
+        for fn in (t1_only_passed_fields_are_written, t2_concurrent_field_updates_no_loss,
+                   t3_file_persist_scratch_is_unique):
             try:
                 fn(store, sid)
             except AssertionError as e:
                 fails.append(f"{fn.__name__}: {e}")
                 print(f"  ❌ {fn.__name__}：{e}")
         if fails:
-            print(f"\n❌ 失败 {len(fails)}/2 条")
+            print(f"\n❌ 失败 {len(fails)}/3 条")
             return 1
-        print("\n" + "=" * 60 + "\n✅ 全部通过 (t1–t2 2/2 全绿)\n" + "=" * 60)
+        print("\n" + "=" * 60 + "\n✅ 全部通过 (t1–t3 3/3 全绿)\n" + "=" * 60)
         return 0
     except Exception as e:
         print(f"\n❌ 异常：{e}")

@@ -164,7 +164,12 @@ class LongTermMemory:
             results = body.get("results") or (body.get("output") or {}).get("results")
             if results is None:
                 raise ValueError(f"响应里没有 results/output.results：{str(body)[:120]}")
-            return [(hits[i["index"]], i.get("relevance_score"))
+            # 回指下标一律 `int()` 一次：守卫那半句已经写了 `int(i["index"])`（等于承认它可能
+            # 不是 int —— 兼容口把 index 序列化成 JSON 字符串是实测存在的形状），取值这半句
+            # 原先直接 `hits[i["index"]]` ⇒ 字符串下标抛 TypeError，被外层 `except Exception`
+            # 吞成「精排不可用，已降级为仅粗排」：整条精排静默跳过，且日志上跟「真没配精排」
+            # 长得一模一样（09-26 审查）。两半用同一次转换。
+            return [(hits[int(i["index"])], i.get("relevance_score"))
                     for i in results if 0 <= int(i["index"]) < len(hits)][:k]
         except Exception as e:
             logger.warning(f"精排不可用，已降级为仅粗排（{url}）：{type(e).__name__}: {e}")

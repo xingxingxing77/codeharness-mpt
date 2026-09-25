@@ -1570,6 +1570,119 @@ def t16_reupload_modified_doc_drops_the_old_slices():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def t17_uppercase_suffix_is_not_a_second_whitelist():
+    """R1（09-26 审查）：门口那三道（`upload_kb` 的白名单、`reader_available`、`_require_reader`）
+    全按 `.lower()` 判，只有 `document.read_data` 拿 `path.suffix` **原文**分派 ⇒ `FAQ.MD` /
+    `Manual.PDF` 这类 Windows 上常见的**大写扩展名**在门口放行、到 `read_data` 掉进最后一个
+    `else` 抛 `NotImplementedError: File format not supported.`（那句会被摄取件原样拼进
+    给用户看的 `errors[]`）。同一份白名单不能只在门口归一。
+
+    两格（离线，不需要 Qdrant/embedding）：① `.md`/`.txt` 的**大写写法**与对应小写逐字等价
+    ——正文与切片都一致，"大写"不许是第二份白名单；② 真不支持的后缀（`.xyz`/`.XYZ`）两种
+    写法必须给**同一句**拒因（一边人话一边 Python 原文也算坏）。"""
+    from codeharness.actions.upload_kb import _texts_of
+    from codeharness.document import read_data
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        for suffix in (".md", ".txt"):
+            low = _fixture_for(tmp, suffix)
+            # ⚠ 基名必须与 low **不同**：Windows 文件系统大小写不敏感，`probe.md` 与 `probe.MD`
+            # 是同一个文件（copyfile 会抛 SameFileError）。而「名字里带大写扩展名」这件事本身
+            # 完全能发生（用户上传的文件名就是 `FAQ.MD`），所以要造的是**另一份**同名内容的文件。
+            up = tmp / f"upper_{low.stem}{suffix.upper()}"
+            up.write_text(low.read_text(encoding="utf-8"), encoding="utf-8")
+            assert up.suffix == suffix.upper() and up.name != low.name
+            try:                                     # 修复前这里抛的是 NotImplementedError 原文——
+                low_docs = [d.page_content for d in read_data(low)]      # 翻成断言，红线才可 grep
+                up_docs = [d.page_content for d in read_data(up)]
+                up_slices = [t for t, _ in _texts_of(up)]
+                low_slices = [t for t, _ in _texts_of(low)]
+            except NotImplementedError as e:
+                raise AssertionError(f"t17① {suffix} 的大写写法掉进了 else 支路："
+                                     f"NotImplementedError: {e}") from e
+            assert low_docs == up_docs, f"t17① {suffix} 大小写两种写法读出的正文不一致"
+            assert up_slices == low_slices, f"t17① {suffix} 的大写写法进了另一条切片路"
+        seen = []
+        for name in ("x.xyz", "x.XYZ"):
+            p = tmp / name
+            p.write_text("x", encoding="utf-8")
+            try:
+                read_data(p)
+                seen.append("(没抛，落进了某个分支)")
+            except NotImplementedError as e:
+                seen.append(str(e))
+        assert seen[0] == seen[1], f"t17② 后缀大小写走了两条不同的拒收口径：{seen}"
+        assert "File format not supported" in seen[0], f"t17② 拒因不是那句既有文案：{seen[0]!r}"
+        print(f"  ok  t17 .md/.txt 大写写法与对应小写逐字等价（正文 + 切片一致）；"
+              f"不支持的后缀大小写同一句拒因（{seen[0]!r}）")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t18_rerank_index_may_arrive_as_a_string():
+    """R4（09-26 审查）：`LongTermMemory.rerank_scored` 的守卫写 `0 <= int(i["index"]) < len(hits)`
+    ——**那个 `int()` 等于承认 index 可能不是 int**（兼容口把 index 序列化成 JSON 字符串是实测
+    存在的形状），可**取值**那半句原先直接 `hits[i["index"]]` ⇒ 字符串下标抛 TypeError，
+    被外层 `except Exception` 吞成「精排不可用，已降级为仅粗排」：整条精排**静默跳过**，
+    而且日志上跟「真没配精排」长得一模一样（C8 治的就是这种假降级）。
+
+    用 127.0.0.1 上的**真 HTTP 桩**（不是替身、不碰云端、零花费），桩回的 `index` 是字符串。
+    三格：① 返回顺序按桩给的相关性序 ⇒ 精排真生效、没被降级；② 不许出现「精排不可用」；
+    ③ **阳性对照**：桩把 index 换成非数字时照旧降级成粗排原序 + 留 warning
+    ——降级那条路没被这条修法堵死（少了③，①只是在断言「桩没被调用」）。"""
+    import json as _json
+    import threading as _th
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from types import SimpleNamespace
+
+    from codeharness.configs.settings import settings
+    from codeharness.logs import logger as _lg
+    from codeharness.memory.longterm import LongTermMemory
+
+    hits = [SimpleNamespace(id=f"p{i}", payload={"text": f"t{i}"}) for i in range(4)]
+    stub = {"body": {"results": [{"index": "3", "relevance_score": 0.91},
+                                 {"index": "1", "relevance_score": 0.80}]}}
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            raw = _json.dumps(stub["body"]).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):          # 桩别刷代理日志
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+    keep = settings.reranker.base_url
+    settings.reranker.base_url = f"http://127.0.0.1:{srv.server_address[1]}"
+    warned, orig = [], _lg.warning
+    _lg.warning = lambda *a, **k: warned.append(a)
+    try:
+        ltm = LongTermMemory.__new__(LongTermMemory)     # rerank_scored 只吃 settings，直测接缝
+        got = asyncio.run(ltm.rerank_scored("q", hits, k=2))
+        assert [h.payload["text"] for h, _ in got] == ["t3", "t1"], \
+            f"t18① 字符串 index 没被映射回粗排列表（精排被静默降级）：{[h.payload['text'] for h, _ in got]}"
+        assert not any("精排不可用" in str(w) for w in warned), f"t18② 不该降级却降了：{warned}"
+        stub["body"] = {"results": [{"index": "not-a-number", "relevance_score": 0.9}]}
+        warned.clear()
+        fallback = asyncio.run(ltm.rerank_scored("q", hits, k=2))
+        assert [h.payload["text"] for h, _ in fallback] == ["t0", "t1"], \
+            f"t18③ 坏 index 没降级成粗排原序：{[h.payload['text'] for h, _ in fallback]}"
+        assert any("精排不可用" in str(w) for w in warned), "t18③ 降级必须留痕（静默缺席是坑）"
+        print("  ok  t18 字符串 index 按桩的相关性序真重排（不降级）；非数字 index 照旧降级粗排 + warning")
+    finally:
+        _lg.warning = orig
+        settings.reranker.base_url = keep
+        srv.shutdown()
+        srv.server_close()
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1587,16 +1700,19 @@ def main():
               t12_recall_floor_keeps_unrelated_doc_out_of_prompt, t13_kb_doc_removal_route,
               t14_kb_tenant_is_the_same_on_both_sides,
               t15_kb_search_is_a_tool_the_model_can_call,
-              t16_reupload_modified_doc_drops_the_old_slices]
+              t16_reupload_modified_doc_drops_the_old_slices,
+              t17_uppercase_suffix_is_not_a_second_whitelist,
+              t18_rerank_index_may_arrive_as_a_string]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
           f"+ C26 的白名单两态 + C22 的来源标记（含页码 0 起下标换算）+ C23 的相关性下限 + C30 的下架单份路由 + "
-          f"C31 的租户两侧同源 + C24 的可主动调检索工具 + B2 的重传改版清旧切片）——"
+          f"C31 的租户两侧同源 + C24 的可主动调检索工具 + B2 的重传改版清旧切片 + "
+          f"后缀大小写同一份白名单 + 精排 index 的字符串形状）——"
           f"其中 t1/t3/t10/t13/t14/t15/t16 需要 Qdrant 在线、t12 还要真 bge-m3 在线，本次分别 "
           f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那六格**'} / "
           f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
-          f"t6/t7/t8/t9/t11 都不依赖在线服务（死端口 + 替身 + 假 kb），任何环境都必须跑到")
+          f"t6/t7/t8/t9/t11/t17/t18 都不依赖在线服务（死端口 + 替身 + 假 kb + 本地桩），任何环境都必须跑到")
 
 
 if __name__ == "__main__":
