@@ -136,7 +136,8 @@ export const api = {
     return req<{ uploaded_count: number; chunk_count: number; errors: string[]; written: string[] }>(
       'POST', `/api/sessions/${sid}/workspace/upload_kb`, fd, KB_UPLOAD_TIMEOUT_MS)
   },
-  /** C30 下架单份知识库文档：只掉这一份的切片，别份一字不动（原件仍在工作区 `kb/` 下——那是取证）。
+  /** C30 下架单份知识库文档：只掉这一份的切片，别份一字不动（原件仍在工作区 `kb/` 下——那是取证，
+   *  D⑫ 09-25 拍定维持不删；**界面不提供删文件的动作，因为后端没有那条路由**，回执里写的是去 workspace 删）。
    *  `source` 走 query 而不是路径段：文件名里的分隔符/空格不做转义就是另一类 bug。
    *  不存在的 source 后端回 **404**（不是静默 ok），调用方照原文显示。 */
   removeKbDoc: (sid: string, source: string) =>

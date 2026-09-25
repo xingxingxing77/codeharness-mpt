@@ -400,7 +400,7 @@ async function doRemoveKb() {
   kbDownErr.value = ''
   try {
     const r = await api.removeKbDoc(store.currentId, n.name)
-    kbMsg.value = { text: `已从知识库下架 ${r.source}（删掉 ${r.deleted} 条切片）\n原件仍在工作区 kb/ 下`,
+    kbMsg.value = { text: `已从知识库下架 ${r.source}（删掉 ${r.deleted} 条切片）\n原件还在工作区 kb/ 里——要连文件一起删，得到该会话的 workspace 目录删（界面上没有这个动作）`,
                     err: false }
     kbDown.value = null
     await load()

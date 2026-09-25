@@ -941,11 +941,14 @@ def t15_kb_upload_entry():
         "C30：确认条上没有「取消」（删除不可逆，用户得有退路）"
     assert "isKbDoc" in dp and "从知识库下架" in dp, \
         "C30：文件树上没有给 `kb/` 那份文件的「下架」动作位"
+    assert "workspace 目录删" in body and "界面上没有这个动作" in body, \
+        "D⑫（09-25 拍定「维持不删原件」）：下架回执里那句去处没了——" \
+        "「下架了为什么文件还在」这句话又会回到支持者身上，而界面上确实没有删文件的入口（无那条路由）"
     _ok("t15", "B12：upload_kb 三侧同判（后端门口三判+四字段 → client.ts multipart+长档 → "
                "界面 errors 与成功数一起说 + 传完刷新树），白名单不在前端重抄；"
                "C16 追加：非 2xx 的 detail 必须原样走到 .kbMsg（catch 用 e.message + pre-line 分行）；"
                "C30 追加：kb_doc 下架三侧同判（路由 + basename/会话 scope/404 → client.ts 转义 query → "
-               "界面先确认再发且确认条带取消）")
+               "界面先确认再发且确认条带取消）；D⑫ 追加：回执带着「原件还在 + 去哪儿删 + 界面没这个动作」")
 
 
 def t16_max_tokens_notice():
