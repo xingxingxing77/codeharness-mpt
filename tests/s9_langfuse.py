@@ -15,9 +15,13 @@
   墙钟明显更久」的阳性对照，与「钩子退出时真跑了才落 marker」的归因读数（真凶是 OTel
   `TracerProvider.shutdown` 这个 atexit 钩子，不是 C28 猜的 `concurrent.futures` 非 daemon worker）。
 - t2 探活（Langfuse 可达才跑）：Basic auth 回读通路（v2/observations），不建 span、不花钱。
+- **t6 真在线量 grace（Langfuse 可达才跑，零模型花费）**：C28/C29 的两条未验边界——①「grace 内
+  真发得完」以前只有本地桩侧证，这一格要**服务端一条不少**；② 同形状打向死端口作阳性对照（否则
+  「落库条数」这个仪器可以恒真）；③ 批量越过 OTel 队列（默认 `max_queue_size=2048`）时
+  `shutdown()` 回 True 而服务端少一大截 ⇒ 硬丢的边界是**入队溢出**，不是等待时长。
 - t3 可选活体（LF_LIVE=1）：真模型一发 + 一个本地工具调用 + 一个手工 span → flush → 回读该会话
   的三类 span：LLM generation / TOOL / 手工 retriever（真钱 ~一次 ping，默认跳过）。
-门禁不挂在外部服务上：Langfuse 不通则 t2/t3 整段跳过并明说（s7 姿势）；t1/t4/t5 任何时候都必须跑到。
+门禁不挂在外部服务上：Langfuse 不通则 t2/t3/t6 整段跳过并明说（s7 姿势）；t1/t4/t5 任何时候都必须跑到。
 """
 import asyncio
 import os
@@ -503,6 +507,161 @@ def t5_process_exit_tail():
               f"atexit 钩子（marker 只在改前形状出现={keep['hook_ran']}）；退出前非 daemon 线程只有主线程")
 
 
+_T6_SPANS = 1000            # ① 那一档的批量：一次会话跑完的 span 量级（真形状另有读数，见台账）
+_T6_OVERFLOW = 20000        # ③ 那一档：故意越过 OTel 队列（默认 `max_queue_size=2048`）
+
+
+# 子进程脚本：建客户端 → n 个 span（挂在 env 里那个 tag 的 session 下）→ 本仓 `shutdown()`。
+# 为什么必须子进程：同 t4③——导出端点被进程内第一个客户端钉死；③ 那档还要把**进程真退出**算进
+# 形状里（grace 用尽后正是靠进程不再等第二次 flush 才成立为「硬丢」）。参数一律走 env 的 S9_T6。
+_T6_SCRIPT = '''
+import json, os, sys, time
+sys.path.insert(0, os.environ["CH_ROOT"])
+from codeharness import observability as obs
+from codeharness.configs.settings import settings
+p = json.loads(os.environ["S9_T6"])
+settings.langfuse.enabled = True
+settings.langfuse.public_key, settings.langfuse.secret_key = p["pk"], p["sk"]
+settings.langfuse.host = p["host"]
+settings.langfuse.shutdown_grace_sec = p["grace"]
+
+
+class _S:
+    id, user_id, paradigm, project_name = p["tag"], "s9-t6", "classic", "s9t6"
+
+
+cli = obs.client()
+t0 = time.time()
+with obs.session_attributes(_S(), "s9t6"):
+    for i in range(p["n"]):
+        with cli.start_as_current_observation(name=f"{p['tag']}-{i}", as_type="span"):
+            pass
+    made = time.time() - t0
+t1 = time.time()
+on_time = obs.shutdown()
+print("T6|%s|%.2f|%.2f|%s" % (p["tag"], made, time.time() - t1, on_time), flush=True)
+'''
+
+
+def _t6_run(tag, n, grace, host, cap=120):
+    """子进程跑 `_T6_SCRIPT`（参数走 env），返回 made/shutdown 墙钟/on_time/进程总墙钟/stderr。"""
+    import json
+    import shutil
+    import subprocess
+    d = Path(tempfile.mkdtemp())
+    try:
+        script = d / "probe.py"
+        script.write_text(_T6_SCRIPT, encoding="utf-8")
+        c = settings.langfuse
+        env = {**os.environ, "CH_ROOT": str(Path(__file__).resolve().parents[1]),
+               "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1", "REDIS__DB": "15",
+               "LANGFUSE__ENABLED": "1", "NO_PROXY": "127.0.0.1,localhost,::1",
+               "S9_T6": json.dumps({"pk": c.public_key, "sk": c.secret_key, "host": host,
+                                    "grace": grace, "n": n, "tag": tag})}
+        t0 = time.time()
+        try:
+            r = subprocess.run([sys.executable, "-B", str(script)], env=env, capture_output=True,
+                               text=True, timeout=cap, errors="replace")
+        except subprocess.TimeoutExpired:
+            return None
+        line = next((l for l in (r.stdout or "").splitlines() if l.startswith("T6|")), "")
+        if not line:
+            return None
+        _, _, made, wall, on_time = line.split("|")
+        return {"made": float(made), "wall": float(wall), "on_time": on_time == "True",
+                "proc_wall": round(time.time() - t0, 2),
+                "stderr": (r.stderr or "")}
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _t6_count(tag, cap=120, zero_is_final=False):
+    """数服务端**真落库**的条数（摄入是异步的：worker→clickhouse 要十几秒）。
+
+    分页游标 + 「连续两次同数」才算收住；`zero_is_final` 给死端口那一档用——那里 0 就是终值，
+    不轮询到 cap 秒。
+    """
+    prev, stable, t0 = -1, 0, time.time()
+    while True:
+        n, cur = 0, None
+        while True:
+            params = {"sessionId": tag, "limit": 100}
+            if cur:
+                params["cursor"] = cur
+            r = _api("/api/public/v2/observations", **params)
+            assert r.status_code == 200, f"回读失败 {r.status_code}: {r.text[:200]}"
+            j = r.json()
+            n += len(j.get("data", []))
+            cur = (j.get("meta") or {}).get("cursor")
+            if not cur or not j.get("data"):
+                break
+        if zero_is_final or (n == prev and n > 0):
+            stable += 1
+            if stable >= 2 or zero_is_final:
+                return n
+        else:
+            stable = 0
+        prev = n
+        if time.time() - t0 > cap:
+            return n
+        time.sleep(5)
+
+
+def t6_live_grace_curve():
+    """C28/C29 未验①③：**真 Langfuse 在线**时量 grace 到底管不管用。三格，零模型花费（只发 span）。
+
+      ① 在线无损：`_T6_SPANS` 条 span、生产默认 grace → `shutdown()` 必须回 True，**且服务端一条
+         不少数得到**。C28 之前这一半只有本地桩的 `flush 0.00s` 侧证。
+      ② 阳性对照（给 ① 装牙）：同一批量打**死端口** → 必须回 False，且服务端数到 **0**。少了这格，
+         「服务端条数」这个仪器可以恒真（比如数到了上一轮没清掉的旧数据）。
+      ③ 溢出归队列、不归 grace：`_T6_OVERFLOW` 条（> OTel 默认队列 2048）在**在线**端点上跑，
+         `shutdown()` 照样回 True 而服务端少一大截 ⇒ 「按时冲完」这句话的边界是**入队溢出**，
+         不是等待时长。这一档断言的是「溢出必须听得见」（SDK 侧 `Queue full` 那一声），
+         不是「不许溢出」。
+    """
+    live = settings.langfuse.host
+    dead = os.environ.get("LF_DEAD_HOST", "http://127.0.0.1:1")
+    grace = settings.langfuse.shutdown_grace_sec
+    stamp = int(time.time())
+    fails, notes = [], []
+
+    t_live = f"s9t6-live-{stamp}"
+    r1 = _t6_run(t_live, _T6_SPANS, grace, live)
+    assert r1, "t6① 的子进程 120s 没跑出读数——探活是通的，这一格不作 skip 作红"
+    n1 = _t6_count(t_live)
+    if r1["on_time"] is not True:
+        fails.append(f"①失效：在线 {grace}s grace 没按时冲完（shutdown 墙钟 {r1['wall']:.2f}s）")
+    if n1 != _T6_SPANS:
+        fails.append(f"①失效：在线说「按时冲完」而服务端只数到 {n1}/{_T6_SPANS}")
+
+    t_dead = f"s9t6-dead-{stamp}"
+    r2 = _t6_run(t_dead, _T6_SPANS, grace, dead)
+    assert r2, "t6② 的子进程 120s 没跑出读数"
+    n2 = _t6_count(t_dead, zero_is_final=True)
+    if r2["on_time"] is not False:
+        fails.append(f"②失效：死端口那一档没回 False（{r2['on_time']}）"
+                     "——grace 不认丢，① 的绿就不是它给的")
+    if n2:
+        fails.append(f"②失效：死端口那批在服务端数到 {n2} 条 ⇒ 回读仪器数了别的东西，① 不可信")
+
+    t_of = f"s9t6-of-{stamp}"
+    r3 = _t6_run(t_of, _T6_OVERFLOW, grace, live)
+    assert r3, "t6③ 的子进程 120s 没跑出读数"
+    n3 = _t6_count(t_of, cap=180)
+    heard = "Queue full" in r3["stderr"]
+    if n3 < _T6_OVERFLOW and not heard:
+        fails.append(f"③失效：溢出 {_T6_OVERFLOW - n3} 条而 SDK 一声没响（`Queue full` 未出现）"
+                     "——那才是真的静默丢数据")
+    notes.append(f"① 在线 {_T6_SPANS} 条：grace={grace}s、shutdown 墙钟 {r1['wall']:.2f}s、"
+                 f"造完 {r1['made']:.2f}s、服务端 {n1}/{_T6_SPANS}")
+    notes.append(f"② 死端口同批量：{r2['wall']:.2f}s 认丢={r2['on_time'] is False}、服务端 {n2} 条")
+    notes.append(f"③ 在线 {_T6_OVERFLOW} 条（越过 OTel 队列 2048）：`shutdown()` 回"
+                 f"{r3['on_time']}、服务端只 {n3} 条（缺口 {_T6_OVERFLOW - n3}）、SDK 有声={heard}"
+                 f" ⇒ 「按时冲完」只管等待，不管入队溢出")
+    assert not fails, "t6 三格：" + "｜".join(fails)
+    _ok("t6", "；".join(notes))
+
+
 def main():
     global LF_UP
     asyncio.run(t1_gate_states())
@@ -510,17 +669,18 @@ def main():
     t5_process_exit_tail()                    # C29：同上，零网络零花费
     LF_UP = _langfuse_up()
     if not LF_UP:
-        _skip("t2/t3", f"Langfuse 未起（{settings.langfuse.host}/api/public/health 不通）"
-                       f"——起 E:\\langfuse 的 compose 后复跑")
+        _skip("t2/t3/t6", f"Langfuse 未起（{settings.langfuse.host}/api/public/health 不通）"
+                          f"——起 E:\\langfuse 的 compose 后复跑")
         print("\ns9_langfuse: 3/3 过（t1 零成本 + t4 有界停机 + t5 退出尾巴），探活组待环境")
         return
     t2_api_readback()
+    t6_live_grace_curve()                     # C28/C29 未验①③：真在线才量的两格，零模型花费
     if os.getenv("LF_LIVE") != "1":
         _skip("t3", "需 LF_LIVE=1（发真模型调用，花真钱）")
-        print("\ns9_langfuse: 4/4 过（t1 + t4 + t5 + t2）")
+        print("\ns9_langfuse: 5/5 过（t1 + t4 + t5 + t2 + t6）")
         return
     asyncio.run(t3_live_roundtrip())
-    print("\ns9_langfuse: 5/5 全绿")
+    print("\ns9_langfuse: 6/6 全绿")
 
 
 if __name__ == "__main__":
