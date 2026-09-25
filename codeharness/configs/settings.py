@@ -132,9 +132,26 @@ class RecallFloorConfig(BaseModel):
     """
 
     mode: Literal["off", "score", "rank", "rerank"] = "score"
+    # C36：记忆腿**单独一档**，默认 `off`。理由不是「记忆不重要」，是这根线没在它身上标过：
+    # `min_score=0.55` 是在 kb 语料（256 字那种文档块）上标的，而记忆写进去的是一条消息的碎点
+    # （十几个字那种）。09-25 在同一台端点上量过——真相关的记忆切片 dense 分中位只有 **0.4578**，
+    # 同窗噪声中位 **0.3988**（差 0.059；kb 那侧的对照是「无关 0.1472 vs 相关 0.6222」，差 0.47）
+    # ⇒ 照搬 0.55 的后果是 **240/300 问一条记忆都召不回**，而它想挡的东西一件没挡住。
+    # 读数：`plan/rag-knowledge.md` C23 行末块 / `storage/benchmark/memory_floor_curve_*.json`。
+    memory_mode: Literal["off", "score", "rank", "rerank"] = "off"
     oversample: int = 3        # dense 候选窗 = k × 此数（≥1；rerank 档不用它，它用 reranker.recall_k）
     min_score: float = 0.55    # score 档的余弦下限：新刻度上「代价仍在 1~2/300 里」的最高档（依据见上面常量）
     max_rank: int = 5          # rank 档的名次上限（≥1）
+
+    def for_leg(self, doc_type: str) -> "RecallFloorConfig":
+        """按腿取档（C36）：`doc_type="memory"` 走 `memory_mode`，其余（`kb`）走 `mode`。
+
+        为什么不把「记忆腿不设闸」写死在 `recall()` 里：那等于用代码替一次标定说话，下次有人给
+        记忆腿标了线，只能改函数；现在它是一档配置，改默认值会先红在 s5 t39① 那一格上。
+        """
+        if doc_type == "memory" and self.memory_mode != self.mode:
+            return self.model_copy(update={"mode": self.memory_mode})
+        return self
 
     @field_validator("min_score")
     @classmethod
@@ -149,20 +166,23 @@ class RecallFloorConfig(BaseModel):
 
         `score` 档留 0 等于开了闸又什么都不砍（还白花一次 dense 预查）；大到超过标定上界的线
         等于「以为设过了」——真相关的那批也过不去，召回从此恒空，而界面看上去只是「知识库里没资料」。
+        C36 起两条腿各有一档 ⇒ **两档都判**（换了腿的坏配置一样坏，不该只判其中一条腿就放行）。
         """
         if self.oversample < 1:
             raise ValueError(f"RECALL_FLOOR__OVERSAMPLE 必须 ≥1，收到 {self.oversample}")
-        if self.mode == "score" and not (0 < self.min_score <= FLOOR_CALIBRATED_MAX_SCORE):
-            raise ValueError(
-                f"RECALL_FLOOR__MODE=score 要求 0 < MIN_SCORE <= {FLOOR_CALIBRATED_MAX_SCORE}"
-                f"（{FLOOR_CALIBRATED_ON}；超过它连尺子上真相关的切片都进不来），收到 {self.min_score}")
-        if self.mode == "rank" and self.max_rank < 1:
-            raise ValueError(f"RECALL_FLOOR__MODE=rank 要求 MAX_RANK ≥1，收到 {self.max_rank}")
-        # rerank 档只判「线在刻度内」，**不判上界**：那根线还没标定（本机只有 3 个样本点），
-        # 拿未标定的数当上界比不设界更骗人。
-        if self.mode == "rerank" and self.min_score <= 0:
-            raise ValueError("RECALL_FLOOR__MODE=rerank 要求 0 < MIN_SCORE <= 1（精排 relevance 刻度，"
-                             f"未标定），收到 {self.min_score}")
+        for leg, m in (("", self.mode), ("MEMORY_", self.memory_mode)):
+            if m == "score" and not (0 < self.min_score <= FLOOR_CALIBRATED_MAX_SCORE):
+                raise ValueError(
+                    f"RECALL_FLOOR__{leg}MODE=score 要求 0 < MIN_SCORE <= {FLOOR_CALIBRATED_MAX_SCORE}"
+                    f"（{FLOOR_CALIBRATED_ON}；超过它连尺子上真相关的切片都进不来），收到 {self.min_score}")
+            if m == "rank" and self.max_rank < 1:
+                raise ValueError(f"RECALL_FLOOR__{leg}MODE=rank 要求 MAX_RANK ≥1，收到 {self.max_rank}")
+            # rerank 档只判「线在刻度内」，**不判上界**：那根线还没标定（本机只有 3 个样本点），
+            # 拿未标定的数当上界比不设界更骗人。
+            if m == "rerank" and self.min_score <= 0:
+                raise ValueError(
+                    f"RECALL_FLOOR__{leg}MODE=rerank 要求 0 < MIN_SCORE <= 1（精排 relevance 刻度，"
+                    f"未标定），收到 {self.min_score}")
         return self
 
 
@@ -303,10 +323,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def check_rerank_floor_needs_a_service(self):
         """C23(b) 那条「不许出现第三种静默降级」的配置面：开了 `rerank` 档却没配精排服务，
-        等于**每一次 recall 都静默没有下限**（`rerank_scored` 会原样退回粗排序）。这种组合不许启动成功。"""
-        if self.recall_floor.mode == "rerank" and not self.reranker.base_url:
-            raise ValueError("RECALL_FLOOR__MODE=rerank 需要 RERANKER__BASE_URL：没配精排却有这道闸，"
-                             "每次 recall 都会静默降级成「无下限」（正是 C8 判过的那族）")
+        等于**每一次 recall 都静默没有下限**（`rerank_scored` 会原样退回粗排序）。这种组合不许启动成功。
+        C36 起两条腿各一档 ⇒ 两档都判。"""
+        for leg, m in (("", self.recall_floor.mode), ("MEMORY_", self.recall_floor.memory_mode)):
+            if m == "rerank" and not self.reranker.base_url:
+                raise ValueError(f"RECALL_FLOOR__{leg}MODE=rerank 需要 RERANKER__BASE_URL：没配精排却有这道闸，"
+                                 "每次 recall 都会静默降级成「无下限」（正是 C8 判过的那族）")
         return self
 
 

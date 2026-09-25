@@ -176,8 +176,10 @@ class LongTermMemory:
         C23：`settings.recall_floor.mode != "off"` 时先过一道相关性下限——dense 腿取宽候选、按余弦或
         名次砍掉不相关的，**再**交 hybrid 只在留下的里面重排。下限不许打在 hybrid 的返回分上（理由见
         `screen_dense`）。`off` 是今天这条单发路径，行为与判据逐字不变。
+        C36：取的是**本条腿那一档**（`for_leg(self.doc_type)`）——记忆腿默认 `off`，因为那根 0.55 只在
+        kb 语料上标过，照搬会把记忆砍空（依据与读数在 `configs/settings.py` 的 `memory_mode`）。
         """
-        cfg = settings.recall_floor
+        cfg = settings.recall_floor.for_leg(self.doc_type)
         # 读侧上界（C32 起、C35 收成一处）：经典线传的可以是整份收件，不截就是
         # 「按字数白烧额度 + 端点静默保头丢尾」。与经验池那条腿共用 `clamp_query`。
         dense = await self.embeddings.aembed_query(clamp_query(query))

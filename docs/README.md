@@ -153,7 +153,11 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 **召回相关性下限（C23，2026-09-23/24）**：`recall` 原先拿到什么回什么，不相关的切片照样进 prompt。
 现在先跑一次 dense-only 宽窗（`RECALL_FLOOR__OVERSAMPLE`，默认 3）拿**可比的**余弦与名次，按
 `RECALL_FLOOR__MODE` 筛（`score`=余弦线 / `rank`=dense 名次 / `rerank`=送精排按 relevance 分筛 / `off`=改前那条单发），
-**再**交 hybrid 只在筛剩的点里重排。三根纪律：① 线只能打在 dense 腿或精排分上——hybrid 那条回的是 RRF **名次分**，
+**再**交 hybrid 只在筛剩的点里重排。**C36（2026-09-25）：两条腿各一档**——`RECALL_FLOOR__MEMORY_MODE` 管
+`doc_type="memory"` 那条腿，代码默认 **`off`**，因为 0.55 那根线是在 kb 语料（256 字的文档块）上标的，
+而记忆写进去的是一条消息的碎点：同一台端点上量到「真相关的记忆切片 dense 分中位 0.4578 vs 同窗噪声 0.3988」
+（差 0.059；kb 那侧差 0.47）⇒ 照搬 0.55 = 240/300 问一条记忆都召不回（读数与量法见
+`plan/rag-knowledge.md` C23 行末块，判据 `s5 t39`）。三根纪律：① 线只能打在 dense 腿或精排分上——hybrid 那条回的是 RRF **名次分**，
 跟任何相似度刻度都不可比（`s5 t34` 的 m2 变异就是反例）；② **`min_score` 的刻度随档变**：`score` 是余弦、
 `rerank` 是精排 relevance，都不是可以跨端点抄的数。代码默认曾长期是 `score/0.40`，标定在**本机 bge-m3**
 + C20 那张尺子上（`tests/manual_recall_floor_curve.py`，k=5 与 k=3 各一份产物）。③ 2026-09-24 起

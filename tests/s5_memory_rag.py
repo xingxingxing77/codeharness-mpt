@@ -1443,6 +1443,78 @@ def t38_both_recall_legs_clamp_their_query():
     print(f"  ok  t38 两条召回腿实发给端点的 query 都截到 {limit} 字上限、短问句原样通过")
 
 
+def _leg_ltm(user: str, project: str, doc_type: str):
+    """把 t34 那四条文本灌进**指定那条腿**（`doc_type` 进点 id 派生式 ⇒ 两腿的点互不顶，见 t33）。"""
+    from codeharness.memory.longterm import LongTermMemory
+    ltm = LongTermMemory(project_id=project, embeddings=DirEmbeddings(C23_COS, C23_Q),
+                         user_id=user, store=gate_store(), doc_type=doc_type)
+    asyncio.run(ltm.drop())
+    asyncio.run(ltm.overflow([Message(content=t, role="user")
+                              for t in (C23_REL, C23_LOUD, C23_MID, C23_COLD)]))
+    return ltm
+
+
+def t39_recall_floor_applies_per_leg():
+    """C36：下限**分腿**——同一条线，kb 腿砍得着、记忆腿默认不吃这一刀。四格各钉一种坏法：
+
+      ① 默认值本身就是那条口径：`mode=score` 而 `memory_mode=off`，且 `for_leg` 两腿各取到自己那档。
+         这一格钉的是「0.55 只在 kb 语料上标过」这句话有没有被写成配置——有人把默认翻过来它就红。
+      ② 腿差异化（本件的正身）：同一份四条文本灌进两条腿，同一条 `min_score=0.4` 的线——kb 腿挡住
+         dense=0.25 那条，记忆腿照旧把它带回来。没有 ① 的话，② 的「记忆腿还在」可以只是「闸没人调」。
+      ③ 反向：`memory_mode="score"` 显式打开时记忆腿也要挡住 —— 证明 ② 不是把记忆腿**硬编码**成
+         不设闸（那正是本件要从 `recall()` 里删掉的那类写法），而是一档真配置。
+      ④ 坏配置两档都判：非法档名、`MEMORY_MODE=score` 而线越出标定上界、`MEMORY_MODE=rerank`
+         却没配精排服务 —— 换了腿的坏组合不许因为「validator 只看了 mode」而放行。
+    """
+    from pydantic import ValidationError
+    from codeharness.configs.settings import RecallFloorConfig, Settings
+    if not live_qdrant():
+        print("  t39 跳过（无 Qdrant）")
+        return
+    d = RecallFloorConfig()
+    assert (d.mode, d.memory_mode) == ("score", "off"), \
+        f"①失效：默认值不再是「kb 吃闸、记忆腿不吃」（{d.mode}/{d.memory_mode}）——" \
+        "0.55 只在 kb 语料上标过这件事是这格的根据，要翻默认先拿记忆腿的标定来"
+    assert (d.for_leg("kb").mode, d.for_leg("memory").mode) == ("score", "off"), \
+        f"①失效：for_leg 没把两腿分开（kb={d.for_leg('kb').mode} / memory={d.for_leg('memory').mode}）"
+    assert d.for_leg("kb") is d, "①失效：kb 腿也在复制配置对象（多一次无谓的 model_copy）"
+
+    kb = _leg_ltm("u_c36kb", "c36_leg_kb", "kb")
+    mem = _leg_ltm("u_c36mem", "c36_leg_mem", "memory")
+    try:
+        with _FloorCfg(mode="score", memory_mode="off", oversample=3, min_score=0.4):
+            got_kb = [m.content for m in asyncio.run(kb.recall(C23_Q, k=2))]
+            got_mem = [m.content for m in asyncio.run(mem.recall(C23_Q, k=2))]
+        assert C23_REL in got_kb and C23_LOUD not in got_kb, \
+            f"②失效：kb 腿那道线没起作用（{got_kb}）——这条线本来就是它标出来的，它不挡就是闸坏了"
+        assert C23_LOUD in got_mem, \
+            f"②失效：记忆腿被 kb 那根线砍了（{got_mem}）——C36 的全部理由就是这根线没在它身上标过"
+
+        with _FloorCfg(mode="score", memory_mode="score", oversample=3, min_score=0.4):
+            got_on = [m.content for m in asyncio.run(mem.recall(C23_Q, k=2))]
+        assert C23_LOUD not in got_on, \
+            f"③失效：memory_mode 打开后记忆腿仍没吃这一刀（{got_on}）⇒ ② 的「没砍」是硬编码不是配置"
+
+        for bad in [dict(memory_mode="nope"), dict(memory_mode="score", min_score=1.5),
+                    dict(memory_mode="score", min_score=0.0), dict(memory_mode="rank", max_rank=0)]:
+            try:
+                RecallFloorConfig(**bad)
+            except ValidationError:
+                continue
+            raise AssertionError(f"④失效：这种坏配置被收下了 {bad}")
+        try:
+            Settings(_env_file=None, recall_floor={"mode": "off", "memory_mode": "rerank"},
+                     reranker={"base_url": ""})
+            raise AssertionError("④失效：memory_mode=rerank 却没配精排服务，还让它启动了")
+        except ValidationError:
+            pass
+    finally:
+        asyncio.run(kb.drop())
+        asyncio.run(mem.drop())
+    print("  ok  t39 C36 分腿：默认 kb=score/memory=off、同一条线下两腿结果各自不同、"
+          "memory_mode 打开后记忆腿也吃这一刀、坏配置两档都判")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -1467,7 +1539,8 @@ def main():
               t33_point_id_carries_tenant_and_doc_type,
               t34_recall_floor_dense_score, t35_recall_floor_dense_rank,
               t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer,
-              t38_both_recall_legs_clamp_their_query]
+              t38_both_recall_legs_clamp_their_query,
+              t39_recall_floor_applies_per_leg]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

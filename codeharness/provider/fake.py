@@ -119,9 +119,10 @@ def uncalibrated_embeddings():
     """
     from codeharness.configs.settings import settings
     cfg = settings.recall_floor
-    keep = cfg.mode, cfg.min_score, cfg.max_rank, cfg.oversample
-    cfg.mode = "off"
+    keep = cfg.mode, cfg.memory_mode, cfg.min_score, cfg.max_rank, cfg.oversample
+    cfg.mode = cfg.memory_mode = "off"        # C36：两腿各有一档，要关就都得关
     try:
         yield cfg
     finally:
-        cfg.mode, cfg.min_score, cfg.max_rank, cfg.oversample = keep
+        (cfg.mode, cfg.memory_mode, cfg.min_score, cfg.max_rank,
+         cfg.oversample) = keep
