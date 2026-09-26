@@ -266,6 +266,77 @@ def t16_event_flusher_survives_a_failing_xadd():
     _ok("t16", "xadd 抖动：两条事件放回队首后仍写出、flusher 不退出、warning 留痕、cancel 可收场")
 
 
+def t17_event_bus_thread_safe():
+    """C63：进程内 `SessionEventBus.publish` 必须顶得住**跨线程**并发。
+
+    `LogBridge` 的 loguru sink 在**发日志的那个线程**里跑 `broadcast_log → publish`
+    （`server/bridges.py:17-20`；loguru 未开 enqueue，回调跟调用方线程走），与 loop 线程的
+    publish 并发。Redis 版为此专门有 `_lock`（`event_store.py:66`），进程内版此前没有：
+    `_counters += 1` 非原子 ⇒ 丢更新 ⇒ 两条事件同 seq/同 cursor ⇒ 前端按
+    `cursor <= lastCursor` 去重**吞掉一条**；且 `asyncio.Queue.put_nowait` 被跨线程调用。
+
+    两格（竞态放大器 `sys.setswitchinterval(1e-6)`，C7 先例）：
+      ① 计数器不丢更新：4 线程 × 250 发 + loop 线程 250 发并发 ⇒ 1250 条事件的 seq 必须
+         恰好 1..1250 各一次（丢了更新就有重复+空洞），cursor 与 seq 一致；
+      ② 跨线程投递：线程里 publish ⇒ 订阅者经 `call_soon_threadsafe` 转投，loop 里收得到
+         （`asyncio.Queue` 非线程安全，线程侧不许直接 put）；同 loop 的 publish 照旧
+         **立刻可见**（get_nowait 快路，既有语义不变）。
+    """
+    from server.events import SessionEventBus, cursor_of
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        async def case():
+            bus = SessionEventBus()
+            q = bus.subscribe("sC")
+            errs = []
+
+            def hammer():
+                try:
+                    for _ in range(250):
+                        bus.publish("sC", kind="log", value="t")
+                except Exception as exc:                     # 线程里的崩别吞：算了 1250 条对不上就查不出来
+                    errs.append(exc)
+
+            threads = [threading.Thread(target=hammer) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for i in range(250):
+                bus.publish("sC", kind="report", value=f"l{i}")
+            for t in threads:
+                t.join()
+            assert not errs, f"线程侧 publish 抛错：{errs[:2]}"
+
+            hist = bus.history("sC")
+            seqs = [e.seq for e in hist]
+            assert len(hist) == 1250, f"事件数 {len(hist)} != 1250"
+            assert sorted(seqs) == list(range(1, 1251)), \
+                "seq 有重复/空洞（计数器丢更新：两条事件同 seq 同 cursor，前端去重要吞一条）"
+            assert all(e.cursor == cursor_of(e.seq) for e in hist), "cursor 与 seq 不一致"
+            assert [e.seq for e in hist] == sorted(e.seq for e in hist), "history 非升序"
+
+            # ② 跨线程投递 + 同 loop 快路
+            q2 = bus.subscribe("sD")
+
+            def fire():
+                bus.publish("sD", kind="log", value="from-thread")
+
+            th = threading.Thread(target=fire)
+            th.start()
+            th.join()
+            ev2 = await asyncio.wait_for(q2.get(), timeout=5)
+            assert ev2.value == "from-thread", f"线程侧 publish 没进订阅者队列：{ev2}"
+            ev3 = bus.publish("sD", kind="log", value="from-loop")
+            assert q2.get_nowait() is ev3, "同 loop 的 publish 不再立刻可见（快路语义变了）"
+
+        asyncio.run(case())
+        _ok("t17", "bus 跨线程并发：1250 发 seq 恰好 1..1250 各一次、cursor 一致；"
+                   "线程侧 publish 经 call_soon_threadsafe 进订阅者队列、同 loop 照旧立刻可见")
+    finally:
+        sys.setswitchinterval(old)
+
+
 # ---------------- redis 部分 ----------------
 async def t2_dual_worker_replay():
     from platforms.event_store import RedisEventBus
@@ -697,15 +768,16 @@ def main():
     t11_start_409_store_view()
     t15_project_name_cannot_escape_workspace()
     t16_event_flusher_survives_a_failing_xadd()
+    t17_event_bus_thread_safe()
     global REDIS_UP
     REDIS_UP = _redis_up()
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 5/5 过（进程内路 t1+t10+t11+t15+t16），redis 路待环境")
+        print("\ns7_platform: 6/6 过（进程内路 t1+t10+t11+t15+t16+t17），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 16/16 全绿（双配置）")
+    print("\ns7_platform: 17/17 全绿（双配置）")
 
 
 if __name__ == "__main__":
