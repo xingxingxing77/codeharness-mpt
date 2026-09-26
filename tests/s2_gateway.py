@@ -267,6 +267,21 @@ def t8_retry_parse():
     finally:
         _s.repair_llm_output = True
 
+    # ---- C60：尾逗号那一档**不许动字符串字面量里的逗号** ----
+    # 到 09-26 为止那一档是 `re.sub(r",\s*([}\]])", r"\1", text)`——**不认引号**：字符串**值**里的
+    # `,]` 会跟着真尾逗号一起被吃掉。真模型在 payload 里塞代码/模板是常事
+    # （`{"thought": "保留 [1, 2, ] 这段"}` 这种），后果是**修复档把一个被改坏的对象当成修好了返回**
+    # ——解析成功、字段却少了个逗号，调用方两边都看不出来。修法是照 `_fix_unclosed` 同款逐字符扫引号。
+    tricky = '```json\n{"thought": "保留 [1, 2, ] 这段", }\n```'
+    got_tricky = repair_to_model(tricky, Out)
+    if got_tricky is None:
+        _fail("60. 带围栏 + 真尾逗号的坏输出没修出来（那一档被改坏了）")
+    if got_tricky.thought != "保留 [1, 2, ] 这段":
+        _fail(f"60. 修复档改掉了字符串字面量里的逗号（数据被改坏）：{got_tricky.thought!r}")
+    # 阳性对照：真尾逗号那一档照旧要生效——别用「把整档关掉」来换这一格绿
+    if repair_to_model('{"thought": "z", }', Out) is None:
+        _fail("60. 阳性对照失效：真尾逗号反而修不出来了")
+
 
 # ---------- 9. extract_* 与 escape 修复 ----------
 def t9_extract_helpers():

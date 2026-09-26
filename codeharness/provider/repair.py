@@ -339,7 +339,45 @@ def _strip_fence(text: str) -> str:
 
 
 def _fix_trailing_comma(text: str) -> str:
-    return re.sub(r",\s*([}\]])", r"\1", text)
+    """去掉对象/数组**最后一个成员后**的逗号——**只在不处于字符串字面量里时**。
+
+    ⚠ 别用 `re.sub(r",\\s*([}\\]])", r"\\1", text)`（本函数到 09-26 为止的写法）：那个模式不认引号，
+    字符串**值**里的 `,]`/`,}` 也会被吃掉。真模型在 payload 里塞代码/模板/片段是常事
+    （`{"thought": "保留 [1, 2, ] 这段"}` 这种），后果是**修复档把一个被改坏的对象当成修好了返回**
+    ——调用方拿到的 JSON 解析成功、字段却少了一个逗号，两边都看不出来。
+    `_fix_unclosed` 早就是逐字符扫引号的状态机，这里照同一个形状走。
+    """
+    out: list[str] = []
+    in_str = esc = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if esc:                                  # 字符串里被转义的那个字符，原样收
+            esc = False
+            out.append(ch)
+        elif in_str:
+            if ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            out.append(ch)
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+        elif ch == ",":
+            # 尾逗号的判据只有一条：**跳过空白后紧跟着 `}` 或 `]`**。满足就整段丢掉（逗号 + 中间的空白），
+            # 不满足就原样保留（那是成员之间的正常逗号）。
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i = j - 1                            # 本轮末尾还会 `i += 1` ⇒ 正好停在那个括号上（别写 j，
+            else:                                    # 那会连括号一起跳掉——第一版就是这么把 `}` 吃没的）
+                out.append(ch)
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _extract_json_block(text: str) -> str:
