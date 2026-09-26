@@ -283,13 +283,15 @@ def t4_breakpoint_settles_and_stops():
           f"对照组旧写法 {clobbered!r}、start 409 detail={detail!r}）")
 
 
-def _patch_gate_assembly(leader_script=None):
+def _patch_gate_assembly(leader_script=None, on_agents=None):
     """把 dynamic 线三个角色的模型换成 FakeLLM 剧本（零花费、零外网），返回还原函数。
 
     ⚠ 换的是 `codeharness.team.dynamic_assembly` 这个**模块属性**：`runner._prepare` 在调用时才
     `from codeharness.team import dynamic_assembly`，绑到调用前取好的名字上就换不掉。
     `leader_script` 换队长的剧本（C15 要用「一上来就 end」那一格），默认就是 write_file → end。
     队长第一跑的 `write_file` 参数与 t5/t6/t8 断言的文件名内容逐字绑定，改它要一起改。
+    `on_agents`（C59 t11 用）：装配好的三个角色交出去给调用方挂钩子（那格要把 `write_file` 包一层计数器），
+    默认 None = 不挂，既有调用一律不受影响。
     """
     import json
     import codeharness.team as team
@@ -310,21 +312,25 @@ def _patch_gate_assembly(leader_script=None):
         for n in ("Alice", "Bob"):
             agents[n].llm = FakeLLM([s_end])
             agents[n].ltm = None
+        if on_agents is not None:
+            on_agents(agents)
         return agents, sop
 
     team.dynamic_assembly = patched
     return lambda: setattr(team, "dynamic_assembly", orig)
 
 
-def _gate_runner(project: str, leader_script=None):
+def _gate_runner(project: str, leader_script=None, permission: str = "readonly", on_agents=None):
     """真图 + 真 gate：队长只调一次需要审批的 `write_file`。
 
     为什么必须有这两组：t1–t4 全打在替身图上，而 A4 真模型那批实测出
     **`astream_events(v2)` 里没有 `on_interrupt` 这条事件**——替身喂得出的事件，生产发不出来，
     于是「停在待批处被写成 finished、审批卡进不了活流」这个缺陷带着 s17 全绿活了很久（§0 硬约定 4）。
+    `permission` / `on_agents` 是 C59 t11 加的两个口（默认值与既有调用逐字一致）：
+    那格要 `full_access`（免得审批闸口先插一脚）并把 `write_file` 包一层计数器。
     """
     import shutil
-    restore = _patch_gate_assembly(leader_script)
+    restore = _patch_gate_assembly(leader_script, on_agents)
     tmp = Path(tempfile.mkdtemp())
     store = SessionStore(path=tmp / "sessions.json")
     runner = SessionRunner(store, SessionEventBus())
@@ -332,7 +338,7 @@ def _gate_runner(project: str, leader_script=None):
     async def none():
         return None
     runner._saver = none
-    s = store.create("写一个文件", project_name=project, paradigm="dynamic", permission="readonly")
+    s = store.create("写一个文件", project_name=project, paradigm="dynamic", permission=permission)
 
     def cleanup():
         restore()
@@ -827,18 +833,128 @@ def t10_unknown_command_is_countable():
     print("  ok  t10 未知命令：留可 grep 的告警 + 落账本计数 + 快照带出（已知命令三处都不动＝阳性对照）")
 
 
+def t11_ask_human_does_not_replay_side_effects():
+    """C59（09-26）：`ask_human` 与副作用命令在同一条命令列表里时，resume **不许**把副作用再跑一遍。
+
+    为什么必须有这条**真图**判据：`interrupt()` 恢复时 LangGraph 从**节点开头**重跑整个节点函数，
+    而 `_act` 原先在**函数末尾**才返回状态更新 ⇒ 中断前跑完的那截命令，结果一个字都没落进 state，
+    重放时全部再跑一遍。复现读数（本轮）：一条 `[write_file, ask_human]` 的命令列表，
+    `ask` 之前 `write_file` 1 次、resume 之后 **2** 次；终端命令 / 追加写 / 外部 API 同理翻倍。
+
+    修法三件：把「问人」挪进零副作用的 `ask` 节点（`act` 靠 `pending_ask` 条件边转过去）、
+    加 `act_cursor` 跳过已跑完的那截、`ask` 回边走 `gate`。四格（都走真图真 resume，零花费）：
+
+      ① **主判据**：`[write_file, ask_human]` → resume 之后 `write_file` 恰好 **1** 次（修复前 2 次）；
+      ② **阳性对照**：不含 ask 的列表照旧执行一次 —— 证明 ① 不是「命令根本没跑」那种假绿；
+      ③ **游标重置**：第一轮只问人、第二轮才写 ⇒ 第二轮的写命令要真执行（`_think` 不重置游标的话，
+         第二轮 `_act` 会从上一轮的游标起步、整列命令被跳过）；
+      ④ **回边过闸门**（结构格）：编译出的图里 `ask → gate` 必须在、`ask → act` 不许有
+         —— ask 回来后直连 `act` 就等于让剩下的命令绕过审批。
+    """
+    import json
+
+    count = {"n": 0}
+
+    def wrap(agents):
+        """把队长的 `write_file` 包一层计数器。**写文件看不出来跑了几次**（覆盖写），副作用次数只能直接数。"""
+        from codeharness.const import TEAMLEADER_NAME as _TL
+        inner = agents[_TL].tools["write_file"]
+
+        class _Counting:
+            async def ainvoke(self, args, **kw):
+                count["n"] += 1
+                return await inner.ainvoke(args, **kw)
+
+            def __getattr__(self, k):
+                return getattr(inner, k)
+
+        agents[_TL].tools["write_file"] = _Counting()
+
+    def script(*cmds):
+        return json.dumps({"thought": "脚本", "commands": list(cmds)}, ensure_ascii=False)
+
+    WRITE = {"command_name": "write_file", "args": {"path": "trace.txt", "content": "ONCE"}}
+    ASK = {"command_name": "RoleZero.ask_human", "args": {"question": "要继续吗？"}}
+    END = {"command_name": "end", "args": {}}
+
+    def run_case(project, leader_script):
+        """起会话 → 等它停车或收口 → （**只有真停车**时才回话）→ 等终态。
+
+        返回 `(停车时的状态, 回话前次数, 最终次数, 终态)`。
+        ⚠ 别对每个用例都断言「必须停在待人工处」：② 那条剧本里没有 ask，本来就该直接收口。
+        """
+        count["n"] = 0
+        store, runner, s, cleanup = _gate_runner(project, leader_script,
+                                                 permission="full_access", on_agents=wrap)
+        try:
+            status, _kept = _settle_parked(store, runner, s)
+            before = count["n"]
+            if status != "awaiting_human":
+                return status, before, count["n"], store.get(s.id).status.value
+
+            async def go():
+                started = runner.answer_human(s.id, "继续")
+                end = asyncio.get_running_loop().time() + 30
+                while asyncio.get_running_loop().time() < end:
+                    if store.get(s.id).status.value in ("finished", "failed", "stopped"):
+                        break
+                    await asyncio.sleep(0.1)
+                return started, store.get(s.id).status.value
+
+            started, final = asyncio.run(go())
+            assert started, f"{project}：resume 没起来"
+            return status, before, count["n"], final
+        finally:
+            for t in list(runner.tasks.values()):
+                t.cancel()
+            cleanup()
+
+    st1, before1, after1, final1 = run_case("s17_c59_once", [script(WRITE, ASK), script(END)])
+    assert st1 == "awaiting_human", f"t11① 该停在待人工处，实际 {st1!r}"
+    assert before1 == 1, f"t11① 停车前 write_file 就该只有 1 次，实际 {before1}"
+    assert after1 == 1, f"t11① resume 之后 write_file 跑了 {after1} 次（C59 复发：中断前那半条被重放）"
+    assert final1 == "finished", f"t11① 终态 {final1!r}（该正常收口）"
+
+    _st2, _b2, after2, final2 = run_case("s17_c59_noask", [script(WRITE), script(END)])
+    assert after2 == 1 and final2 == "finished", \
+        f"t11② 阳性对照：不含 ask 的列表该执行一次并收口，实际 count={after2} final={final2!r}"
+
+    st3, before3, after3, final3 = run_case("s17_c59_cursor", [script(ASK), script(WRITE), script(END)])
+    assert st3 == "awaiting_human", f"t11③ 该停在待人工处，实际 {st3!r}"
+    assert before3 == 0, f"t11③ 第一轮只问人不该有副作用，实际 {before3}"
+    assert after3 == 1, f"t11③ 第二轮的新命令列表没被执行（游标没重置）：{after3}"
+    assert final3 == "finished", f"t11③ 终态 {final3!r}"
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+    g = RoleZero({"name": "probe", "profile": "p", "goal": "g"}, [], FakeLLM(["{}"])).build(
+        checkpointer=InMemorySaver())
+    # 静态边读编译图留着的那个 builder（`get_graph().edges` 只给 `__start__/__end__` 两条，
+    # 条件边与后加的静态边都不在里面 —— 本轮第一版就是被这个绕过、红在格自己身上）。
+    # 「`act` 在 `pending_ask` 时能走到 `ask`」那半由 ①②③ 的行为读数证（它们真停在了 ask 上）。
+    edges = set(g.builder.edges)
+    assert ("ask", "gate") in edges, f"t11④ `ask` 回来没走审批闸门（剩下的命令会绕过审批）：{sorted(edges)}"
+    assert ("ask", "act") not in edges, f"t11④ `ask` 直连了 `act`：{sorted(edges)}"
+    assert {"think", "gate", "act", "ask"} <= set(g.builder.nodes), "四个节点没齐"
+    print(f"  ok  t11 C59：含 ask 的命令列表 resume 后副作用仍是 1 次（修复前 2）、不含 ask 的照旧 1 次、"
+          f"第二轮新列表真执行、静态边 {sorted(e for e in edges if e[0] == 'ask')}（`ask` 回边走 gate）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
               t7_special_commands_never_park, t8_restart_keeps_parked_session,
               t9_failure_is_loud,
-              t10_unknown_command_is_countable]
+              t10_unknown_command_is_countable,
+              t11_ask_human_does_not_replay_side_effects]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
           f"不抢槽/连点幂等 1 组 + human-input 409 端点半边 1 组 + 断点落态/停止/start 1 组 + "
           f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
-          f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组")
+          f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组 + "
+          f"未知命令可数 1 组 + **ask_human 不重放副作用 1 组（C59）**")
 
 
 if __name__ == "__main__":

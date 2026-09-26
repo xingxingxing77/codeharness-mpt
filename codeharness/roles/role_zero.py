@@ -40,6 +40,16 @@ class RoleZeroState(TypedDict):
     experience: str
     respond_language: str
     finished: bool
+    # C59：`_act` 执行到第几条命令的**续跑游标**（0 = 从头）。中断恢复时 LangGraph 从节点开头重跑
+    # 整个节点函数，没有游标就只能把中断前的命令再跑一遍（真图实测副作用 1→2 次）。
+    # `_think` 每产出一个新命令列表就把它重置为 0——忘了这条，新一列命令会被旧游标跳过头几条。
+    act_cursor: int
+    # C59：`_act` **因为碰到 ask_human 而停下**（命令没跑完，等人回话）时为 True。
+    # 它是 `act → ?` 那条条件边的判据：`True` 走零副作用的 `ask` 节点，否则才回 `think`。
+    # ⚠ 不能改用「`_act` 返回 `Command(goto="ask")`」——静态条件边不会被 goto 压掉，两个目标会
+    # **同时被调度**（实测：`think` 在没人回话时就跑了，resume 时两个节点挤进同一 tick 各写一次
+    # `history` ⇒ `InvalidUpdateError`）。路由必须由这一条条件边**唯一**决定。
+    pending_ask: bool
 
 
 class RoleZero:
@@ -229,12 +239,30 @@ class RoleZero:
         g.add_node("think", self._think)
         g.add_node("gate", self._gate_commands)        # 工具审批闸门（批次36）：无 LLM、无副作用
         g.add_node("act", self._act)
+        # C59：`ask_human` 单独一个节点（**零副作用**，所以恢复时重放它无害）。为什么必须有它：
+        # `interrupt()` 恢复时 LangGraph 从**节点开头**重跑节点函数，而 `_act` 只在函数末尾才返回
+        # 状态更新 ⇒ 中断前已跑完的命令会**再跑一遍**（真图实测 `write_file` 调用 1→2 次）。
+        # 这与 `gate` 是同一范式，纪律写在 `strategy/plan_and_act.py:6-7`。
+        g.add_node("ask", self._ask)
         g.set_entry_point("think")
         g.add_conditional_edges("think", lambda s: END if s["finished"] else "gate")
         g.add_edge("gate", "act")
-        # act 若已 finished（end 命令）直接收口：旧写法 act→think 无条件回跳，
-        # 多烧一次模型不说，think 追加的无 results 条目还会让 as_node 收尾读 results 当场 KeyError。
-        g.add_conditional_edges("act", lambda s: END if s["finished"] else "think")
+
+        def _after_act(s: RoleZeroState):
+            """C59：`act` 的下一步**由这一条条件边唯一决定**（别用 `Command(goto=)`，见 `pending_ask` 的注释）。
+
+            顺序有讲究：`pending_ask` 排在 `finished` 之前——命令列表写成 `[end, ask_human]` 时
+            （模型偶尔会这么写），旧行为是**照样把问题问出去**，这里要保住它：问完再由 `finished`
+            收口。反过来的话，那条 ask 会被静默丢掉、人永远等不到问题。
+            """
+            if s.get("pending_ask"):
+                return "ask"
+            return END if s["finished"] else "think"
+
+        g.add_conditional_edges("act", _after_act)
+        # `ask` 之后**必须回 `gate`**，不能直接回 `act`：问完之后剩下的命令还没过审批闸门，
+        # 直连 `act` 就等于让 ask 之后那半条命令绕过审批（这条也是判据之一）。
+        g.add_edge("ask", "gate")
         return g.compile(checkpointer=checkpointer or InMemorySaver())
 
     # ---- 工具审批闸门（S11-批次36）----
@@ -251,7 +279,10 @@ class RoleZero:
             return {}
         last = s["history"][-1] if s["history"] else {}
         reason = str(last.get("thought", ""))[:200]
-        for cmd in last.get("commands", []):
+        # C59：只 police **还没跑的那一截**（游标之后）。第一趟游标是 0、等价于全列表（原行为）；
+        # ask 回来后游标已前进，已批准并执行过的命令不该再去台账上问第二遍。
+        start = int(s.get("act_cursor") or 0)
+        for cmd in last.get("commands", [])[start:]:
             name, args = cmd["command_name"], cmd.get("args", {})
             # 只 police `self.tools` 里真有的工具（C15）：`end`/`RoleZero.*`/`Plan.*`/`publish_*`
             # 在 `_act` 里走特殊分支、一次副作用都不发生，而 `_approval.TOOL_TIER` 没登记它们，
@@ -331,25 +362,45 @@ class RoleZero:
             commands = [{"command_name": "end", "args": {}}]
         self.memory.add(Message(content=thought.thought, role="assistant",
                                 cause_by=RequirementTag.RUN_COMMAND, sent_from=self.profile["name"]))
-        return {"history": s["history"] + [{"thought": thought.thought, "commands": commands}]}
+        # C59：新命令列表配新游标。**必须在这里重置**——`_act` 的续跑游标是「这一列命令跑到第几条」，
+        # 而 `_think` 每次都产出一列全新的命令；不重置，第二轮的 `_act` 会拿上一轮的游标跳过头几条。
+        # （C13 那轮踩的是同族形状：投递游标 `seen` 刻意不进 init。）
+        return {"history": s["history"] + [{"thought": thought.thought, "commands": commands}],
+                "act_cursor": 0, "pending_ask": False}
 
     # ---- 源 _act(:280-301)/_run_commands(:385)/_run_special_command(:420) ----
     # config 参数由 LangGraph 注入；interrupt() 的 get_config 依赖它（langgraph 1.x 节点执行路径不自带）
     async def _act(self, s: RoleZeroState, config: RunnableConfig | None = None):
+        """顺序执行本轮的 `commands`。**可重入**（C59）：从 `act_cursor` 处接着跑。
+
+        为什么需要游标：`interrupt()` 恢复时 LangGraph 从**节点开头**重跑整个节点函数（它没有
+        「从函数中间续跑」的能力），而本函数只在**末尾**返回状态更新 ⇒ 中断前跑完的那截命令，
+        结果一个字都没落进 state，重放时全部再跑一遍。真图实测：一条 `[write_file, ask_human]`
+        的命令列表，`ask` 之前 `write_file` 调 1 次、resume 之后调 **2** 次。
+        现在碰到 `ask_human` 就**不在这里 interrupt**，而是带着「跑到第几条」交给零副作用的 `ask` 节点。
+
+        ⚠ 已跑完的那截结果从 `last["results"]` 续上（`ask` 节点写它就是为这个），别再从头 append。
+        """
         from langchain_core.runnables.config import var_child_runnable_config
         tok = var_child_runnable_config.set(config)
         try:
             last = s["history"][-1]
-            results, finished = [], False
-            for cmd in last["commands"]:
+            commands = last["commands"]
+            start = int(s.get("act_cursor") or 0)          # 0 = 这一列命令从头跑
+            results, finished = list(last.get("results") or []), False
+            pending_at = -1                                # >=0 = 停在这里等人回话
+            for idx in range(start, len(commands)):
+                cmd = commands[idx]
                 name, args = cmd["command_name"], cmd.get("args", {})
+                if name == "RoleZero.ask_human":           # 源 ask_human(:456) → 交 `ask` 节点
+                    # C59：**在这里不 interrupt**，只记下「停在第几条」交给 `ask`（零副作用节点）。
+                    # 恢复时重放的是 `ask`，上面那些副作用一次都不会重来。
+                    pending_at = idx
+                    break
                 try:
                     if name in ("end", "End"):                    # 源 _end(:474)
                         finished = True
                         results.append({"name": name, "result": "[结束]"})
-                    elif name == "RoleZero.ask_human":            # 源 ask_human(:456) → interrupt
-                        answer = interrupt({"question": args.get("question", "")})
-                        results.append({"name": name, "result": answer})
                     elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
                         results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
                     elif name in self.PUBLISH_COMMANDS:           # 源 TeamLeader.publish_team_message(:81)
@@ -398,9 +449,31 @@ class RoleZero:
                 except Exception as e:                            # self-heal：错误回喂下一轮（源 :289 error_msg 同语义）
                     results.append({"name": name, "result": f"[错误] {type(e).__name__}: {e}"})
             history = s["history"][:-1] + [{**last, "results": results}]
-            return {"history": history, "finished": finished}
+            # 游标：停在 ask 上就留在那一条（`_ask` 读它、并把游标推到下一条）；跑完就推到列表末尾。
+            # `pending_ask` 是 `act → ?` 那条条件边的判据（见 `build()` 里的 `_after_act`）。
+            return {"history": history, "finished": finished,
+                    "act_cursor": pending_at if pending_at >= 0 else len(commands),
+                    "pending_ask": pending_at >= 0}
         finally:
             var_child_runnable_config.reset(tok)
+
+    async def _ask(self, s: RoleZeroState):
+        """`RoleZero.ask_human` 的落点（C59）。**零副作用**——所以恢复时重放它无害，这正是它存在的理由。
+
+        只做三件事：读游标处那条命令的问题、`interrupt()` 问人、把答案记进本轮结果并把游标 +1。
+        恢复时 LangGraph 会把这个函数从头再跑一遍：`interrupt()` 这一次不再暂停，而是**直接返回**上次的
+        答复值，于是继续往下走——所以这里的每一句都必须是幂等的（读 state / 拼结果 / 写回）。
+        真正的副作用在 `_act` 里，而它靠游标跳过已跑完的那截。
+
+        ⚠ 出口是 `build()` 里的静态边 `ask → gate`（不是直接回 `act`）：问完之后剩下的命令还没过审批闸门。
+        """
+        last = s["history"][-1]
+        idx = int(s.get("act_cursor") or 0)
+        cmd = last["commands"][idx]
+        answer = interrupt({"question": cmd.get("args", {}).get("question", "")})
+        results = list(last.get("results") or []) + [{"name": "RoleZero.ask_human", "result": answer}]
+        return {"history": s["history"][:-1] + [{**last, "results": results}],
+                "act_cursor": idx + 1, "pending_ask": False}
 
     # ---- 嵌入团队图（接口与 Agent.as_node 完全一致） ----
     def as_node(self, name: str):
@@ -442,7 +515,10 @@ class RoleZero:
                     except Exception as e:
                         logger.warning(f"plan_fn({type(self.plan_fn).__name__}) 失败，退回无规划: {type(e).__name__}: {e}")
             sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
-                                       "respond_language": "中文", "finished": False})
+                                       "respond_language": "中文", "finished": False,
+                                       # C59：新一跑从第 0 条命令开始（不传也行——`_act`/`_ask`/`gate`
+                                       # 都按 `s.get("act_cursor") or 0` 兜底，这里写出来只为读代码时看得见）
+                                       "act_cursor": 0})
             turns = sub["history"] or []
             # `reply_to_human` 可能在任意一轮（模型常是「先汇报、再 end」），只读最后一轮会把成员
             # 干完活的那句话蒸发在收尾 thought 里（实测：给成员排两轮脚本，黑板收到的是第二轮的「收工」）
