@@ -524,20 +524,32 @@ def _purge(sid: str):
     r.zrem(INDEX, sid)
 
 
-def _worker(phase: str, root: Path, project: str, sid: str = "") -> dict:
+def _worker(phase: str, root: Path, project: str, sid: str = "", script_kind: str = "approve") -> dict:
     """t8 第二格必须跨**进程**：单进程里「启动自愈」和「重启后重建图」两件事一件都发生不了。
 
     `park` = 真图真 gate 挂出审批卡后进程退出（=服务死掉）；`resume` = 全新进程 `create_app()`
     （启动期真跑自愈）走真 HTTP 面把它恢复掉。两个进程都把 `WORKSPACE_ROOT` 指到 tmp，断点因此
     落在 `<root>/storage/checkpoints.db`——与生产 `default_checkpoint_path` 同一个形状，跑完随 tmp 没。
     （产物目录 `workspace/<project>` 是工具层按 cwd 算的，跟 t5/t6 一样另清。）
+    `script_kind="ask"`（t12②）：停车点不是审批卡而是 `ask_human`——剧本 `[ask_human, write_file, end]`
+    加 `full_access`（没有审批卡，唯一的 interrupt 来自 ask），量的是「游标/pending_ask 进了 checkpointer、
+    重启后续得上」而不是「审批卡还在台账里」。
     """
     import server.settings as srv_settings
     from codeharness.configs.settings import settings
     settings.platform.use_redis = True
     root.mkdir(parents=True, exist_ok=True)
     srv_settings.WORKSPACE_ROOT = root        # `runner._saver` 调用时才读这个属性，改这里就改了断点位置
-    restore = _patch_gate_assembly()
+    import json as _json
+    if script_kind == "ask":
+        leader = [_json.dumps({"thought": "先问人再动手", "commands": [
+            {"command_name": "RoleZero.ask_human", "args": {"question": "重启后还能续上吗？"}},
+            {"command_name": "write_file", "args": {"path": "after_ask.txt", "content": "RESUMED-OK"}},
+            {"command_name": "end", "args": {}}]}, ensure_ascii=False)]
+        permission = "full_access"
+    else:
+        leader, permission = None, "readonly"
+    restore = _patch_gate_assembly(leader)
     try:
         if phase == "park":
             from platforms.event_store import RedisEventBus
@@ -550,7 +562,7 @@ def _worker(phase: str, root: Path, project: str, sid: str = "") -> dict:
             async def go():
                 bus.start()
                 s = store.create("写一个文件", project_name=project, paradigm="dynamic",
-                                 permission="readonly")
+                                 permission=permission)
                 runner.start(s)
                 status = "timeout"
                 for _ in range(600):                       # 60s 还不收口就是挂了，别把门禁一起卡住
@@ -561,7 +573,8 @@ def _worker(phase: str, root: Path, project: str, sid: str = "") -> dict:
                 from codeharness.environment.checkpoint import close_all
                 await close_all()                         # 断点得真写进 sqlite 文件，WAL 不能留在将死的进程里
                 await bus.aclose()
-                return {"sid": s.id, "parked": status}
+                return {"sid": s.id, "parked": status,
+                        "file_before": (Path("workspace") / project / "after_ask.txt").exists()}
             return asyncio.run(go())
 
         import time
@@ -569,18 +582,23 @@ def _worker(phase: str, root: Path, project: str, sid: str = "") -> dict:
         sa.WORKSPACE_ROOT = root                          # create_app 的 mkdir/静态挂载在建 app 时读它
         from fastapi.testclient import TestClient
         from server.app import create_app
-        target = Path("workspace") / project / "probe.txt"
+        target = Path("workspace") / project / ("after_ask.txt" if script_kind == "ask" else "probe.txt")
         out: dict = {}
         with TestClient(create_app()) as c:
             out["after_boot"] = c.get(f"/api/sessions/{sid}").json()["status"]
             appr = c.get(f"/api/sessions/{sid}/approvals").json()
             out["pending"] = len(appr["pending"])
-            if not appr["pending"]:
-                return out                                # 没有卡就没资格谈恢复
-            aid = appr["pending"][0]["id"]
-            r = c.post(f"/api/sessions/{sid}/approvals/{aid}/respond", json={"outcome": "allowed-once"})
-            out["respond"] = r.status_code
-            out["ok"] = r.json().get("ok") if r.status_code == 200 else None
+            if script_kind == "ask":
+                # 停在 ask 上没有审批卡：恢复走 human-input（普通回答，`_ask` 的 interrupt 直接吃它）
+                r = c.post(f"/api/sessions/{sid}/human-input", json={"content": "继续"})
+                out["respond"] = r.status_code
+            else:
+                if not appr["pending"]:
+                    return out                                # 没有卡就没资格谈恢复
+                aid = appr["pending"][0]["id"]
+                r = c.post(f"/api/sessions/{sid}/approvals/{aid}/respond", json={"outcome": "allowed-once"})
+                out["respond"] = r.status_code
+                out["ok"] = r.json().get("ok") if r.status_code == 200 else None
             final = ""
             for _ in range(600):
                 time.sleep(0.1)
@@ -963,28 +981,252 @@ def t11_ask_human_does_not_replay_side_effects():
           f"（`ask` 回边走 gate）")
 
 
+def t12_approval_and_ask_alternate():
+    """C59 未验边界两格（09-26 验证批，主仓零生产改动）：审批与 ask 的**交互组合**。
+
+    t11 覆盖纯 ask 的形状（t5/t6/t7 覆盖纯审批）；没量过的是两族组合：
+      格①（进程内，真图真台账，readonly）两个子形状——**停车序由 gate 的前置性决定**（gate 会把
+        一列命令里所有待批项**全部前置**问完，act 才开跑；实测读数，见下）：
+        ①a 三轮剧本 `[WRITE_A] / [ASK] / [WRITE_B, END]` ⇒ **批A → 问 → 批B**（题面原样的交替）：
+           批 A 之前零副作用、A 恰好 1 次；停在 ask 上时台账 settled=1/pending=0（纯问）；
+           ask 回来后 B 照样挂卡（不绕过审批闸门）；B 恰好 1 次；终态 finished。
+        ①b 单列表 `[WRITE_A, ASK, WRITE_B, END]` ⇒ **批A → 批B → 问**（同列表混合形状）：
+           ask 回来后 gate 按 `commands[cursor:]` 复查，B 已在台账 ⇒ **不许冒第三张卡**（C59 第 5 处）；
+           settled=2/pending=0、两次写各恰好一次、两个文件内容逐字对。
+      格②（跨进程，t8 同款两进程姿势，full_access）：`[ask_human, write_file, end]`
+        ⇒ 停在 ask 上进程退出（=服务死掉）；新进程 `create_app()` 走完启动自愈后：
+        状态仍是 awaiting_human（自愈只抹 running）、**无审批卡**、POST human-input 后
+        游标从断点续上——`act_cursor`/`pending_ask` 真的进了 checkpointer（t8 量的是停在审批卡，
+        那条路的恢复只依赖台账，游标断点没被问过）。
+    """
+    import json
+    from platforms.approval_store import ApprovalStore
+
+    count = {"n": 0}
+
+    def wrap(agents):
+        """write_file 包计数器——覆盖写看不出跑了几次，副作用次数只能直接数（t11 同一课）。"""
+        from codeharness.const import TEAMLEADER_NAME as _TL
+        inner = agents[_TL].tools["write_file"]
+
+        class _Counting:
+            async def ainvoke(self, args, **kw):
+                count["n"] += 1
+                return await inner.ainvoke(args, **kw)
+
+            def __getattr__(self, k):
+                return getattr(inner, k)
+
+        agents[_TL].tools["write_file"] = _Counting()
+
+    def script(*cmds):
+        return json.dumps({"thought": "脚本", "commands": list(cmds)}, ensure_ascii=False)
+
+    WRITE_A = {"command_name": "write_file", "args": {"path": "alt_a.txt", "content": "ONE"}}
+    ASK = {"command_name": "RoleZero.ask_human", "args": {"question": "中间确认一次，继续吗？"}}
+    WRITE_B = {"command_name": "write_file", "args": {"path": "alt_b.txt", "content": "TWO"}}
+    END = {"command_name": "end", "args": {}}
+
+    def cards_of(st):
+        return [p["tool"] for p in st.pending()], [p["tool"] for p in st.settled()]
+
+    def _approve(st):
+        """t6 口径：先在台账定案（allowed-once），再把卡 id 当回话内容交出去——
+        gate 的 interrupt() 返回值只当「有人回过话」的信号，结论一律回台账读。"""
+        aid = st.pending()[0]["id"]
+        assert st.decide(aid, "allowed-once") == "allowed-once", "①a 台账写不进结论"
+        return aid
+
+    # ---- 格①a 三轮剧本：批A → 问 → 批B（题面原样的「先批、再问、再批」） ----
+    count["n"] = 0
+    seen = []
+
+    def chk_a(i, status, n, st):
+        pend, settled = cards_of(st)
+        seen.append((i, status, n, len(pend), len(settled)))
+        if i == 0:      # 第一停 = A 的审批卡：批之前零副作用
+            assert status == "awaiting_human" and n == 0, f"①a 第{i}步失配：{seen[-1]}"
+            assert pend == ["write_file"] and not settled, f"①a 第一张卡形状不对：{seen[-1]}"
+        elif i == 1:    # 批 A → WRITE_A 执行 → 队长下一轮 [ASK] → 停在问（纯问：零卡）
+            assert status == "awaiting_human" and n == 1, \
+                f"①a 批 A 后 WRITE_A 该恰好 1 次并停在 ask 上：{seen[-1]}"
+            assert pend == [] and len(settled) == 1, f"①a 停在 ask 上台账该 settled=1/pending=0：{seen[-1]}"
+        elif i == 2:    # 答 ask → 游标续上 → 新一轮 [WRITE_B, END] → B 挂卡（不绕闸门）
+            assert status == "awaiting_human" and n == 1, \
+                f"①a ask 不该产生副作用、B 要先过审批：{seen[-1]}"
+            assert pend == ["write_file"], f"①a ask 回来后 B 没挂卡（绕过审批闸门）：{seen[-1]}"
+        else:           # 批 B → WRITE_B 执行 → 收口
+            assert status == "finished" and n == 2, \
+                f"①a 终态该 finished 且两次写各恰好一次：{seen[-1]}"
+            assert pend == [] and len(settled) == 2, f"①a 台账该 settled=2/pending=0：{seen[-1]}"
+
+    count["n"] = 0
+    seen.clear()
+    store_a, runner_a, sa_, cleanup_a = _gate_runner("s17_c59_alt3",
+                                                     [script(WRITE_A), script(ASK), script(WRITE_B, END)],
+                                                     permission="readonly", on_agents=wrap)
+    st_a = None
+    try:
+        status, _k = _settle_parked(store_a, runner_a, sa_)
+        st_a = ApprovalStore(sa_.id)
+        chk_a(0, status, count["n"], st_a)
+
+        async def step(sid_, ans):
+            assert runner_a.answer_human(sid_, ans), "①a resume 没起来"
+
+            async def _wait(pred, limit=30.0):
+                end = asyncio.get_running_loop().time() + limit
+                while asyncio.get_running_loop().time() < end:
+                    if pred(store_a.get(sid_).status.value):
+                        return True
+                    await asyncio.sleep(0.1)
+                return False
+
+            await _wait(lambda v: v != "awaiting_human")
+            await _wait(lambda v: v in ("finished", "failed", "stopped", "awaiting_human"))
+            return store_a.get(sid_).status.value
+
+        chk_a(1, asyncio.run(step(sa_.id, _approve(st_a))), count["n"], st_a)
+        chk_a(2, asyncio.run(step(sa_.id, "继续")), count["n"], st_a)
+        chk_a(3, asyncio.run(step(sa_.id, _approve(st_a))), count["n"], st_a)
+        ws = Path("workspace") / "s17_c59_alt3"
+        assert (ws / "alt_a.txt").read_text(encoding="utf-8").strip() == "ONE", "①a A 的内容不对"
+        assert (ws / "alt_b.txt").read_text(encoding="utf-8").strip() == "TWO", "①a B 的内容不对"
+        print(f"  ok  t12①a 批A→问→批B（三轮交替）：停车序 {[f'{x[0]}:{x[1]}' for x in seen]}、"
+              f"A/B 各恰好 1 次、ask 停车时台账零卡、B 照样过闸门")
+    finally:
+        for t in list(runner_a.tasks.values()):
+            t.cancel()
+        if st_a is not None:
+            st_a.r.delete(st_a.key, st_a.dkey)
+        cleanup_a()
+
+    # ---- 格①b 单列表 [A, ASK, B, end]：批A → 批B → 问（gate 把一列里的待批项全部前置），
+    #      关键断言：ask 回来后 gate 按 commands[cursor:] 复查、B 已在台账 ⇒ 不许冒第三张卡（C59 第 5 处）。
+    count["n"] = 0
+    seen.clear()
+    store_b, runner_b, sb, cleanup_b = _gate_runner("s17_c59_alt1",
+                                                    [script(WRITE_A, ASK, WRITE_B, END)],
+                                                    permission="readonly", on_agents=wrap)
+    st_b = None
+    try:
+        status, _k = _settle_parked(store_b, runner_b, sb)
+        st_b = ApprovalStore(sb.id)
+
+        async def step_b(ans):
+            assert runner_b.answer_human(sb.id, ans), "①b resume 没起来"
+
+            async def _wait(pred, limit=30.0):
+                end = asyncio.get_running_loop().time() + limit
+                while asyncio.get_running_loop().time() < end:
+                    if pred(store_b.get(sb.id).status.value):
+                        return True
+                    await asyncio.sleep(0.1)
+                return False
+
+            await _wait(lambda v: v != "awaiting_human")
+            await _wait(lambda v: v in ("finished", "failed", "stopped", "awaiting_human"))
+            return store_b.get(sb.id).status.value
+
+        pend0, settled0 = cards_of(st_b)
+        assert status == "awaiting_human" and count["n"] == 0, f"①b 第一停失配：{status!r} n={count['n']}"
+        assert pend0 == ["write_file"] and not settled0, f"①b 第一张卡形状不对：{pend0}/{settled0}"
+
+        s1 = asyncio.run(step_b(_approve(st_b)))                # 批 A → gate 复查 → B 的卡前置
+        pend1, settled1 = cards_of(st_b)
+        assert s1 == "awaiting_human" and count["n"] == 0, \
+            f"①b 批 A 后 act 还不该开跑（gate 把 B 的审批前置了）：{s1!r} n={count['n']}"
+        assert pend1 == ["write_file"] and len(settled1) == 1, f"①b 第二张卡形状不对：{pend1}/{settled1}"
+
+        s2 = asyncio.run(step_b(_approve(st_b)))                # 批 B → act：A 执行、撞 ask → 停在问
+        pend2, settled2 = cards_of(st_b)
+        assert s2 == "awaiting_human" and count["n"] == 1, \
+            f"①b 批 B 后 A 该恰好跑 1 次并停在 ask 上：{s2!r} n={count['n']}"
+        assert pend2 == [] and len(settled2) == 2, f"①b 停在 ask 上台账该 settled=2/pending=0：{pend2}/{settled2}"
+
+        s3 = asyncio.run(step_b("继续"))                         # 答 ask → B 执行 → 收口
+        pend3, settled3 = cards_of(st_b)
+        assert s3 == "finished" and count["n"] == 2, \
+            f"①b 终态该 finished 且两次写各恰好一次：{s3!r} n={count['n']}"
+        assert pend3 == [] and len(settled3) == 2, \
+            f"①b 失效：ask 回来后冒了第三张卡（B 被重问，C59 第 5 处复发）：{pend3}/{settled3}"
+        ws = Path("workspace") / "s17_c59_alt1"
+        assert (ws / "alt_a.txt").read_text(encoding="utf-8").strip() == "ONE", "①b A 的内容不对"
+        assert (ws / "alt_b.txt").read_text(encoding="utf-8").strip() == "TWO", "①b B 的内容不对"
+        print("  ok  t12①b 批A→批B→问（单列表混合）：gate 前置两张卡、ask 停车时台账已定 2 张、"
+              "resume 后不冒第三张卡、A/B 各恰好 1 次")
+    finally:
+        for t in list(runner_b.tasks.values()):
+            t.cancel()
+        if st_b is not None:
+            st_b.r.delete(st_b.key, st_b.dkey)
+        cleanup_b()
+
+    # ---- 格② 重启停在 ask 上（跨进程，t8 同款姿势） ----
+    import os
+    import shutil
+    import subprocess
+    import sys
+    root = Path(tempfile.mkdtemp()) / "ws"
+    project2 = f"s17_c59ask_{os.urandom(3).hex()}"
+    me = str(Path(__file__).resolve())
+    env = dict(os.environ, PLATFORM__USE_REDIS="1", REDIS__DB="15", PYTHONUNBUFFERED="1")
+
+    def run(*args):
+        p = subprocess.run([sys.executable, "-B", me, "--worker", *args], capture_output=True,
+                           text=True, env=env, timeout=300, cwd=str(Path(me).parent.parent))
+        line = next((l for l in p.stdout.splitlines() if l.startswith("RESULT ")), "")
+        assert line, (f"t12② 子进程没出读数：args={args} rc={p.returncode}\n"
+                      f"stdout 末段={p.stdout[-600:]!r}\nstderr 末段={p.stderr[-600:]!r}")
+        return json.loads(line[len("RESULT "):])
+
+    sid = ""
+    try:
+        parked = run("park", str(root), project2, "", "ask")
+        sid = parked["sid"]
+        assert parked["parked"] == "awaiting_human", f"t12② 前置失配：没停在 ask 上：{parked}"
+        assert parked.get("file_before") is False, "t12② 停在 ask 上就该零副作用，文件却已存在"
+        after = run("resume", str(root), project2, sid, "ask")
+        assert after["after_boot"] == "awaiting_human", \
+            f"t12② 失效：重启后 GET 是 {after['after_boot']!r}——启动自愈抹掉了停在 ask 上的驻留态"
+        assert after["pending"] == 0, f"t12② 停在 ask 上不该有审批卡：{after['pending']}"
+        assert after["respond"] == 200, f"t12② human-input 没被接住：{after}"
+        assert after.get("file") == "RESUMED-OK", \
+            f"t12② 失效：重启后 resume 没从游标续上——文件没落盘或内容不对：{after}"
+        assert after["final"] == "finished", f"t12② 收口 {after['final']!r}"
+        print("  ok  t12② 重启停在 ask：自愈不抹、无审批卡、human-input 后游标从断点续上、真落盘、正常收口")
+    finally:
+        if sid:
+            _purge(sid)
+        shutil.rmtree(root.parent, ignore_errors=True)
+        shutil.rmtree(Path("workspace") / project2, ignore_errors=True)
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
               t7_special_commands_never_park, t8_restart_keeps_parked_session,
               t9_failure_is_loud,
               t10_unknown_command_is_countable,
-              t11_ask_human_does_not_replay_side_effects]
+              t11_ask_human_does_not_replay_side_effects,
+              t12_approval_and_ask_alternate]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
           f"不抢槽/连点幂等 1 组 + human-input 409 端点半边 1 组 + 断点落态/停止/start 1 组 + "
           f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
           f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组 + "
-          f"未知命令可数 1 组 + **ask_human 不重放副作用 1 组（C59）**")
+          f"未知命令可数 1 组 + ask_human 不重放副作用 1 组（C59）+ "
+          f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）**")
 
 
 if __name__ == "__main__":
     import json
     import sys
-    if "--worker" in sys.argv:                        # t8 格② 的子进程模式，见 `_worker`
+    if "--worker" in sys.argv:                        # t8 格② / t12② 的子进程模式，见 `_worker`
         a = sys.argv[sys.argv.index("--worker") + 1:]
-        print("RESULT " + json.dumps(_worker(a[0], Path(a[1]), a[2], a[3] if len(a) > 3 else ""),
+        print("RESULT " + json.dumps(_worker(a[0], Path(a[1]), a[2], a[3] if len(a) > 3 else "",
+                                             a[4] if len(a) > 4 else "approve"),
                                      ensure_ascii=False), flush=True)
     else:
         main()

@@ -361,12 +361,34 @@ class SessionRunner:
         graph, config = packed
         if not await self._pending(graph, config):
             return                                   # 没停在待恢复点，别把会话误标成 finished
+        # C62：恢复值按 **interrupt id 定向投递**（`Command(resume={id: content})`）。
+        # 标量 resume 在同一次恢复运行里会被后续 interrupt **冒名领走**——langgraph 的
+        # `get_null_resume` 会沿 parent scratchpad 回退，子图里排在后面的节点（`_ask`）
+        # 拿到的「回答」就是前一个 interrupt 的恢复值。实测（真图 + FakeLLM，探针
+        # E:/tmp/ch_c59b_probe.py）：readonly 会话的命令列表里先出现需批的 write_file、
+        # 后出现 ask_human，批完卡之后 `_ask` 的 `interrupt()` **直接返回卡 id**、
+        # 问题被静默跳过，用户永远看不到提问。按 id 投递后值只进那个确切的 interrupt，
+        # 后续 interrupt 照常停车。dict 的键必须是 interrupt 的 `id`（xxh3_128 hexdigest，
+        # `_loop.py:910` 按这个形状识别 map 形式；`Interrupt.id` 的生成正是同一摘要）。
+        payload = content
+        try:
+            state = await graph.aget_state(config)
+            for t in getattr(state, "tasks", ()) or ():
+                for it in getattr(t, "interrupts", ()) or ():
+                    iid = getattr(it, "id", None)
+                    if iid:
+                        payload = {iid: content}
+                        break
+                if payload is not content:
+                    break
+        except Exception:
+            payload = content                        # 取不到状态时按标量恢复（_pending 同一口径）
         chat = self.chats.get(sid) or self._make_chat(sid)
         self.chats[sid] = chat
         self.store.update(sid, status=SessionStatus.running)
         try:
             with self._session_ctx(sid):
-                async for ev in graph.astream_events(Command(resume=content), config, version="v2"):
+                async for ev in graph.astream_events(Command(resume=payload), config, version="v2"):
                     self._translate(sid, ev)
             await self._settle(sid)
         except asyncio.CancelledError:
