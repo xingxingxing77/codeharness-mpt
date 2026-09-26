@@ -849,7 +849,8 @@ def t11_ask_human_does_not_replay_side_effects():
       ③ **游标重置**：第一轮只问人、第二轮才写 ⇒ 第二轮的写命令要真执行（`_think` 不重置游标的话，
          第二轮 `_act` 会从上一轮的游标起步、整列命令被跳过）；
       ④ **回边过闸门**（结构格）：编译出的图里 `ask → gate` 必须在、`ask → act` 不许有
-         —— ask 回来后直连 `act` 就等于让剩下的命令绕过审批。
+         —— ask 回来后直连 `act` 就等于让剩下的命令绕过审批；
+      ⑤ **同列表两次 ask**：两次都问到（停两次）、逐次按序、零副作用。
     """
     import json
 
@@ -877,11 +878,14 @@ def t11_ask_human_does_not_replay_side_effects():
     ASK = {"command_name": "RoleZero.ask_human", "args": {"question": "要继续吗？"}}
     END = {"command_name": "end", "args": {}}
 
-    def run_case(project, leader_script):
-        """起会话 → 等它停车或收口 → （**只有真停车**时才回话）→ 等终态。
+    def run_case(project, leader_script, answers=("继续",)):
+        """起会话 → 等它停车或收口 → 逐次回话直到收口 → 返回 `(停车次数, 回话前次数, 最终次数, 终态)`。
 
-        返回 `(停车时的状态, 回话前次数, 最终次数, 终态)`。
-        ⚠ 别对每个用例都断言「必须停在待人工处」：② 那条剧本里没有 ask，本来就该直接收口。
+        ⚠ 两条都是踩过的坑：
+          ① 别对每个用例都断言「必须停在待人工处」——② 那条剧本里没有 ask，本来就该直接收口；
+          ② 回话后的轮询**不能只看状态**：`answer_human` 刚返回时状态还是 `awaiting_human`（resume 任务
+             刚 `create_task`），立刻判「停着」就把结果判错了。要**先等它离开** awaiting_human、再等落地
+             ——「等的是结果，不是状态翻转」（t6 的注释里就写着这条）。
         """
         count["n"] = 0
         store, runner, s, cleanup = _gate_runner(project, leader_script,
@@ -889,41 +893,58 @@ def t11_ask_human_does_not_replay_side_effects():
         try:
             status, _kept = _settle_parked(store, runner, s)
             before = count["n"]
-            if status != "awaiting_human":
-                return status, before, count["n"], store.get(s.id).status.value
+            started_parked = status == "awaiting_human"
+
+            async def _wait(pred, limit=30.0):
+                end = asyncio.get_running_loop().time() + limit
+                while asyncio.get_running_loop().time() < end:
+                    if pred(store.get(s.id).status.value):
+                        return True
+                    await asyncio.sleep(0.1)
+                return False
+
+            repark = 0
 
             async def go():
-                started = runner.answer_human(s.id, "继续")
-                end = asyncio.get_running_loop().time() + 30
-                while asyncio.get_running_loop().time() < end:
-                    if store.get(s.id).status.value in ("finished", "failed", "stopped"):
-                        break
-                    await asyncio.sleep(0.1)
-                return started, store.get(s.id).status.value
+                nonlocal repark
+                for ans in answers:
+                    assert runner.answer_human(s.id, ans), f"{project}：resume 没起来"
+                    await _wait(lambda st: st != "awaiting_human")        # 先等它离开断点
+                    await _wait(lambda st: st in ("finished", "failed", "stopped", "awaiting_human"))
+                    if store.get(s.id).status.value == "awaiting_human":  # 又停了一次
+                        repark += 1
+                return store.get(s.id).status.value
 
-            started, final = asyncio.run(go())
-            assert started, f"{project}：resume 没起来"
-            return status, before, count["n"], final
+            final = asyncio.run(go()) if started_parked else store.get(s.id).status.value
+            parks = (1 if started_parked else 0) + repark
+            return parks, before, count["n"], final
         finally:
             for t in list(runner.tasks.values()):
                 t.cancel()
             cleanup()
 
-    st1, before1, after1, final1 = run_case("s17_c59_once", [script(WRITE, ASK), script(END)])
-    assert st1 == "awaiting_human", f"t11① 该停在待人工处，实际 {st1!r}"
+    p1, before1, after1, final1 = run_case("s17_c59_once", [script(WRITE, ASK), script(END)])
+    assert p1 == 1, f"t11① 该停一次，实际 {p1}"
     assert before1 == 1, f"t11① 停车前 write_file 就该只有 1 次，实际 {before1}"
     assert after1 == 1, f"t11① resume 之后 write_file 跑了 {after1} 次（C59 复发：中断前那半条被重放）"
     assert final1 == "finished", f"t11① 终态 {final1!r}（该正常收口）"
 
-    _st2, _b2, after2, final2 = run_case("s17_c59_noask", [script(WRITE), script(END)])
-    assert after2 == 1 and final2 == "finished", \
-        f"t11② 阳性对照：不含 ask 的列表该执行一次并收口，实际 count={after2} final={final2!r}"
+    p2, _b2, after2, final2 = run_case("s17_c59_noask", [script(WRITE), script(END)])
+    assert p2 == 0 and after2 == 1 and final2 == "finished", \
+        f"t11② 阳性对照：不含 ask 的列表该**不停**、执行一次并收口，实际 停={p2} count={after2} final={final2!r}"
 
-    st3, before3, after3, final3 = run_case("s17_c59_cursor", [script(ASK), script(WRITE), script(END)])
-    assert st3 == "awaiting_human", f"t11③ 该停在待人工处，实际 {st3!r}"
+    p3, before3, after3, final3 = run_case("s17_c59_cursor", [script(ASK), script(WRITE), script(END)])
+    assert p3 == 1, f"t11③ 该停一次，实际 {p3}"
     assert before3 == 0, f"t11③ 第一轮只问人不该有副作用，实际 {before3}"
     assert after3 == 1, f"t11③ 第二轮的新命令列表没被执行（游标没重置）：{after3}"
     assert final3 == "finished", f"t11③ 终态 {final3!r}"
+
+    # ⑤ 同一列表里**两次 ask**：两次都要问到（停两次）、逐条按序，且一次副作用都不许有。
+    p5, before5, after5, final5 = run_case("s17_c59_twoasks",
+                                           [script(ASK, ASK, END)], answers=("第一次", "第二次"))
+    assert p5 == 2, f"t11⑤ 同列表两次 ask 只停了 {p5} 次（第二次被吞了）"
+    assert before5 == 0 and after5 == 0, f"t11⑤ ask 不该产生副作用：before={before5} after={after5}"
+    assert final5 == "finished", f"t11⑤ 终态 {final5!r}"
 
     from langgraph.checkpoint.memory import InMemorySaver
     from codeharness.provider.fake import FakeLLM
@@ -938,7 +959,8 @@ def t11_ask_human_does_not_replay_side_effects():
     assert ("ask", "act") not in edges, f"t11④ `ask` 直连了 `act`：{sorted(edges)}"
     assert {"think", "gate", "act", "ask"} <= set(g.builder.nodes), "四个节点没齐"
     print(f"  ok  t11 C59：含 ask 的命令列表 resume 后副作用仍是 1 次（修复前 2）、不含 ask 的照旧 1 次、"
-          f"第二轮新列表真执行、静态边 {sorted(e for e in edges if e[0] == 'ask')}（`ask` 回边走 gate）")
+          f"第二轮新列表真执行、同列表两次 ask 停两次、静态边 {sorted(e for e in edges if e[0] == 'ask')}"
+          f"（`ask` 回边走 gate）")
 
 
 def main():
