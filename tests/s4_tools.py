@@ -917,6 +917,109 @@ def t47_new_held_out_after_desc_normalization():
 
 
 
+def t48_editor_read_path_is_locale_independent():
+    """T5（09-26 全量审查留账；本轮复核时**当场改判了一条**）。
+
+    `editor.py` 的读路径原先全是裸 `open()`（编码跟 locale 走），而同一文件的写路径（`write()`、
+    `:682`）与 `read_file` 固定 utf-8 ⇒ 读自己刚写的中文文件在非 UTF-8 启动的进程里会
+    `UnicodeDecodeError: 'gbk' codec ...`（实测命中 `editor.py:216`）。
+
+    ⚠ 留账里写的「本机 ACP=936 所以读不了」**不准确**：本机 `GetACP()=936`、`locale.getencoding()`
+    也是 cp936 都不假，但**门禁进程默认 `sys.flags.utf8_mode=1`，`open()` 的默认编码就是 utf-8**
+    ⇒ 默认跑法下**复现不出来**。必须 `PYTHONUTF8=0` 才现形，而编码是**进程启动时定的**、同进程里
+    改不了，所以 ① 只能起子进程——这也正是真部署的形状。
+
+    两格：
+      ① **功能（真读数）**：`PYTHONUTF8=0` 的子进程里「写一份含中文的文件 → 编辑器读窗口」，
+         退出码必须 0 且真读到中文；修复前退出码 1、stderr 上是那句 UnicodeDecodeError。
+      ② **结构（不靠环境）**：AST 断言 `editor.py` 里每个 `open()` 都带 `encoding=`。
+         ① 只在非 UTF-8 模式的进程里有牙，② 才是任何环境下的常驻守卫（新增裸 open 的读路径即红）。
+    """
+    import subprocess as _sp
+
+    code = (
+        "import pathlib\n"
+        "from codeharness.runtime import session_root\n"
+        "from codeharness.tools.libs.editor import Editor\n"
+        "root = session_root()\n"
+        "p = pathlib.Path(root) / 's4_cn_probe.py'\n"
+        "p.write_text('# 中文注释：知识库\\nx = 1\\n', encoding='utf-8')\n"
+        "out = Editor(working_dir=pathlib.Path(root))._print_window(p, 1, 5)\n"
+        "assert '知识库' in out, repr(out[:80])\n"
+        "print('EDITOR_READ_OK')\n"
+    )
+    env = {**os.environ, "PYTHONUTF8": "0"}          # 关掉 UTF-8 模式：open() 默认编码变回 cp936
+    r = _sp.run([sys.executable, "-B", "-c", code], cwd=str(ROOT), env=env,
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert r.returncode == 0 and "EDITOR_READ_OK" in (r.stdout or ""), \
+        f"t48① PYTHONUTF8=0 下编辑器读 utf-8 中文失败（exit={r.returncode}）：" \
+        f"{(r.stderr or r.stdout or '')[-300:]}"
+
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "codeharness" / "tools" / "libs"
+           / "editor.py").read_text(encoding="utf-8")
+    naked = [n.lineno for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "open" and "encoding" not in [k.arg for k in n.keywords]]
+    assert not naked, f"t48② editor.py 还有不带 encoding 的 open()（读路径跟 locale 走）：行 {naked}"
+
+
+def t49_cancel_reaps_child_and_pumps():
+    """T6（09-26 全量审查留账）：`run_proc` 被**外部取消**时原先不收尸——两个 `except` 只管超时。
+    会话 stop 走的正是 `task.cancel()`（`server/runner.py` 取消跑图任务 → `roles/*._act` → 这里），
+    `CancelledError` 会直接穿过这个函数：子进程继续跑、还攥着继承去的管道，两条 pump 任务永远悬着。
+
+    两格都是**确定性**读数（不看调度运气），子进程与 pump 任务用 spy 抓：
+      ① 取消之后两条 pump 任务全部收场（`done()`）——修复前恒为假；
+      ② 子进程真被判死（`returncode is not None`）——修复前恒为假（那个子进程要睡 30 秒）。
+    """
+    import asyncio as _aio
+
+    async def case():
+        real_exec, real_ct = _aio.create_subprocess_exec, _aio.create_task
+        procs, tasks = [], []
+
+        async def exec_spy(*a, **kw):
+            p = await real_exec(*a, **kw)
+            procs.append(p)
+            return p
+
+        def ct_spy(coro, **kw):
+            t = real_ct(coro, **kw)
+            tasks.append(t)
+            return t
+
+        _aio.create_subprocess_exec, _aio.create_task = exec_spy, ct_spy
+        try:
+            task = real_ct(run_proc([sys.executable, "-c", "import time; time.sleep(30)"], cwd=ROOT))
+            for _ in range(100):                    # 子进程没起来就没法断言，等它现身
+                if procs:
+                    break
+                await _aio.sleep(0.05)
+            assert procs, "子进程没起来——这一格会变成空转"
+            pumps = [t for t in tasks if t is not task]
+            assert len(pumps) == 2, f"pump 任务数不对：{len(pumps)}"
+            await _aio.sleep(0.3)                   # 让两条 pump 真挂到 read 上
+            task.cancel()
+            try:
+                await task
+            except _aio.CancelledError:
+                pass
+            else:
+                raise AssertionError("run_proc 被取消却没抛 CancelledError")
+            assert all(t.done() for t in pumps), \
+                f"t49① 取消之后 pump 任务还悬着（没收尸）：{[t.done() for t in pumps]}"
+            assert procs[0].returncode is not None, \
+                "t49② 取消之后子进程还活着（那个要睡 30s 的）——没收尸"
+        finally:
+            _aio.create_subprocess_exec, _aio.create_task = real_exec, real_ct
+            for p in procs:
+                if p.returncode is None:
+                    p.kill()
+
+    _aio.run(case())
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -956,7 +1059,8 @@ def main():
               t42_recall_coverage_is_pinned_at_measured_value, t43_roster_unchanged_by_c6,
               t44_hybrid_coverage_when_embedding_live, t45_semantic_leg_offline_degrades_to_lexical,
               t46_held_out_phrasings_show_the_real_rate,
-              t47_new_held_out_after_desc_normalization]
+              t47_new_held_out_after_desc_normalization,
+              t48_editor_read_path_is_locale_independent, t49_cancel_reaps_child_and_pumps]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

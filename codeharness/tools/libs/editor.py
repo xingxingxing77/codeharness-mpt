@@ -212,7 +212,13 @@ class Editor(BaseModel):
 
     def _print_window(self, file_path: Path, targeted_line: int, window: int):
         self._check_current_file(file_path)
-        with file_path.open() as file:
+        # T5（09-26 全量审查留账）：本文件的**读**路径全部显式 `encoding="utf-8"`（本处起共 10 处，
+        # 与写路径 `write()`/`:682` 及 `read_file` 对齐）。原先它们都是裸 `open()`——跟 locale 走：
+        # 本机 `GetACP()=936`，只是门禁进程默认 `utf8_mode=1`（`open()` 恰好也是 utf-8）才没现形；
+        # 一旦以 `PYTHONUTF8=0` 启动（真部署更可能），读自己刚写的中文文件就是
+        # `UnicodeDecodeError: 'gbk' codec ...`（实测读数在 `plan/team-runtime.md` §1.1 的 T5 行）。
+        # 新增任何读路径都必须带上它——门禁有一条 AST 断言盯着全文件。
+        with file_path.open(encoding="utf-8") as file:
             content = file.read()
 
             # Ensure the content ends with a newline character
@@ -293,7 +299,7 @@ class Editor(BaseModel):
             raise FileNotFoundError(f"File {path} not found")
 
         self.current_file = path
-        with path.open() as file:
+        with path.open(encoding="utf-8") as file:
             total_lines = max(1, sum(1 for _ in file))
 
         if not isinstance(line_number, int) or line_number < 1 or line_number > total_lines:
@@ -317,7 +323,7 @@ class Editor(BaseModel):
         """
         self._check_current_file()
 
-        with self.current_file.open() as file:
+        with self.current_file.open(encoding="utf-8") as file:
             total_lines = max(1, sum(1 for _ in file))
         if not isinstance(line_number, int) or line_number < 1 or line_number > total_lines:
             raise ValueError(f"Line number must be between 1 and {total_lines}")
@@ -332,7 +338,7 @@ class Editor(BaseModel):
         """Moves the window down by 100 lines."""
         self._check_current_file()
 
-        with self.current_file.open() as file:
+        with self.current_file.open(encoding="utf-8") as file:
             total_lines = max(1, sum(1 for _ in file))
         self.current_line = self._clamp(self.current_line + self.window, 1, total_lines)
         output = self._cur_file_header(self.current_file, total_lines)
@@ -343,7 +349,7 @@ class Editor(BaseModel):
         """Moves the window up by 100 lines."""
         self._check_current_file()
 
-        with self.current_file.open() as file:
+        with self.current_file.open(encoding="utf-8") as file:
             total_lines = max(1, sum(1 for _ in file))
         self.current_line = self._clamp(self.current_line - self.window, 1, total_lines)
         output = self._cur_file_header(self.current_file, total_lines)
@@ -563,7 +569,7 @@ class Editor(BaseModel):
                 temp_file_path = temp_file.name
 
                 # Read the original file and check if empty and for a trailing newline
-                with file_name.open() as original_file:
+                with file_name.open(encoding="utf-8") as original_file:
                     lines = original_file.readlines()
 
                 if is_append:
@@ -775,7 +781,7 @@ class Editor(BaseModel):
 
         # Check if the first_replaced_line_number  and last_replaced_line_number  correspond to the appropriate content.
         mismatch_error = ""
-        with file_name.open() as file:
+        with file_name.open(encoding="utf-8") as file:
             content = file.read()
             # Ensure the content ends with a newline character
             if not content.endswith("\n"):
@@ -875,7 +881,7 @@ class Editor(BaseModel):
         # if found, replace it with `new_content`
         # if not found, perform a fuzzy search to find the closest match and replace it with `new_content`
         file_name = self._try_fix_path(file_name)
-        with file_name.open("r") as file:
+        with file_name.open("r", encoding="utf-8") as file:
             file_content = file.read()
 
         if to_replace.strip() == "":
@@ -1007,7 +1013,7 @@ class Editor(BaseModel):
                 if file.startswith("."):
                     continue
                 file_path = Path(root) / file
-                with file_path.open("r", errors="ignore") as f:
+                with file_path.open("r", errors="ignore", encoding="utf-8") as f:
                     for line_num, line in enumerate(f, 1):
                         if search_term in line:
                             matches.append((file_path, line_num, line.strip()))
@@ -1044,7 +1050,7 @@ class Editor(BaseModel):
             raise FileNotFoundError(f"File {file_path} not found")
 
         matches = []
-        with file_path.open() as file:
+        with file_path.open(encoding="utf-8") as file:
             for i, line in enumerate(file, 1):
                 if search_term in line:
                     matches.append((i, line.strip()))

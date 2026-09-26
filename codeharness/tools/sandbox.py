@@ -30,12 +30,33 @@ async def kill_tree(proc) -> None:
         proc.kill()
 
 
+async def _reap(proc, pumps) -> None:
+    """取消路径的收尸：停 pump、杀进程树、等它真死。
+
+    单独一段是为了能 `shield` 起来——调用方此刻**已经在取消中**，收尸不能再被同一个取消打断。
+    收尸失败只留一声 warning：调用方随后会把原来那个 `CancelledError` 原样抛出去，别让收尸的
+    异常把它盖掉（那会让上层分不清「子进程没收干净」与「这次是被取消的」）。"""
+    for t in pumps:
+        t.cancel()
+    try:
+        await kill_tree(proc)
+        await asyncio.wait_for(proc.wait(), 5)
+    except Exception as exc:
+        from codeharness.logs import logger
+        logger.warning(f"取消路径收尸没做干净（{type(exc).__name__}: {exc}）——子进程可能还在跑")
+
+
 async def run_proc(argv, cwd: Path | None = None, timeout: int = 60, shell: bool = False,
                    env: dict | None = None) -> RunCodeResult:
     """跑子进程到结束或超时。超时杀进程树并留下超时前已产出的输出，return_code=-1。
 
     不用 `wait_for(proc.communicate())`：被取消的 communicate() 会把管道里已读到的数据丢掉
     （实测超时后 stdout 变空串），而超时输出恰恰是调用方最需要的信息。
+
+    T6（09-26 全量审查留账）：**外部取消**这条原先没有收尸——下面两个 `except` 只管超时。
+    会话 stop 走的是 `task.cancel()`（`server/runner.py` 取消跑图任务 → `roles/*._act` → 这里），
+    `CancelledError` 会直接穿过这个函数：pytest/npm 这类子进程继续跑、且攥着继承去的管道，
+    两条 pump 任务永远悬着（`terminal._kill` 与下面的超时支路都收了尸，只有这条路没有）。
     """
     kwargs = dict(cwd=str(cwd or session_root()),
                   # 子进程 python 对管道是块缓冲：不强制无缓冲，超时前 print 的东西全留在它自己的缓冲区里
@@ -53,17 +74,24 @@ async def run_proc(argv, cwd: Path | None = None, timeout: int = 60, shell: bool
     pumps = [asyncio.create_task(pump(proc.stdout, out)), asyncio.create_task(pump(proc.stderr, err))]
     timed_out = False
     try:
-        await asyncio.wait_for(proc.wait(), timeout)
-    except asyncio.TimeoutError:
-        timed_out = True
-        await kill_tree(proc)
-        await proc.wait()
-        err.extend(f"[timeout after {timeout}s]".encode())
-    try:
-        await asyncio.wait_for(asyncio.gather(*pumps), 5)
-    except asyncio.TimeoutError:
-        for t in pumps:
-            t.cancel()                       # ponytail: 孙进程攥住管道时到此为止，输出已尽力收全
+        try:
+            await asyncio.wait_for(proc.wait(), timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
+            await kill_tree(proc)
+            await proc.wait()
+            err.extend(f"[timeout after {timeout}s]".encode())
+        try:
+            await asyncio.wait_for(asyncio.gather(*pumps), 5)
+        except asyncio.TimeoutError:
+            for t in pumps:
+                t.cancel()                       # ponytail: 孙进程攥住管道时到此为止，输出已尽力收全
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(_reap(proc, pumps))
+        except asyncio.CancelledError:
+            pass                                 # 二次取消：收尸尽力而为，但**必须**把取消原样抛出去
+        raise
     return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
                          stderr=err.decode(errors="replace")[:20000],
                          return_code=-1 if timed_out else (proc.returncode or 0))
