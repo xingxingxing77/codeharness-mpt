@@ -1,6 +1,7 @@
 """SessionRunner：会话 ↔ LangGraph 团队图。三件事：
-1) 会话任务入口装四个 ContextVar（SESSION_ID/CURRENT_PROJECT/REPORT_SINK/CHAT_SINK）——
-   内核的报道与插话因此零依赖 web 层；
+1) 会话任务入口装七个 ContextVar（SESSION_ID/CURRENT_PROJECT/CURRENT_SESSION/REPORT_SINK/CHAT_SINK/…）——
+   内核的报道与插话因此零依赖 web 层；`CURRENT_PROJECT` 是产物目录名、`CURRENT_SESSION` 是会话身份（③），
+   两者刻意分开（见 `codeharness/runtime.py` 里 CURRENT_SESSION 的注释）；
 2) astream_events 里只翻译两件事：LLM token（Thought 打字机）与 interrupt（ask_human）；
    其余块事件全部来自内核报道槽（report.py），此处只做 sink→bus 转发；
 3) 人工回答 = 同 graph 实例 + 同 thread_id 的 Command(resume)，且必须重装同一套 ContextVar。"""
@@ -197,16 +198,51 @@ class SessionRunner:
         self.graphs[sid] = (team, config)
         return self.graphs[sid]
 
+    async def _thread_key(self, session, project: str) -> str:
+        """这个会话在 checkpointer 里的唯一键（③，2026-09-26 用户拍板）。
+
+        **为什么不能拿 `project_name` 当键**：它是用户输入的名字、同用户重名是合法的
+        （`api/sessions.py` 的 409 只挡跨用户），而 `workspace/{name}` 同时是给人看的产物目录。
+        拿它当身份 ⇒ 同用户两场**同名**会话共用一条 checkpointer 线程：B 的 messages/memories
+        追加进 A 的线程，并发时两路写同一 thread。`sop/builder.py` 对模板线早就写着
+        「server 多会话必须传会话唯一值，否则 checkpointer 按线程串台」——装配主路径没照做。
+
+        **存量口径（老断点不作废）**：切换前落下的断点全在 `project_name` 名下。
+        这里只在一个会话**确实跑过**（`started_at` 非空）且**新键下空**、**老键下有货**时回退用老键：
+        老会话照旧续得上，而**新会话永远不会被带回老线程**——哪怕名字撞了，它没跑过 ⇒ 用 sid
+        （少了 `started_at` 这一道，「同名新会话」会认领别人的线程，等于把这条修法反过来又踩一遍）。
+
+        读不动 saver 时按新键走并留一声响：装配不该因为读不了断点而失败。判据四支在 `s21 t5`。
+        """
+        if not getattr(session, "started_at", ""):
+            return session.id                      # 从没跑过 ⇒ 新会话，一律 sid
+        legacy = project or ""
+        try:
+            saver = await self._saver()
+            if await saver.aget_tuple({"configurable": {"thread_id": session.id}}) is not None:
+                return session.id                  # 新键已有断点 ⇒ 继续用新键
+            if legacy and await saver.aget_tuple({"configurable": {"thread_id": legacy}}) is not None:
+                logger.info(f"会话 {session.id} 的断点在旧键 {legacy!r} 名下（切换前的存量），本次按旧键续跑")
+                return legacy
+        except Exception as exc:
+            logger.warning(f"读 checkpointer 判断会话键失败，按新键 {session.id} 走："
+                           f"{type(exc).__name__}: {exc}")
+        return session.id
+
     async def _prepare(self, session, project: str, cost_manager, persist_roles: bool = True):
         """按会话三态装配三件套：sop=N7 模板线（9.3 扩展入口）；dynamic=S9.1 对照的 RoleZero 线；
         classic=默认经典线。resume 重建路径走同一函数——两张表（组队 × 路由）不会再各长各的
-        （第十一处教训）。thread_id 必须带会话唯一值：多会话共用模板不能在 checkpointer 里串台。
+        （第十一处教训）。
+
+        ⚠ `project` 只用来**算会话键的存量回退**（`_thread_key`）与产物目录语义，**不再**直接当
+        `thread_id`（③）：多会话共用同名项目不能在 checkpointer 里串台。
 
         `persist_roles=False`（只读回放，B7）：一列都不回写。装配出口那三个赋值原先无条件做，
         而 `store.update(roles=…)` 是**写库**——只读路由顺手写库正是 B7 那条的另一半。"""
         from codeharness.const import RequirementTag
         from codeharness.environment.team_graph import SOP
         from codeharness.team import prepare_project, _make_llm, classic_team
+        thread_key = await self._thread_key(session, project)   # 装配前先定身份，两条装配路共用
         # 一次装配只建一个网关：会话的 llm_override 就在这里落地。经典线原先走
         # prepare_project 的 agents=None 兜底，而 _default_agents 会另建一个不认
         # override 的网关——所以三条线都显式组队。
@@ -216,7 +252,7 @@ class SessionRunner:
             edges = get_template(session.sop).edges
             team, config, init = build_team_from_template(session.sop, llm,
                                                           checkpointer=await self._saver(),
-                                                          idea=session.idea, thread_id=project)
+                                                          idea=session.idea, thread_id=thread_key)
             names = sorted({str(r) for roles in edges.values() for r in roles})
             entry = str(next(iter(edges.get(RequirementTag.USER_REQUIREMENT) or []), ""))
         else:
@@ -238,7 +274,7 @@ class SessionRunner:
                 agents = react_assembly(llm)
             else:
                 agents = classic_team(llm)
-            team, config, init = prepare_project(session.idea, project, agents=agents,
+            team, config, init = prepare_project(session.idea, thread_key, agents=agents,
                                                  checkpointer=await self._saver(),
                                                  cost_manager=cost_manager, sop=sop)
             names = sorted(agents)
@@ -366,7 +402,7 @@ class SessionRunner:
 
     @contextmanager
     def _session_ctx(self, sid: str):
-        """装/卸六个 ContextVar。token 只能是局部变量——挂在 self 上会被并发会话互相覆盖，
+        """装/卸七个 ContextVar。token 只能是局部变量——挂在 self 上会被并发会话互相覆盖，
         随后 reset 到别人 context 里创建的 token 直接 ValueError。
 
         批次36 多装两个：PERMISSION（工具审批的会话级免审档）与 APPROVAL_IO（待批通道，
@@ -375,14 +411,17 @@ class SessionRunner:
         N9：同时套一层 Langfuse 的会话属性（session_id/user/tags）——两个 astream 循环共用的
         唯一上下文口，OTel 上下文按 asyncio task 隔离，并发会话不串；未开启时是 nullcontext。"""
         from contextlib import ExitStack
-        from codeharness.runtime import (CURRENT_PROJECT, REPORT_SINK, CHAT_SINK, CURRENT_USER,
-                                         APPROVAL_IO, PERMISSION)
+        from codeharness.runtime import (CURRENT_PROJECT, CURRENT_SESSION, REPORT_SINK, CHAT_SINK,
+                                         CURRENT_USER, APPROVAL_IO, PERMISSION)
         from codeharness.observability import session_attributes
         from platforms.approval_store import ApprovalStore
         session = self.store.get(sid)
         pairs = (
             (SESSION_ID, SESSION_ID.set(sid)),
             (CURRENT_PROJECT, CURRENT_PROJECT.set(self.projects.get(sid, sid))),
+            # ③：**会话身份**单独一个 var（= sid）。CURRENT_PROJECT 是产物目录名、可重名，
+            # 只用于路径与切片作用域；身份（thread_id、常驻 shell / Editor 的登记键）认这一个。
+            (CURRENT_SESSION, CURRENT_SESSION.set(sid)),
             (REPORT_SINK, REPORT_SINK.set(self._make_sink(sid))),
             (CHAT_SINK, CHAT_SINK.set(self.chats.get(sid))),
             # N1：user_id 贯穿进内核（记忆/经验池的切片键从这里兜底），auth 关恒 "default"
@@ -425,17 +464,17 @@ class SessionRunner:
             self._call_t0.pop(k, None)
         if terminal:
             self.graphs.pop(sid, None)
-            project = self.projects.pop(sid, None)
-            if project:
-                # 常驻 shell 按会话登记，散会不收就是每会话漏一个 cmd.exe
-                from codeharness.tools.libs.terminal import close_terminal
-                task = asyncio.create_task(close_terminal(project))
-                self._closers.add(task)
-                task.add_done_callback(self._closers.discard)
-                # Editor 视图态（current_file/行窗）与会话同生命周期——B3 命令面登记后必收，
-                # 否则字典按会话名只增不减
-                from codeharness.tools.libs.editor_tools import close_editor
-                close_editor(project)
+            self.projects.pop(sid, None)
+            # 常驻 shell / Editor 按**会话 id** 收（③）：不收就是每会话漏一个 cmd.exe；
+            # 而按项目目录名收会把**同名另一场**的壳顺手关掉（那两个注销表也改成按会话 id 索引了）。
+            from codeharness.tools.libs.terminal import close_terminal
+            task = asyncio.create_task(close_terminal(sid))
+            self._closers.add(task)
+            task.add_done_callback(self._closers.discard)
+            # Editor 视图态（current_file/行窗）与会话同生命周期——B3 命令面登记后必收，
+            # 否则字典按会话只增不减
+            from codeharness.tools.libs.editor_tools import close_editor
+            close_editor(sid)
 
     async def _interrupt_payload(self, sid: str):
         """活图视角问「这个 thread 是不是停在 interrupt 上」，是则回它的 payload（ask_human 的问题或待批项）。

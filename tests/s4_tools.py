@@ -1020,6 +1020,62 @@ def t49_cancel_reaps_child_and_pumps():
     _aio.run(case())
 
 
+def t50_tool_state_is_keyed_by_session_not_project_name():
+    """③（09-26 用户拍板「名字与唯一键解耦」）：常驻 shell 与 Editor 的登记键是**会话 id**，不是项目目录名。
+
+    原先两者都 `key = CURRENT_PROJECT.get()`（`terminal.py:178`、`editor_tools.py:21`），而
+    `CURRENT_PROJECT` 是**产物目录名**、同用户重名合法 ⇒ 同用户两场同名会话共用一支 `cmd.exe`
+    （B 在 A 的 cwd 里执行、读到 A 的输出队列）与同一个 Editor（current_file / 行窗串台）。
+
+    两格：
+      ① 同名两场（`CURRENT_PROJECT` 相同、`CURRENT_SESSION` 不同）⇒ 拿到**不同**的 shell 与 editor，
+         登记表的键是 sid；且 `close_terminal(sid1)` / `close_editor(sid1)` 只动自己那一支；
+      ② 不在会话里（`CURRENT_SESSION` 空）⇒ 退回项目目录名——脚本 / 单测 / 批处理的旧行为逐字不变。
+    """
+    from codeharness.runtime import CURRENT_PROJECT, CURRENT_SESSION
+    from codeharness.tools.libs.editor_tools import _EDITORS, close_editor, current_editor
+    from codeharness.tools.libs.terminal import _TERMINALS, close_terminal, current_terminal
+
+    for k in ("s50sid1", "s50sid2", "s50_project_name"):        # 清基线，别让残留污染读数
+        _TERMINALS.pop(k, None)
+        _EDITORS.pop(k, None)
+    tp = CURRENT_PROJECT.set("s50_project_name")
+    try:
+        ts1 = CURRENT_SESSION.set("s50sid1")
+        try:
+            t_a, e_a = current_terminal(), current_editor()
+        finally:
+            CURRENT_SESSION.reset(ts1)
+        ts2 = CURRENT_SESSION.set("s50sid2")
+        try:
+            t_b, e_b = current_terminal(), current_editor()
+        finally:
+            CURRENT_SESSION.reset(ts2)
+        assert t_a is not t_b, "t50① 同名两场共用了一支常驻 shell（③ 未落地）"
+        assert e_a is not e_b, "t50① 同名两场共用了一个 Editor（③ 未落地）"
+        assert {"s50sid1", "s50sid2"} <= set(_TERMINALS), f"shell 没按 sid 登记：{sorted(_TERMINALS)}"
+        assert {"s50sid1", "s50sid2"} <= set(_EDITORS), f"editor 没按 sid 登记：{sorted(_EDITORS)}"
+        asyncio.run(close_terminal("s50sid1"))
+        close_editor("s50sid1")
+        assert "s50sid1" not in _TERMINALS and "s50sid2" in _TERMINALS, \
+            f"t50① 收壳串到别人那一支：{sorted(_TERMINALS)}"
+        assert "s50sid1" not in _EDITORS and "s50sid2" in _EDITORS, \
+            f"t50① 销账串到别人那一支：{sorted(_EDITORS)}"
+        ts3 = CURRENT_SESSION.set("")                          # ② 不在会话里
+        try:
+            current_terminal()
+            current_editor()
+        finally:
+            CURRENT_SESSION.reset(ts3)
+        assert "s50_project_name" in _TERMINALS and "s50_project_name" in _EDITORS, \
+            f"t50② 不在会话里时没退回项目目录名（脚本/单测的旧行为断了）：{sorted(_TERMINALS)}"
+    finally:
+        for k in ("s50sid1", "s50sid2", "s50_project_name"):
+            _TERMINALS.pop(k, None)
+            _EDITORS.pop(k, None)
+        CURRENT_PROJECT.reset(tp)
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1060,7 +1116,8 @@ def main():
               t44_hybrid_coverage_when_embedding_live, t45_semantic_leg_offline_degrades_to_lexical,
               t46_held_out_phrasings_show_the_real_rate,
               t47_new_held_out_after_desc_normalization,
-              t48_editor_read_path_is_locale_independent, t49_cancel_reaps_child_and_pumps]
+              t48_editor_read_path_is_locale_independent, t49_cancel_reaps_child_and_pumps,
+              t50_tool_state_is_keyed_by_session_not_project_name]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

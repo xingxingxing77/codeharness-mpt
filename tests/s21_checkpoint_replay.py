@@ -213,16 +213,100 @@ async def t4_read_only_rebuild_registers_nothing():
               "正路照旧注册且 persist_roles=True（spy 有阳性对照）")
 
 
+async def t5_thread_key_is_the_session_id_not_the_project_name():
+    """③（09-26 用户拍板「名字与唯一键解耦」）：会话在 checkpointer 里的键是 **sid**，不是项目目录名。
+
+    原先 `_prepare` 把 `session.project_name or sid` 直接当 `thread_id`（`runner.py:219/241`），
+    而 `project_name` 是**用户输入的名字**、同用户重名是合法的（`api/sessions.py` 的 409 只挡跨用户）
+    ⇒ 同用户两场同名会话共用一条线程：B 的 messages/memories 追加进 A 的线程。
+
+    判据走**真 `_prepare`**（不打桩它），量的是它交给装配器的 `project_id`——spy 打在
+    `codeharness.team.prepare_project` 上（`_prepare` 是函数内 import，patch 模块属性有效）。
+    四支，旧键/新键的「有没有断点」由假 saver 给：
+      ① 同名两场（都没跑过）⇒ 各拿各的 sid、互不相同；
+      ② **存量回退**：跑过的会话（`started_at` 非空）、sid 下空、老键（项目名）下有货 ⇒ 用老键
+         （切换前落下的断点不作废，老会话照旧续得上）；
+      ③ **新会话不被带回老线程**：没跑过的新会话，即便老键有货也用自己的 sid
+         （少了这道，「同名新会话」会认领别人的线程 = 把这条修法反过来又踩一遍）；
+      ④ 新键已有断点 ⇒ 优先新键，哪怕老键也有货。
+    """
+    import codeharness.team as team_mod
+    from codeharness.provider.cost import CostManager
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    class _Saver(InMemorySaver):
+        """真 saver 的**子类**，只把「哪个 thread 有断点」这一问答成我们要的样子。
+
+        ⚠ 不能自造一个只有 `aget_tuple` 的类：`_prepare` 会把它交给 `build_team`，而
+        `langgraph.graph.state.compile` 里有 `ensure_valid_checkpointer`，非 `BaseCheckpointSaver`
+        直接 TypeError（本轮第一版就这么红的）。这一格量的是**键的选择**，不是 saver 本身。"""
+
+        def __init__(self):
+            super().__init__()
+            self.has: set = set()
+
+        async def aget_tuple(self, config):
+            return {"thread": config["configurable"]["thread_id"]} \
+                if config["configurable"]["thread_id"] in self.has else None
+
+    saver = _Saver()
+    store = SessionStore(path=Path(tempfile.mkdtemp()) / "sessions.json")
+    runner = SessionRunner(store, SessionEventBus())
+
+    async def _fake_saver():
+        return saver
+
+    runner._saver = _fake_saver
+    seen: list = []
+    real_prepare = team_mod.prepare_project
+
+    def spy(idea, project_id, **kw):
+        seen.append(project_id)
+        return real_prepare(idea, project_id, **kw)
+
+    a = store.create("甲", project_name="same_name", user_id="u1")
+    b = store.create("乙", project_name="same_name", user_id="u1")
+    cm = CostManager()
+    try:
+        team_mod.prepare_project = spy
+        await runner._prepare(a, "same_name", cm)          # ① 同名两场…
+        await runner._prepare(b, "same_name", cm)
+        assert seen == [a.id, b.id], \
+            f"t5① 同名两会话没各用各的 sid（③ 未落地）：{seen}（a={a.id} b={b.id}）"
+
+        store.update(a.id, started_at="2026-01-01 00:00:00")
+        a_ran = store.get(a.id)                            # ⚠ update 会换一个新对象，别拿旧的（旧对象 started_at 仍空）
+        saver.has = {"same_name"}                          # ② 存量：断点只在老键下
+        seen.clear()
+        await runner._prepare(a_ran, "same_name", cm)
+        assert seen == ["same_name"], f"t5② 存量断点没回退到老键（老会话断点作废了）：{seen}"
+
+        fresh = store.create("丙", project_name="same_name", user_id="u1")
+        seen.clear()
+        await runner._prepare(fresh, "same_name", cm)      # ③ 新会话 + 老键有货
+        assert seen == [fresh.id], f"t5③ 同名新会话认领了老线程：{seen}（要 {fresh.id}）"
+
+        saver.has = {"same_name", a.id}                    # ④ 新键也有货
+        seen.clear()
+        await runner._prepare(a_ran, "same_name", cm)
+        assert seen == [a.id], f"t5④ 新键已有断点却没用它：{seen}"
+    finally:
+        team_mod.prepare_project = real_prepare
+    _ok("t5", "会话键 = sid：同名两场各用各的线程（旧键仅在「跑过的会话 + 新键空 + 老键有货」时回退）；"
+              "新会话不会被带回老线程")
+
+
 def main():
     try:
         asyncio.run(t1_page_semantics())
         asyncio.run(t2_endpoints())
         asyncio.run(t3_read_only())
         asyncio.run(t4_read_only_rebuild_registers_nothing())
+        asyncio.run(t5_thread_key_is_the_session_id_not_the_project_name())
     finally:
         # 不关连接的话解释器会被 aiosqlite 的后台线程吊住（C2 那轮的收官教训：断言全过但永不退出）
         asyncio.run(close_all())
-    print("\ns21_checkpoint_replay: 4/4 全绿")
+    print("\ns21_checkpoint_replay: 5/5 全绿")
     return 0
 
 

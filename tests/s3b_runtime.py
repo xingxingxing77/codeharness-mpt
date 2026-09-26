@@ -513,7 +513,16 @@ def t14_dynamic_paradigm_assembly():
             team3, cfg3, init3 = asyncio.run(r._prepare(sp, "p", None))
             assert captured == {}, "sop 会话不该再走 prepare_project"
             assert team3 is not None and init3 is not None
-            assert cfg3["configurable"]["thread_id"] == "p", "thread_id 必须取会话项目名（防串台）"
+            # ③（09-26 用户拍板「名字与唯一键解耦」）：装配键是**会话 id**，不是项目目录名。
+            # ⚠ 这一格原先钉的是「thread_id 必须取会话项目名（防串台）」——那句判据的**前提**已被拍板
+            # 改掉（项目名可重名，拿它当身份才是串台的来源），按 §4 第 3 条当场改判，不是把代码退回去。
+            assert cfg3["configurable"]["thread_id"] == sp.id, \
+                f"thread_id 必须是会话 id（③），实际 {cfg3['configurable']['thread_id']!r}（sid={sp.id}）"
+            sp2 = ss.Session(id="s2b", idea="x", project_name="p", sop="s3b_t14_sop")
+            _, cfg4, _ = asyncio.run(r._prepare(sp2, "p", None))
+            assert cfg4["configurable"]["thread_id"] == "s2b" \
+                and cfg4["configurable"]["thread_id"] != cfg3["configurable"]["thread_id"], \
+                "同名两场（project_name 都是 'p'）拿到了同一个 thread_id —— 正是 ③ 要治的串台"
         finally:
             _EXT_TEMPLATES.pop("s3b_t14_sop", None)
     finally:

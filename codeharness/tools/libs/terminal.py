@@ -25,7 +25,7 @@ from codeharness.logs import logger
 from langchain_core.tools import tool
 
 from codeharness.report import END_MARKER_VALUE, terminal_block
-from codeharness.runtime import CURRENT_PROJECT, session_root
+from codeharness.runtime import CURRENT_PROJECT, CURRENT_SESSION, session_root
 from codeharness.tools.sandbox import kill_tree
 from codeharness.tools.tool_registry import register_tool
 
@@ -173,9 +173,18 @@ class Terminal:
 _TERMINALS: dict[str, Terminal] = {}
 
 
+def _session_key() -> str:
+    """常驻 shell 的登记键：**优先会话 id**（③），不在会话里才退回项目目录名（脚本/单测的旧行为）。
+
+    按项目目录名索引时，同用户两场**同名**会话共用一支壳——B 在 A 的 cwd 里执行、读到 A 的输出队列，
+    一方散会还会把另一方的壳关掉（`server/runner.py` 的 `_forget` 现在按 sid 收壳）。
+    """
+    return CURRENT_SESSION.get() or CURRENT_PROJECT.get()
+
+
 def current_terminal() -> Terminal:
     """每会话一个常驻 shell。共用单个 shell 会让 B 会话在 A 的 cwd 里执行、并读到 A 的输出队列。"""
-    key = CURRENT_PROJECT.get()
+    key = _session_key()
     if key not in _TERMINALS:
         _TERMINALS[key] = Terminal()
     return _TERMINALS[key]
@@ -183,7 +192,7 @@ def current_terminal() -> Terminal:
 
 async def close_terminal(project: str | None = None) -> None:
     """散会收壳——按会话登记的 shell 不主动关就是每会话漏一个常驻进程。默认关当前会话的。"""
-    t = _TERMINALS.pop(project or CURRENT_PROJECT.get(), None)
+    t = _TERMINALS.pop(project or _session_key(), None)
     if t:
         await t.close()
 

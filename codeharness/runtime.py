@@ -12,6 +12,21 @@ from codeharness.const import TEAMLEADER_NAME
 CURRENT_PROJECT: ContextVar[str] = ContextVar("current_project", default="project")
 """当前会话的项目目录名——ArtifactStore.active() 用它，保证产物落进 session.workspace 同名目录"""
 
+CURRENT_SESSION: ContextVar[str] = ContextVar("current_session", default="")
+"""当前**会话**的唯一键（= `session.id`）。与 `CURRENT_PROJECT`（项目**目录名**）刻意分开（③，2026-09-26 用户拍板）。
+
+为什么必须分开：`project_name` 是**用户输入的名字**，同用户重名是合法的（`server/api/sessions.py`
+只挡跨用户的那一档），而它同时又是 `workspace/{name}` 这个给人看的产物目录名。一个值不能既当
+「给人看的目录」又当「机器认的身份」——按它索引进程态（常驻 shell / Editor）会让同用户两场
+**同名**会话共用一支 `cmd.exe`（B 在 A 的 cwd 里执行、一方散会把另一方的壳关掉），按它当
+checkpointer 的 `thread_id` 则会让两场共用一条线程（消息与记忆互相追加）。
+
+⚠ 只用于**身份**（`thread_id`、进程态登记键）。路径（`session_root`）、切片作用域（`upload_kb`
+的 scope、`LongTermMemory.project`）与 BrainMemory 的 key 仍走 `CURRENT_PROJECT`——那是「产物
+按名归堆」的口径，用户拍 ③ 时明确「工作区仍按名」。
+
+空串 = 不在会话里（脚本、单测、批处理）：那时各读者退回 `CURRENT_PROJECT`，与改动前逐字节同行为。"""
+
 REPORT_SINK: ContextVar[object] = ContextVar("report_sink", default=None)
 """报道槽：sync callable(event_dict)。内核的 report.py 把块事件灌给它；server 装桥→SessionEventBus"""
 

@@ -9,7 +9,7 @@ Editor 复制件的 `_try_fix_path` 只把相对路径并进 working_dir、绝�
 """
 from langchain_core.tools import tool
 
-from codeharness.runtime import CURRENT_PROJECT, session_root
+from codeharness.runtime import CURRENT_PROJECT, CURRENT_SESSION, session_root
 from codeharness.tools._boundary import safe_session_path
 from codeharness.tools.libs.editor import Editor
 from codeharness.tools.tool_registry import register_tool
@@ -17,8 +17,18 @@ from codeharness.tools.tool_registry import register_tool
 _EDITORS: dict[str, Editor] = {}
 
 
+def _session_key() -> str:
+    """Editor 视图态的登记键：**优先会话 id**（③，与 `terminal._session_key` 同一口径）。
+
+    按项目目录名索引时，同用户两场**同名**会话共用一个 Editor：current_file/current_line 是
+    「当前打开了哪份文件、翻到第几行」这种会话私有状态，串台的表现是「我明明没打开那个文件，
+    它却跳到别人的行号上」。
+    """
+    return CURRENT_SESSION.get() or CURRENT_PROJECT.get()
+
+
 def current_editor() -> Editor:
-    key = CURRENT_PROJECT.get()
+    key = _session_key()
     ed = _EDITORS.get(key)
     if ed is None:
         ed = _EDITORS[key] = Editor(working_dir=session_root())
@@ -27,7 +37,7 @@ def current_editor() -> Editor:
 
 def close_editor(project: str | None = None) -> None:
     """散会销账（与 runner._forget 收壳同批；Editor 无常驻进程，纯清视图态）。"""
-    _EDITORS.pop(project if project is not None else CURRENT_PROJECT.get(), None)
+    _EDITORS.pop(project if project is not None else _session_key(), None)
 
 
 def _inside(path: str) -> str | None:
