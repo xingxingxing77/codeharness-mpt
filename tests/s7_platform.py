@@ -337,6 +337,142 @@ def t17_event_bus_thread_safe():
         sys.setswitchinterval(old)
 
 
+def t18_shutdown_flush_is_bounded():
+    """C64：停机路径先把 ring 里的账冲完再拆 bus，且等待**必须有界**。
+
+    `server/app.py` 的 lifespan 停机原先直接 `aclose()`——它 cancel flusher 与在途 XADD，
+    ring 里没落库的事件直接丢（留账：s8:626 与 s7 t2 的测试路径都按 `flush_now → aclose`
+    的顺序，唯独唯一的产线停机路径没接）。而 C51 之后失败事件**放回 ring 队首重试**：
+    Redis 不可达时 ring 永不空，无界 `flush_now` 会把停机挂死 ⇒ 必须带界 grace，到点认
+    「没冲完」并喊一声（C28 的 `LANGFUSE__SHUTDOWN_GRACE_SEC` 同款形状，配置 =
+    `PLATFORM__SHUTDOWN_GRACE_SEC`，默认 3s；在线时 1000 条 0.07s 就冲完，B⑥ 读数）。
+
+    三格（①② 用假 client，不碰真 Redis；③ 走真 create_app 的 lifespan 停机路径）：
+      ① 有界性：xadd 必炸 ⇒ `flush_now(grace=0.3)` 在有限时间返回（包 `wait_for` 防「真挂死」
+         把门禁一起拖走），且留可 grep 的「没冲完」warning（含 ring 剩量）；
+      ② 阳性对照：xadd 健康 ⇒ flush 后 ring 空、事件已写出、**不打**那行 warning（恒亮=没有）；
+      ③ 接线：redis 模式 create_app → 往 ring 塞必炸事件 → 退出 TestClient（触发 lifespan
+         停机）⇒ warning 留痕且 bus 已被 aclose（`_flusher` 归 None）。进程内路无 ring，无此半边。
+    """
+    import server.settings as srv_settings  # noqa: F401  （create_app 的工作区根，门禁里不另动）
+    from platforms.event_store import RedisEventBus
+    import codeharness.logs as _lgs
+
+    class _Boom:
+        """xadd 恒炸的假客户端：模拟 Redis 不可达（C51 会把事件放回 ring 队首，ring 永不空）。"""
+        async def xadd(self, *a, **kw):
+            raise RuntimeError("redis 不可达")
+        async def aclose(self):
+            pass
+
+    class _Ok:
+        def __init__(self):
+            self.written = []
+
+        async def xadd(self, key, fields, maxlen=0, approximate=True):
+            self.written.append(fields["d"])
+            return f"{1758900000000 + len(self.written)}-0"
+
+        async def aclose(self):
+            pass
+
+    def capture_warning():
+        buf = []
+        orig = _lgs.logger.warning
+        _lgs.logger.warning = lambda *a, **k: buf.append(" ".join(str(x) for x in a))
+        return buf, orig
+
+    # ① 有界性 + 喊一声
+    async def case_bounded():
+        bus = RedisEventBus(TEST_DB)
+        bus.client = _Boom()
+        buf, orig = capture_warning()
+        bus._flusher = asyncio.get_running_loop().create_task(bus._flush_loop())
+        try:
+            bus.publish("sT18", kind="report", value="v1")
+            bus.publish("sT18", kind="report", value="v2")
+            t0 = asyncio.get_running_loop().time()
+            # 界 15s 远大于 grace 0.3s：修复前这里会挂满 15s 被掐成 TimeoutError（= 红）
+            await asyncio.wait_for(bus.flush_now(grace=0.3), timeout=15)
+            cost = asyncio.get_running_loop().time() - t0
+            assert cost < 5, f"flush_now(grace=0.3) 花了 {cost:.1f}s——有界等待没生效"
+            assert any("没冲完" in w and "还剩" in w for w in buf), \
+                f"到点没喊「没冲完」（运维 grep 不到这次丢弃）：{buf}"
+        finally:
+            _lgs.logger.warning = orig
+            if bus._flusher and not bus._flusher.done():
+                bus._flusher.cancel()
+            try:
+                await bus._flusher
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(case_bounded())
+    _ok("t18①", "ring 永不空（C51 放回重试）时 flush_now(grace=0.3) 界内返回且留「没冲完」warning")
+
+    # ② 阳性对照：冲得动就不许喊
+    async def case_healthy():
+        bus = RedisEventBus(TEST_DB)
+        ok_client = _Ok()
+        bus.client = ok_client
+        buf, orig = capture_warning()
+        bus._flusher = asyncio.get_running_loop().create_task(bus._flush_loop())
+        try:
+            bus.publish("sT18", kind="report", value="v1")
+            bus.publish("sT18", kind="report", value="v2")
+            await asyncio.wait_for(bus.flush_now(grace=5), timeout=15)
+            assert len(ok_client.written) == 2, f"健康路径没写出：{len(ok_client.written)}"
+            assert not any("没冲完" in w for w in buf), \
+                f"冲干净了还喊「没冲完」（它恒亮就等于没有）：{buf}"
+        finally:
+            _lgs.logger.warning = orig
+            if bus._flusher and not bus._flusher.done():
+                bus._flusher.cancel()
+            try:
+                await bus._flusher
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(case_healthy())
+    _ok("t18②", "阳性对照：健康路径 flush 后事件全写出、不打「没冲完」")
+
+    # ③ 产线接线：create_app 的 lifespan 停机真调了 flush_now(grace=…)
+    if not _redis_up():
+        print("  ⏭  t18③ 跳过（redis 未起）：create_app 的 redis 模式起不来，接线半边待环境")
+        return
+    from fastapi.testclient import TestClient
+    import server.sessions as ss
+    import server.app as sa
+    from codeharness.configs.settings import settings as _settings
+
+    keep_sess, keep_db = ss.SESSIONS_FILE, _settings.redis.db
+    keep_flag, keep_grace = _settings.platform.use_redis, _settings.platform.shutdown_grace_sec
+    ss.SESSIONS_FILE = Path(tempfile.mkdtemp()) / "sessions.json"   # 别把开发会话表搬进测试库
+    _settings.redis.db = 15                                          # create_app 直读 settings：钉进测试库
+    _settings.platform.use_redis = True
+    _settings.platform.shutdown_grace_sec = 0.3                      # 别让这一格真等 3s
+    try:
+        buf, orig = capture_warning()
+        with TestClient(sa.create_app()) as c:
+            bus = c.app.state.bus
+            assert type(bus).__name__ == "RedisEventBus", type(bus).__name__
+            bus.client = _Boom()                                     # xadd 必炸 ⇒ ring 冲不出去
+            bus.publish("sT18w", kind="report", value="w1")
+            bus.publish("sT18w", kind="report", value="w2")
+            # 退出 context ⇒ lifespan 停机：flush_now(grace) → aclose
+        _lgs.logger.warning = orig
+        assert any("没冲完" in w for w in buf), \
+            f"停机路径没接 flush_now（ring 里的账随 aclose 直接丢了）：{buf}"
+        assert bus._flusher is None, "停机没走到 aclose（flusher 还挂着）"
+        print("  ok  t18③ 产线接线：lifespan 停机先 flush_now(grace) 再 aclose，到点喊「没冲完」")
+    finally:
+        _lgs.logger.warning = orig
+        ss.SESSIONS_FILE = keep_sess
+        _settings.redis.db = keep_db
+        _settings.platform.use_redis = keep_flag
+        _settings.platform.shutdown_grace_sec = keep_grace
+
+
 # ---------------- redis 部分 ----------------
 async def t2_dual_worker_replay():
     from platforms.event_store import RedisEventBus
@@ -769,15 +905,16 @@ def main():
     t15_project_name_cannot_escape_workspace()
     t16_event_flusher_survives_a_failing_xadd()
     t17_event_bus_thread_safe()
+    t18_shutdown_flush_is_bounded()
     global REDIS_UP
     REDIS_UP = _redis_up()
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 6/6 过（进程内路 t1+t10+t11+t15+t16+t17），redis 路待环境")
+        print("\ns7_platform: 7/7 过（进程内路 t1+t10+t11+t15+t16+t17+t18），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 17/17 全绿（双配置）")
+    print("\ns7_platform: 18/18 全绿（双配置）")
 
 
 if __name__ == "__main__":

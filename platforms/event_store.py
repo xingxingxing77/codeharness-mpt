@@ -128,14 +128,26 @@ class RedisEventBus:
                 continue
             await asyncio.sleep(0.02)                               # 攒批窗口：20ms 对 SSE 无感
 
-    async def flush_now(self):
+    async def flush_now(self, grace: float | None = None):
         """测试/停机用：把 ring 里的积压刷干净（生产靠 flusher 自转）。
         必须连在途批次一起等——ring 在 popleft 时就空了，那时 XADD 还没发完，
-        只看 ring 会让停机路径丢掉整批事件。"""
+        只看 ring 会让停机路径丢掉整批事件。
+
+        `grace`（C64）：**有界**等待，停机路径必须带——C51 让失败事件放回 ring 队首重试，
+        Redis 不可达时 ring 永不空，无界等会把停机挂死（留账原文）。到点认「没冲完」并喊一声
+        （照 C28 的 LANGFUSE__SHUTDOWN_GRACE_SEC 同款形状）；`None` = 无界，既有测试口径不变。"""
+        deadline = None if grace is None else asyncio.get_running_loop().time() + grace
         while True:
             with self._lock:
                 idle = not self._ring
             if idle and self._inflight == 0:
+                return
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                with self._lock:
+                    left = len(self._ring)
+                logger.warning(f"停机 flush 等待 {grace}s 到点仍未冲完（ring 里还剩 {left} 条）——"
+                               f"Redis 不可达时 C51 的放回重试会一直补货，按「没冲完」收场，这批丢掉"
+                               f"（要等久一点就调 PLATFORM__SHUTDOWN_GRACE_SEC）")
                 return
             await asyncio.sleep(0.03)
 

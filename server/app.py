@@ -86,6 +86,10 @@ def create_app() -> FastAPI:
         tracing_shutdown()                          # N9：把队列里没发完的 span 冲干净再退
         if redis_mode:
             runner._ctl_task.cancel()                   # 先停监听再关连接（顺序反了就是 ConnectionError 栈）
+            # C64：停机前把 ring 里的账冲完再拆——aclose 会 cancel flusher 与在途 XADD，不 flush
+            # ring 里没落库的直接丢。grace 必须有界（C51 的失败放回让 Redis 不可达时 ring 永不空），
+            # 到点认「没冲完」并喊一声（C28 的 grace 形状）。
+            await bus.flush_now(grace=settings.platform.shutdown_grace_sec)
             await bus.aclose()
             await runner._ctl.aclose()
 

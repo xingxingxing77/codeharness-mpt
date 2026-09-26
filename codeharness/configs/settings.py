@@ -265,6 +265,19 @@ class PlatformConfig(BaseModel):
     rate_window_sec: int = 60
     auth_enabled: bool = False        # N1 账号边界：默认关=单机开发态（15 门禁零破坏）；置 1 强制登录，
                                       # session/记忆/配额按 user_id 隔离。生产多租户部署显式开启。
+    # C64：停机时**最多**等多久把事件 ring 刷进 Redis（`RedisEventBus.flush_now(grace=…)`）。
+    # C51 之后失败事件会**放回 ring 队首重试**，Redis 不可达时 ring 永不空 ⇒ 无界等会把停机挂死
+    # （留账原文）；在线时 1000 条 0.07s 就冲完（09-25 B⑥ 读数），3s 根本用不尽。到点认
+    # 「没冲完」并喊一声——同 C28 的 LANGFUSE__SHUTDOWN_GRACE_SEC 形状。
+    shutdown_grace_sec: float = 3.0
+
+    @field_validator("shutdown_grace_sec")
+    @classmethod
+    def check_event_grace(cls, v):
+        """0 不是「不等」的开关，是「每次停机都必丢 ring 且没人知道」——要丢请显式走 aclose 不 flush。"""
+        if v <= 0:
+            raise ValueError(f"PLATFORM__SHUTDOWN_GRACE_SEC 必须是正数（秒），收到 {v}")
+        return v
 
 
 class LangfuseConfig(BaseModel):
