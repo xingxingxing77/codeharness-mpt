@@ -10,10 +10,8 @@ P0-3: 租户隔离——从 CURRENT_USER ContextVar 取 user_id，避免"default
 """
 import uuid
 
-from codeharness.configs.settings import settings
 from codeharness.document_store.embed_split import clamp_query, split_for_embedding
 from codeharness.document_store.qdrant_store import Point, QdrantStore
-from codeharness.logs import logger
 from codeharness.provider.gateway import LLMGateway
 
 
@@ -40,18 +38,27 @@ class ExpStore:
         self.user_id = user_id or CURRENT_USER.get("default")
 
     async def save(self, action_tag: str, input_sig: str, output: str, score: float = 0.0):
-        # C27：入库文本一律过唯一出口，不许再把整串直接发给端点（端点超长会**静默**截断，读数见
-        # `embed_split` 模块头）。经验这一条的单位是**一个点**——`exp_point_id` 同时就是 Redis 命中
-        # 计数的键，切成 N 个点会把计数打散，所以超限时取首块并**喊出来**：以前是端点默默只看了
-        # 前 ~3200 字（真文档复量，见 settings 那条注释），现在是已知、有界、带日志。
-        # ponytail: 天花板=签名超过 `EMBEDDING__MAX_CHARS` 的部分进不了向量（payload 文本仍是全文，
-        # 召回回来的内容不缺）。升级路径=一条经验存 N 个点、payload 里带 `exp_id` 做读侧去重，
-        # 只在 exp_pool 真开起来（`EXP_POOL__ENABLED`，今天默认关）且现场量到长签名之后才值得做。
-        chunks = split_for_embedding([input_sig])
-        if len(chunks) > 1:
-            logger.warning(f"经验签名 {len(input_sig)} 字超过 embedding 上限 "
-                           f"{settings.embedding.max_chars}，只有首块进向量（tag={action_tag}）")
-        dense = await self.embeddings.aembed_query(chunks[0])
+        """写一条经验。**签名先过读侧那道界（`clamp_query`）再进出口**——这是 R2（09-26 审查）的修法。
+
+        原先写侧用 `split_for_embedding([input_sig])[0]`、读侧用 `clamp_query(query)`：对同一份签名，
+        `_cut` 的首块在**含换行**时只到第一个换行（可能短短一行），而 `clamp_query` 给的是 `text[:h]`
+        ——两者长度能差一个量级 ⇒ **写进去的向量与查它时的向量不是同一个东西，那份经验永远命中不了自己**
+        （缓存阈值 0.9 比的正是这条腿的余弦）。经验池里「文档就是查询」，两侧必须同源。
+
+        为什么是「先 clamp 再 split」而不是直接把出口换成 `clamp_query`：`clamp_query` 保证 ≤h，
+        `split_for_embedding` 于是原样通过——**出口仍在链上**（C27 的 t8 盯的就是「每条入库路都过出口」，
+        它会把没走出口的文本判红），而两侧算的就是同一段文本了。
+        短签名（≤ 上限，绝大多数）逐字节不变：`clamp_query` 原样返回、`split` 也原样返回。
+
+        读侧为何不反过来改成 `split`（那样也能同源）：`clamp_query` 的 docstring 写着理由——读侧要的是
+        「一个问句对一个向量」，而且 C35 的 t38 钉的是实发长度恰好等于上限，切成首块会短于上限。
+        谁都不动对方的界，只在**签名这一个接缝**上让两边对齐。
+        """
+        # C27：入库文本一律过唯一出口（端点超长会**静默**截断，读数见 `embed_split` 模块头）。
+        # 经验这一条的单位是**一个点**（`exp_point_id` 同时是 Redis 命中计数的键，切成 N 个点会把计数
+        # 打散），所以先 clamp 成一段 ≤ 上限的文本，再交给出口——出口原样放行，只有一处。
+        sig = clamp_query(input_sig)
+        dense = await self.embeddings.aembed_query(split_for_embedding([sig])[0])
         await self.store.write([Point(
             id=exp_point_id(action_tag, input_sig, self.user_id),
             text=input_sig, dense=list(dense), doc_type="exp", user_id=self.user_id,

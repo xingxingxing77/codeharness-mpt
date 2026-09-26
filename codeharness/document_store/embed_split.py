@@ -49,13 +49,16 @@ def clamp_query(text: str) -> str:
     所以不截的后果不是报错，而是「换个说法就召不回」，看着像模型笨。
     两条召回腿（`LongTermMemory.recall` 与 `ExpStore.search`）共用这一处，不许各抄一份——
     C27 当年就是靠「唯一出口」才让「绕开出口」变成一件会红的事。
+
+    R2（09-26 审查）之后**多一个调用方**：`ExpStore.save` 的签名先过这里再进出口（见那边的注释）
+    ——经验池里「文档就是查询」，同一个签名既当写侧正文又当读侧 query，两侧必须算同一段文本。
     """
     h = settings.embedding.max_chars
     if len(text) <= h:
         return text
     from codeharness.logs import logger
-    logger.warning(f"召回 query 超长，按端点窗口截断：{len(text)}→{h} 字"
-                   f"（不截就是端点静默保头丢尾）")
+    logger.warning(f"文本超长，按端点窗口截断：{len(text)}→{h} 字"
+                   f"（不截就是端点静默保头丢尾；读侧 query 与经验池签名共用这一处）")
     return text[:h]
 
 

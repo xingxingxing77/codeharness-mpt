@@ -1443,6 +1443,64 @@ def t38_both_recall_legs_clamp_their_query():
     print(f"  ok  t38 两条召回腿实发给端点的 query 都截到 {limit} 字上限、短问句原样通过")
 
 
+def t40_exp_signature_is_embedded_the_same_on_both_sides():
+    """R2 留账（09-26 全面审查）：经验池的签名**写侧与读侧必须算同一段文本**。
+
+    `ExpStore.save` 原用 `split_for_embedding([sig])[0]`（**入库口径**：`_cut` 优先在换行处断），
+    而 `search` 用 `clamp_query`（**读侧口径**：硬截 `text[:h]`）。对同一份签名，只要 `len > 上限`
+    且**前 h 字里含换行**，两侧就差一个量级（`_cut` 的首块可能只是短短一行）⇒ **写进去的向量与查它时的
+    向量不是同一个东西，那份经验永远命中不了自己**（缓存阈值 0.9 比的正是这条腿的余弦）。
+
+    经验池里「文档就是查询」——同一个 `input_sig` 既当写侧正文又当读侧 query，两侧必须同源。
+    修法是**先 `clamp_query` 再进出口**（不是把出口换掉）：clamp 保证 ≤h ⇒ 出口原样放行，
+    C27 那条「每条入库路都过出口」的不变量照样成立（`s15 t8` 盯着它），两侧算的就是同一段文本。
+
+    判据（全离线：spy embedding 记「端点实收的文本」+ 替身 store）：长签名与短签名各一组，
+    同一份签名 save 一次、search 一次，断言**两次送进端点的文本逐字相同**；
+    短签名那组同时是「没被改动」的阳性对照。
+    """
+    from codeharness.configs.settings import settings
+    from codeharness.document_store.exp_store import ExpStore
+
+    limit = settings.embedding.max_chars
+    sent: list[str] = []
+
+    class SpyEmb:
+        dim = 64
+
+        async def aembed_query(self, q):
+            sent.append(q)
+            return [0.0] * 64
+
+        async def aembed_documents(self, ts):
+            return [[0.0] * 64 for _ in ts]
+
+    class FakeStore:
+        async def write(self, points):
+            return len(points)
+
+        async def search(self, *a, **kw):
+            return []
+
+    # 前 limit 字里含换行 ⇒ 旧写侧只取到第一个换行（首行 5 字），旧读侧取 text[:limit]
+    long_sig = "第一行很短\n" + "长" * (limit + 500)
+    short_sig = "写一个快排"
+    for label, sig in (("长签名", long_sig), ("短签名", short_sig)):
+        st = ExpStore(embeddings=SpyEmb(), user_id="u40", store=FakeStore())
+        sent.clear()
+        asyncio.run(st.save("RunCode", sig, "out"))
+        written = list(sent)
+        sent.clear()
+        asyncio.run(st.search("RunCode", sig))
+        queried = list(sent)
+        assert written and queried, f"t40（{label}）有一侧没往端点发（写={len(written)} 读={len(queried)}）"
+        assert written[0] == queried[0], (
+            f"t40（{label}）写侧与读侧送进端点的不是同一段文本（同一份签名永远命中不了自己）："
+            f"写 {len(written[0])} 字 vs 读 {len(queried[0])} 字")
+    print(f"  ok  t40 经验池：同一份签名在写侧与读侧算的是同一段文本"
+          f"（长 {len(long_sig)} 字 / 短 {len(short_sig)} 字各一组）")
+
+
 def _leg_ltm(user: str, project: str, doc_type: str):
     """把 t34 那四条文本灌进**指定那条腿**（`doc_type` 进点 id 派生式 ⇒ 两腿的点互不顶，见 t33）。"""
     from codeharness.memory.longterm import LongTermMemory
@@ -1540,7 +1598,8 @@ def main():
               t34_recall_floor_dense_score, t35_recall_floor_dense_rank,
               t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer,
               t38_both_recall_legs_clamp_their_query,
-              t39_recall_floor_applies_per_leg]
+              t39_recall_floor_applies_per_leg,
+              t40_exp_signature_is_embedded_the_same_on_both_sides]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
