@@ -612,6 +612,61 @@ def t16_run_code_named_delivery():
     assert "filename" in (r_fail.instruct_content or {}), "CodingContext 必须有 filename（extra=forbid 校验）"
 
 
+def t17_react_think_survives_a_broken_structured_reply():
+    """C76（09-28 全量审查批）：REACT 档的 `_think` 必须扛住**解析不回来的 structured 回包**。
+
+    现象：`roles/agent.py` 的 REACT 支裸调 `self.llm.structured(ActionChoice).ainvoke(...)`，且整个函数体
+    没有 try；而网关在「严格解析失败 + `repair_to_model` 也救不回」时是 **raise**
+    （`provider/gateway.py::_Wrapped.ainvoke`）⇒ 异常穿出角色子图，被 `server/runner.py` 的 `_fail` 判成
+    **整场 failed**（经典线 = 默认范式，走的就是这条路），已完成的产物与已花的钱一起陪葬。对照
+    `RoleZero._think` 有「structured 失败 → 纯文本重问 → `llm_repair_json` → 按 end 收口」整条链。
+    修法：补同款兜底（真网关的 `aask` 吃 str/list，FakeLLM 只吃 str ⇒ 统一传 str）。
+
+    三格（零花费、零外网，走真 Agent 子图）：
+      ① 坏回包（非 JSON）**不抛**，终态 `chosen == "END"`（本轮收工，不是把整场打死）；
+      ② 留了可 grep 的 `[agent-structured-fallback]` 警告（静默降级不许）；
+      ③ 阳性对照：正常剧本**不走**兜底，`chosen` 就是脚本里那个动作名。
+    """
+    import io
+
+    from codeharness.logs import logger
+    from codeharness.provider.fake import FakeLLM      # s3b 里 FakeLLM/logger 都是局部导入（不在模块头）
+
+    class _A1(BaseAction):
+        async def run(self, msg):
+            return msg
+
+    class _A2(BaseAction):
+        async def run(self, msg):
+            return msg
+
+    def _run(script):
+        llm = FakeLLM(script)                       # 两个动作 ⇒ 不走「单动作直选」那条短路
+        agent = Agent({"name": "T", "profile": "p", "goal": "g"}, [_A1(llm=llm), _A2(llm=llm)], llm)
+        graph = agent.build()
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="WARNING")     # 与 s4/s17 同款抓法
+        try:
+            out = asyncio.run(graph.ainvoke({
+                "name": "T", "inbox": [Message(content="干活", role="user")], "memory": [],
+                "action_cursor": -1, "chosen": "", "loops": 0, "output": []}))
+        finally:
+            logger.remove(hid)
+        return out, buf.getvalue()
+
+    out_bad, log_bad = _run(["{不是 JSON", "END"])          # 第一发 structured 必校验失败
+    assert out_bad["chosen"] == "END", \
+        f"t17① 坏回包下没按 END 收口（修复前是抛穿节点 ⇒ 整场 failed）：chosen={out_bad['chosen']!r}"
+    assert "[agent-structured-fallback]" in log_bad, \
+        f"t17② 走了兜底却没留可 grep 的 warning：{log_bad[:200]!r}"
+
+    out_ok, log_ok = _run(['{"thought": "选第一个", "action": "A1"}'])
+    assert out_ok["chosen"] == "A1", f"t17③ 正常剧本没照选（阳性对照不成立）：{out_ok['chosen']!r}"
+    assert "[agent-structured-fallback]" not in log_ok, \
+        f"t17③ 正常回包也触发了兜底（判据在数错东西）：{log_ok[:200]!r}"
+    print("  ok  t17 C76：坏回包 ⇒ 不抛且按 END 收口 + 留 [agent-structured-fallback] 警告；正常回包不走兜底")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -620,7 +675,8 @@ def main():
               t9_kernel_tests_leave_no_disk, t10_default_agents_cover_sop_targets,
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
               t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
-              t15_no_dead_state_channels, t16_run_code_named_delivery]
+              t15_no_dead_state_channels, t16_run_code_named_delivery,
+              t17_react_think_survives_a_broken_structured_reply]
     try:
         for c in checks:
             c()
@@ -640,7 +696,7 @@ def main():
           f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
           f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组 + "
           f"写→评审→摘要生产装配 1 组 + C2 假通道不复燃守卫 1 组（TeamState 无 docs 键 + 三处初值源码无写入）+ "
-          f"生产级具名投递两分支 1 组")
+          f"生产级具名投递两分支 1 组 + REACT 档坏回包兜底 1 组（C76）")
 
 
 if __name__ == "__main__":

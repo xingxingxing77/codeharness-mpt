@@ -186,12 +186,28 @@ class Agent:
                 await rep.content(f"[计划] 执行 {names[cursor]}")
             return {"chosen": names[cursor], "action_cursor": cursor, "loops": s["loops"] + 1}
         from codeharness.report import thought_block
+        # C76（09-28 审查批）：prompt 提成变量——兜底那一路要**拿同一串**再问一次（见下）。
+        prompt = (self.build_prefix()
+                  + "\n可选动作: " + ", ".join(names)
+                  + "\n最新消息:\n" + (s["inbox"][-1].content[:2000] if s["inbox"] else "")
+                  + "\n根据最新消息选择下一个动作；全部完成填 END。")
         async with thought_block(role=self.profile["name"]) as rep:
-            choice: ActionChoice = await self.llm.structured(ActionChoice).ainvoke(
-                self.build_prefix()
-                + "\n可选动作: " + ", ".join(names)
-                + "\n最新消息:\n" + (s["inbox"][-1].content[:2000] if s["inbox"] else "")
-                + "\n根据最新消息选择下一个动作；全部完成填 END。")
+            try:
+                choice: ActionChoice = await self.llm.structured(ActionChoice).ainvoke(prompt)
+            except Exception as e:
+                # C76：**REACT 档必须有兜底**。网关在「严格解析失败 + `repair_to_model` 也救不回」时是
+                # `raise`（`provider/gateway.py::_Wrapped.ainvoke`），而这里原先裸调 ⇒ 一次坏回包穿出
+                # 角色子图、被 `server/runner.py` 的 `_fail` 判成**整场 failed**，已完成的产物与已花的钱
+                # 一起陪葬；`paradigm=classic`（默认范式）走的就是这条路。对照 `RoleZero._think` 有
+                # 「structured 失败 → 纯文本重问 → `llm_repair_json` → 按 end 收口」整条链，这里补齐同款：
+                # 兜底失败就**按 END 收口**（本轮收工，不是把整场打死），并留一行可 grep 的 warning。
+                from codeharness.logs import logger
+                from codeharness.provider.repair import llm_repair_json
+                logger.warning(f"[agent-structured-fallback] {self.profile['name']} 决策回包解析失败，"
+                               f"走兜底收口：{type(e).__name__}: {e}")
+                raw = await self.llm.aask(prompt, tag="agent_fallback")
+                choice = await llm_repair_json(raw, ActionChoice, self.llm) or ActionChoice(
+                    thought=f"[解析失败，已按 END 收口] {str(raw)[:200]}", action="END")
             await rep.content(choice.thought)
         return {"chosen": choice.action, "loops": s["loops"] + 1}
 
