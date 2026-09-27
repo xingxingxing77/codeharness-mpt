@@ -8,6 +8,17 @@ const MAX_LOGS = 800
  *  token 事件，按块定页数就会把首屏撑回「一次吞完整条流」。 */
 const HISTORY_PAGE = 400
 
+/** C91：`mergeEarlierPage` 整页回放期间为真。历史事件是**过去**的读数，只许走会产生
+ *  `blocks`/`logs` 的那几支（调用方对这两份做了快照还原）；下面这六支写的是**实时**状态，
+ *  回放旧值会把当前状态盖成历史：
+ *  · `status`  —— 顶栏金额/`store.status` 回退（`isRunning` 假真/假假、`humanQuestion` 被清）
+ *  · `ask_human`/`approval` —— 已答过的问答卡、已决议的审批卡重新占住 composer
+ *  · `queue`/`feedback`/`goal` —— 插话队列/票/目标被旧值覆盖
+ *  ⚠ 加**新的**事件 kind 时想清楚两件事：它落的是块还是实时状态？后者要进这个名单，
+ *  否则「加载更早」会把它重新执行一遍（C91 就是这两者被混在同一个 switch 里的代价）。 */
+const PAGE_REPLAY_OPAQUE = new Set(['status', 'ask_human', 'approval', 'queue', 'feedback', 'goal'])
+let replayingPage = false
+
 function newBlock(ev: WEvent): Block {
   return {
     key: ev.uuid || `e${ev.cursor || ev.seq}`,
@@ -255,7 +266,14 @@ export const useSessionStore = defineStore('sessions', {
       this.logs = []
       this.lastCursor = ''
       this.lastSeq = 0
-      for (const ev of evs) this.applyEvent(ev)
+      // C91：这一遍是**合成块**用的，不是「把这一页当成刚发生」——所以期间只读不写实时状态。
+      // try/finally：applyEvent 里有 throw 的路径，标志卡在 true 会让**之后的活流**整段哑掉。
+      replayingPage = true
+      try {
+        for (const ev of evs) this.applyEvent(ev)
+      } finally {
+        replayingPage = false
+      }
       const pageBlocks = this.blocks
       const pageOrder = this.blockOrder
       const pageLogs = this.logs
@@ -389,6 +407,10 @@ export const useSessionStore = defineStore('sessions', {
     },
 
     applyEvent(ev: WEvent) {
+      // C91：整页前拼（`mergeEarlierPage`）期间的**只读回放**——那一遍只为合成块，写实时状态的
+      // 六支（status/ask_human/approval/queue/feedback/goal）必须整支跳过，否则历史值会把当前
+      // 状态盖回去（过期问答卡甚至会占住 composer 座位、把答案投给当前那个待中断）。
+      if (replayingPage && PAGE_REPLAY_OPAQUE.has(ev.kind)) return
       if (ev.cursor) {
         if (this.lastCursor && ev.cursor <= this.lastCursor) return
         this.lastCursor = ev.cursor
