@@ -669,6 +669,72 @@ def t10_plan_lives_in_outer_state():
     assert 'sub.get("plan")' in src and '"plans": {name:' in src, "C71 的 plans 写回键不见了"
 
 
+def t11_plans_survive_process_restart():
+    """C71 收尾：`plans` 通道**跨进程持久化**——role_zero.py 头注与 as_node 注释里写着
+    「跨进程重启也不再丢——plans 随 checkpointer 持久化」（2026-09-28 先在 E:/tmp 探针上量、
+    本格转正为常驻判据）。两"进程"用两次独立的 saver 实例模拟：`close_all()` 清工厂缓存后
+    重开同一 db 文件，graph 与 RoleZero **全部重建**（实例记忆与计划全空）——第二程 continue
+    激活终态里 t1 的唯一来路就是 checkpointer 里的 plans 通道按名播种。
+    ⚠ 量法自伤（2026-09-28 第一版探针）：三个 `build_team` 全漏传 `checkpointer=` ⇒ 在默认
+    InMemorySaver 上量出「持久化失效」假红——凡量持久化，先看 graph 接没接 saver。"""
+    import shutil
+    import tempfile
+    import json
+    from pathlib import Path
+
+    from codeharness.environment import checkpoint as ck
+    from codeharness.environment.checkpoint import async_sqlite_saver
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+
+    END_CMD = {"command_name": "end", "args": {}}
+    tmp = Path(tempfile.mkdtemp())
+    db = tmp / "checkpoints.db"
+
+    def _think(thought, commands):
+        return json.dumps({"thought": thought, "commands": commands}, ensure_ascii=False)
+
+    def _append(tid, instr):
+        return {"command_name": "Plan.append_task",
+                "args": {"task_id": tid, "dependent_task_ids": [],
+                         "instruction": instr, "assignee": "Mem"}}
+
+    def _member(script):
+        return RoleZero({"name": "Mem", "profile": "p", "goal": "g"}, [], FakeLLM(script))
+
+    async def _run():
+        cfg = {"configurable": {"thread_id": "s16-t11"}}
+        try:
+            saver1 = await async_sqlite_saver(db)
+            g1 = build_team({"Mem": _member([_think("立计划", [_append("t1", "写出周报"), END_CMD])])},
+                            sop={}, checkpointer=saver1)
+            out1 = await g1.ainvoke(
+                {"messages": [Message(content="任务甲", role="user",
+                                      cause_by=RequirementTag.USER_REQUIREMENT,
+                                      sent_from="user", send_to={"Mem"})],
+                 "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}, cfg)
+            assert [t["task_id"] for t in out1["plans"]["Mem"]["tasks"]] == ["t1"], out1["plans"]
+
+            await ck.close_all()                    # 清工厂缓存 ⇒ 下一次工厂调用是真·重开文件
+            saver2 = await async_sqlite_saver(db)
+            assert saver2 is not saver1, "工厂缓存没清（量法失效：第二程拿的还是同一实例）"
+            g2 = build_team({"Mem": _member([_think("续跑推进", [_append("t2", "画出图表"), END_CMD])])},
+                            sop={}, checkpointer=saver2)
+            out2 = await g2.ainvoke(
+                {"messages": [Message(content="continue", role="assistant",
+                                      cause_by=RequirementTag.RUN_COMMAND,
+                                      sent_from="Boss", send_to={"Mem"})]}, cfg)
+            return [t["task_id"] for t in out2["plans"]["Mem"]["tasks"]]
+        finally:
+            await ck.close_all()                    # aiosqlite 后台线程会吊住解释器，必须显式关
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    ids = asyncio.run(_run())
+    assert ids == ["t1", "t2"], \
+        f"plans 跨进程持久化失效：第二程终态 {ids}（t1 只能来自 checkpointer 里的 plans 通道）"
+    print("  ok  t11 plans 跨进程持久化：重开 saver + 全新实例，continue 激活把 t1 播种回来并追加 t2")
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
@@ -676,7 +742,8 @@ def main():
               t7_superstep_batch_all_delivered,
               t8_memories_concurrent_no_last_write_wins,
               t9_send_input_carries_state,
-              t10_plan_lives_in_outer_state]
+              t10_plan_lives_in_outer_state,
+              t11_plans_survive_process_restart]
     for c in checks:
         c()
         if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
@@ -687,7 +754,8 @@ def main():
           f"+ C1 未知收件人当场抛 1 组（含合法指名与 <all> 两格对照）"
           f"+ C13 同超步多条产出全投递 1 组（两目标两条 + 一成员三条）"
           f"+ **T3 memories 并发不覆盖 1 组（C66：并集去重、顺序等价）**"
-          f"+ **C71 计划住外层 plans 键 1 组（续跑播种/新任务作废/并发不互清/reducer/结构守卫）**")
+          f"+ **C71 计划住外层 plans 键 1 组（续跑播种/新任务作废/并发不互清/reducer/结构守卫）**"
+          f"+ **C71 plans 跨进程持久化 1 组（t11：close_all 重开 saver + 全新实例，播种回来）**")
 
 
 if __name__ == "__main__":
