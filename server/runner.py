@@ -26,13 +26,23 @@ def _seeded_ledger(saved: dict):
 
     ⚠ 只读 `cost_usd`/`cost_cny` 两个键。老记录里那个单一 `total_cost` 是**混币种脏数**
     （美元行与人民币行加在同一个 float 上），C12 拍板不留兼容字段，所以这里直接不读——
-    读它等于把错口径继续带进新快照。"""
+    读它等于把错口径继续带进新快照。
+
+    C78（09-28 审查批）：三个**观测计数**（`truncated_calls`/`unknown_command_calls`/
+    `empty_output_calls`）也必须播种——它们在 `cost_snapshot` 里是被持久化、被 `/api/sessions`
+    带出去的字段（C19 落下来的「无效调用」观测就靠这三个数），而新账本从 0 起 ⇒ 重启后 resume
+    老会话，终态快照会把历史值**静默覆盖成 0**，且 0 是合法读数、看不出是丢的。
+    """
     from codeharness.provider.cost import CostManager
     cm = CostManager()
     cm.total_prompt_tokens = int(saved.get("total_prompt_tokens", 0) or 0)
     cm.total_completion_tokens = int(saved.get("total_completion_tokens", 0) or 0)
     cm.cost_usd = float(saved.get("cost_usd", 0) or 0)
     cm.cost_cny = float(saved.get("cost_cny", 0) or 0)
+    # C78：三个观测计数一并播种（理由见 docstring）。缺键/坏值一律退 0，老记录不受影响。
+    cm.truncated_calls = int(saved.get("truncated_calls", 0) or 0)
+    cm.unknown_command_calls = int(saved.get("unknown_command_calls", 0) or 0)
+    cm.empty_output_calls = int(saved.get("empty_output_calls", 0) or 0)
     return cm
 
 

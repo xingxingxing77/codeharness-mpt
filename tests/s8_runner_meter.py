@@ -23,7 +23,7 @@ from pathlib import Path
 from langchain_core.messages import AIMessage
 
 from codeharness.provider.cost import CostManager
-from server.runner import SessionRunner, _seeded_ledger
+from server.runner import SessionRunner, _seeded_ledger, cost_snapshot
 from server.events import SessionEventBus
 from server.sessions import SessionStore, SessionStatus
 
@@ -79,7 +79,20 @@ def t2_seeded_ledger():
     legacy = _seeded_ledger({"total_cost": 9.99})
     assert (legacy.cost_usd, legacy.cost_cny) == (0.0, 0.0), \
         f"C12 回归：又去读老的混币种 total_cost 了：{legacy.cost_usd} / {legacy.cost_cny}"
-    _ok("t2", "_seeded_ledger 从落盘快照续算两桶，缺项/坏项退 0 不炸，且不回读混币种 total_cost")
+    # C78（09-28 审查批）：三个观测计数也要从落盘快照播种——它们在 `cost_snapshot` 里是被持久化、
+    # 被 `/api/sessions` 带出去的字段（C19 的「无效调用」观测全靠它们）。不播种的后果不是「少个读数」，
+    # 而是**重启后 resume 老会话时终态快照把历史值覆盖成 0**（0 是合法读数，看不出是丢的）。
+    c78 = _seeded_ledger({"truncated_calls": 3, "unknown_command_calls": 2, "empty_output_calls": 1})
+    assert (c78.truncated_calls, c78.unknown_command_calls, c78.empty_output_calls) == (3, 2, 1), \
+        f"C78 回归：三个观测计数没被播种（truncated={c78.truncated_calls} " \
+        f"unknown={c78.unknown_command_calls} empty={c78.empty_output_calls}）"
+    assert cost_snapshot(c78)["truncated_calls"] == 3 and cost_snapshot(c78)["empty_output_calls"] == 1, \
+        "C78：播种完的快照没带出这三个计数（持久化出口那半也没接上）"
+    no_keys = _seeded_ledger({"total_prompt_tokens": 7})
+    assert (no_keys.truncated_calls, no_keys.unknown_command_calls, no_keys.empty_output_calls) == (0, 0, 0), \
+        "C78：老记录（没有这三个键）该退 0，不该炸也不该编数"
+    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 三个观测计数（C78），缺项/坏项退 0 不炸，"
+              "且不回读混币种 total_cost")
 
 
 async def _make_runner():
