@@ -218,19 +218,29 @@ class LLMGateway:
         msgs = [content] if isinstance(content, dict) else [_message_to_dict(m) for m in content]
         return count_message_tokens(messages=msgs, model=self.cfg.model)
 
-    async def ainvoke(self, msgs: Union[str, list, None] = None, tag: str = "",
-                      stream: bool = False, timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> BaseMessage:
-        """唯一的出口：所有计数/trace 都在这里，**别在别处再算一遍**。"""
-        msgs = self.format_msg(msgs or [])
-        
-        # 批次5: token 压缩——四策略表驱动（源 base_llm.py:340-412）。触发权在此，_compress_messages 只管裁。
+    def _apply_compression(self, msgs: list) -> list:
+        """批次5 的压缩门（源 base_llm.py:340-412，原内联在 ainvoke 里）：触发权在此，
+        `_compress_messages` 只管裁。C65：**structured 也走这一处**——动态线每轮思考
+        （`RoleZero._think → llm_cached_think → structured`）不经 `ainvoke`，闸原先只接在
+        ainvoke 上等于 `LLM__CONTEXT_LENGTH`/`COMPRESS_TYPE` 对主路径**静默失效**。
+
+        接线前量过分布（09-27，db0 trace 306 笔真 span：p50=1451 / p99=10841 / max=11625 pt；
+        现配置 `context_length=None` ⇒ 闸全路径休眠，接线零行为变化）——闸只在显式配置了
+        `LLM__CONTEXT_LENGTH` 时才可能触发，届时两条路必须一起生效才算数。"""
         from codeharness.configs.compress_msg_config import CompressType
         _ct = self.cfg.compress_type
         if self.cfg.context_length and (_ct != CompressType.NO_COMPRESS or self.cfg.compress_threshold < 1.0):
             strategy = _ct if _ct != CompressType.NO_COMPRESS else CompressType.POST_CUT_BY_TOKEN
             keep_token = int(self.cfg.context_length * self.cfg.compress_threshold)
             if self._count_tokens_direct(msgs) > keep_token:
-                msgs = self._compress_messages(msgs, keep_token, strategy)
+                return self._compress_messages(msgs, keep_token, strategy)
+        return msgs
+
+    async def ainvoke(self, msgs: Union[str, list, None] = None, tag: str = "",
+                      stream: bool = False, timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> BaseMessage:
+        """唯一的出口：所有计数/trace 都在这里，**别在别处再算一遍**。"""
+        msgs = self.format_msg(msgs or [])
+        msgs = self._apply_compression(msgs)
         
         model = self._model.bind(**kwargs) if kwargs else self._model
         deadline = timeout or self.cfg.timeout
@@ -398,6 +408,9 @@ class LLMGateway:
                     return ""
 
             async def ainvoke(self, prompt, tag: str = "", timeout: int = USE_CONFIG_TIMEOUT, **kw):
+                # C65：压缩门与 ainvoke 同源——动态线主路径（每轮思考）走的是本方法，
+                # 不接闸 `LLM__CONTEXT_LENGTH`/`COMPRESS_TYPE` 就是摆设（留账原文）。
+                prompt = self.outer._apply_compression(self.outer.format_msg(prompt))
                 deadline = timeout or self.outer.cfg.timeout
                 try:
                     out = await _acall(runnable.ainvoke, prompt, timeout=deadline, **kw)

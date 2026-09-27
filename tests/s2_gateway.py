@@ -1057,13 +1057,79 @@ def t17_ratelimit_single_owner():
         _fail(" ｜ ".join(bad))
 
 
+def t19_structured_goes_through_compression():
+    """C65：压缩门原来只在 `ainvoke` 里（批次5 内联），而动态线每轮思考走
+    `RoleZero._think → llm_cached_think → structured`——不经 `ainvoke` ⇒
+    `LLM__CONTEXT_LENGTH`/`COMPRESS_TYPE` 对主路径**静默失效**（留账原文）。
+
+    接线前量过分布（09-27，db0 trace 306 笔真 span：p50=1451 / p90=7064 / p99=10841 /
+    max=11625 pt；现配置 `context_length=None` ⇒ 闸全路径休眠，接线零行为变化）。
+    三格：
+      ① structured 触发：context_length=60 + POST_CUT_BY_TOKEN、prompt 超阈值 ⇒
+         runnable 收到的 prompt 已被裁——总量 ≤ keep、system 恒留原样、末条是被截消息的**尾部**
+         （POST 留尾，离当下最近的上下文在最后）；
+      ② structured 默认档：context_length=None ⇒ prompt 逐条原样（热路径默认零行为变化）；
+      ③ ainvoke 同一闸：同 cfg 下 ainvoke 也裁——两路同源，防「只接一边」回归。
+    """
+    from codeharness.configs.compress_msg_config import CompressType
+    from codeharness.configs.llm_config import LLMConfig
+
+    def big_msgs():
+        return [SystemMessage(content="你是助手。"),
+                HumanMessage(content="背景资料：" + "关键词甲乙丙丁 " * 120),
+                HumanMessage(content="更多背景：" + "关键词子丑寅卯 " * 120),
+                HumanMessage(content="请回答。")]
+
+    def counts(msgs):
+        from tiktoken import get_encoding
+        enc = get_encoding("cl100k_base")
+        return sum(len(enc.encode(m.content)) for m in msgs)
+
+    ok_structured = {
+        "raw": AIMessage(content='{"thought":"ok"}',
+                         response_metadata={"token_usage": {"prompt_tokens": 5, "completion_tokens": 2}}),
+        "parsed": Out(thought="ok"), "parsing_error": None}
+
+    # ① structured 触发
+    cfg_big = LLMConfig(model="gpt-4o", api_key="sk-test", stream=False,
+                        context_length=60, compress_type=CompressType.POST_CUT_BY_TOKEN)
+    g1 = _gw(cfg_big, structured_result=ok_structured)
+    asyncio.run(g1.structured(Out).ainvoke(big_msgs()))
+    kinds = [c[0] for c in g1._model.calls]
+    assert "structured" in kinds, f"structured 没到 runnable：{kinds}"
+    got = next(c[1] for c in g1._model.calls if c[0] == "structured")
+    keep = int(60 * 0.8)                                  # 48
+    assert counts(got) <= keep, \
+        f"structured 路的 prompt 没被裁（总量 {counts(got)} > keep {keep}）——闸对主路径仍失效"
+    assert isinstance(got[0], SystemMessage) and got[0].content == "你是助手。", \
+        f"system 该恒留原样：{got[0]!r}"
+    orig = big_msgs()
+    assert orig[-1].content.endswith(got[-1].content), \
+        f"POST 该留尾：末条该是原末条的尾部 {got[-1].content[:40]!r}"
+
+    # ② structured 默认档：零行为变化
+    g2 = _gw(structured_result=ok_structured)
+    asyncio.run(g2.structured(Out).ainvoke(big_msgs()))
+    got2 = next(c[1] for c in g2._model.calls if c[0] == "structured")
+    assert [m.content for m in got2] == [m.content for m in orig], \
+        "默认档（context_length=None）动了 prompt——接线不该改热路径默认行为"
+
+    # ③ ainvoke 同一闸
+    g3 = _gw(cfg_big)
+    asyncio.run(g3.ainvoke(big_msgs(), tag="t19"))
+    got3 = next(c[1] for c in g3._model.calls if c[0] == "ainvoke")
+    assert counts(got3) <= keep, f"ainvoke 路反而没裁了（总量 {counts(got3)} > keep {keep}）——两路没同源"
+    assert isinstance(got3[0], SystemMessage) and got3[0].content == "你是助手。", got3[0]
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
               t8_retry_parse, t9_extract_helpers, t10_settings, t11_usage, t12_structured_and_code,
               t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline,
               t16_structured_failure_accounts, t17_ratelimit_single_owner,
-              t18_embedding_leg_has_explicit_bounds]
+              t18_embedding_leg_has_explicit_bounds,
+              t19_structured_goes_through_compression]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -1072,7 +1138,8 @@ def main():
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
           f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑 / "
           f"流式分支按 deadline 失败（内置 TimeoutError 与 SDK 的 APITimeoutError 两条腿各留一声账差） / "
-          f"坏结构化产出真 HTTP 落账与截断计数 / 429 有界退避与重试归属单点）")
+          f"坏结构化产出真 HTTP 落账与截断计数 / 429 有界退避与重试归属单点 / "
+          f"embedding 两档显式界 / **压缩门两路同源（C65）**）")
 
 
 if __name__ == "__main__":
