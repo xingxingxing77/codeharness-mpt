@@ -43,10 +43,16 @@ def _dump(s: Session) -> dict:
 def _load(sid: str, h: dict) -> Session:
     d = dict(h)
     d["id"] = d.get("id") or sid
-    # 批次36 之前存的记录没有这个字段。缺字段≠新会话：老会话按改动前「无拦截」的行为读，
-    # 否则恢复一个跑了一半的老会话会凭空每步弹审批。新建走模型默认（readonly）。
-    if "permission" not in d:
-        d["permission"] = "full_access"
+    # C89（09-28 审查批）：缺 `permission` 的老记录**兜最严的 readonly**（= 模型默认），不再 fail-open。
+    # 修前这里写的是 `full_access`，理由是「老会话按改动前无拦截的行为读」——但那条理由站不住：
+    # ① 同一个字段**两条读路径给相反答案**——文件仓是 `Session(**item)`（走模型默认 readonly），
+    #    Redis 仓是这个特殊档（full_access）⇒ 同一份数据换个后端就换了安全档（C31「读写不同源」同族，
+    #    方向还更危险：Redis 那半等于静默提权到工具全免审）；
+    # ② 三处现值都指向 readonly：`Session.permission` 的模型默认、`server/sessions.py` 的文件仓、
+    #    `runner._session_ctx` 的「取不到会话按 readonly」；
+    # ③ 存量会话要免审不需要迁移工具——composer 那枚 chip（`PATCH /api/sessions/{sid}` 带
+    #    `permission`）切一次即可，多一次**显式**动作、少一条与另两处相反的默认。
+    d.setdefault("permission", "readonly")
     for f, empty in _JSON_FIELDS.items():
         d[f] = json.loads(d.get(f) or json.dumps(empty))
     return Session(**d)

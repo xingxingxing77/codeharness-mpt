@@ -18,6 +18,7 @@
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
     PYTHONDONTWRITEBYTECODE=1 F:/anaconda/python.exe tests/s18_session_store_fields.py
 """
+import json
 import os
 import socket
 import subprocess
@@ -31,7 +32,7 @@ import redis as sync_redis
 
 from codeharness.configs.settings import RedisConfig
 from platforms.session_store import KEY, RedisSessionStore, _dump
-from server.sessions import Session, SessionStatus
+from server.sessions import Session, SessionStatus, SessionStore
 
 
 def _free_port() -> int:
@@ -200,10 +201,46 @@ def t3_file_persist_scratch_is_unique(_store, _sid):
           f"落盘仍是完整 JSON、零 .tmp 残骸")
 
 
+def t4_legacy_permission_default_is_readonly_everywhere():
+    """C89（09-28 审查批）：老记录缺 `permission` 时，**两个仓必须给同一个答案**，且是最严的那个。
+
+    修前现象：`Session.permission` 的模型默认是 `readonly`、文件仓走模型默认（`Session(**item)`）
+    ⇒ 老记录读成 readonly；而 Redis 仓的 `_load` 显式写了
+    `if "permission" not in d: d["permission"] = "full_access"` ⇒ **同一份数据、两条实现给出相反的
+    安全档**，且 Redis 那半 fail-open（工具全免审）。这是 C31「读写不同源」的同族形状，方向更危险。
+    修法：删掉 Redis 仓那个特殊档，缺字段一律走模型默认；存量要免审用现成的 permission chip 切。
+
+    三格：① Redis 仓 `_load` 缺字段 ⇒ readonly；② 文件仓读同一份记录 ⇒ readonly（两仓同口径）；
+    ③ 显式给了 `permission` ⇒ 照认（阳性对照：别把口径修成「一律 readonly」）。
+    """
+    from platforms.session_store import _load
+    from server.sessions import SessionStore
+
+    legacy = {"id": "s18legacy", "idea": "老会话", "project_name": "s18legacy"}
+    assert _load("s18legacy", dict(legacy)).permission == "readonly", \
+        "C89 回归：Redis 仓对缺 permission 的老记录又 fail-open 了（工具全免审）"
+    tmp = Path(tempfile.mkdtemp(prefix="s18_c89_"))
+    (tmp / "sessions.json").write_text(json.dumps([dict(legacy)]), encoding="utf-8")
+    fs = SessionStore(path=tmp / "sessions.json")
+    assert fs.get("s18legacy").permission == "readonly", \
+        f"C89：两仓口径不一致——文件仓读成 {fs.get('s18legacy').permission!r}（同一份老记录两条实现给相反的安全档）"
+    explicit = _load("s18new", {**legacy, "id": "s18new", "permission": "full_access"})
+    assert explicit.permission == "full_access", \
+        f"C89 阳性对照：显式给的 permission 必须照认，实际 {explicit.permission!r}"
+    print("  ok  t4 C89：缺 permission 的老记录两仓同口径（readonly），显式值照认")
+
+
 def main():
     print("=" * 60)
-    print("S18: RedisSessionStore.update 字段级 HSET（B3）")
+    print("S18: RedisSessionStore.update 字段级 HSET（B3）+ 老记录 permission 口径（C89）")
     print("=" * 60)
+    # C89 这条**不依赖 Redis**（纯函数 + 文件仓），所以放在 redis 可用性检查**之前**：
+    # 否则本机没 redis-server 时它会跟着整支跳过，变成「绿但没验」的假象。
+    try:
+        t4_legacy_permission_default_is_readonly_everywhere()
+    except AssertionError as e:
+        print(f"\n❌ 失败 t4 C89：{e}")
+        return 1
     exe = Path("F:/Redis/redis-server.exe")
     if not exe.exists():
         print(f"⚠️  跳过全部：本机无 {exe}，真服务读数拿不到（退出码 0 不代表验过）")
@@ -243,7 +280,7 @@ def main():
         if fails:
             print(f"\n❌ 失败 {len(fails)}/3 条")
             return 1
-        print("\n" + "=" * 60 + "\n✅ 全部通过 (t1–t3 3/3 全绿)\n" + "=" * 60)
+        print("\n" + "=" * 60 + "\n✅ 全部通过 (t4 C89 口径 1 格 + t1–t3 3/3 全绿)\n" + "=" * 60)
         return 0
     except Exception as e:
         print(f"\n❌ 异常：{e}")
