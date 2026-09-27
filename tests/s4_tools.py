@@ -1076,6 +1076,95 @@ def t50_tool_state_is_keyed_by_session_not_project_name():
         CURRENT_PROJECT.reset(tp)
 
 
+def t51_write_path_pins_encoding_and_newline():
+    """C73/C74（09-28 全量审查批）：工具层的**写路径**必须同时钉住 `encoding` 与 `newline`。
+
+    修前读数（探针 `E:/tmp/ch_probe_editor_bytes.py`）：`Editor.edit_file_by_replace` 改第 2 行 ⇒
+    整份文件 `crlf=3 / 裸 lf=0`——文本模式默认把 `\\n` 翻译成 `os.linesep`，而这条路径是
+    `readlines()` 全读 + 临时文件整份写回 + `shutil.move` 顶掉原件（`editor.py:568/595`），
+    所以「改一行」=全文件 diff；写进 Linux 容器的 `#!/bin/bash\\r` 直接跑不起来。
+    同族第二条：那两处 `NamedTemporaryFile("w")` 与 `Editor.write` 的 `open(...,"w")` **连 encoding
+    都没有**（C55 的 AST 判据只扫 `.open()` 这一个 attr），`PYTHONUTF8=0` 的进程里会把内容按
+    locale(cp936) 写出去——症状延后到下次 utf-8 读时才以 `UnicodeDecodeError` 现形。
+
+    三格：
+      ① **行尾（本机今天就有牙）**：真 `Editor.edit_file_by_replace` 改一份 **LF** 文件的中间行 ⇒
+         编辑后**零个** `\\r\\n`、`\\n` 个数不变、内容文本一致（修复前 `crlf=3/裸 lf=0`）。
+      ② **编码（只在非 UTF-8 进程里有牙）**：`PYTHONUTF8=0` 子进程里编辑含中文的 LF 文件 ⇒
+         文件仍按 utf-8 解得回中文且仍是 LF（真部署的形状，与 t48① 同款做法）。
+      ③ **结构（任何环境下的常驻守卫）**：AST 断言 `editor.py` 与 `tools/__init__.py` 的每个
+         **文本写**调用（`open(...,"w"/"a")`、`NamedTemporaryFile`、`write_text`）都同时带
+         `encoding=` 与 `newline=`。
+    """
+    import ast
+    import subprocess as _sp
+    import tempfile
+
+    from codeharness.tools.libs.editor import Editor
+
+    # ---- ① 行尾：真编辑器改一行，整份文件的行尾不许变 ----
+    d = Path(tempfile.mkdtemp(prefix="s4_t51_"))
+    f = d / "t.py"
+    f.write_bytes("第一行中文\n第二行中文\n第三行中文\n".encode("utf-8"))     # 纯 LF
+    ed = Editor(working_dir=str(d))
+    ed.open_file("t.py")
+    ed.edit_file_by_replace("t.py", 2, "第二行中文", 2, "第二行中文", "第二行改过了")
+    raw = f.read_bytes()
+    crlf, lf = raw.count(b"\r\n"), raw.count(b"\n") - raw.count(b"\r\n")
+    assert (crlf, lf) == (0, 3), \
+        f"t51① 编辑后行尾被改写：crlf={crlf} 裸lf={lf}（C73 复发：整份文件被换成 CRLF）字节={raw!r}"
+    assert raw.decode("utf-8") == "第一行中文\n第二行改过了\n第三行中文\n", f"t51① 内容不对：{raw!r}"
+
+    # ---- ② 非 UTF-8 模式进程：写出去还得是 utf-8（C74 的激活条件） ----
+    code = (
+        "import pathlib, tempfile\n"
+        "from codeharness.tools.libs.editor import Editor\n"
+        "d = pathlib.Path(tempfile.mkdtemp(prefix='s4_t51_sub_'))\n"
+        "f = d / 'z.py'\n"
+        "f.write_bytes('甲\\n乙\\n'.encode('utf-8'))\n"
+        "ed = Editor(working_dir=str(d)); ed.open_file('z.py')\n"
+        "ed.edit_file_by_replace('z.py', 1, '甲', 1, '甲', '甲改了')\n"
+        "raw = f.read_bytes()\n"
+        "assert raw.decode('utf-8') == '甲改了\\n乙\\n', raw\n"
+        "assert b'\\r\\n' not in raw, raw\n"
+        "print('WRITE_BYTES_OK')\n"
+    )
+    env = {**os.environ, "PYTHONUTF8": "0"}          # 关掉 UTF-8 模式：open() 默认编码变回 cp936
+    r = _sp.run([sys.executable, "-B", "-c", code], cwd=str(ROOT), env=env,
+                capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert r.returncode == 0 and "WRITE_BYTES_OK" in (r.stdout or ""), \
+        f"t51② PYTHONUTF8=0 下写路径没钉住编码/行尾（exit={r.returncode}）：" \
+        f"{(r.stderr or r.stdout or '')[-300:]}"
+
+    # ---- ③ 结构：三类文本写调用都要带 encoding + newline（C55 那条只扫 .open()） ----
+    def bad_calls(src: str) -> list:
+        out = []
+        for n in ast.walk(ast.parse(src)):
+            if not isinstance(n, ast.Call):
+                continue
+            f_ = n.func
+            name = f_.attr if isinstance(f_, ast.Attribute) else (f_.id if isinstance(f_, ast.Name) else "")
+            kw = {k.arg for k in n.keywords}
+            args = [a.value for a in n.args if isinstance(a, ast.Constant)]
+            mode = next((a for a in args if isinstance(a, str) and any(c in a for c in "wa")), "")
+            is_text_write = (
+                (name == "open" and bool(mode) and "b" not in mode)
+                or name == "write_text"
+                or name == "NamedTemporaryFile"
+            )
+            if is_text_write and not {"encoding", "newline"} <= kw:
+                out.append((n.lineno, name, sorted(kw)))
+        return out
+
+    root = Path(__file__).resolve().parents[1] / "codeharness" / "tools"
+    for rel in ("libs/editor.py", "__init__.py"):
+        bad = bad_calls((root / rel).read_text(encoding="utf-8"))
+        assert not bad, f"t51③ {rel} 还有没同时钉住 encoding/newline 的文本写调用（行,调用,已有keys）：{bad}"
+
+    print(f"  ok  t51 C73/C74：编辑器改一行的字节读数 crlf={crlf} 裸lf={lf}（修复前 3/0）、"
+          f"PYTHONUTF8=0 子进程写出的仍是 utf-8+LF、两文件的文本写调用全带 encoding+newline")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1117,7 +1206,8 @@ def main():
               t46_held_out_phrasings_show_the_real_rate,
               t47_new_held_out_after_desc_normalization,
               t48_editor_read_path_is_locale_independent, t49_cancel_reaps_child_and_pumps,
-              t50_tool_state_is_keyed_by_session_not_project_name]
+              t50_tool_state_is_keyed_by_session_not_project_name,
+              t51_write_path_pins_encoding_and_newline]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
@@ -1141,7 +1231,8 @@ def main():
           f"+ C6 工具召回 {sum(1 for c in checks if c.__name__.split('_', 1)[0] in {'t39', 't40', 't41', 't42', 't43', 't44', 't45', 't46', 't47'})} 组"
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
-          f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）")
+          f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline）")
 
 
 if __name__ == "__main__":

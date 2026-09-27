@@ -18,7 +18,10 @@ async def write_file(path: str, content: str) -> str:
     if not t:
         return "拒绝：路径越界"
     t.parent.mkdir(parents=True, exist_ok=True)
-    t.write_text(content, encoding="utf-8")
+    # C73/C74：`Path.write_text` 与 `open(..., "w")` 同病——文本模式默认 **翻译换行**（Windows 上
+    # `\n` → `\r\n`，整份文件的行尾都被改写）且编码跟 locale 走。两个参数都得钉（读侧是
+    # `read_text(encoding="utf-8")`，那边不受影响）。
+    t.write_text(content, encoding="utf-8", newline="")
     log_tool_output(ToolLogItem(name="write_file", value=path))
     async with editor_block(filename=path) as rep:          # 前端 Editor 块（代码卡）
         await rep.document({"filename": path, "content": content})

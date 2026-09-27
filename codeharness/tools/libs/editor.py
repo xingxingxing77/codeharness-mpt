@@ -121,7 +121,10 @@ class Editor(BaseModel):
         directory = os.path.dirname(path)
         if directory and not os.path.exists(directory):
             os.makedirs(directory)
-        with open(path, "w", encoding="utf-8") as f:
+        # C73/C74：写路径必须**双钉**——`encoding` 防非 UTF-8 进程（locale=cp936）把整份文件转码，
+        # `newline=""` 防文本模式的换行翻译把整份文件的 LF 变成 CRLF（Windows 上改一行=全文件 diff，
+        # 写进 Linux 容器的 `#!/bin/bash\r` 直接跑不起来）。读侧本就走 universal newlines，语义不变。
+        with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         # self.resource.report(path, "path")
         return f"The writing/coding the of the file {os.path.basename(path)}' is now completed. The file '{os.path.basename(path)}' has been successfully created."
@@ -556,7 +559,7 @@ class Editor(BaseModel):
         src_abs_path = file_name.resolve()
         first_error_line = None
         # The file to store previous content and will be removed automatically.
-        temp_backup_file = tempfile.NamedTemporaryFile("w", delete=True)
+        temp_backup_file = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8", newline="")
 
         try:
             # lint the original file
@@ -565,7 +568,7 @@ class Editor(BaseModel):
                 original_lint_error, _ = self._lint_file(file_name)
 
             # Create a temporary file
-            with tempfile.NamedTemporaryFile("w", delete=False) as temp_file:
+            with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="") as temp_file:
                 temp_file_path = temp_file.name
 
                 # Read the original file and check if empty and for a trailing newline
