@@ -114,8 +114,11 @@ async def import_repo(sid: str, request: Request, user: str = Depends(current_us
     auth 关=workspace_root 内即可（导入公共模板目录是合法用法）；产物一律写进本会话工作区。
     """
     from codeharness.runtime import CURRENT_PROJECT, session_root
-    body = await request.json()
+    # C86：**归属判定先于读 body**（B11/C47 那条「边界判定在昂贵操作之前」的同族第三处）——
+    # 原先 `await request.json()` 排在最前，越权者也能让服务端先把整段 body 收进内存，
+    # 才轮到 404。判定不需要 body（`_ws` 只吃 sid 与 user），顺序换一下即可。
     workspace = _ws(request, sid, user)                    # 先定归属（越权 404），边界用它
+    body = await request.json()
     repo_path = Path(str(body.get("repo_path", ""))).resolve()
     from codeharness.configs.settings import settings
     if settings.platform.auth_enabled:

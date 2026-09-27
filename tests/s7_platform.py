@@ -898,6 +898,75 @@ async def _redis_suite():
             raise AssertionError(f"{fn.__name__} 卡死（60s watchdog 到点）")
 
 
+def t19_entry_body_limits_and_deploy_coherence():
+    """C86+C88（09-28 全量审查批）：入口的字段/body 上界，与部署层的口径是否成对。
+
+    C86 现象：`/chat` 的 `content`、建会话的 `idea`、`/human-input` 的 `content`、招人档案三字段
+    原先**只判 `min_length`**——auth **关**时这些端点不需要登录（`current_user` 恒 "default"），
+    整段 body 先被 Starlette 读进内存、再进队列/会话表/checkpointer/prompt；`import_repo` 还把
+    `request.json()` 排在**归属判定之前**（B11/C47 那条「边界判定先于昂贵操作」的同族第三处）。
+    C88 现象：`frontend/nginx.conf` 的 `client_max_body_size 25m` 与业务口径（20 文件 × 20MB）矛盾
+    ——多文件一次传合计超 25MB 会被网关**裸 413** 掐掉，走不到 `upload_kb` 的逐条 `errors[]` 回执。
+
+    四格：
+      ① **字段上限**：超长 `idea` ⇒ 422 且**零会话落库**（边界先于副作用）；合法长度 200（阳性对照）。
+      ② **body 档位（真发）**：3MB 的 JSON body ⇒ **413**（中间件在读内存之前挡）；1MB 的同形请求
+         不许是 413（阈值两侧各测一次）。
+      ③ **分档函数**：`multipart/form-data` 走上传大档、`application/json` 走小档，且大档 ≥ 400MB
+         ——不然真发 400MB 太重（只判函数）。
+      ④ **部署口径成对**：`nginx.conf` 的 `client_max_body_size` ≥ 业务上限之和。谁把它改小谁当场红
+         ——这是 C88 的常驻守卫（改回 25m 就红）。
+    """
+    import re
+    import server.sessions as ss
+    from server.api.sessions import MAX_IDEA_CHARS
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        import server.app as sa
+        with TestClient(sa.create_app()) as c:
+            # ① 字段上限：超长被 422 挡在副作用之前
+            before = len(c.get("/api/sessions").json())
+            r = c.post("/api/sessions", json={"idea": "x" * (MAX_IDEA_CHARS + 1), "project_name": "s7big"})
+            assert r.status_code == 422, f"超长 idea 应 422，实际 {r.status_code}: {r.text[:120]}"
+            assert len(c.get("/api/sessions").json()) == before, "被拒的 idea 居然建出了会话"
+            ok = c.post("/api/sessions", json={"idea": "合法长度", "project_name": "s7len"})
+            assert ok.status_code == 200, f"合法 idea 被误拒：{ok.text[:120]}"
+            sid = ok.json()["id"]
+
+            # ② body 档位：阈值两侧各测一次（同一个请求形状，只差体积）
+            big = json.dumps({"content": "y" * (3 * 1024 * 1024)})
+            rb = c.post(f"/api/sessions/{sid}/chat", content=big,
+                        headers={"content-type": "application/json"})
+            assert rb.status_code == 413, f"3MB 的 JSON body 应 413，实际 {rb.status_code}: {rb.text[:120]}"
+            mid = json.dumps({"content": "y" * (1024 * 1024)})
+            rm = c.post(f"/api/sessions/{sid}/chat", content=mid,
+                        headers={"content-type": "application/json"})
+            assert rm.status_code != 413, f"1MB 的 body 不该触发 413（阈值判错了）：{rm.status_code}"
+
+            # ③ 分档：multipart 走大档（真发 400MB 太重，只判函数）
+            assert sa._body_cap_for("application/json") == sa._MAX_JSON_BODY_BYTES, "JSON 没走小档"
+            assert sa._body_cap_for("multipart/form-data; boundary=X") == sa._MAX_UPLOAD_BODY_BYTES, \
+                "multipart 没走上传大档"
+            assert sa._MAX_UPLOAD_BODY_BYTES >= 400 * 1024 * 1024, \
+                f"上传档 {sa._MAX_UPLOAD_BODY_BYTES} 比业务口径（20×20MB）还小"
+    finally:
+        ss.SESSIONS_FILE = keep
+
+    # ④ 部署口径成对（静态守卫：nginx 那一层不许比业务上限更紧）
+    from server.api.workspace import MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES
+    nginx = (Path(__file__).resolve().parents[1] / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+    m = re.search(r"client_max_body_size\s+(\d+)\s*([mk])", nginx, re.I)
+    assert m, "nginx.conf 里找不到 client_max_body_size（部署层没了这道口径）"
+    size = int(m.group(1)) * (1024 * 1024 if m.group(2).lower() == "m" else 1024)
+    need = MAX_UPLOAD_BYTES * MAX_UPLOAD_FILES
+    assert size >= need, \
+        f"nginx 只放 {size // 1048576}MB 而业务口径要 {need // 1048576}MB —— 多文件上传会被网关裸 413 掐掉（C88）"
+    _ok("t19", f"入口上界与部署口径成对：超长 idea→422（零会话落库）、3MB JSON→413、1MB 放行、"
+               f"multipart 走 {sa._MAX_UPLOAD_BODY_BYTES // 1048576}MB 大档、nginx {size // 1048576}MB ≥ "
+               f"业务 {need // 1048576}MB")
+
+
 def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
@@ -906,15 +975,16 @@ def main():
     t16_event_flusher_survives_a_failing_xadd()
     t17_event_bus_thread_safe()
     t18_shutdown_flush_is_bounded()
+    t19_entry_body_limits_and_deploy_coherence()
     global REDIS_UP
     REDIS_UP = _redis_up()
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 7/7 过（进程内路 t1+t10+t11+t15+t16+t17+t18），redis 路待环境")
+        print("\ns7_platform: 8/8 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 18/18 全绿（双配置）")
+    print("\ns7_platform: 19/19 全绿（双配置）")
 
 
 if __name__ == "__main__":

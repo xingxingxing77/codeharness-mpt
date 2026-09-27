@@ -12,16 +12,26 @@ from server.sessions import SessionStatus
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
+# C86（09-28 审查批）：入口的**信任边界**。auth 关时这些端点**不需要登录**（`current_user` 恒
+# "default"），而原先只判 `min_length`——一条 200MB 的 idea/消息会被 Starlette 整段读进内存，
+# 再逐层进队列、会话表、checkpointer 与 prompt。上限取「人话级」的宽值：超了**以 422 明说**
+# （pydantic 在进任何副作用之前就挡下），而不是收下来再炸在后面某一层。
+MAX_MESSAGE_CHARS = 64_000      # `/chat` 与 `/human-input` 的单条文本
+MAX_IDEA_CHARS = 20_000         # 建会话/改会话的 idea（需求原文）
+MAX_GOAL_CHARS = 2_000          # 会话目标（B5）
+MAX_ROLE_FIELD_CHARS = 8_000    # 招人档案的 profile/goal/constraints
+MAX_ROLE_TOOLS = 64             # 招人档案点名的工具数（名册 19 只，留余量）
+
 
 class CreateSessionReq(BaseModel):
-    idea: str = Field(min_length=1)
+    idea: str = Field(min_length=1, max_length=MAX_IDEA_CHARS)   # C86：上界见文件头注释
     project_name: str = ""
     n_round: int = 5
     paradigm: str = "classic"       # classic|dynamic（S9.1 对照）|react（9.2 策略曲线）；其余值 422
     sop: str = ""                   # N7 模板名（9.3 扩展线入口）；非空时 create 即校验，别让拼错拖到 start 才炸
     llm: dict = Field(default_factory=dict)
     permission: str = "readonly"    # 工具审批的免审档（判定表 codeharness/tools/_approval.py）；其余值 422
-    goal: str = ""                 # B5：建会话时用户填的目标（口径：只有用户能点完成）
+    goal: str = Field(default="", max_length=MAX_GOAL_CHARS)   # B5：建会话时用户填的目标（口径：只有用户能点完成）
 
     @field_validator("permission")
     @classmethod
@@ -77,27 +87,27 @@ class CreateSessionReq(BaseModel):
 
 
 class ChatReq(BaseModel):
-    content: str = Field(min_length=1)
-    send_to: str = ""          # 空=TeamLeader；角色名=直聊（InputCard 的目标选择）
+    content: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)   # C86
+    send_to: str = Field(default="", max_length=64)   # 空=TeamLeader；角色名=直聊（InputCard 的目标选择）
 
 
 class HumanInputReq(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)   # C86
 
 
 class RoleReq(BaseModel):
     """C1-③ 招人档案。这里只做**形状**校验（少字段就 422，不进内核），
     语义校验（名字合法、工具已注册、档位够不够）在 `codeharness.team.check_role_def` 那一个出口里做。"""
     name: str = Field(min_length=1, max_length=32)
-    profile: str = Field(min_length=1)
-    goal: str = Field(min_length=1)
-    constraints: str = ""
-    tools: list[str] = Field(default_factory=list)
+    profile: str = Field(min_length=1, max_length=MAX_ROLE_FIELD_CHARS)      # C86
+    goal: str = Field(min_length=1, max_length=MAX_ROLE_FIELD_CHARS)         # C86
+    constraints: str = Field(default="", max_length=MAX_ROLE_FIELD_CHARS)    # C86
+    tools: list[str] = Field(default_factory=list, max_length=MAX_ROLE_TOOLS)   # C86：列表也要有上界
 
 
 class PatchSessionReq(BaseModel):
     """四个都可选：不传的字段保持原值，所以取消归档要显式发 archived=false。"""
-    idea: Optional[str] = Field(default=None, min_length=1)
+    idea: Optional[str] = Field(default=None, min_length=1, max_length=MAX_IDEA_CHARS)   # C86
     archived: Optional[bool] = None
     pinned: Optional[bool] = None
     permission: Optional[str] = None        # 会话中途切免审档（composer 那枚 chip）

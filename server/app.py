@@ -27,6 +27,20 @@ def _mask(v: str) -> str:
     return f"{v[:6]}...{v[-4:]}" if v and len(v) > 12 else ("***" if v else "")
 
 
+# C86：入口 body 上限的两档（判据住在 `guard_body_size` 的注释里）。上传档 = 业务口径 + 余量，
+# **从 `workspace.py` 的门口判据推出来**，不另抄一份数。
+_MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+_MAX_UPLOAD_BODY_BYTES = (workspace_api.MAX_UPLOAD_BYTES * workspace_api.MAX_UPLOAD_FILES
+                          + 16 * 1024 * 1024)
+
+
+def _body_cap_for(content_type: str) -> int:
+    """按 content-type 挑档：multipart（知识库上传）走大档，其余一律小档。"""
+    return (_MAX_UPLOAD_BODY_BYTES
+            if (content_type or "").lower().startswith("multipart/form-data")
+            else _MAX_JSON_BODY_BYTES)
+
+
 def create_app() -> FastAPI:
     llm_defaults, llm_problem = load_llm_defaults()
 
@@ -107,6 +121,24 @@ def create_app() -> FastAPI:
     from fastapi.responses import JSONResponse
     from server.auth import auth_enabled, tokens
     _WS_PREFIX, _STORAGE_ROOT = "/workspace", (WORKSPACE_ROOT / "storage").resolve()
+
+    # C86（09-28 审查批）：入口 body 上界。**按 content-type 分两档**，不按路由名——路由改名或新增
+    # 上传口时不会静默失效；两档正好对应「JSON 端点只收人话级的体」与「知识库上传是唯一合法的大
+    # body（20 文件 × 20MB，那组数住在 `workspace.py` 的门口判据里，不在这里重抄）」。字段级上限
+    # 另有 pydantic 那一层（`services/api/sessions.py` 的 MAX_*_CHARS），这里是**读进内存之前**的闸。
+    # `Content-Length` 缺失（chunked）时放行：Starlette 解析 multipart 另有上限，JSON 端点还有
+    # pydantic 兜着——两档都不至于无界。
+    @app.middleware("http")
+    async def guard_body_size(request, call_next):
+        length = request.headers.get("content-length", "")
+        if length.isdigit():
+            cap = _body_cap_for(request.headers.get("content-type", ""))
+            if int(length) > cap:
+                extra = ("（JSON 端点只收人话级的体；上传请走 multipart/form-data）"
+                         if cap == _MAX_JSON_BODY_BYTES else "")
+                return JSONResponse(status_code=413, content={
+                    "detail": f"请求体 {int(length) // 1048576}MB 超过 {cap // 1048576}MB 上限{extra}"})
+        return await call_next(request)
 
     @app.middleware("http")
     async def guard_workspace(request, call_next):
