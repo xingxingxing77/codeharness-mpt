@@ -21,6 +21,7 @@ SDK **懒导入**：内核（memory）在本模块挂了装饰器，未接入的
 from __future__ import annotations
 
 import atexit
+import logging
 import threading
 from contextlib import nullcontext
 from functools import wraps
@@ -65,7 +66,35 @@ def client():
         c = settings.langfuse
         _client = Langfuse(public_key=c.public_key, secret_key=c.secret_key,
                            host=c.host, tracing_enabled=True, timeout=c.timeout)
+        _bridge_otel_logging()      # B⑥：BSP 溢出的降级从此可 grep（建链时挂一次，幂等）
     return _client
+
+
+class _OTelLogBridge(logging.Handler):
+    """B⑥：把 OTel SDK 的 std-logging 转发进本仓 loguru。
+
+    动态线 span 经 langfuse 的 OTel `BatchSpanProcessor` 导出，其内部队列（2048）满时
+    **入队即丢**并打一条 std-logging 的 `WARNING: Queue full, dropping ...`
+    （`opentelemetry/sdk/_shared_internal/__init__.py` 的 `emit`）——而本仓日志体系是 loguru、
+    不收 std logging ⇒ 「硬丢」这一族降级**零痕迹**（留账原文「shutdown() 看不见这一族降级」：
+    它根本不发生在 shutdown，发生在运行期）。只挂 OTel 这一个 logger（按名取同一实例），
+    不动根 logger、不动其他库。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from codeharness.logs import logger
+            logger.log(record.levelno, f"[otel] {record.getMessage()}")
+        except Exception:
+            pass                    # 日志桥自己绝不能把调用方炸了
+
+
+def _bridge_otel_logging() -> None:
+    lg = logging.getLogger("opentelemetry.sdk._shared_internal")   # BSP 的 _logger 同名同实例
+    if not any(getattr(h, "_otel_bridge", False) for h in lg.handlers):
+        h = _OTelLogBridge()
+        h._otel_bridge = True
+        h.setLevel(logging.WARNING)
+        lg.addHandler(h)
 
 
 def callbacks() -> list:

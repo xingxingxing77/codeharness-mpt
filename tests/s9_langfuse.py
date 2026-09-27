@@ -686,25 +686,66 @@ def t6_live_grace_curve():
     _ok("t6", "；".join(notes))
 
 
+def t7_otel_overflow_is_greppable():
+    """B⑥（09-27）：langfuse 的 OTel `BatchSpanProcessor` 内部队列（2048）满时**入队即丢**
+    并打一条 std-logging 的 `WARNING: Queue full, dropping ...`——发生在**运行期**，不经过
+    `shutdown()`（grace/返回值都盖不住它）。本仓日志体系是 loguru、不收 std logging ⇒
+    「硬丢」这一族降级零痕迹（留账原文「shutdown() 看不见这一族降级」）。
+    修法：`client()` 建链时给 OTel 那一个 logger（`opentelemetry.sdk._shared_internal`，
+    BSP 的 `_logger` 同名同实例）挂 `_OTelLogBridge` → loguru。三格（零网络零花费，直测接缝）：
+      ① 桥装上后，std-logging 的 WARNING 进 loguru（带 `[otel]` 前缀可 grep）；
+      ② 幂等：`_bridge_otel_logging()` 重复调，桥 handler 恰好一个（client() 每进程建一次，
+         但脚本里可能多次进 enable——重复挂会把一条溢出喊成 N 条）；
+      ③ 阳性对照：INFO 级不转发（handler level=WARNING，别把 OTel 的debug噪音灌进来）。
+    """
+    import io
+    import logging
+
+    from codeharness.logs import logger as _lg
+    from codeharness.observability import _bridge_otel_logging
+
+    _bridge_otel_logging()
+    otel_lg = logging.getLogger("opentelemetry.sdk._shared_internal")
+    bridges = [h for h in otel_lg.handlers if getattr(h, "_otel_bridge", False)]
+    assert len(bridges) == 1, f"t7② 幂等失败：桥 handler 有 {len(bridges)} 个"
+
+    buf = io.StringIO()
+    hid = _lg.add(buf, format="{message}", level="INFO")
+    try:
+        otel_lg.warning("Queue full, dropping 1 span(s).")
+        assert "[otel] Queue full, dropping" in buf.getvalue(), \
+            f"t7① 溢出 warning 没进 loguru（硬丢还是零痕迹）：buf={buf.getvalue()!r}"
+        buf.truncate(0)
+        buf.seek(0)
+        otel_lg.info("batch export ok")          # 阳性对照：INFO 不转发
+        assert "[otel]" not in buf.getvalue(), \
+            f"t7③ INFO 也被转发了（噪音阀没了）：{buf.getvalue()!r}"
+    finally:
+        _lg.remove(hid)
+    print("  ok  t7 otel 溢出可 grep：std-logging WARNING 进 loguru（[otel] 前缀）、"
+          "桥幂等、INFO 不转发")
+
+
 def main():
     global LF_UP
     asyncio.run(t1_gate_states())
     t4_shutdown_is_bounded()                  # C28：不依赖外部服务，必须先跑
     t5_process_exit_tail()                    # C29：同上，零网络零花费
+    t7_otel_overflow_is_greppable()           # B⑥：同上，零网络零花费
     LF_UP = _langfuse_up()
     if not LF_UP:
         _skip("t2/t3/t6", f"Langfuse 未起（{settings.langfuse.host}/api/public/health 不通）"
                           f"——起 E:\\langfuse 的 compose 后复跑")
-        print("\ns9_langfuse: 3/3 过（t1 零成本 + t4 有界停机 + t5 退出尾巴），探活组待环境")
+        print("\ns9_langfuse: 4/4 过（t1 零成本 + t4 有界停机 + t5 退出尾巴 + t7 otel 溢出可 grep），探活组待环境")
         return
     t2_api_readback()
     t6_live_grace_curve()                     # C28/C29 未验①③：真在线才量的两格，零模型花费
     if os.getenv("LF_LIVE") != "1":
         _skip("t3", "需 LF_LIVE=1（发真模型调用，花真钱）")
-        print("\ns9_langfuse: 5/5 过（t1 + t4 + t5 + t2 + t6）")
+        print("\ns9_langfuse: 6/6 过（t1 + t4 + t5 + t7 + t2 + t6）")
         return
     asyncio.run(t3_live_roundtrip())
-    print("\ns9_langfuse: 6/6 全绿")
+    print("\ns9_langfuse: 7/7 全绿")
 
 
 if __name__ == "__main__":
