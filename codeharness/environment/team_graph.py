@@ -11,9 +11,28 @@ from codeharness.const import MESSAGE_ROUTE_TO_ALL, MESSAGE_ROUTE_TO_NONE, MESSA
 from codeharness.schema import Message
 
 
-def merge_dicts(a: dict, b: dict) -> dict:
-    """并行 Send 时 dict 合并 reducer（memories 按角色名合并，防覆盖）"""
-    return {**a, **b}
+def merge_memories(a: dict, b: dict) -> dict:
+    """并行 Send 时按角色合并**记忆列表**（T3/C66，用户拍 (a)：并集去重、保序）。
+
+    为什么不能用 `{**a, **b}`：同一成员同超步被多条 Send 激活时（WriteTasks 一拆 N、
+    委派一拆 N——s16 t7 的夹具形状），每个激活基于**同一快照**返回「快照 + 各自新增」，
+    末写覆盖会把前 N-1 个激活的新增静默丢掉。并集正好是正确答案：快照相同、新增各异。
+    安全性：图 state 里的 memory **只增不减**（`roles/agent.py:53` 的溢写不裁 state 列表）
+    ⇒ 并集不会复活被删条目；顺序单激活时「快照+新增」⊇ 旧值 ⇒ 与替换语义逐字等价。
+    条目可能是 Message 也可能是 str/dict（不可哈希）⇒ 线性 `in` 去重；
+    ponytail: 记忆是每角色私有、量级小（几十条），O(n²) 代价可忽略，真变大再换指纹键。"""
+    if not b:
+        return a
+    if not a:
+        return b
+    out = dict(a)
+    for role, items in b.items():
+        base = list(out.get(role) or [])
+        for it in (items or []):
+            if it not in base:
+                base.append(it)
+        out[role] = base
+    return out
 
 
 class UnknownRecipient(ValueError):
@@ -30,7 +49,7 @@ class UnknownRecipient(ValueError):
 
 class TeamState(TypedDict):
     messages: Annotated[list, operator.add]        # 全局黑板 = env.history
-    memories: Annotated[dict, merge_dicts]         # 每角色私有记忆（checkpointer 持久化）
+    memories: Annotated[dict, merge_memories]      # 每角色私有记忆（checkpointer 持久化）
     seen: int                                      # 路由游标：黑板已被消费到的条数（router 写，C13）
     undelivered: list                              # 本超步新增、还没投递的那一截（router 算，route 只读）
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）

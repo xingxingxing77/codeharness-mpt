@@ -373,11 +373,77 @@ def t7_superstep_batch_all_delivered():
     print(f"  ok  t7 同批全投：两条各投各的 + 三条并发激活的回报三条都回队长（{leader.seen}）")
 
 
+def t8_memories_concurrent_no_last_write_wins():
+    """T3/C66（用户拍 (a)：并集去重、保序）：同一成员同超步被多条 Send 激活时，memories **不许末写覆盖**。
+
+    各激活返回「各自的新增」（Agent._run 形状），旧 reducer `{**a, **b}` 对同一角色的并发
+    激活是末写覆盖 ⇒ 前 N-1 个激活的新增静默丢。安全性前提：图 state 里的 memory
+    **只增不减**（agent.py:53 的溢写不裁 state 列表）⇒ 并集不会复活被删条目。
+    ⚠ 探针实锤的边界（超出本格拍板范围，留账在分计划）：langgraph 1.2.11 的 `Send` arg
+    **完全替换节点输入**——Send 路的节点 state 里只有 `_inbox`，Agent._run 的记忆播种恒空。
+    本格只钉 **reducer 的提交正确性**（它同时是未来修好播种后的唯一防覆盖护栏）。
+    两格：
+      ① 并发（真图）：一条委派聚合件拆 3 条给同一成员，每次激活返回一条自己的新增
+         ⇒ 终态该角色恰好 3 条（旧 reducer 只活最后 1 条）；
+      ② reducer 直测：带快照的返回 = 顺序等价（快照+新增 ⊇ 旧值，替换语义保住）、
+         重复条目不堆积（含不可哈希形状）、幂等；阳性对照 = 旧 `{**a,**b}` 形状确实丢条目。
+    """
+    class _Hub:
+        def as_node(self, name):
+            async def _run(state):
+                return {"messages": [Message(
+                    content="派发中", role="user", cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                    send_to={"Mem"},
+                    instruct_content={"delegations": [{"member": "Mem", "instruction": f"任务 {i}"}
+                                                      for i in range(3)]},
+                    instruct_schema="TeamDelegation")]}
+            return name, _run
+
+    class _Mem:
+        """照 Agent._run 的返回形状（agent.py:310）：交回本激活的记忆增量"""
+        def __init__(self):
+            self.seen = []
+
+        def as_node(self, name):
+            async def _run(state):
+                inbox = state.get("_inbox") or []
+                tag = inbox[-1].content if inbox else ""
+                self.seen.append(tag)
+                return {"messages": [Message(content=f"完成-{tag}", role="assistant",
+                                             cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                                             send_to={MESSAGE_ROUTE_TO_NONE})],
+                        "memories": {name: [f"记住-{tag}"]}}
+            return name, _run
+
+    m = _Mem()
+    g = build_team({"Hub": _Hub(), "Mem": m},
+                   sop={RequirementTag.USER_REQUIREMENT: ["Hub"]})
+    out = _ainvoke(g, _init(Message(content="开工", role="user",
+                                    cause_by=RequirementTag.USER_REQUIREMENT)), "s16-t8")
+    assert len(m.seen) == 3, f"前置失配：成员没被激活 3 次（{m.seen}）"
+    mems = (out.get("memories") or {}).get("Mem", [])
+    assert sorted(mems) == [f"记住-任务 {i}" for i in range(3)], \
+        f"并发激活的新增被末写覆盖丢了（T3）：{mems}"
+
+    # ② reducer 直测：顺序等价 / 去重 / 幂等 / 旧形状的阳性对照
+    from codeharness.environment.team_graph import merge_memories
+    assert merge_memories({}, {"Seq": ["a"]}) == {"Seq": ["a"]}, "空侧合并失配"
+    assert merge_memories({"Seq": ["a"]}, {"Seq": ["a", "b"]}) == {"Seq": ["a", "b"]}, \
+        "返回带快照时不是顺序等价（快照+新增 ⊇ 旧值）——替换语义被破坏"
+    assert merge_memories({"Seq": ["a", {"k": 1}]}, {"Seq": ["a", {"k": 1}, "b"]}) \
+        == {"Seq": ["a", {"k": 1}, "b"]}, "重复条目堆积了（含不可哈希形状）"
+    x = {"Seq": ["a", {"k": 1}]}
+    assert merge_memories(x, x) == x, "幂等失败（重放场景会翻倍）"
+    assert {**{"Seq": ["x"]}, **{"Seq": ["y"]}} == {"Seq": ["y"]}, \
+        "阳性对照失效：旧 {**a,**b} 形状在这个例子里居然不丢条目"
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
               t5_approval_reject_does_not_run_action, t6_unknown_recipient_raises,
-              t7_superstep_batch_all_delivered]
+              t7_superstep_batch_all_delivered,
+              t8_memories_concurrent_no_last_write_wins]
     for c in checks:
         c()
         if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
@@ -386,7 +452,8 @@ def main():
           f"条件边写 state 不持久化 1 组（含节点写入对照组）+ 真图刹车 2 组（<self> 自环 / DEBUG_ERROR 广播）"
           f"+ B9 自愈回喂 2 组（Action 抛错 / 审批拒绝，都要再激活角色且 3 轮内收尾）"
           f"+ C1 未知收件人当场抛 1 组（含合法指名与 <all> 两格对照）"
-          f"+ C13 同超步多条产出全投递 1 组（两目标两条 + 一成员三条）")
+          f"+ C13 同超步多条产出全投递 1 组（两目标两条 + 一成员三条）"
+          f"+ **T3 memories 并发不覆盖 1 组（C66：并集去重、顺序等价）**")
 
 
 if __name__ == "__main__":
