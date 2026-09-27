@@ -215,13 +215,55 @@ def t5_missing_pyreverse_normalizes_to_value_error():
           "ValueError 含「pyreverse 不在 PATH」；PermissionError 原样出环（guard 没放宽成 except Exception）")
 
 
+def t6_concurrent_commands_stay_isolated():
+    """C75（09-28 全量审查批）：同一支常驻 shell 被**并发**调用时，输出不许串台、也不许抛读冲突。
+
+    触发形状：同一会话里两名角色同一超步各跑一条 `terminal_command`（动态线一轮投两名成员、
+    委派一拆 N 都是这个形状）——登记键是**会话**（C58，防的是跨会话串味），所以它们拿到的是
+    **同一支** Terminal；`stdin.write` 字节交错、两个 `stdout.read(1)` 抢同一个 StreamReader
+    （asyncio 明令禁止，而 `run_command` 没接这个族）。修复前：至少一条抛
+    `RuntimeError: read() called while another coroutine is already waiting for incoming data`，
+    另一条常读到对家的行。
+
+    两格：① 两条并发命令各自只拿到**自己**的标记（互不含对方的），② 并发期间零异常。
+    （"是不是真串行"不作为判据：无锁时并发的墙钟也差不多，那条分辨不出来——由反证 m42 摘锁来证
+    ①② 真有牙。）
+    """
+    import time
+    from codeharness.tools.libs.terminal import Terminal
+
+    # cmd.exe 下第一条命令要真占住一段时间：`timeout /t` 在 stdin 被重定向下不可用，ping 可靠。
+    A = "echo A_DONE_1 & ping -n 2 127.0.0.1 >nul & echo A_DONE_2"
+    B = "echo B_DONE_1 & echo B_DONE_2"
+
+    async def body():
+        t = Terminal()          # ⚠ 进程与 close 必须**同一个 loop**：`asyncio.run` 之间换 loop 时
+        try:                    # 子进程管道已经关掉，第二次 run 里的 close() 会 `I/O operation on closed pipe`
+            t0 = time.time()
+            res = await asyncio.gather(t.run_command(A), t.run_command(B), return_exceptions=True)
+            return time.time() - t0, res
+        finally:
+            await t.close()
+
+    elapsed, res = asyncio.run(body())
+
+    errs = [r for r in res if isinstance(r, BaseException)]
+    assert not errs, f"t6② 并发命令抛异常（读冲突没治）：{errs!r}"
+    out_a, out_b = res
+    assert "A_DONE_1" in out_a and "A_DONE_2" in out_a, f"t6① A 没拿到自己的完整输出：{out_a!r}"
+    assert "B_DONE_1" not in out_a, f"t6① A 的输出里混进了 B 的行（输出串台）：{out_a!r}"
+    assert "B_DONE_1" in out_b and "B_DONE_2" in out_b, f"t6① B 没拿到自己的完整输出：{out_b!r}"
+    assert "A_DONE_1" not in out_b, f"t6① B 的输出里混进了 A 的行（输出串台）：{out_b!r}"
+    print(f"  t6 C75：两条并发命令各自只拿到自己的标记、零读冲突（串行总耗时 {elapsed:.2f}s）")
+
+
 def main():
     print("=" * 60)
-    print("S19: shell 系三条（B4 阻塞壳 / B5 注入 / B6 pyreverse）")
+    print("S19: shell 系四条（B4 阻塞壳 / B5 注入 / B6 pyreverse / C75 并发同壳）")
     print("=" * 60)
     fns = (t1_loop_stays_responsive, t2_tree_degrades_instead_of_raising,
            t3_mime_type_passes_filename_as_one_argv, t4_rebuild_class_views_spaced_and_failure,
-           t5_missing_pyreverse_normalizes_to_value_error)
+           t5_missing_pyreverse_normalizes_to_value_error, t6_concurrent_commands_stay_isolated)
     fails = []
     try:
         for fn in fns:

@@ -52,6 +52,20 @@ class Terminal:
         self.timeout = timeout
         self.stdout_queue = Queue(maxsize=1000)
         self.process: Optional[asyncio.subprocess.Process] = None
+        # C75（09-28 审查批）：一支壳 = 命令**串行化**。登记键是**会话**（C58），而同一会话里两个
+        # 并发激活（动态线一轮投两名成员、委派一拆 N）会拿到**同一支** Terminal：`stdin.write`
+        # 字节交错、两个 `stdout.read(1)` 抢同一个 StreamReader。后者是 asyncio 明令禁止的
+        # （`RuntimeError: read() called while another coroutine is already waiting for incoming
+        # data`），而 `run_command` 没接这个族；就算不抛也是**输出串台**（后一条读到前一条的尾巴、
+        # `END_MARKER` 被对家吃掉 ⇒ 一边读到空、一边读到别人的输出）。
+        # ponytail: 粒度=实例，不碰进程级/全局锁。两个已知上限（都在本文档 O(1) 可查，不是漏）：
+        #   ① `daemon=True` 只保证**写**在锁内，它的后台读仍在锁外 ⇒「daemon 命令 + 普通命令并行」
+        #      这条固有形状没治（要治得给每条命令一支壳，那会动 `stop` 收壳与 cwd 保态的语义）；
+        #   ② 会话散会时 `close()`/`_kill()` 与在跑的读之间仍可能撞（它们把 `process` 置 None，
+        #      读侧可能拿到一次 AttributeError）——`_kill` 自带 5s 收尸上界、`run_command` 的调用方
+        #      （`role_zero._act`）有 `[错误]` 自愈，故不叠锁（叠了要处理「在跑的命令持锁直到超时」
+        #      与收壳的互等）。
+        self._lock = asyncio.Lock()
         # ponytail: cmd.exe 会把命令提示符一起回显进 stdout，输出里因此带 shell 提示行。
         # 源同样如此（照抄保真），要干净输出得上 PowerShell 或按提示符正则剥，等真被投诉再做。
         self.forbidden_commands = {
@@ -70,12 +84,23 @@ class Terminal:
         await self._check_state()
 
     async def _check_state(self):
-        """打印当前目录，确认 shell 活着（源语义）。"""
-        output = await self.run_command(self.pwd_command)
+        """打印当前目录，确认 shell 活着（源语义）。走**已持锁**的内部路径（C75）：
+        本函数唯一的调用点是 `_start_process`，而它只在 `_run_command_locked` 里被调
+        ——回头调公共 `run_command` 会拿同一把 `asyncio.Lock`（不重入）当场自锁。"""
+        output = await self._run_command_locked(self.pwd_command)
         logger.info("The terminal is at:", output)
 
     async def run_command(self, cmd: str, daemon: bool = False, timeout: int | None = None) -> str:
-        """执行命令并流式收输出，直到读到结束标记。daemon=True 时输出进 stdout_queue，返回空串。"""
+        """执行命令并流式收输出，直到读到结束标记。daemon=True 时输出进 stdout_queue，返回空串。
+
+        C75：**整条命令持锁**（`self._lock`），见 `__init__` 里那段注释。
+        """
+        async with self._lock:
+            return await self._run_command_locked(cmd, daemon, timeout)
+
+    async def _run_command_locked(self, cmd: str, daemon: bool = False,
+                                  timeout: int | None = None) -> str:
+        """锁内的真身。**调用方必须已持有 `self._lock`**（公共入口是 `run_command`）。"""
         if self.process is None or self.process.returncode is not None:
             await self._start_process()
 
