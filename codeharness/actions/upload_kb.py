@@ -140,8 +140,19 @@ class UploadKB(Action):
                                 doc_type=doc_type, user_id=user_id, project=CURRENT_PROJECT.get(),
                                 extra=extra))
         await _purge_old(store, doc_type, user_id, pairs)     # B2：先删这份文件的旧切片，再灌
+        # C67（用户拍 (a)）：回执口径 = **去重后**的实际落库数。point_id 由 scope+source+内容
+        # 派生 ⇒ 同文件里重复的行/页、两份文件同段，算出同一个点；`store.write` 是 upsert、
+        # 后写顶前写，库里最终就是「每个 id 一份」——回执按 len(points) 报等于把重复算成功
+        # （留账原文「回执数是去重前」）。去重保**最后一个**（与 upsert 的顶替语义一致），
+        # 被顶掉的那几条在 `dedup_count` 里单独交代，明细不给假数。
+        dedup: dict = {}
+        for pt in points:
+            dedup[pt.id] = pt
+        dedup_count = len(points) - len(dedup)
+        points = list(dedup.values())
         written = await store.write(points)
-        return {"uploaded_count": written, "chunk_count": len(pairs), "errors": errors}
+        return {"uploaded_count": written, "chunk_count": len(pairs), "dedup_count": dedup_count,
+                "errors": errors}
 
 
 async def _purge_old(store, doc_type: str, user_id: str, pairs: list) -> None:

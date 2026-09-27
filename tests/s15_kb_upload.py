@@ -563,9 +563,14 @@ def t7_long_input_cannot_reach_the_endpoint_whole():
         sent = spy.sent[0]
         assert all(len(t) <= h for t in sent), \
             f"t7③：{max(map(len, sent))} 字的切片原样发给了端点（出口没接上）"
-        assert len(sent) > 1 and out["chunk_count"] == len(sent) == len(store.written), \
-            f"t7③ 读数不自洽：发了 {len(sent)} 块，chunk_count={out['chunk_count']}，写了 {len(store.written)}"
+        assert len(sent) > 1 and out["chunk_count"] == len(sent), \
+            f"t7③ 读数不自洽：发了 {len(sent)} 块，chunk_count={out['chunk_count']}"
         assert "".join(sent) == "丙" * 5000, "t7③：发给端点的文本拼不回去，切块过程吞了字"
+        # C67 改判（09-27，口径改了）：纯重复字符切块产出的块**同文本同 id**（"丙"*1200 ×4 + 尾块），
+        # 旧断言「写数==块数」按去重前口径写——新口径下库内本来就是 2 枚（同 id upsert 顶掉），
+        # 回执只报实况：written == chunk_count - dedup_count。块级守恒由上一行 join 断言保住。
+        assert len(store.written) == out["chunk_count"] - out["dedup_count"] and out["dedup_count"] >= 1, \
+            f"t7③ 去重读数不自洽：written={len(store.written)} out={out}"
         short = _Spy()
         asyncio.run(_action(_Store(), short, [_write_faq(tmp, "faq.md", FAQ)]))
         assert any(len(batch) > 1 for batch in short.sent) and \
@@ -1683,6 +1688,82 @@ def t18_rerank_index_may_arrive_as_a_string():
         srv.server_close()
 
 
+def t19_upload_receipt_counts_dedup():
+    """C67（用户拍 (a)）：回执口径 = **去重后**的实际落库数。
+
+    point_id 由 `point_id(f"{scope}/{src}", text)` 派生 ⇒ **同一路径传两遍**（一次多选里
+    手滑选了同一份文件两次）产出的两枚切片同 id；`store.write` 是 upsert、后写顶前写，
+    库里最终「每个 id 一份」——回执按 len(points) 报等于把重复算成功（留账原文「回执数是
+    去重前」）。`chunk_count` 照旧报切完的数（它回答「切出多少片」，不去重）。
+    两格：
+      ① 替身格（不碰 Qdrant）：同一路径传两遍 ⇒ uploaded_count == 去重后数、
+         dedup_count == 被顶掉数、write 收到的 points **id 唯一**；
+      ② 真库格：灌完按 source 数点 ⇒ **库内点数 == uploaded_count**（回执与库内实况是同一个数）。
+    """
+    content = "# 重复回执\n\n这份文件会被同一路径传两遍，用来造同 id 的切片对。\n"
+    tmp = Path(tempfile.mkdtemp())
+    f = _write_faq(tmp, "dup.md", content)
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_c67")
+
+    class _Rec:
+        """替身 store：记录 upsert 收到的 points（uploaded_count 的口径修复发生在 upload_kb 层）"""
+        def __init__(self):
+            self.points = []
+
+        async def write(self, points):
+            self.points.extend(points)
+            return len(points)
+
+        async def ensure(self, dim):
+            pass
+
+        async def delete_scope(self, **kw):
+            return 0
+
+    async def one():
+        rec = _Rec()
+        out = await _action(store=rec, embeddings=HashEmbeddings(), files=[f, f])
+        return rec, out
+
+    try:
+        rec, out = asyncio.run(one())
+        assert out["dedup_count"] >= 1, \
+            f"t19① 前置失配：同路径传两遍没识别出重复（dedup_count={out['dedup_count']}）——" \
+            f"chunk_count={out['chunk_count']} uploaded_count={out['uploaded_count']}"
+        assert out["uploaded_count"] == out["chunk_count"] - out["dedup_count"], \
+            f"t19① 口径恒等式破了：{out}"
+        ids = [p.id for p in rec.points]
+        assert len(ids) == len(set(ids)), f"t19① write 收到的 points 有同 id：{len(ids)} vs {len(set(ids))}"
+        assert out["uploaded_count"] == len(rec.points), f"t19① 回执与写出数不一致：{out}"
+        print(f"  ok  t19① 同路径两遍：chunk_count={out['chunk_count']} ⇒ uploaded_count="
+              f"{out['uploaded_count']}（去重 {out['dedup_count']} 条）、write 收到的 id 唯一")
+
+        if not live_qdrant():
+            print("  skip t19②（Qdrant 不在线）：库内实况那半边待环境")
+            return
+        from qdrant_client import models as m
+        store = QdrantStore(collection=GATE_COLL)
+        user = "u_c67"
+        try:
+            asyncio.run(store.drop())
+            out2 = asyncio.run(_action(store, HashEmbeddings(), [f, f]))
+            must = [m.FieldCondition(key=k, match=m.MatchValue(value=v))
+                    for k, v in (("doc_type", "kb"), ("user_id", user), ("project", PROJ),
+                                 ("source", "dup.md")) if v]
+            pts, _ = asyncio.run(store.client.scroll(GATE_COLL, limit=100, with_payload=True,
+                                                     scroll_filter=m.Filter(must=must)))
+            assert len(pts) == out2["uploaded_count"], \
+                f"t19② 回执与库内实况对不上：库内 {len(pts)} 点 vs 回执 {out2['uploaded_count']}"
+            assert out2["dedup_count"] >= 1, out2
+            print(f"  ok  t19② 真库：库内 {len(pts)} 点 == uploaded_count（{out2['uploaded_count']}），"
+                  f"chunk_count={out2['chunk_count']}、去重 {out2['dedup_count']}")
+        finally:
+            asyncio.run(store.drop())
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1702,7 +1783,8 @@ def main():
               t15_kb_search_is_a_tool_the_model_can_call,
               t16_reupload_modified_doc_drops_the_old_slices,
               t17_uppercase_suffix_is_not_a_second_whitelist,
-              t18_rerank_index_may_arrive_as_a_string]
+              t18_rerank_index_may_arrive_as_a_string,
+              t19_upload_receipt_counts_dedup]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
