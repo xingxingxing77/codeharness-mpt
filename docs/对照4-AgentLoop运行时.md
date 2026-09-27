@@ -38,7 +38,7 @@
 | 位置 | 机制 | 性质 |
 |---|---|---|
 | `codeharness/environment/team_graph.py:145-165` | `StateGraph` + router 虚节点 + `add_conditional_edges("router", route)` | **新栈原生替换**（R3） |
-| `team_graph.py:88-142` | `route()`：`Send(node, {"_inbox": [msg]})` 精准激活；`stats` 记每轮「激活节点数 vs 角色数」 | 改造（订阅表→出边） |
+| `team_graph.py:88-142` | `route()`：`Send(node, {**state, "_inbox": [m]})` 精准激活——langgraph 1.2.11 的 Send arg **完全替换节点输入**，早先只带 `_inbox` ⇒ 被投节点读不到 memories 等任何通道（记忆播种恒空，C69 已修）；`stats` 记每轮「激活节点数 vs 角色数」 | 改造（订阅表→出边） |
 | `team_graph.py:100-103,136-139` | `debug_rounds >= 3` 两处硬闸（QA 自环 + DEBUG_ERROR 回路） | **新增**（源无，源靠 test_round 语义） |
 | `codeharness/roles/agent.py:66-119` | observe→think→(route)→act→think 内层图；`_route:112-119` 只有 `loops`/`chosen` 两个停止条件 | 改造，逐行对 `role.py:340-379,458-474` |
 | `codeharness/roles/agent.py:150-158` | Action 抛错转 `[错误]` 消息回喂记忆，下一轮自愈 | **新栈自有**（源是 re-raise + 删记忆） |
