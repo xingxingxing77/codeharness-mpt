@@ -197,16 +197,18 @@ def t4_no_roster_refuses():
     from codeharness.roles.registry import build_role
     leader = build_role("TeamLeader", FakeLLM([]))
     assert leader.teammates == {}, "registry 直建的角色不该有名册"
-    out = leader._publish_team_message({"content": "x", "send_to": "Alice"})
+    # C69：_publish_team_message 攒进**调用方给的激活级 outbox**（不再挂实例——并发激活互偷）
+    ob = []
+    out = leader._publish_team_message({"content": "x", "send_to": "Alice"}, ob)
     assert "已忽略" in out, f"没名册却当真去委派了：{out}"
-    assert leader._outbox == [], f"outbox 被写脏了：{leader._outbox}"
+    assert ob == [], f"outbox 被写脏了：{ob}"
     leader.teammates = {"Alice": "Product Manager, write a PRD"}
-    assert "已委派" in leader._publish_team_message({"content": "x", "send_to": "Alice"})
-    assert leader._outbox == [("x", "Alice")], leader._outbox
-    assert "已拒绝" in leader._publish_team_message({"content": "x", "send_to": "Charlie"})
-    assert leader._outbox == [("x", "Alice")], "被拒的那条也进了 outbox"
+    assert "已委派" in leader._publish_team_message({"content": "x", "send_to": "Alice"}, ob)
+    assert ob == [("x", "Alice")], f"激活级 outbox 没写入：{ob}"
+    assert "已拒绝" in leader._publish_team_message({"content": "x", "send_to": "Charlie"}, ob)
+    assert ob == [("x", "Alice")], "被拒的那条也进了 outbox"
     assert "Alice: Product Manager" in leader.team_info(), leader.team_info()
-    print("  ok  t4 无名册直接忽略；有名册后对的进 outbox、错的被拒且不进")
+    print("  ok  t4 无名册直接忽略；有名册后对的进激活级 outbox、错的被拒且不进")
 
 
 def t5_original_message_not_narrowed():
@@ -268,7 +270,9 @@ async def t6_report_path():
     leader = agents[TEAMLEADER_NAME]
     assert leader.plan is not None and leader.plan.tasks, "回报把队长的计划清掉了（新任务判定漏了 is_report）"
     assert leader.plan.tasks[0].is_finished, f"队长没能 finish_current_task：{leader.plan.tasks[0]}"
-    assert leader._report_to == "", "队长收到回报后又把回报回投给成员=活循环的引子"
+    assert not hasattr(leader, "_report_to"), \
+        "C69 之后 _report_to 是激活级局部量（收口消费、无实例残留）——实例字段还在=改造没做完" \
+        "（旧护栏钉的「回报不回投给成员」由此结构性保证）"
     flat = [m for call in llms[TEAMLEADER_NAME].calls for m in (call if isinstance(call, list) else [call])]
     joined = " ".join(getattr(m, "content", str(m)) for m in flat)
     assert "[Alice 的回报]" in joined, "回报没进队长的模型上下文"

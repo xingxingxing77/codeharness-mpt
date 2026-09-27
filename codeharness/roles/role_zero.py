@@ -50,6 +50,12 @@ class RoleZeroState(TypedDict):
     # **同时被调度**（实测：`think` 在没人回话时就跑了，resume 时两个节点挤进同一 tick 各写一次
     # `history` ⇒ `InvalidUpdateError`）。路由必须由这一条条件边**唯一**决定。
     pending_ask: bool
+    # T7 前半（C69）：激活级暂存搬进子图 state——旧实现挂在实例上（`self._outbox`），同一成员
+    # 同超步被多条 Send 并发激活时（一拆 N，s16 t7 形状），收口的「取走-清空」会把另一个激活
+    # 攒的委派一起偷走/清空，extend 与列表推导之间还有窗口。`_report_to` 同理是激活级的
+    # （谁派给我的、干完向他回报）——本来就该是 as_node._run 的局部量。
+    outbox: list
+    report_to: str
 
 
 class RoleZero:
@@ -86,8 +92,9 @@ class RoleZero:
         # 空名册=这角色没进过队，publish_team_message 直接拒（否则 route 的 UnknownRecipient
         # 会把整场已烧的用量陪葬——模型写错名字是常态，不是编程错误）。
         self.teammates: dict[str, str] = {}
-        self._outbox: list[tuple[str, str]] = []    # [(任务指令, 成员名)]，as_node 收口时发成 Send
-        self._report_to = ""                        # 委派我的人，干完就向他回报（C1-②b）
+        # C69：_outbox/_report_to 已搬进激活级 state（RoleZeroState.outbox/report_to）——
+        # 实例字段并发激活会互偷/互清。self.plan / self.memory 维持实例级（跨激活有意共享，
+        # 并发激活下的穿插见 plan/team-runtime 的留账口径）。
 
     PLAN_COMMANDS = {   # 源 :121-124 的 Plan 命令面
         "Plan.append_task": "append_task", "Plan.reset_task": "reset_task",
@@ -101,11 +108,13 @@ class RoleZero:
         模型照这份名册填 `send_to`，名字对不上才有的可纠。"""
         return "".join(f"{n}: {desc}\n" for n, desc in sorted(self.teammates.items()))
 
-    def _publish_team_message(self, args: dict) -> str:
+    def _publish_team_message(self, args: dict, outbox: list) -> str:
         """源 team_leader.py:81-91：把任务交给某个成员，成员就此开工。
 
         源在命令里直接 `env.publish_message`；本仓的投递边界是团队图的 `route()`，
-        所以这里只把 (指令, 成员) 记进 outbox，由 `as_node` 在节点收口时发成消息。"""
+        所以这里只把 (指令, 成员) 记进 **outbox**（C69：激活级暂存，挂在调用方 `_act` 的
+        state 里而不是实例上——同成员并发激活时实例字段会互偷/互清），由 `as_node`
+        在节点收口时发成消息。"""
         if not self.teammates:
             return "[已忽略] 本角色不在任何团队里（没有队友名册），无法委派"
         raw = args.get("send_to", "")
@@ -115,7 +124,7 @@ class RoleZero:
             # 当场拒不当场抛：这条文本经 _observe 回喂下一轮，模型自己改名字重发（B9 同一条自愈路）
             return f"[已拒绝] 成员 {unknown} 不在团队（在册: {sorted(self.teammates)}）"
         content = str(args.get("content", "") or "")
-        self._outbox.extend((content, str(m)) for m in members)
+        outbox.extend((content, str(m)) for m in members)
         return f"[已委派] → {', '.join(str(m) for m in members)}"
 
     def _run_plan_command(self, name: str, args: dict) -> str:
@@ -388,6 +397,7 @@ class RoleZero:
             commands = last["commands"]
             start = int(s.get("act_cursor") or 0)          # 0 = 这一列命令从头跑
             results, finished = list(last.get("results") or []), False
+            outbox = list(s.get("outbox") or [])           # C69：激活级暂存，收口时随 state 交回
             pending_at = -1                                # >=0 = 停在这里等人回话
             for idx in range(start, len(commands)):
                 cmd = commands[idx]
@@ -404,7 +414,7 @@ class RoleZero:
                     elif name == "RoleZero.reply_to_human":       # 源 reply_to_human(:465)
                         results.append({"name": name, "result": f"[已回复] {args.get('content', '')}"})
                     elif name in self.PUBLISH_COMMANDS:           # 源 TeamLeader.publish_team_message(:81)
-                        results.append({"name": name, "result": self._publish_team_message(args)})
+                        results.append({"name": name, "result": self._publish_team_message(args, outbox)})
                     elif name in self.PLAN_COMMANDS:            # 台账 #10：真 Plan 状态机（源 :121-124）
                         results.append({"name": name, "result": self._run_plan_command(name, args)})
                     elif name in self.tools:
@@ -453,7 +463,8 @@ class RoleZero:
             # `pending_ask` 是 `act → ?` 那条条件边的判据（见 `build()` 里的 `_after_act`）。
             return {"history": history, "finished": finished,
                     "act_cursor": pending_at if pending_at >= 0 else len(commands),
-                    "pending_ask": pending_at >= 0}
+                    "pending_ask": pending_at >= 0,
+                    "outbox": outbox}
         finally:
             var_child_runnable_config.reset(tok)
 
@@ -488,6 +499,8 @@ class RoleZero:
             # 委派出去的载荷不带这个标记（_wire_delegation 只留 content/sent_from），仍按新任务走。
             is_report = incoming is not None and incoming.instruct_schema == "TeamReport"
             task = incoming.content if incoming else "continue"
+            # C69：**局部量**，不是实例字段——并发激活各带各的（收口消费）。
+            report_to = ""
             if is_report:
                 self.memory.add(Message(content=f"[{incoming.sent_from} 的回报] {task}", role="user",
                                         sent_from=incoming.sent_from,
@@ -503,7 +516,7 @@ class RoleZero:
                                         cause_by=RequirementTag.USER_REQUIREMENT))
                 # 谁派给我的，我就向谁回报（源 MGXEnv 靠全员广播让队长自己看见；本仓 `<all>` 刻意
                 # 不广播，所以指名回报。`sent_from=="user"` 时不回报——那本来就是用户直接递的活）。
-                self._report_to = incoming.sent_from if incoming.sent_from not in ("", "user", name) else ""
+                report_to = incoming.sent_from if incoming.sent_from not in ("", "user", name) else ""
                 if self.plan_fn is not None:
                     # 批次1：ToT 等外部规划器——先树搜索出择优路径，写进记忆供 think 取材（源 ToT 无角色
                     # 消费者，本仓把它接到 RoleZero 首轮规划这一真实接缝上）
@@ -518,22 +531,24 @@ class RoleZero:
                                        "respond_language": "中文", "finished": False,
                                        # C59：新一跑从第 0 条命令开始（不传也行——`_act`/`_ask`/`gate`
                                        # 都按 `s.get("act_cursor") or 0` 兜底，这里写出来只为读代码时看得见）
-                                       "act_cursor": 0})
+                                       "act_cursor": 0,
+                                       # C69：激活级暂存从零起（不播种——委派/回报对象只属本激活）
+                                       "outbox": [], "report_to": ""})
             turns = sub["history"] or []
             # `reply_to_human` 可能在任意一轮（模型常是「先汇报、再 end」），只读最后一轮会把成员
             # 干完活的那句话蒸发在收尾 thought 里（实测：给成员排两轮脚本，黑板收到的是第二轮的「收工」）
             reply = next((r["result"] for t in reversed(turns) for r in reversed(t.get("results") or [])
                           if r["name"] == "RoleZero.reply_to_human"), None)
             content = reply or (turns[-1]["thought"] if turns else "done")
-            to, self._report_to = self._report_to, ""
+            to = report_to
             msgs = [Message(content=content, role="assistant",
                             cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
                             send_to={to} if to else None,
                             instruct_schema="TeamReport" if to else "")]
             # ---- 委派聚合件（C1-②）：源 publish_team_message 一次一发，本仓一次节点运行攒一摞，
             # 交给 team_graph 的 `_wire_delegation` 拆成「一人一条」再 Send。投给自己不算委派（源同）。
-            deleg = [(c, m) for c, m in self._outbox if m != name]
-            self._outbox = []
+            # C69：从**子图 state** 的激活级 outbox 取（并发激活各带各的，互不偷）；不再清实例字段。
+            deleg = [(c, m) for c, m in (sub.get("outbox") or []) if m != name]
             if deleg:
                 # 顺序有讲究：route() 只读 state["messages"][-1]，聚合件必须排在最后一条。
                 # ponytail: 同一轮既委派又回报时，只有排最后的那条被路由（本仓一次超步只投递一条消息）；
