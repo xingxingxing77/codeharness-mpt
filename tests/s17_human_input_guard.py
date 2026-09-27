@@ -1202,6 +1202,101 @@ def t12_approval_and_ask_alternate():
         shutil.rmtree(Path("workspace") / project2, ignore_errors=True)
 
 
+def t13_as_node_replay_does_not_reseed():
+    """C72（09-28 全量审查批）：`as_node._run` 的**前置副作用**在 resume 时不许重放。
+
+    为什么 t11 没盖住这条：C59 治的是**内层** `_act` 的重放（中断前那半条命令），而 `interrupt()`
+    同样会从**节点开头**重跑**外层**节点函数——`RoleZero.as_node` 的 `_run` 里、`graph.ainvoke(...)`
+    之前有三处副作用：任务文本进记忆、回报文本进记忆、`plan_fn(task)`（`roles/registry.py:262`
+    把 ToT 树搜索接在这，**真模型=付费**）。每出现一次中断（审批卡或 ask_human）外层节点就重跑
+    一次 ⇒ 规划器按中断次数重复烧钱、任务与 `[Planned path]` 在 prompt 里出现多份。
+
+    三格（真图真 resume，零花费；`plan_fn` 用计数桩——生产里它是 `make_tot_planner(llm)`）：
+      ① **主判据**：`[ask, ask, end]`（停两次 ⇒ 外层节点跑 3 次）后 `plan_fn` 仍只调 **1** 次、
+         任务文本在队长记忆里只有 **1** 条、`[Planned path]` 只有 **1** 条（修复前各 3）；
+      ② 停一次的形状 `[ask, end]`：同一个口径各 1；
+      ③ 阳性对照 `[end]`（不停）：各恰好 1 ——证明 ① 不是「压根没播种」那种假绿。
+    """
+    import json
+    from codeharness.const import TEAMLEADER_NAME as _TL
+
+    count = {"plan": 0}
+    seen = {}
+
+    def wrap(agents):
+        seen["agents"] = agents
+
+        async def plan_fn(task):
+            count["plan"] += 1
+            return f"[树搜索产物 #{count['plan']}]"
+
+        agents[_TL].plan_fn = plan_fn
+
+    def script(*cmds):
+        return json.dumps({"thought": "脚本", "commands": list(cmds)}, ensure_ascii=False)
+
+    ASK = {"command_name": "RoleZero.ask_human", "args": {"question": "要继续吗？"}}
+    END = {"command_name": "end", "args": {}}
+    IDEA = "写一个文件"                     # `_gate_runner` 建会话用的 idea，就是队长拿到的那条任务文本
+
+    def run_case(project, leader_script, answers=("继续",)):
+        count["plan"] = 0
+        seen.clear()
+        store, runner, s, cleanup = _gate_runner(project, leader_script,
+                                                 permission="full_access", on_agents=wrap)
+        try:
+            status, _kept = _settle_parked(store, runner, s)
+            started_parked = status == "awaiting_human"
+
+            async def _wait(pred, limit=30.0):
+                end = asyncio.get_running_loop().time() + limit
+                while asyncio.get_running_loop().time() < end:
+                    if pred(store.get(s.id).status.value):
+                        return True
+                    await asyncio.sleep(0.1)
+                return False
+
+            repark = 0
+
+            async def go():
+                nonlocal repark
+                for ans in answers:
+                    assert runner.answer_human(s.id, ans), f"{project}：resume 没起来"
+                    await _wait(lambda st: st != "awaiting_human")     # 先等它离开断点（t11 同款注释）
+                    await _wait(lambda st: st in ("finished", "failed", "stopped", "awaiting_human"))
+                    if store.get(s.id).status.value == "awaiting_human":
+                        repark += 1
+                return store.get(s.id).status.value
+
+            final = asyncio.run(go()) if started_parked else store.get(s.id).status.value
+            parks = (1 if started_parked else 0) + repark
+            mem = [m.content for m in seen["agents"][_TL].memory.storage]
+            return (parks, final, count["plan"], mem.count(IDEA),
+                    sum(1 for c in mem if c.startswith("[Planned path]")))
+        finally:
+            for t in list(runner.tasks.values()):
+                t.cancel()
+            cleanup()
+
+    p1, final1, plan1, task1, planned1 = run_case("s17_c72_twice", [script(ASK, ASK, END)],
+                                                 answers=("第一次", "第二次"))
+    assert p1 == 2, f"t13① 该停两次，实际 {p1}"
+    assert plan1 == 1, f"t13① plan_fn 被调了 {plan1} 次（C72 复发：外层节点重放把付费规划重跑了）"
+    assert task1 == 1, f"t13① 任务文本在记忆里有 {task1} 条（C72 复发：重放把任务装了多遍）"
+    assert planned1 == 1, f"t13① [Planned path] 有 {planned1} 条（该恰好 1 条）"
+    assert final1 == "finished", f"t13① 终态 {final1!r}"
+
+    p2, final2, plan2, task2, planned2 = run_case("s17_c72_once", [script(ASK, END)])
+    assert (p2, plan2, task2, planned2, final2) == (1, 1, 1, 1, "finished"), \
+        f"t13② 停一次的形状读数 {p2},{plan2},{task2},{planned2},{final2!r}"
+
+    p3, final3, plan3, task3, planned3 = run_case("s17_c72_noask", [script(END)])
+    assert (p3, plan3, task3, planned3, final3) == (0, 1, 1, 1, "finished"), \
+        f"t13③ 阳性对照：不停时 plan/任务/[Planned path] 该各 1，实际 {p3},{plan3},{task3},{planned3},{final3!r}"
+    print(f"  ok  t13 C72：停两次后 plan_fn 仍 1 次、任务与 [Planned path] 各 1 条"
+          f"（修复前各 3）；停一次/不停两种形状各 1（阳性对照）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1209,7 +1304,8 @@ def main():
               t9_failure_is_loud,
               t10_unknown_command_is_countable,
               t11_ask_human_does_not_replay_side_effects,
-              t12_approval_and_ask_alternate]
+              t12_approval_and_ask_alternate,
+              t13_as_node_replay_does_not_reseed]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1217,7 +1313,8 @@ def main():
           f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
           f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组 + "
           f"未知命令可数 1 组 + ask_human 不重放副作用 1 组（C59）+ "
-          f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）**")
+          f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）** + "
+          f"**外层节点重放不重复播种 1 组（C72）**")
 
 
 if __name__ == "__main__":

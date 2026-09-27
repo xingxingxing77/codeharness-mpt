@@ -84,6 +84,11 @@ class RoleZero:
         self.ltm = longterm_memory          # 第 4 步 LongTermMemory，可空
         self.kb = None                      # C3：知识库读者（doc_type="kb"），装配期挂；None=没订阅
         self.memory = memory if memory is not None else Memory()
+        # C72：外部规划器（ToT 树搜索等）**按任务文本**的记忆。它是付费调用，而 resume 会重跑
+        # `as_node._run`（外层节点也一样）⇒ 不记就会按中断次数重复烧。只增、键是任务文本。
+        # ponytail: 上限 = 本会话出现过的不同任务数（人话级）；升级路径 = 把 [Planned path] 落进
+        #          子图 state，让重放从 checkpointer 读到而不是靠实例记忆。
+        self._plan_memo: dict[str, str] = {}
         self.brain = brain                  # None → 超窗直接丢，语义同源的 memory_k 截断
         self.redis_key = redis_key
         self.memory_k = memory_k or settings.memory_overflow_size
@@ -169,6 +174,19 @@ class RoleZero:
                 self.memory.add(Message(content=text, role="user",
                                         cause_by=RequirementTag.RUN_COMMAND,
                                         sent_from=self.profile["name"]))
+
+    def _remember_once(self, text: str, **kw) -> None:
+        """同一段文本只进记忆一次（C72）。**按内容全等判**，不靠 `Memory.add` 自带的去重。
+
+        为什么 `Memory.add` 拦不住：它按**对象相等**判（`memory.py:36` 的 `message in self.storage`），
+        而 `Message.id` 是每次构造新生成的 uuid、`created_at` 也是新时刻 ⇒ 内容一样的第二条永远
+        `!=` 第一条。而 resume 会**重跑整个 `as_node._run`**（不只内层 `_act`，见下面 `plan_fn` 的
+        注释），于是任务文本/回报文本会被装第二遍进 prompt。
+        为什么用**全等**而不是 `try_remember` 的「包含」：包含式会把「某个 thought/工具结果里
+        引用过这句话」也算命中，那种误跳过比重复一条更坏（任务文本不进上下文=模型不知道要干嘛）。
+        """
+        if not any(m.content == text for m in self.memory.storage):
+            self.memory.add(Message(content=text, **kw))
 
     async def _compress(self):
         """超窗：窗口外那截按源的分工两路走——逐字引用进 Qdrant(ltm)，背景理解进摘要(brain)。"""
@@ -527,16 +545,16 @@ class RoleZero:
             # C69：**局部量**，不是实例字段——并发激活各带各的（收口消费）。
             report_to = ""
             if is_report:
-                self.memory.add(Message(content=f"[{incoming.sent_from} 的回报] {task}", role="user",
-                                        sent_from=incoming.sent_from,
-                                        cause_by=RequirementTag.RUN_COMMAND))
+                self._remember_once(f"[{incoming.sent_from} 的回报] {task}", role="user",
+                                    sent_from=incoming.sent_from,
+                                    cause_by=RequirementTag.RUN_COMMAND)
             elif task != "continue":
                 # 新任务→旧计划作废（源：每任务 planner 重立，作废体现在 plan_seed=None）；"continue" 保计划续跑。
                 # ⚠ 任务必须进 self.memory：_context_messages 只从记忆取材，think 的 prompt 里没有
                 # 任务文本——不装则模型上下文根本没有需求（S9.1 对照首跑实测：真模型第一条思考
                 # 就是「没有具体用户需求，先问用户」，零产物收口=第十七处）。
-                self.memory.add(Message(content=task, role="user", sent_from="user",
-                                        cause_by=RequirementTag.USER_REQUIREMENT))
+                self._remember_once(task, role="user", sent_from="user",
+                                    cause_by=RequirementTag.USER_REQUIREMENT)
                 # 谁派给我的，我就向谁回报（源 MGXEnv 靠全员广播让队长自己看见；本仓 `<all>` 刻意
                 # 不广播，所以指名回报。`sent_from=="user"` 时不回报——那本来就是用户直接递的活）。
                 report_to = incoming.sent_from if incoming.sent_from not in ("", "user", name) else ""
@@ -544,10 +562,15 @@ class RoleZero:
                     # 批次1：ToT 等外部规划器——先树搜索出择优路径，写进记忆供 think 取材（源 ToT 无角色
                     # 消费者，本仓把它接到 RoleZero 首轮规划这一真实接缝上）
                     try:
-                        plan_text = await self.plan_fn(task)
+                        # C72：规划器走**按任务文本的记忆**——它可能是付费的树搜索，而 resume 会重跑
+                        # 本节点（见 `_remember_once`）。空串也记进 memo：区分「没算过」与「算过但没产出」。
+                        plan_text = self._plan_memo.get(task)
+                        if plan_text is None:
+                            plan_text = await self.plan_fn(task) or ""
+                            self._plan_memo[task] = plan_text
                         if plan_text:
-                            self.memory.add(Message(content=f"[Planned path]\n{plan_text}", role="assistant",
-                                                    cause_by=RequirementTag.USER_REQUIREMENT))
+                            self._remember_once(f"[Planned path]\n{plan_text}", role="assistant",
+                                                cause_by=RequirementTag.USER_REQUIREMENT)
                     except Exception as e:
                         logger.warning(f"plan_fn({type(self.plan_fn).__name__}) 失败，退回无规划: {type(e).__name__}: {e}")
             sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
