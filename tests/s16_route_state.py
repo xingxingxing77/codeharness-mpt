@@ -522,13 +522,161 @@ def t9_send_input_carries_state():
     print(f"  ok  t9 Send arg 带全量 state：委派播种生效（{mems}）、<self> 自环播种生效（{mems2}）")
 
 
+def t10_plan_lives_in_outer_state():
+    """C71（口径 a，用户拍）：RoleZero 的计划状态机住外层 TeamState 键 `plans`——每个激活
+    从外层按名播种出**子图 state 副本**（RoleZeroState.plan）、收口按名写回；实例字段不参与
+    （共享槽会被「新任务→plan=None」清掉并发激活正在用的副本，那是 C71 要治的病本身；
+    试实施的「播种进实例」形状治不了它——副本必须随 state 走）。
+      ① 续跑：continue 激活播种旧计划，Plan.* 在旧计划上推进（判据双读数：外层终态含旧任务
+         + FakeLLM prompt 的 plan_status 渲染出旧任务字样——播种没发生时退化为 history 摘要）；
+      ② 作废：新任务激活 ⇒ 写回 plans[name]=None（None 只来自新任务分支）；
+      ③ 并发不互清（缺陷本身）：同一成员两条 Send 并发激活——A 新任务、B continue，两边剧本
+         都是 [end]，谁先谁后不影响判据：B 的 prompt 必须看得到旧任务（副本播种），A 的
+         prompt 必须看不到（本激活已作废）；
+      ④ reducer 直测：按名覆盖 / None 作废 / 异名互不干扰 / 幂等；
+      ⑤ 结构守卫（上一棒试实施的两个死坑）：`report_to = incoming.sent_from` 赋值必须恰一次
+         且缩进深于 `elif task !=`（残留行留在 if/elif/else 之后 = is_report 激活也被覆盖成
+         report_to=发件人 ⇒ 等回报↔收工死循环）；return 必须带 plans 写回键。
+    """
+    import inspect
+    import json as _json
+
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.schema import Plan, Task
+    from codeharness.environment.team_graph import merge_plans
+
+    END_CMD = {"command_name": "end", "args": {}}
+
+    def _think(thought, commands):
+        return _json.dumps({"thought": thought, "commands": commands}, ensure_ascii=False)
+
+    def _append(tid, instr):
+        return {"command_name": "Plan.append_task",
+                "args": {"task_id": tid, "dependent_task_ids": [],
+                         "instruction": instr, "assignee": "Mem"}}
+
+    def _member(script):
+        return RoleZero({"name": "Mem", "profile": "p", "goal": "g"}, [], FakeLLM(script))
+
+    def _flatten(rz):
+        flat = [m for call in rz.llm.calls for m in (call if isinstance(call, list) else [call])]
+        return [getattr(m, "content", str(m)) for m in flat]
+
+    # ① 续跑：先立计划（外层写回），continue 激活播种后在旧计划上追加
+    m1 = _member([_think("立计划", [_append("t1", "写出周报"), END_CMD]),
+                  _think("续跑推进", [_append("t2", "画出图表"), END_CMD])])
+    g1 = build_team({"Mem": m1}, sop={})
+    cfg1 = {"configurable": {"thread_id": "s16-t10a"}}
+    out1 = asyncio.run(g1.ainvoke(
+        {"messages": [Message(content="任务甲", role="user", cause_by=RequirementTag.USER_REQUIREMENT,
+                              sent_from="user", send_to={"Mem"})],
+         "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}, cfg1))
+    p1 = out1["plans"]["Mem"]
+    assert p1 and p1["tasks"][0]["task_id"] == "t1", f"①写回缺失：{p1}"
+    out2 = asyncio.run(g1.ainvoke(
+        {"messages": [Message(content="continue", role="assistant", cause_by=RequirementTag.RUN_COMMAND,
+                              sent_from="Boss", send_to={"Mem"})]}, cfg1))
+    ids = [t["task_id"] for t in out2["plans"]["Mem"]["tasks"]]
+    assert ids == ["t1", "t2"], f"①播种失效：续跑激活看不到旧计划 t1（终态只剩 {ids}）"
+    joined = " ".join(_flatten(m1))
+    assert "写出周报" in joined, \
+        "①播种失效：续跑激活的 prompt 里没有旧计划（plan_status 退化成 history 摘要）"
+
+    # ② 作废：新任务激活 ⇒ plans[Mem] 写回 None
+    m2 = _member([_think("立计划", [_append("t1", "写出周报"), END_CMD]),
+                  _think("新任务来了", [END_CMD])])
+    g2 = build_team({"Mem": m2}, sop={})
+    cfg2 = {"configurable": {"thread_id": "s16-t10b"}}
+    asyncio.run(g2.ainvoke(
+        {"messages": [Message(content="任务甲", role="user", cause_by=RequirementTag.USER_REQUIREMENT,
+                              sent_from="user", send_to={"Mem"})],
+         "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}, cfg2))
+    out3 = asyncio.run(g2.ainvoke(
+        {"messages": [Message(content="换个活：任务乙", role="user",
+                              cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user",
+                              send_to={"Mem"})]}, cfg2))
+    assert out3["plans"]["Mem"] is None, \
+        f"②作废失效：新任务没把旧计划清掉：{out3['plans']['Mem']}"
+
+    # ③ 并发不互清：委派聚合件拆 2 条给同一成员（s16 t7 形状），A 新任务 + B continue
+    _p = Plan(goal="种子目标")
+    _p.add_tasks([Task(task_id="s1", instruction="种子任务", assignee="Mem")])
+    seed_plan = _p.model_dump()
+
+    class _Hub:
+        """只派发一次：回报回到 Hub 后不再派发（否则 委派↔回报 ping-pong 到 team_rounds 刹车）"""
+
+        def __init__(self):
+            self.fired = 0
+
+        def as_node(self, name):
+            async def _run(state):
+                self.fired += 1
+                if self.fired > 1:
+                    return {"messages": []}
+                return {"messages": [Message(
+                    content="派发中", role="user", cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                    send_to={"Mem"},
+                    instruct_content={"delegations": [{"member": "Mem", "instruction": "任务A"},
+                                                      {"member": "Mem", "instruction": "continue"}]},
+                    instruct_schema="TeamDelegation")]}
+            return name, _run
+
+    hub = _Hub()
+    m3 = _member([_think("收尾", [END_CMD]), _think("收尾", [END_CMD])])
+    g3 = build_team({"Hub": hub, "Mem": m3},
+                    sop={RequirementTag.USER_REQUIREMENT: ["Hub"]})
+    out4 = asyncio.run(g3.ainvoke(
+        {"messages": [Message(content="开工", role="user", cause_by=RequirementTag.USER_REQUIREMENT)],
+         "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False,
+         "plans": {"Mem": seed_plan}},
+        {"configurable": {"thread_id": "s16-t10c"}, "recursion_limit": 24}))
+    # 判别按**调用组**（一次激活 = 一次 structured 请求）：激活任务不进 prompt（continue 不进记忆），
+    # 唯一可靠的组级标记就是 "# Current Plan" 段本身——两次激活恰好一组带种子、一组作废。
+    groups = [" ".join(getattr(m, "content", str(m))
+                       for m in (call if isinstance(call, list) else [call]))
+              for call in m3.llm.calls]
+    prompts = [g for g in groups if "# Current Plan" in g]
+    assert len(prompts) == 2, f"前置失配：两次激活各一次 think，实得 {len(prompts)} 组 prompt"
+    assert sum("种子任务" in g for g in prompts) == 1, \
+        "③播种失效：续跑激活的 prompt 里看不到旧计划（并发新任务激活把共享副本清了——C71 的病）"
+    assert sum("no plan yet" in g for g in prompts) == 1, \
+        "③作废失效：新任务激活的 prompt 里还渲染着旧计划"
+
+    # ④ reducer 直测
+    assert merge_plans({}, {"M": None}) == {"M": None}
+    assert merge_plans({"M": {"goal": "g"}}, {"M": None}) == {"M": None}, "作废必须能覆盖旧计划"
+    assert merge_plans({"M": None}, {"M": {"goal": "g"}}) == {"M": {"goal": "g"}}, \
+        "续跑写回必须能覆盖 None"
+    assert merge_plans({"A": {"goal": "1"}}, {"B": {"goal": "2"}}) \
+        == {"A": {"goal": "1"}, "B": {"goal": "2"}}, "异名互不干扰失败"
+    x = {"M": {"goal": "g"}}
+    assert merge_plans(x, x) == x, "幂等失败（重放场景会变形）"
+
+    # ⑤ 结构守卫（上一棒试实施的两个死坑）
+    src = inspect.getsource(RoleZero.as_node)
+    lines = src.splitlines()
+    ind = lambda l: len(l) - len(l.lstrip())
+    rep = [i for i, l in enumerate(lines) if "report_to = incoming.sent_from" in l]
+    assert len(rep) == 1, "report_to 赋值不见了或多了（收口的回报路由被破坏）"
+    elif_i = next(i for i, l in enumerate(lines) if l.strip().startswith('elif task != "continue"'))
+    assert rep[0] > elif_i and ind(lines[rep[0]]) > ind(lines[elif_i]), \
+        "report_to 赋值被移出 elif 分支（残留行形状：is_report 激活也被覆盖 report_to ⇒ 等回报↔收工死循环）"
+    seed_i = next(i for i, l in enumerate(lines) if 'state.get("plans")' in l)
+    isrep_i = next(i for i, l in enumerate(lines) if "is_report = " in l)
+    assert isrep_i < seed_i < elif_i, "plan 种子必须读得到 is_report/task（分支前计算）"
+    assert 'sub.get("plan")' in src and '"plans": {name:' in src, "C71 的 plans 写回键不见了"
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
               t5_approval_reject_does_not_run_action, t6_unknown_recipient_raises,
               t7_superstep_batch_all_delivered,
               t8_memories_concurrent_no_last_write_wins,
-              t9_send_input_carries_state]
+              t9_send_input_carries_state,
+              t10_plan_lives_in_outer_state]
     for c in checks:
         c()
         if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
@@ -538,7 +686,8 @@ def main():
           f"+ B9 自愈回喂 2 组（Action 抛错 / 审批拒绝，都要再激活角色且 3 轮内收尾）"
           f"+ C1 未知收件人当场抛 1 组（含合法指名与 <all> 两格对照）"
           f"+ C13 同超步多条产出全投递 1 组（两目标两条 + 一成员三条）"
-          f"+ **T3 memories 并发不覆盖 1 组（C66：并集去重、顺序等价）**")
+          f"+ **T3 memories 并发不覆盖 1 组（C66：并集去重、顺序等价）**"
+          f"+ **C71 计划住外层 plans 键 1 组（续跑播种/新任务作废/并发不互清/reducer/结构守卫）**")
 
 
 if __name__ == "__main__":

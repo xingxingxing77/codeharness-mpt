@@ -35,6 +35,22 @@ def merge_memories(a: dict, b: dict) -> dict:
     return out
 
 
+def merge_plans(a: dict, b: dict) -> dict:
+    """并行 Send 时按名覆盖**每角色的 Plan 状态机**（T7 前半另半件/C71，用户拍 (a)）。
+
+    与 `merge_memories` 故意不同：plan 不是只增列表而是「每角色一份状态机」，并集语义
+    不成立，**按名整体替换**才是对的——同名的并发激活里，`None` 只会来自新任务分支
+    （作废语义），带 dump 的写回是续跑/回报分支的播种结果。
+    ponytail: 同名并发激活的收口次序 langgraph 不保证 ⇒ 末写赢；「A 作废、B 续跑」
+    同超步撞名时计划归属不确定，这是口径 a 明示接受的形状（实例级旧病是**激活中途被
+    清**，比这严重：B 的 `Plan.*` 命令会打到被人清空的实例上从头立计划）。"""
+    if not b:
+        return a
+    out = dict(a)
+    out.update(b)
+    return out
+
+
 class UnknownRecipient(ValueError):
     """委派/路由指向一个不在装配里的收件人——**当场抛，不再静默丢**（C1-d 拍板）。
 
@@ -50,6 +66,7 @@ class UnknownRecipient(ValueError):
 class TeamState(TypedDict):
     messages: Annotated[list, operator.add]        # 全局黑板 = env.history
     memories: Annotated[dict, merge_memories]      # 每角色私有记忆（checkpointer 持久化）
+    plans: Annotated[dict, merge_plans]            # 每角色一份 Plan 状态机（C71 口径 a；值=Plan dump 或 None）
     seen: int                                      # 路由游标：黑板已被消费到的条数（router 写，C13）
     undelivered: list                              # 本超步新增、还没投递的那一截（router 算，route 只读）
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）

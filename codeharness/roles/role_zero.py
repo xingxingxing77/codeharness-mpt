@@ -56,6 +56,11 @@ class RoleZeroState(TypedDict):
     # （谁派给我的、干完向他回报）——本来就该是 as_node._run 的局部量。
     outbox: list
     report_to: str
+    # C71（口径 a）：计划状态机随**子图 state** 走（schema.Plan 的 dump 或 None）。每个激活
+    # 从外层 TeamState.plans 按名播种出自己的副本，Plan.* 命令改的是这份副本、收口经 as_node
+    # 写回外层——实例字段不参与（共享实例槽在并发激活下会被「新任务→plan=None」清掉别人的
+    # 副本，那正是 C71 要治的病；播种进实例治不了它，副本必须随 state 走）。
+    plan: dict | None
 
 
 class RoleZero:
@@ -84,17 +89,17 @@ class RoleZero:
         self.memory_k = memory_k or settings.memory_overflow_size
         self._brain_loaded = False
         # 计划状态机（接线台账 #10）：schema.Plan 从此有运行时读者——源 tool_execution_map
-        # :121-124 的 Plan.* 四命令吃它。随会话实例存活；跨进程重启丢计划（与子图 InMemorySaver
-        # 同一层已知债，S7 落盘时一起收）。
-        self.plan: Plan | None = None
-        self._plan_goal = ""
+        # :121-124 的 Plan.* 四命令吃它。C71（口径 a）起 plan **不住实例**：真身随子图 state
+        # 走（RoleZeroState.plan）、每激活一份副本、收口经 as_node 写回外层 TeamState.plans
+        # （并发激活互不清；跨进程重启也不再丢——plans 随 checkpointer 持久化）。
         # 委派名册（C1-②）：{成员名: "profile, goal"}。由装配方（team.default_team）在组队后填，
         # 空名册=这角色没进过队，publish_team_message 直接拒（否则 route 的 UnknownRecipient
         # 会把整场已烧的用量陪葬——模型写错名字是常态，不是编程错误）。
         self.teammates: dict[str, str] = {}
         # C69：_outbox/_report_to 已搬进激活级 state（RoleZeroState.outbox/report_to）——
-        # 实例字段并发激活会互偷/互清。self.plan / self.memory 维持实例级（跨激活有意共享，
-        # 并发激活下的穿插见 plan/team-runtime 的留账口径）。
+        # 实例字段并发激活会互偷/互清。self.memory 维持实例级（口径 b：跨激活有意共享，
+        # 并发穿插只乱序不丢失——memory 是只增列表；plan 那种状态机语义才需要激活级隔离，
+        # 已随 C71 搬进子图 state + 外层 TeamState.plans）。
 
     PLAN_COMMANDS = {   # 源 :121-124 的 Plan 命令面
         "Plan.append_task": "append_task", "Plan.reset_task": "reset_task",
@@ -127,18 +132,22 @@ class RoleZero:
         outbox.extend((content, str(m)) for m in members)
         return f"[已委派] → {', '.join(str(m) for m in members)}"
 
-    def _run_plan_command(self, name: str, args: dict) -> str:
+    def _run_plan_command(self, plan: Plan | None, name: str, args: dict,
+                          goal: str = "") -> tuple[str, Plan]:
         """真身 schema.Plan：拓扑排序/级联 reset/游标推进都在里面。参数错（缺 task_id、
-        未知依赖断言）照源不兜——抛出去由 _act 的 [错误] self-heal 回喂模型重发。"""
-        if self.plan is None:
-            self.plan = Plan(goal=self._plan_goal)
-        fn = getattr(self.plan, self.PLAN_COMMANDS[name])
+        未知依赖断言）照源不兜——抛出去由 _act 的 [错误] self-heal 回喂模型重发。
+        C71：plan 由 `_act` 从子图 state 播出、收口随返回值写回（激活级局部量），本方法
+        不再读写实例字段。懒创建的 goal 取激活任务文本；continue 激活上懒创建只在
+        「此前从未立过计划」的边角发生，Plan.goal 无任何展示消费者，外观值不追（ponytail）。"""
+        if plan is None:
+            plan = Plan(goal=goal)
+        fn = getattr(plan, self.PLAN_COMMANDS[name])
         fn(**args)
-        cur = self.plan.current_task
+        cur = plan.current_task
         where = f"{cur.task_id}: {cur.instruction[:60]}" if cur else "(全部完成)"
         if name == "Plan.finish_current_task":
-            return f"[plan] 已推进 → {where}; 计划完成: {self.plan.is_plan_finished()}"
-        return f"[plan] 共 {len(self.plan.tasks)} 任务, 当前 → {where}"
+            return f"[plan] 已推进 → {where}; 计划完成: {plan.is_plan_finished()}", plan
+        return f"[plan] 共 {len(plan.tasks)} 任务, 当前 → {where}", plan
 
     def _brain_key(self) -> str:
         """一个角色一个 key：目录名走 CURRENT_PROJECT（与 session_root 同一接缝），不另起一套会话对象。"""
@@ -233,12 +242,14 @@ class RoleZero:
     def _plan_status(self, s: RoleZeroState):
         """源 :216 get_plan_status。B4 起计划从**真 Plan 状态机**出（对勾=Task.is_finished、
         游标=current_task，且 get_plan_status 走 _update_current_task 的拓扑序）；
-        无计划时（首轮或未用过 Plan.* 的任务型角色）退化为 history 的 thought 摘要。"""
-        if self.plan and self.plan.tasks:
+        无计划时（首轮或未用过 Plan.* 的任务型角色）退化为 history 的 thought 摘要。
+        C71：计划读子图 state 的 plan 槽（激活级副本），不再读实例字段。"""
+        plan = Plan.model_validate(s["plan"]) if s.get("plan") else None
+        if plan and plan.tasks:
             lines = [f"- [{'x' if t.is_finished else ' '}] {t.task_id}: {t.instruction[:80]}"
                      + (f" (assignee: {t.assignee})" if t.assignee else "")
-                     for t in self.plan.tasks]
-            cur = self.plan.current_task
+                     for t in plan.tasks]
+            cur = plan.current_task
             return "\n".join(lines), f"{cur.task_id}: {cur.instruction[:120]}" if cur else "(all finished)"
         lines = [f"- [{i+1}] {h['thought'][:80]}" for i, h in enumerate(s["history"][-5:])]
         return "\n".join(lines) or "(no plan yet)", f"step {len(s['history'])+1}/{self.max_loops}"
@@ -398,6 +409,7 @@ class RoleZero:
             start = int(s.get("act_cursor") or 0)          # 0 = 这一列命令从头跑
             results, finished = list(last.get("results") or []), False
             outbox = list(s.get("outbox") or [])           # C69：激活级暂存，收口时随 state 交回
+            plan = Plan.model_validate(s["plan"]) if s.get("plan") else None   # C71：激活级副本
             pending_at = -1                                # >=0 = 停在这里等人回话
             for idx in range(start, len(commands)):
                 cmd = commands[idx]
@@ -416,7 +428,8 @@ class RoleZero:
                     elif name in self.PUBLISH_COMMANDS:           # 源 TeamLeader.publish_team_message(:81)
                         results.append({"name": name, "result": self._publish_team_message(args, outbox)})
                     elif name in self.PLAN_COMMANDS:            # 台账 #10：真 Plan 状态机（源 :121-124）
-                        results.append({"name": name, "result": self._run_plan_command(name, args)})
+                        res, plan = self._run_plan_command(plan, name, args, goal=str(s.get("task") or ""))
+                        results.append({"name": name, "result": res})
                     elif name in self.tools:
                         # 执行前再判一次档：gate 节点负责挂起问人，这里只读台账结论——
                         # 被拒的命令**不进 ainvoke**，副作用一次都不发生。
@@ -464,7 +477,10 @@ class RoleZero:
             return {"history": history, "finished": finished,
                     "act_cursor": pending_at if pending_at >= 0 else len(commands),
                     "pending_ask": pending_at >= 0,
-                    "outbox": outbox}
+                    "outbox": outbox,
+                    # C71：本激活改过的计划副本随 state 交回（下轮 _think 的 plan_status、
+                    # 以及 as_node 收口写回外层 TeamState.plans 都从这里取）
+                    "plan": plan.model_dump() if plan is not None else None}
         finally:
             var_child_runnable_config.reset(tok)
 
@@ -499,6 +515,15 @@ class RoleZero:
             # 委派出去的载荷不带这个标记（_wire_delegation 只留 content/sent_from），仍按新任务走。
             is_report = incoming is not None and incoming.instruct_schema == "TeamReport"
             task = incoming.content if incoming else "continue"
+            # C71（口径 a）：计划状态机住外层 TeamState 键 `plans`（每角色一份、按名覆盖）。
+            # 每个激活算出自己的**种子**随子图 state 走（RoleZeroState.plan）：续跑/回报按名
+            # 播种外层旧计划（回报清了队长就没法 finish_current_task），新任务不播种（作废，
+            # plans 里的 None 只来自这个分支）；收口把子图终态按名写回。实例字段不参与——
+            # 共享槽在并发激活下会被「新任务→清空」清掉别人的副本，那是 C71 要治的病本身。
+            if is_report or task == "continue":
+                plan_seed = (state.get("plans") or {}).get(name)
+            else:
+                plan_seed = None                    # 新任务：旧计划作废
             # C69：**局部量**，不是实例字段——并发激活各带各的（收口消费）。
             report_to = ""
             if is_report:
@@ -506,12 +531,10 @@ class RoleZero:
                                         sent_from=incoming.sent_from,
                                         cause_by=RequirementTag.RUN_COMMAND))
             elif task != "continue":
-                # 新任务→旧计划作废（源：每任务 planner 重立）；"continue" 保计划续跑。
+                # 新任务→旧计划作废（源：每任务 planner 重立，作废体现在 plan_seed=None）；"continue" 保计划续跑。
                 # ⚠ 任务必须进 self.memory：_context_messages 只从记忆取材，think 的 prompt 里没有
                 # 任务文本——不装则模型上下文根本没有需求（S9.1 对照首跑实测：真模型第一条思考
                 # 就是「没有具体用户需求，先问用户」，零产物收口=第十七处）。
-                self.plan = None
-                self._plan_goal = task
                 self.memory.add(Message(content=task, role="user", sent_from="user",
                                         cause_by=RequirementTag.USER_REQUIREMENT))
                 # 谁派给我的，我就向谁回报（源 MGXEnv 靠全员广播让队长自己看见；本仓 `<all>` 刻意
@@ -533,7 +556,9 @@ class RoleZero:
                                        # 都按 `s.get("act_cursor") or 0` 兜底，这里写出来只为读代码时看得见）
                                        "act_cursor": 0,
                                        # C69：激活级暂存从零起（不播种——委派/回报对象只属本激活）
-                                       "outbox": [], "report_to": ""})
+                                       "outbox": [], "report_to": "",
+                                       # C71：计划种子（续跑/回报=外层旧计划副本；新任务=None 作废）
+                                       "plan": plan_seed})
             turns = sub["history"] or []
             # `reply_to_human` 可能在任意一轮（模型常是「先汇报、再 end」），只读最后一轮会把成员
             # 干完活的那句话蒸发在收尾 thought 里（实测：给成员排两轮脚本，黑板收到的是第二轮的「收工」）
@@ -559,6 +584,9 @@ class RoleZero:
                                     instruct_content={"delegations": [{"member": m, "instruction": c}
                                                                       for c, m in deleg]},
                                     instruct_schema="TeamDelegation"))
-            return {"messages": msgs}
+            return {"messages": msgs,
+                    # C71：计划状态机按名写回（子图终态的 plan）。None=作废（新任务且子图里没立过
+                    # 新计划）；续跑/回报分支写回的是「播种的计划 + 本激活 Plan.* 命令的结果」。
+                    "plans": {name: sub.get("plan")}}
 
         return name, _run

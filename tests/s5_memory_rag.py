@@ -794,31 +794,37 @@ def t26_plan_state_machine_wired():
     from codeharness.provider.fake import FakeLLM
     from codeharness.roles.role_zero import RoleZero
 
-    def act(rz, cmd, args):
+    def act(rz, cmd, args, plan=None):
         s = {"task": "做个计算器", "history": [{"thought": "先立计划",
              "commands": [{"command_name": cmd, "args": args}], "results": []}],
-             "experience": "", "respond_language": "中文", "finished": False}
+             "experience": "", "respond_language": "中文", "finished": False,
+             "plan": plan}                                # C71：计划随子图 state 走（激活级副本）
         out = asyncio.run(rz._act(s))
-        return out["history"][-1]["results"][-1]["result"]
+        return out["history"][-1]["results"][-1]["result"], out.get("plan")
 
     CURRENT_PROJECT.set("s5plan")
     try:
         rz = RoleZero({"name": "RZP", "profile": "p", "goal": "g"}, [], FakeLLM([]))
-        rz._plan_goal = "做个计算器"
-        r = act(rz, "Plan.append_task", {"task_id": "T1", "dependent_task_ids": [],
-                                         "instruction": "设计接口", "assignee": "RZP"})
+        plan = None
+        r, plan = act(rz, "Plan.append_task", {"task_id": "T1", "dependent_task_ids": [],
+                                               "instruction": "设计接口", "assignee": "RZP"}, plan)
         assert "共 1 任务" in r, r
-        r = act(rz, "Plan.append_task", {"task_id": "T2", "dependent_task_ids": ["T1"],
-                                         "instruction": "实现加法", "assignee": "RZP"})
+        r, plan = act(rz, "Plan.append_task", {"task_id": "T2", "dependent_task_ids": ["T1"],
+                                               "instruction": "实现加法", "assignee": "RZP"}, plan)
         assert "共 2 任务" in r, r
-        r = act(rz, "Plan.finish_current_task", {})
+        r, plan = act(rz, "Plan.finish_current_task", {}, plan)
         assert "已推进 → T2" in r and "计划完成: False" in r, r
-        status, cur = rz._plan_status({"history": []})
+        status, cur = rz._plan_status({"history": [], "plan": plan})
         assert "[x] T1" in status and "[ ] T2" in status and cur.startswith("T2"), (status, cur)
-        act(rz, "Plan.reset_task", {"task_id": "T1"})   # 级联：T1 未完成，游标回 T1
-        assert rz.plan.current_task.task_id == "T1" and not rz.plan.tasks[0].is_finished
-        r = act(rz, "Plan.append_task", {"task_id": "T9", "dependent_task_ids": ["NOPE"],
-                                         "instruction": "坏任务", "assignee": "RZP"})
+        r, plan = act(rz, "Plan.reset_task", {"task_id": "T1"}, plan)   # 级联：T1 未完成，游标回 T1
+        from codeharness.schema import Plan as PlanModel
+        back = PlanModel.model_validate(plan)           # C71 写回是纯 dict，必须可往返
+        assert back.current_task.task_id == "T1" and not back.tasks[0].is_finished
+        back.finish_current_task()
+        assert back.tasks[0].is_finished, \
+            "dump→validate 往返后 finish 打空了（tasks↔task_map 别名被往返打断，C71 实测）"
+        r, plan = act(rz, "Plan.append_task", {"task_id": "T9", "dependent_task_ids": ["NOPE"],
+                                               "instruction": "坏任务", "assignee": "RZP"}, plan)
         assert r.startswith("[错误]"), f"未知依赖必须回喂自愈而不是静默: {r}"
     finally:
         CURRENT_PROJECT.set("")

@@ -25,7 +25,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Type, TypeVar, Union
 
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_serializer, field_validator, model_validator
 
 from codeharness.const import (
     AGENT,
@@ -378,6 +378,16 @@ class Plan(BaseModel):
     tasks: list[Task] = []
     task_map: dict[str, Task] = {}
     current_task_id: str = ""
+
+    @model_validator(mode="after")
+    def _realias_task_map(self):
+        """tasks 与 task_map 必须持有**同一批对象**（append/reset 全靠这个别名：
+        `finish_current_task` 改的是 task_map 里的条目，判据读的是 tasks 列表）。
+        `model_dump → model_validate` 往返会把两者重建成**独立副本**，别名断了——
+        finish/reset 的级联写打在 tasks 看不见的副本上（C71 把 plan 搬进图 state 后
+        每次激活都往返一趟，当场撞实）。构造/校验后一律按 tasks 重建映射。"""
+        self.task_map = {t.task_id: t for t in self.tasks}
+        return self
 
     def _topological_sort(self, tasks: list[Task]):
         task_map = {task.task_id: task for task in tasks}

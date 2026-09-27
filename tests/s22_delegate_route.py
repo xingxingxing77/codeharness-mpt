@@ -267,9 +267,12 @@ async def t6_report_path():
         and reports[0].sent_from == "Alice", f"回报没投回队长：{[(r.sent_from, r.send_to) for r in reports]}"
     assert "PRD 已写入产物仓" in reports[0].content, \
         f"回报内容不是她那句汇报（跨轮次取 reply 的修法没生效）：{reports[0].content!r}"
+    leader_plan = (out.get("plans") or {}).get(TEAMLEADER_NAME)
+    assert leader_plan is not None and leader_plan.get("tasks"), \
+        "回报把队长的计划清掉了（C71：外层 plans 没收到队长的写回——播种或写回断了）"
+    assert leader_plan["tasks"][0]["is_finished"], \
+        f"队长没能 finish_current_task：{leader_plan['tasks'][0]}"
     leader = agents[TEAMLEADER_NAME]
-    assert leader.plan is not None and leader.plan.tasks, "回报把队长的计划清掉了（新任务判定漏了 is_report）"
-    assert leader.plan.tasks[0].is_finished, f"队长没能 finish_current_task：{leader.plan.tasks[0]}"
     assert not hasattr(leader, "_report_to"), \
         "C69 之后 _report_to 是激活级局部量（收口消费、无实例残留）——实例字段还在=改造没做完" \
         "（旧护栏钉的「回报不回投给成员」由此结构性保证）"
