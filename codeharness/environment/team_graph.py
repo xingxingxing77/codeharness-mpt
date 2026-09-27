@@ -153,6 +153,16 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
         w = wiring or CONTEXT_WIRING                    # 别名：route 内赋值会遮蔽闭包变量
         sends = []
 
+        def _input(m: Message) -> dict:
+            """Send 的 arg **完全替换节点输入**（langgraph 1.2.11 实测，s16 t9 的 keys 读数）——
+            早先只带 `{"_inbox": [m]}` 的话，被 Send 的节点 state 里就只有 `_inbox` 一个键，
+            `Agent._run` 的 `state.get("memories")` 恒空 ⇒ 记忆播种从未发生（C66 落账时探针实锤，
+            「快照+新增」实际是「空快照+新增」）。把当前 state 整份带进 arg：节点读得到播种，
+            写回照旧走各通道自己的 reducer，checkpoint 不受影响（arg 不持久化）。"""
+            d = dict(state)
+            d["_inbox"] = [m]
+            return d
+
         for last in batch:
             # <self> 自投递（QA 的 WriteTest→RunCode→DebugError 内环不广播；B9 的错误/拒绝回喂同路）
             if MESSAGE_ROUTE_TO_SELF in last.send_to:
@@ -165,7 +175,7 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
                 # 一条被刹住的链不该顺带把同批其它消息与插话一起丢掉。
                 if state.get("debug_rounds", 0) >= 3:
                     continue
-                sends.append(Send(last.sent_from, {"_inbox": [last]}))
+                sends.append(Send(last.sent_from, _input(last)))
                 if stats is not None:
                     stats.append({"cause_by": last.cause_by, "activated": 1, "roles": len(agents)})
                 continue
@@ -208,7 +218,7 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
             for m in payload_msgs:
                 named = set() if m is last else m.send_to.difference(markers)
                 tgts = [t for t in targets if t in named] if named else targets
-                msg_sends.extend(Send(t, {"_inbox": [m]}) for t in tgts)
+                msg_sends.extend(Send(t, _input(m)) for t in tgts)
             sends.extend(msg_sends)
             if stats is not None:
                 stats.append({"cause_by": last.cause_by, "activated": len({s.node for s in msg_sends}),
@@ -232,8 +242,8 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
                     if stats is not None:
                         stats.append({"cause_by": "chat-dropped", "activated": 0, "roles": recv})
                     continue
-                sends.append(Send(recv, {"_inbox": [Message(
-                    content=content, cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")]}))
+                sends.append(Send(recv, _input(Message(
+                    content=content, cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user"))))
 
         # 每超步一条 stat 的旧形状已改成**每条消息一条**（与 C13 同批）：门禁按 stats 数激活次数，
         # 一批多条时旧的"只看最后一条"读数会把漏投伪装成精准。

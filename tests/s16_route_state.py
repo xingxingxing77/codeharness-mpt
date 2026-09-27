@@ -438,12 +438,97 @@ def t8_memories_concurrent_no_last_write_wins():
         "阳性对照失效：旧 {**a,**b} 形状在这个例子里居然不丢条目"
 
 
+def t9_send_input_carries_state():
+    """① Send 输入形状（C69 拍板落地）：`Send` 的 arg **完全替换节点输入**（langgraph 1.2.11，
+    t8 落账时的 keys 探针实锤）——早先 route() 只带 `{"_inbox": [m]}`，被 Send 的节点读不到
+    `memories` 等通道 ⇒ `Agent._run` 的记忆播种恒空（「快照+新增」实际是「空快照+新增」）。
+    修法：Send arg 带整份 state（`{**state, "_inbox": [m]}`——arg 不持久化，写回照旧走 reducer）。
+      ① 播种生效：init 预置 `memories={"Mem": ["seed"]}`，委派拆 2 条给 Mem ⇒ 每次激活
+         **读得到** seed、返回「seed+各自新增」⇒ 终态恰为 seed + 2 条新增（修复前 seed 丢失）；
+      ② `<self>` 自环路同形状：回喂激活读得到播种并追加。
+    """
+    class _Hub:
+        def as_node(self, name):
+            async def _run(state):
+                return {"messages": [Message(
+                    content="派发中", role="user", cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                    send_to={"Mem"},
+                    instruct_content={"delegations": [{"member": "Mem", "instruction": f"任务 {i}"}
+                                                      for i in range(2)]},
+                    instruct_schema="TeamDelegation")]}
+            return name, _run
+
+    class _Mem:
+        """照 Agent._run 的形状（agent.py:307/310）：读播种快照、追加自己的新增、整列表交回。
+        ⚠ 多带一条「快照长度=N」读数：并集 reducer 会掩盖「激活丢播种」（seed 已在通道里，
+        激活丢播种只是没重复返回）——只有快照长度才区分得出来（修复后=1，回退后=0）。"""
+
+        def __init__(self):
+            self.seen = []
+
+        def as_node(self, name):
+            async def _run(state):
+                inbox = state.get("_inbox") or []
+                tag = inbox[-1].content if inbox else ""
+                self.seen.append(tag)
+                mem = list(state.get("memories", {}).get(name, []))
+                return {"messages": [Message(content=f"完成-{tag}", role="assistant",
+                                             cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                                             send_to={MESSAGE_ROUTE_TO_NONE})],
+                        "memories": {name: mem + [f"记住-{tag}", f"快照长度={len(mem)}"]}}
+            return name, _run
+
+    m = _Mem()
+    g = build_team({"Hub": _Hub(), "Mem": m},
+                   sop={RequirementTag.USER_REQUIREMENT: ["Hub"]})
+    init = _init(Message(content="开工", role="user", cause_by=RequirementTag.USER_REQUIREMENT))
+    init["memories"] = {"Mem": ["seed"]}                 # 播种：外层 state 预置一条旧记忆
+    out = _ainvoke(g, init, "s16-t9")
+    mems = (out.get("memories") or {}).get("Mem", [])
+    assert len(m.seen) == 2, f"前置失配：成员没被激活 2 次（{m.seen}）"
+    assert "快照长度=0" not in mems and "快照长度=1" in mems, \
+        f"t9① 播种失效：激活读不到外层 memories（Send arg 只带 _inbox 的旧形状回来了，快照长度=0）：{mems}"
+    assert sorted(m for m in mems if m.startswith("记住")) == ["记住-任务 0", "记住-任务 1"], \
+        f"t9① 新增没齐：{mems}"
+
+    # ② <self> 自环路同形状
+    class _SelfLoop:
+        def __init__(self):
+            self.turns = 0
+
+        def as_node(self, name):
+            async def _run(state):
+                self.turns += 1
+                mem = list(state.get("memories", {}).get(name, []))
+                new = mem + [f"turn-{self.turns}"]
+                nxt = (Message(content="再想一轮", role="assistant",
+                               cause_by=RequirementTag.RUN_CODE, sent_from=name,
+                               send_to={MESSAGE_ROUTE_TO_SELF})
+                       if self.turns < 2 else
+                       Message(content="收口", role="assistant",
+                               cause_by=RequirementTag.RUN_COMMAND, sent_from=name,
+                               send_to={MESSAGE_ROUTE_TO_NONE}))
+                return {"messages": [nxt], "memories": {name: new}}
+            return name, _run
+
+    sl = _SelfLoop()
+    g2 = build_team({"SL": sl}, sop={RequirementTag.USER_REQUIREMENT: ["SL"]})
+    init2 = _init(Message(content="开始", role="user", cause_by=RequirementTag.USER_REQUIREMENT))
+    init2["memories"] = {"SL": ["seed"]}
+    out2 = _ainvoke(g2, init2, "s16-t9b")
+    mems2 = (out2.get("memories") or {}).get("SL", [])
+    assert mems2 == ["seed", "turn-1", "turn-2"], \
+        f"t9② 自环路的播种也断了：{mems2}"
+    print(f"  ok  t9 Send arg 带全量 state：委派播种生效（{mems}）、<self> 自环播种生效（{mems2}）")
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
               t5_approval_reject_does_not_run_action, t6_unknown_recipient_raises,
               t7_superstep_batch_all_delivered,
-              t8_memories_concurrent_no_last_write_wins]
+              t8_memories_concurrent_no_last_write_wins,
+              t9_send_input_carries_state]
     for c in checks:
         c()
         if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
