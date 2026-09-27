@@ -8,6 +8,7 @@ R5（interrupt/resume）要等 `team_graph.py`/`team.py`/`runner.py` 上的预�
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s3_report_action.py
 """
 import json
+from pathlib import PurePath
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -102,7 +103,9 @@ def t4_path_absolute():
     ev = _collect()
     RP.EditorReporter().report("docs/design.md", "path")
     got = ev[-1]["value"]
-    if not got.startswith(("C:", "/", "E:")):
+    # 判「是不是绝对路径」用 Path.is_absolute：abspath 原样继承 cwd 的盘符大小写，
+    # 本机不同启动器给出的 cwd 有 E:/e: 两种（WorkBuddy bash = 小写），按前缀判会假红
+    if not PurePath(got).is_absolute():
         _fail(f"4. name=path 时未转绝对路径（前端文件树取不到）: {got!r}")
     data = RP.DocsReporter()._format_data("a/b.md", "path", None)
     if "extra" in data:
