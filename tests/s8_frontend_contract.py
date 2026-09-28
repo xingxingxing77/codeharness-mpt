@@ -1932,6 +1932,56 @@ def t26_ui_bugfix_batch():
     assert "eorg" not in ep and "geekan" not in ep, "t26⑥ 假归属 org 又渲染回来了"
 
 
+def t27_recall_visibility():
+    """R3（09-28 普查批第 3 批）：召回「挂了」与「库里没东西」在界面上必须长得不一样。
+    依据是普查现证：读腿连接失败只有日志 warning（09-27 一整天 1 次成功 / 595 次失败），
+    对话流与用量页都零痕迹 ⇒ 用户看到的都是同一句「这条回答没引文档」。"""
+    import asyncio
+    import pathlib as _p
+    root = _p.Path("frontend/src")
+    rd = lambda r: (root / r).read_text(encoding="utf-8")
+
+    # ① 取数：三个键必须读的是后端 `cost_snapshot` 那三个真名，且**不与 waste 那三笔混用**
+    st = rd("utils/stats.ts")
+    assert "export function recallTotals" in st, "t27① 召回求和函数没了（格子会读不到数）"
+    for key in ("recall_returned", "recall_zero_hits", "recall_failures"):
+        assert key in st, f"t27① `recallTotals` 没读 cost 快照里的 {key}（那就是恒 0 的假格子）"
+    assert "unknown_command_calls" in st.split("export function recallTotals")[0], \
+        "t27① 阳性对照失守：wasteTotals 没了 ⇒ 「召回」与「无效调用」并成一段就白分开了"
+
+    # ② 渲染：整格只在这场真发生过召回时出现（09-25 的 C95 纪律：没数据源的格子不许摆着）
+    up = rd("components/settings/UsagePage.vue")
+    seg = up.split('recallTotals')[-1]
+    assert "recallTotals" in up and "const recall = computed" in up, "t27② computed 没接上"
+    assert 'v-if="recall.returned || recall.zero || recall.failures"' in up, \
+        "t27② 那格丢了 v-if ⇒ RAG 关掉的部署会摆一排 0，把「没接线」显示成「没命中」"
+    assert up.count("召回切片") == 1, "t27② 标签复述了（两处文案会漂）"
+
+    # ③ 后端发射点：动态线在 Thought 块里发，措辞只有一个来源
+    rz = _p.Path("codeharness/roles/role_zero.py").read_text(encoding="utf-8")
+    rp = _p.Path("codeharness/report.py").read_text(encoding="utf-8")
+    assert "for line in recall_notice(self.ltm, self.kb):" in rz, "t27③ 动态线不发了"
+    assert "def recall_notice" in rp, "t27③ 措辞的唯一定义没了"
+
+    # ④ 行为断言（不是文本守卫）：只出该出的那一行、带真实异常类名、不猜原因
+    from codeharness.report import recall_notice
+
+    class _Leg:
+        def __init__(self, doc, up_, err=""):
+            self.doc_type, self.up, self.last_error = doc, up_, err
+
+    both_up = recall_notice(_Leg("memory", True), _Leg("kb", True), None)
+    assert both_up == [], f"t27④ 阳性对照失守：两条腿都好的时候也发行了（{both_up}）⇒ 那就是恒亮的告警"
+    one = recall_notice(_Leg("kb", False, "ResponseHandlingException: All connection attempts failed"),
+                        _Leg("memory", True), None)
+    assert len(one) == 1 and one[0].startswith("[召回不可用] kb 腿"), f"t27④ 只该发一条：{one}"
+    assert "ResponseHandlingException" in one[0], f"t27④ 没带出真实异常类名（C16：不许写成猜的话）：{one[0]}"
+    assert "存储不可用" not in one[0] and "数据库" not in one[0], f"t27④ 又替用户下结论了：{one[0]}"
+    empty_err = recall_notice(_Leg("memory", False))
+    assert "原因见日志" in empty_err[0], f"t27④ 末次异常为空时不许留空句：{empty_err[0]}"
+    print("  ok  t27 召回可用性三格：读的是 cost 快照真键、整格有 v-if、动态线在 Thought 块里发一行事实")
+
+
 def t28_stream_ux_batch():
     """流式 UX 批（09-28 用户报「前端不是流式输出、输出会带一大块文本出现」）的文本级守卫。
 
@@ -1981,7 +2031,7 @@ def main():
               t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface,
               t23_run_after_fork, t24_checkpoint_to_chat_jump,
               t25_frontend_one_liners_c92_c96,
-              t26_ui_bugfix_batch,
+              t26_ui_bugfix_batch, t27_recall_visibility,
               t28_stream_ux_batch)
     for fn in checks:
         fn()

@@ -386,6 +386,25 @@ def _brief_args(args: dict | None) -> dict:
     return out
 
 
+def recall_notice(*legs) -> list[str]:
+    """R3：把「哪条读腿已经短路」写成给用户看的一行事实。**纯函数**（不自己发射，交给调用方手上
+    那个 Thought 块），这样经典线哪天要接就是一行，不必再造第二个措辞。
+    今天只有一个用户：动态线 `RoleZero._think`。经典线那两条读腿跑在 `Agent._act` 里、那里没有
+    Thought 块作用域 ⇒ 本批不为此新造发射器，经典线的召回状态只在用量页可见（已留账）。
+
+    为什么必须有这行：召回挂了此前只有日志 warning 与用量页计数，对话流里看不出来，而用户在那儿看到的
+    表现是「这条回答没引文档」——与「知识库里没相关内容」完全同形（C96 那一族：把故障演成空态）。
+    措辞只写数得出的事实：腿名、本场此腿不再尝试、后端留下的原始异常类名。**不猜原因**（C16：
+    不许写成「存储不可用」那种替用户下结论的话）。
+    """
+    out = []
+    for leg in legs:
+        if leg is not None and not getattr(leg, "up", True):
+            out.append(f"[召回不可用] {leg.doc_type} 腿本场已跳过："
+                       f"{getattr(leg, 'last_error', '') or '原因见日志'}")
+    return out
+
+
 async def tool_call_report(name: str, args: dict | None, out, ok: bool = True, role: str = ""):
     """一次工具调用 → 一个 ToolCall 块（meta 带工具名与参数摘要，正文带结果首行）。
 

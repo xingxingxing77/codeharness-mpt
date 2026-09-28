@@ -373,6 +373,11 @@ class RoleZero:
             experience = (experience + "\n" +
                           await reflect(self.llm, s["task"], s["history"], err)).strip()
         async with thought_block(role=self.profile["name"]) as rep:
+            # R3：读腿短路要在对话流里说一句（措辞收成 `report.recall_notice` 一处）。
+            # 放在这里而不是 `_think` 开头：本轮的召回刚刚跑完，`up` 是这一轮的读数。
+            from codeharness.report import recall_notice
+            for line in recall_notice(self.ltm, self.kb):
+                await rep.content(line)
             context = ([SystemMessage(content=system_prompt)]
                        + ([SystemMessage(content=f"[知识库片段]\n{kb}")] if kb else [])
                        + self._context_messages())

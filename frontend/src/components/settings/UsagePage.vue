@@ -23,6 +23,14 @@
         <b>{{ waste.unknown }} · {{ waste.truncated }} · {{ waste.empty }}</b>
         <span>无效调用（未知命令 · 被截断 · 空正文）</span>
       </div>
+      <!-- R1（09-28 普查批）：召回链的可用性。三笔分开报——「那条腿连不上」「库里没有相关内容」
+           「召回到但被相关性下限砍空」是三件事，并成一句「召回 0 条」就又把故障演成了空态。
+           整格只在这场会话真发生过召回时出现：RAG 关掉的部署里 0 是常态，摆出来就是把没接线说成没命中。
+           前两个数是**条/次混排**（条数 · 次数 · 次数），口径与后端 `provider/cost.py` 同读一处。 -->
+      <div v-if="recall.returned || recall.zero || recall.failures" class="u-cell">
+        <b>{{ recall.returned }} · {{ recall.zero }} · {{ recall.failures }}</b>
+        <span>召回切片（条） · 空返回（次） · 不可用（次）</span>
+      </div>
     </div>
 
     <!-- B4「按时间分」：按投票时刻分天。旧票（09-23 之前）没记时刻 ⇒ 单列一档，
@@ -76,7 +84,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useSessionStore } from '../../stores/sessions'
 import { useUiStore } from '../../stores/ui'
 import { moneyBoth, sumCosts } from '../../utils/money'
-import { countVotes, wasteTotals } from '../../utils/stats'
+import { countVotes, recallTotals, wasteTotals } from '../../utils/stats'
 import { filterRowsByVote, voteBuckets, type VoteFilter } from '../../utils/votes'
 import type { Session } from '../../types'
 
@@ -111,6 +119,8 @@ const total = computed(() => ({
 const votes = computed(() => countVotes(rows.value))
 // 跨会话求和吃的就是列表带出的那份 cost 快照（零新端点；老记录里没这两个键 ⇒ 按 0 计）
 const waste = computed(() => wasteTotals(rows.value))
+// R1：召回链可用性，与 waste 同一份 rows（零新端点）。三个数分开，不并成"召回数"。
+const recall = computed(() => recallTotals(rows.value))
 
 const FILTERS: { k: VoteFilter; label: string }[] = [
   { k: 'all', label: '全部' }, { k: 'any', label: '有票' }, { k: 'like', label: '有用' },
