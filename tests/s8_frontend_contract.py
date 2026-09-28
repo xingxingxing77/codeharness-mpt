@@ -26,6 +26,7 @@
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \
     PYTHONDONTWRITEBYTECODE=1 F:/anaconda/python.exe -B tests/s8_frontend_contract.py
 """
+import pathlib
 import re
 import tempfile
 import time
@@ -1841,6 +1842,48 @@ def t24_checkpoint_to_chat_jump():
                "中栏先清再跳（连点同一行仍会滚）；锚点前缀与 ChatNode 同一真值源，台账行也走同一处")
 
 
+def t25_frontend_one_liners_c92_c96():
+    """C92-C96（09-28 审查批前端五件，一行级）。文本级守卫（s15 t5 / s3b t15 先例），
+    每件都带一格阳性对照——证明不是「把功能删了所以断言恒真」：
+      C92 client.ts 的 401 分支：setToken('') 之外还要清 store（useAuthStore().clear()，
+        动态 import 避免与 stores/auth 的静态环）；阳性对照=/api/auth 豁免条件还在
+        （登录接口自己的 401 不许清票）。
+      C93 MessageIconActions：`toast.fail`（不存在的方法 ⇒ catch 里再抛 TypeError、
+        用户零提示）换成 `toast.push(msg, 'error')`；全 src 不许再有 toast.fail。
+      C94 ArchivedPage：假空态换成真列表（读 store.sessions 过滤 archived），空态必须
+        挂在 `!list.length` 上（那句「暂无」从恒显变成真话）；阳性对照=SettingsView
+        的注册点还在（页面没被顺手摘掉）。
+      C95 AppearancePage：空控件「紧凑模式」删除（ref(false) 无消费者、不落盘、不参与
+        样式——切它没效果、刷新即回）。
+      C96 WorkspaceBrowser：空态与加载态互斥（v-else-if）——冷启动不再同显
+        「还没有会话」+「载入中…」那句假话；阳性对照=两个空态 div 都还在（不是删功能）。
+    """
+    root = pathlib.Path("frontend/src")
+    client = (root / "api/client.ts").read_text(encoding="utf-8")
+    i401 = client.find("rsp.status === 401")
+    branch = client[i401:client.find("let detail", i401)]
+    assert "setToken('')" in branch, "t25/C92① 401 不清票了？"
+    assert "useAuthStore().clear()" in branch and "import('../stores/auth')" in branch,         "t25/C92① 401 只清了 localStorage、没清 store（needLogin 永假 ⇒ 登录页不出现）"
+    assert "!url.startsWith('/api/auth')" in branch, "t25/C92② 阳性对照失守：/api/auth 豁免没了"
+
+    mia = (root / "components/conversation/MessageIconActions.vue").read_text(encoding="utf-8")
+    assert "toast.push((e as Error).message, 'error')" in mia, "t25/C93 反馈失败分支没有 toast"
+    assert "toast.fail" not in mia, "t25/C93 toast.fail 又回来了（store 没这个方法）"
+
+    arch = (root / "components/settings/ArchivedPage.vue").read_text(encoding="utf-8")
+    assert "store.sessions.filter((s) => s.archived)" in arch, "t25/C94 归档页没读真 store"
+    assert 'v-if="!list.length"' in arch, "t25/C94 空态没挂在真实列表上（假空态形状）"
+    assert "patchSession(s.id, { archived: false })" in arch, "t25/C94 取消归档没接既有出口"
+    assert "archived: ArchivedPage" in (root / "components/SettingsView.vue").read_text(encoding="utf-8"),         "t25/C94 阳性对照失守：页面注册点没了"
+
+    app = (root / "components/settings/AppearancePage.vue").read_text(encoding="utf-8")
+    assert "compact" not in app and "紧凑模式" not in app, "t25/C95 空控件「紧凑模式」又回来了"
+
+    wb = (root / "components/sidebar/WorkspaceBrowser.vue").read_text(encoding="utf-8")
+    assert wb.index('v-if="loading"') < wb.index('v-else-if="!total"'),         "t25/C96 空态与加载态又不互斥了（两个 v-if 会同屏显一句真话一句假话）"
+    assert 'class="empty">还没有会话' in wb and 'class="empty">载入中' in wb,         "t25/C96 阳性对照失守：两个空态文案被删了"
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1850,7 +1893,8 @@ def main():
               t14_checkpoint_replay_surface, t15_kb_upload_entry, t16_max_tokens_notice,
               t17_goal_surface, t18_steer_queue, t19_fork_surface,
               t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface,
-              t23_run_after_fork, t24_checkpoint_to_chat_jump)
+              t23_run_after_fork, t24_checkpoint_to_chat_jump,
+              t25_frontend_one_liners_c92_c96)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

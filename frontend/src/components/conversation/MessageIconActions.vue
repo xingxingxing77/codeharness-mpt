@@ -83,7 +83,7 @@ async function cast(v: 'like' | 'dislike') {
     // ——不归一就会「再点一次取消」失效（对象永远 !== 字符串）。同一个 normalizeVotes，规则只有一份。
     store.feedback = normalizeVotes(r.feedback || {})
   } catch (e) {
-    toast.fail((e as Error).message)      // 值域/越权的原文照说，不猜文案
+    toast.push((e as Error).message, 'error')   // C93：toast store 没有 fail 方法（旧码在此抛 TypeError，用户零提示）；值域/越权的原文照说，不猜文案
   }
 }
 const copied = ref(false)

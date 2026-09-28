@@ -50,7 +50,13 @@ async function req<T = any>(method: string, url: string, body?: any,
     throw e
   }
   if (!rsp.ok) {
-    if (rsp.status === 401 && !url.startsWith('/api/auth')) setToken('')
+    if (rsp.status === 401 && !url.startsWith('/api/auth')) {
+      setToken('')
+      // C92：光清 localStorage 不够——store 的 hasToken 是 needLogin 的唯一开关，
+      // 不翻假登录页就不出现（界面停在一片「操作全部无声失败」上，只能靠刷新恢复）。
+      // 动态 import 避免与 stores/auth 的静态环（那边 import 本模块的 getToken/setToken）。
+      import('../stores/auth').then(({ useAuthStore }) => useAuthStore().clear()).catch(() => {})
+    }
     let detail: unknown = rsp.statusText
     try {
       detail = (await rsp.json()).detail || detail

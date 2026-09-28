@@ -34,8 +34,10 @@
     </div>
 
     <div ref="listEl" class="list" role="tree" aria-label="会话">
-      <div v-if="!total" class="empty">还没有会话</div>
+      <!-- C96：两个 v-if 互不排斥 ⇒ 冷启动同显「还没有会话」+「载入中…」——一句真话一句假话。
+           改 v-else-if：loading 优先（还没载完就别断言「没有会话」），载完才轮到空态。 -->
       <div v-if="loading" class="empty">载入中…</div>
+      <div v-else-if="!total" class="empty">还没有会话</div>
 
       <!-- 平铺模式 -->
       <template v-if="view.groupBy === 'flat'">

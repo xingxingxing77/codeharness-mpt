@@ -11,9 +11,8 @@
       <Row title="界面语言" desc="与常规设置中的语言项同步生效">
         <SelectBox v-model="p.language" :options="['自动检测', '简体中文', 'English']" />
       </Row>
-      <Row title="紧凑模式" desc="减少对话与面板的留白间距">
-        <Toggle v-model="compact" />
-      </Row>
+      <!-- C95：原「显示」组里那个空开关（无消费者、不落盘、不参与任何样式，切了没效果、
+           刷新即回）删掉了——「界面控件说了不算」的纪律不许它留在这（s8 t25 守卫盯字面量）。 -->
     </div>
   </div>
 </template>
@@ -25,7 +24,6 @@ import { useThemeStore, type ThemePref } from '../../stores/theme'
 import RadioCards from './RadioCards.vue'
 import Row from './Row.vue'
 import SelectBox from './SelectBox.vue'
-import Toggle from './Toggle.vue'
 
 const p = useSettingsStore().prefs
 const theme = useThemeStore()
@@ -35,8 +33,6 @@ const themePref = computed({
   get: () => theme.pref,
   set: (v: string) => theme.set(v as ThemePref)
 })
-
-const compact = ref(false)
 
 const themes = [
   { value: 'light', icon: 'sun', title: '亮色', desc: '适合明亮环境的浅色主题' },
