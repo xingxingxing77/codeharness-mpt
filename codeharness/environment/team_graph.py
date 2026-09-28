@@ -71,11 +71,15 @@ class TeamState(TypedDict):
     undelivered: list                              # 本超步新增、还没投递的那一截（router 算，route 只读）
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）
     team_rounds: int                               # 委派↔回报来回上限（C1-②b，防队长-成员活循环）
-    finished: bool
     # ⚠ 原来的 `round: int` 已删（C14）：三处 init 写 0 后全仓零读零写，与 C2 的 `docs` 同族。
     #    `seen`/`undelivered` **不进 init**——它们由 router 现算，且必须跟着 checkpointer 走：
     #    跑完的会话再 start 时 messages 是「追加」而这两个键若被 init 重置成全量重投。
     #    复燃守卫见 `tests/s3b_runtime.py::t15`。
+    # ⚠ 还有一个死布尔键也删了（C77）：route 里那句「if state.get(那个键): return END」的
+    #    「收工即停」全仓**没有生产者**——内层子图自己的同名键只服务子图的两条条件边，
+    #    写不到外层；散会本来就走 route 尾部的 `if not sends: return END`。要真做
+    #    「收工即停」得先回答「成员的 end 会不会误杀整场」再立新件，别把这条死分支接回来
+    #    （判据 s16 t12 的文本守卫在扫这个字面量，注释里都不能再写它）。
 
 
 # ---- 真实 SOP 订阅表（= 各角色 _watch + 参考速查全图；经典线） ----
@@ -153,8 +157,6 @@ def make_route(sop: dict, agents: dict, wiring: dict | None = None, stats: list 
     **精准激活**（订阅式路由的本意就是每轮只唤醒相关角色，而不是全员轮询）。"""
 
     def route(state: TeamState):
-        if state.get("finished"):
-            return END
         if not state["messages"]:
             return END
         # **本超步新增的消息全投，不止最后一条**（C13）。旧写法只看 `messages[-1]`：

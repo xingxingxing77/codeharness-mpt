@@ -735,6 +735,37 @@ def t11_plans_survive_process_restart():
     print("  ok  t11 plans 跨进程持久化：重开 saver + 全新实例，continue 激活把 t1 播种回来并追加 t2")
 
 
+def t12_team_state_finished_dead_key_removed():
+    """C77（09-28 审查批）：`TeamState.finished` 是死键——`team_graph.py` 声明 + route 里
+    `if state.get("finished"): return END` 的「收工即停」分支，全仓**没有生产者**
+    （内层 `RoleZeroState.finished` 只服务子图自己的两条条件边，写不到外层；
+    三处 init 只写 False）⇒ 一条设计好的路由条件永远为假，读码的人会以为它已实现。
+    C14（`round` 死键）同族，同款修法：键与分支一起删——接上生产者是给没人要的
+    「收工即停」造新行为（成员的 end 会误杀整场），不做。三格：
+      ① 结构格：`TeamState` 注解里没有 `finished`；
+      ② 行为格：route 收到带 `finished=True` 的 state **照旧路由**（死分支没了，不是
+         「改个键名继续藏」）；阳性对照=空黑板仍 END（真散会路径还在）；
+      ③ 复燃守卫（源码文本级，s15 t5 先例）：三个生产文件里不许再出现 `"finished"`
+         写点——谁把死键接回来这格当场红。
+    """
+    from codeharness.environment.team_graph import TeamState, make_route
+    assert "finished" not in TeamState.__annotations__,         "t12① TeamState.finished 复燃了（C77 删掉的死键又出现在注解里）"
+
+    agents = {"A": _Emitter(RequirementTag.RUN_CODE, MESSAGE_ROUTE_TO_SELF)}
+    route = make_route({}, agents)
+    msg = Message(content="x", role="assistant", cause_by=RequirementTag.RUN_CODE,
+                  sent_from="A", send_to={MESSAGE_ROUTE_TO_SELF})
+    out = route({"finished": True, "messages": [msg], "seen": 0})
+    # ⚠ END 是字符串 "__end__"、真值——断言必须 `is not END`，光 assert out 挡不住短路
+    # （变异工装第一跑就抓出了这个弱点：短路成 END 时原断言照样绿，是 ③ 兜住的）。
+    assert out is not END and out,         "t12② route 把带 finished=True 的 state 短路成 END——死分支又接回来了"
+    assert route({"messages": []}) is END,         "t12② 阳性对照失守：空黑板该 END（真散会路径被误伤，②的读数不作数）"
+    for f in ("codeharness/team.py", "codeharness/sop/builder.py",
+              "codeharness/environment/team_graph.py"):
+        src = open(f, encoding="utf-8").read()
+        assert '"finished"' not in src and "finished: bool" not in src,             f"t12③ {f} 又写/又读 finished 了（C77 的死键复燃）"
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
@@ -743,7 +774,8 @@ def main():
               t8_memories_concurrent_no_last_write_wins,
               t9_send_input_carries_state,
               t10_plan_lives_in_outer_state,
-              t11_plans_survive_process_restart]
+              t11_plans_survive_process_restart,
+              t12_team_state_finished_dead_key_removed]
     for c in checks:
         c()
         if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
@@ -755,7 +787,8 @@ def main():
           f"+ C13 同超步多条产出全投递 1 组（两目标两条 + 一成员三条）"
           f"+ **T3 memories 并发不覆盖 1 组（C66：并集去重、顺序等价）**"
           f"+ **C71 计划住外层 plans 键 1 组（续跑播种/新任务作废/并发不互清/reducer/结构守卫）**"
-          f"+ **C71 plans 跨进程持久化 1 组（t11：close_all 重开 saver + 全新实例，播种回来）**")
+          f"+ **C71 plans 跨进程持久化 1 组（t11：close_all 重开 saver + 全新实例，播种回来）**"
+          f"+ **C77 finished 死键删除 1 组（结构/行为/复燃三格）**")
 
 
 if __name__ == "__main__":
