@@ -20,8 +20,10 @@ def default_team(llm, env_desc: str = "a software company"):
         from codeharness.memory.longterm import LongTermMemory
         from codeharness.provider.gateway import LLMGateway
         emb = LLMGateway.embeddings()                       # project 用时现取，三角色共用
-        ltm = LongTermMemory(embeddings=emb)
-        kb = LongTermMemory(embeddings=emb, doc_type="kb")  # C3：`UploadKB` 灌进去的那条切片的读者
+        # R1：读腿的三个计数落在这一份账本上（runner 手上的是同一个对象，s8_runner_meter t10 证过）。
+        meter = getattr(llm, "cost_manager", None)
+        ltm = LongTermMemory(embeddings=emb, meter=meter)
+        kb = LongTermMemory(embeddings=emb, doc_type="kb", meter=meter)  # C3：`UploadKB` 灌进去的那条切片的读者
     profiles = {                                    # 字段逐字抄自 roles/ 对应文件（参考速查 §4）
         TEAMLEADER_NAME: ("Team Leader", "Manage a team to assist users"),   # t17 对账：源逐字
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
@@ -191,9 +193,10 @@ def classic_team(llm):
         from codeharness.memory.longterm import LongTermMemory
         from codeharness.provider.gateway import LLMGateway
         emb = LLMGateway.embeddings()
+        meter = getattr(llm, "cost_manager", None)      # R1：与 dynamic 线同一份账本口径
         for a in agents.values():
-            a.kb = LongTermMemory(embeddings=emb, doc_type="kb")
-            a.ltm = LongTermMemory(embeddings=emb)      # C33：记忆腿（读同项目历史 + 超窗溢写）
+            a.kb = LongTermMemory(embeddings=emb, doc_type="kb", meter=meter)
+            a.ltm = LongTermMemory(embeddings=emb, meter=meter)      # C33：记忆腿（读同项目历史 + 超窗溢写）
     return agents
 
 
@@ -286,7 +289,8 @@ def build_hired_role(defn: dict, llm):
     if settings.enable_rag:
         from codeharness.memory.longterm import LongTermMemory
         from codeharness.provider.gateway import LLMGateway
-        role.kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb")
+        role.kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb",
+                                 meter=getattr(llm, "cost_manager", None))   # R1：与队长同一份账本
     return role
 
 

@@ -158,17 +158,12 @@ class Agent:
                            f"{type(e).__name__}: {e}")
 
     async def _ltm_block(self, task: str) -> str:
-        """读同项目的历史（`RoleZero._ltm_recall` 的对应物）。挂了按「没有记忆」继续。"""
+        """读同项目的历史（`RoleZero._ltm_recall` 的对应物）。挂了按「没有记忆」继续——
+        catch 不在这里，R2 已把它收进 `LongTermMemory.recall` 一处。"""
         from codeharness.configs.settings import settings
         if self.ltm is None or not settings.enable_rag or not task.strip():
             return ""
-        try:
-            return "\n".join(m.content for m in await self.ltm.recall(task, k=3))
-        except Exception as e:
-            from codeharness.logs import logger
-            logger.warning(f"{self.profile['name']} 长期记忆召回失败，按无经验继续: "
-                           f"{type(e).__name__}: {e}")
-            return ""
+        return "\n".join(m.content for m in await self.ltm.recall(task, k=3))
 
     # ---- 源 _think(:340-379) 两模式（全部包 thought_block，前端每个思考步都有 Thought 块） ----
     async def _think(self, s: AgentState):
@@ -227,18 +222,13 @@ class Agent:
 
         与 `RoleZero._kb_recall` 同一档位：检索链任何一环挂了都按「没有资料」继续，
         不为一次召回打断整场（那会把已完成的工作与已花的钱一起陪葬，第十二处教训）。
+        catch 现在在 `LongTermMemory.recall` 一处（R2），本函数只剩守卫与排版。
         """
         from codeharness.configs.settings import settings
         if self.kb is None or not settings.enable_rag or not task.strip():
             return ""
-        try:
-            from codeharness.memory.longterm import format_kb_blocks
-            return format_kb_blocks(await self.kb.recall(task, k=3))
-        except Exception as e:
-            from codeharness.logs import logger
-            logger.warning(f"{self.profile['name']} 知识库召回失败，按无资料继续: "
-                           f"{type(e).__name__}: {e}")
-            return ""
+        from codeharness.memory.longterm import format_kb_blocks
+        return format_kb_blocks(await self.kb.recall(task, k=3))
 
     async def _act(self, s: AgentState):
         from langgraph.errors import GraphInterrupt

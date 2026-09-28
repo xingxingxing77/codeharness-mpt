@@ -159,6 +159,11 @@ def _seeded_ledger(saved: dict):
     cm.truncated_calls = int(saved.get("truncated_calls", 0) or 0)
     cm.unknown_command_calls = int(saved.get("unknown_command_calls", 0) or 0)
     cm.empty_output_calls = int(saved.get("empty_output_calls", 0) or 0)
+    # R1：召回链那三个也同规播种——它们一样是被 `/api/sessions` 带出去的字段，
+    # 漏一个就等于跨重启把「这场召不回过几次」抹成 0（0 是合法读数，抹掉看不出来）。
+    cm.recall_failures = int(saved.get("recall_failures", 0) or 0)
+    cm.recall_zero_hits = int(saved.get("recall_zero_hits", 0) or 0)
+    cm.recall_returned = int(saved.get("recall_returned", 0) or 0)
     return cm
 
 
@@ -173,7 +178,11 @@ def cost_snapshot(cm) -> dict:
             "total_completion_tokens": c.total_completion_tokens,
             "truncated_calls": getattr(cm, "truncated_calls", 0),
             "unknown_command_calls": getattr(cm, "unknown_command_calls", 0),
-            "empty_output_calls": getattr(cm, "empty_output_calls", 0)}
+            "empty_output_calls": getattr(cm, "empty_output_calls", 0),
+            # R1：召回链观测（成功率 = returned/(returned+zero_hits)，可用性看 failures）。
+            "recall_failures": getattr(cm, "recall_failures", 0),
+            "recall_zero_hits": getattr(cm, "recall_zero_hits", 0),
+            "recall_returned": getattr(cm, "recall_returned", 0)}
 
 
 class SessionRunner:

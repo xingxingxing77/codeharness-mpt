@@ -91,8 +91,19 @@ def t2_seeded_ledger():
     no_keys = _seeded_ledger({"total_prompt_tokens": 7})
     assert (no_keys.truncated_calls, no_keys.unknown_command_calls, no_keys.empty_output_calls) == (0, 0, 0), \
         "C78：老记录（没有这三个键）该退 0，不该炸也不该编数"
-    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 三个观测计数（C78），缺项/坏项退 0 不炸，"
-              "且不回读混币种 total_cost")
+    # R1（09-28 普查批）：召回链那三个观测计数同规播种 + 同规带出。漏一个的后果与 C78 一模一样——
+    # 重启后 resume 老会话，终态快照把「这场召不回过几次」静默覆盖成 0，而 0 是合法读数。
+    r1 = _seeded_ledger({"recall_failures": 299, "recall_zero_hits": 12, "recall_returned": 340})
+    assert (r1.recall_failures, r1.recall_zero_hits, r1.recall_returned) == (299, 12, 340), \
+        f"R1 回归：召回三笔没被播种（{r1.recall_failures}/{r1.recall_zero_hits}/{r1.recall_returned}）"
+    snap = cost_snapshot(r1)
+    assert (snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"]) == (299, 12, 340), \
+        f"R1 回归：播种完的快照没把这三笔带出去（持久化出口那半没接上）：{snap}"
+    r1_missing = _seeded_ledger({"total_prompt_tokens": 7})
+    assert (r1_missing.recall_failures, r1_missing.recall_zero_hits, r1_missing.recall_returned) == (0, 0, 0), \
+        "R1：老记录没有这三个键 ⇒ 退 0，不炸也不编数"
+    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 六个观测计数（C78 三笔 + R1 召回三笔），"
+              "缺项/坏项退 0 不炸，且不回读混币种 total_cost")
 
 
 async def _make_runner():
@@ -326,11 +337,15 @@ def t8_two_currency_buckets():
     snap = cost_snapshot(cm)
     # 键集仍然**整颗钉死**（这条防的是漂移，不是"多两个键就放宽到不检"）。
     # 后两个是 T4-③ 的「无效调用」计数：住在 manager 上、随快照持久化、被列表出口带出。
+    # 末三个是 R1 的召回链观测（failures/zero_hits/returned）：这一格加宽键集就是这次契约变更的
+    # **申报口**——守卫不红才说明有人偷偷加了字段没登记。
     assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
-                          "truncated_calls", "unknown_command_calls", "empty_output_calls"}, snap
+                          "truncated_calls", "unknown_command_calls", "empty_output_calls",
+                          "recall_failures", "recall_zero_hits", "recall_returned"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
-    assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"]) == (0, 0, 0), \
-        f"这一格没制造无效调用，计数却非 0（那就是恒亮的告警）：{snap}"
+    assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"],
+            snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"]) == (0,) * 6, \
+        f"这一格没制造无效调用、也没走召回，六个计数却非 0（那就是恒亮的告警）：{snap}"
 
     # C19：正文空＝这一发花了钱没产出（真云端实测最贵那发 ¥0.914、24.5 万 ct、正文是空串，
     # 而它既不进截断也不进未知命令）。三格一起钉：空的要计上、**只调工具不说话的不算浪费**（阳性对照）、

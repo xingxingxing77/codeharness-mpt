@@ -959,12 +959,16 @@ def t24_classic_line_reads_the_knowledge_base():
         doc_type = "kb"
 
         def __init__(self, msgs=(), boom=False):
-            self.msgs, self.boom, self.seen = list(msgs), boom, []
+            self.msgs, self.boom, self.seen, self.up = list(msgs), boom, [], True
 
         async def recall(self, query, k=5):
             self.seen.append(query)
+            # R2 之后读腿的契约：**异常不外抛**——catch 收在 `LongTermMemory.recall` 一处，
+            # 挂了回空列表并把短路位翻假。替身必须照这个契约演，否则测的是「caller 自己兜」
+            # 那条已经被删掉的路（真失败路径由 `tests/s5_memory_rag.py::t42` ① 在真代码上测）。
             if self.boom:
-                raise ConnectionError("qdrant 没起")
+                self.up = False
+                return []
             return self.msgs
 
     class NoStore:
@@ -1089,9 +1093,11 @@ def t25_classic_line_reads_and_writes_longterm_memory():
         doc_type = "memory"
 
         def __init__(self, boom=False):
-            self.boom, self.flushed, self.reads = boom, [], []
+            self.boom, self.flushed, self.reads, self.up = boom, [], [], True
 
         async def overflow(self, msgs):
+            # 写腿**照旧外抛**：R2 刻意没把 catch 收进 `overflow`——`agent._ltm_flush` 的游标只在
+            # 成功时进位（C34 的「失败留到下轮重试」语义），收进来就等于悄悄改掉重试。
             if self.boom:
                 raise ConnectionError("qdrant 没起")
             self.flushed.append([m.content for m in msgs])
@@ -1099,8 +1105,9 @@ def t25_classic_line_reads_and_writes_longterm_memory():
 
         async def recall(self, query, k=5):
             self.reads.append(query)
-            if self.boom:
-                raise ConnectionError("qdrant 没起")
+            if self.boom:                       # 读腿契约同 StubKB：挂了回空、短路位翻假
+                self.up = False
+                return []
             return [Message(content="上次这个项目里机票上限按一千八百元执行")]
 
     def msgs(n, tag="m"):

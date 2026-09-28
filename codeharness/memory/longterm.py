@@ -75,7 +75,7 @@ def format_kb_blocks(msgs: list) -> str:
 class LongTermMemory:
     def __init__(self, project_id: str = "", embeddings=None, user_id: str = "",
                  session_id: str = "", store: QdrantStore | None = None,
-                 doc_type: str = "memory"):
+                 doc_type: str = "memory", meter=None):
         self.store = store or QdrantStore()
         self.embeddings = embeddings
         self._project = project_id
@@ -84,6 +84,24 @@ class LongTermMemory:
         # 同一个类当两条切片的读者：`memory`=角色自己的历史，`kb`=用户上传的知识库（C3）。
         # 知识库那条只被 `recall` 读——它是人上传的文档，不是记忆溢出写进去的。
         self.doc_type = doc_type
+        # R1：只读计量的落点（`CostManager`，装配期由 `team.py` 指过去）。None = 无人计量
+        # （自测脚本与不带账本的装配），计数静默跳过、其余行为一字不变。
+        self.meter = meter
+        # R2：读腿短路位。现证一次连不上 Qdrant 的代价是 2316ms（本机三次实测 2315/2316/2319ms，
+        # 异常与生产日志逐字同形），而 `_think` 里 ltm/kb 两条腿是**串行** await ⇒ 每轮白等 4.6s+。
+        # 挂过一次就当整场不可用：这条腿是可选增强，不是业务必需（口径同「不为一次召回打断这场」）。
+        # 天花板：进程内、按实例，Qdrant 中途起来也不自动恢复（要新会话）；不做半开探测——
+        # 今天没有任何证据支持「跑中途端点会自己回来」。
+        self.up = True
+        # 末次异常的「类名: 原因」原样留着，给**读者**说人话用。为什么不在这里包一层措辞：
+        # `s15 t15⑤` 钉的就是「降级文案必须带出真实异常类名，不许写成『服务不可用』那种猜的话」
+        # （C16 口径）。catch 收进本类之后，异常不再飘到 caller，所以类名得由本类带出来，
+        # 否则那条判据就靠一句日志行撑着——界面读不到日志。
+        self.last_error = ""
+
+    def _count(self, field: str, n: int = 1):
+        if self.meter is not None:
+            setattr(self.meter, field, getattr(self.meter, field, 0) + n)
 
     @property
     def user_id(self) -> str:
@@ -180,8 +198,34 @@ class LongTermMemory:
         s5 t28/t32 钉的就是这一条——`rerank_scored` 是它的带分版本。"""
         return [h for h, _ in await self.rerank_scored(query, hits, k)]
 
-    @span("memory.recall", as_type="retriever")
     async def recall(self, query: str, k: int = 5) -> list[Message]:
+        """读腿的唯一出口（R1/R2）。异常在本函数内吞成空列表，四个 caller 一律不再自己 catch。
+
+        为什么把守卫放在这里而不是 caller：现证 6 处同形状里有 4 处是**读**（`role_zero.py` 两条、
+        `agent.py` 两条），在四处各点一次计数就是四个漏点，而将来第五条腿必然漏——C13/R2 那条
+        「别在第二处再写一遍规则」的纪律同指一处。**写腿（`overflow`）这两处刻意不动**：
+        `agent._ltm_flush` 的游标只在成功时进位（C34 的「失败留到下轮重试」语义），
+        收进来就等于悄悄改掉重试。
+        """
+        if not self.up:
+            return []                      # 短路：不再白等，也不再刷日志（计数不重复加）
+        try:
+            out = await self._recall_inner(query, k)
+        except Exception as e:
+            self.up = False
+            self.last_error = f"{type(e).__name__}: {e}"
+            self._count("recall_failures")
+            # 一条可 grep 的真话，且不伪装成「没资料」：后面那句写明本条腿本场不再尝试。
+            logger.warning(f"{self.doc_type} 召回不可用（本场此腿不再尝试）：{self.last_error}")
+            return []
+        if out:
+            self._count("recall_returned", len(out))
+        else:
+            self._count("recall_zero_hits")
+        return out
+
+    @span("memory.recall", as_type="retriever")
+    async def _recall_inner(self, query: str, k: int = 5) -> list[Message]:
         """新任务开始时检索回填（调用方：RoleZero._think 里 `_retrieve_experience` 的位置）。
         hybrid 粗排 → reranker 在场则精排重排（台账 #11 的吸收点）。
         N9：整条检索链（embedding → Qdrant hybrid → rerank）不在 LangChain callback 面内，

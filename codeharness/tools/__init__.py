@@ -86,16 +86,18 @@ async def search_knowledge_base(query: str) -> str:
     # 与灌库侧、与每轮预取那条读者同源（C31 修的就是「两处各算一次同一个身份」）。
     # ponytail: 一次调用 = 一对新客户端（Qdrant + embeddings），连接靠 GC 收。上限是「模型高频调它」；
     # 真到那一步再给 QdrantStore 加进程级 client 复用，现在不为没出现的调用方造池子。
-    from codeharness.logs import logger
     from codeharness.memory.longterm import LongTermMemory, format_kb_blocks
     from codeharness.provider.gateway import LLMGateway
     kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb")
-    try:
-        blocks = format_kb_blocks(await kb.recall(query, k=3))
-    except Exception as e:
-        # 与 _kb_recall 同一档位：检索挂了不打断这场。类名照原样带出去，不写成「存储不可用」的谎（C16）
-        logger.warning(f"知识库检索工具失败: {type(e).__name__}: {e}")
-        return f"[知识库检索暂不可用: {type(e).__name__}: {e}]"
+    blocks = format_kb_blocks(await kb.recall(query, k=3))
+    # R2 之后异常不再飘到这里（catch 收在 `LongTermMemory.recall` 一处），所以「挂了」与「查到了但
+    # 不相关」的分辨改读短路位 `kb.up`。不许退化成那句假话：挂了的时候印「知识库里没有相关切片」。
+    # 类名与原因在 recall 里那条 warning 上（C16 口径：不写成「存储不可用」这种猜出来的措辞）。
+    if not kb.up:
+        # 类名从 reader 身上取（`last_error`），不是从异常里取——catch 已收在 `LongTermMemory.recall`
+        # 一处，异常不再飘到这里。`s15 t15⑤` 钉的就是这句里必须带真实异常类名（C16：不许写成
+        # 「存储不可用」那种猜出来的措辞），所以这个字段是判据要求的形状，不是顺手加的日志尾巴。
+        return f"[知识库检索暂不可用: {kb.last_error or '未知原因'}]"
     return (blocks or "[知识库里没有与这句相关的切片]")[:8000]
 
 

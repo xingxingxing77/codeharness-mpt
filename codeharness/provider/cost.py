@@ -51,6 +51,15 @@ class CostManager(BaseModel):
     # 也没走到命令派发（不进未知命令）。那种"钱花了、产出为零"的形态在账面上原本隐形。
     # ⚠ 只调工具不说话的那一笔**不算**浪费（`tool_calls` 非空即合法），所以判据两边都要有对照。
     empty_output_calls: int = 0
+    # R1（09-28 普查批）：召回链（读腿）的三个只读计数。与上面三笔同族——只是计数，不参与金额口径。
+    # 为什么要装表：普查现证 09-27 全天 kb 腿 1 次成功 / 595 次连接失败，09-28 是 6/299，而失败只有
+    # 一行 warning（`logger.warning` 里那句「按无资料继续」），界面上与「知识库里真没资料」同一个长相；
+    # memory 腿更彻底——`RECALL_FLOOR__MEMORY_MODE=off` 之后连 floor 那条 debug 行都不发，零痕迹。
+    # 三个数就是 hit-rate 的分子分母：成功率 = returned/(returned+zero_hits)，可用性 = failures 那笔。
+    # ⚠ `recall_returned` 数的是**召回回来的切片条数**（不是调用次数），一次召 3 条就 +3。
+    recall_failures: int = 0
+    recall_zero_hits: int = 0
+    recall_returned: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""

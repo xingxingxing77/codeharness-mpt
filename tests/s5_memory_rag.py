@@ -1630,6 +1630,158 @@ def t39_recall_floor_applies_per_leg():
           "memory_mode 打开后记忆腿也吃这一刀、坏配置两档都判")
 
 
+def t42_recall_metering_and_short_circuit():
+    """R1/R2（09-28 普查批）：读腿的计数、短路位，以及「挂了」不许长成「没资料」。
+    离线格——不碰 Qdrant 与 embedding 端点，因此**端点在不在线都要能跑**（普查现证生产里
+    这条腿 98% 的时间是连不上的，判据不能跟着它一起哑）。
+
+      ① 失败⇒`recall_failures` +1、回空列表、`up` 翻假；**阳性对照**：调用前 `up is True`。
+      ② 第二次调用不再打端点（数发数）——2316ms/次的白等就是这么消掉的。
+      ③ 成功记条数、成功但零命中记 `recall_zero_hits`（两格成对：只有一格时「停在 0」是假绿）。
+      ④ `meter=None`（自测/无账本装配）不炸——计数静默跳过，其余行为不变。
+      ⑤ catch 已收口：三个 caller 文件里那两句旧 warning 不许复燃；工具面改读 `kb.up` 说话。
+    """
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.cost import CostManager
+
+    class _Emb:
+        def __init__(self, boom=False):
+            self.n, self.boom = 0, boom
+
+        async def aembed_query(self, q):
+            self.n += 1
+            if self.boom:
+                raise ConnectionError("embedding 端点不在线")
+            return [0.1] * 8
+
+    class _Point:
+        def __init__(self, i, text):
+            self.id, self.score = str(i), 0.9
+            self.payload = {"text": text, "role": "user", "cause_by": "", "sent_from": ""}
+
+    class _Store:
+        def __init__(self, pts=()):
+            self.pts, self.calls = list(pts), 0
+
+        async def search(self, query, dense, **kw):
+            self.calls += 1
+            return list(self.pts)
+
+    def _ltm(emb, store, meter, doc="memory"):
+        return LongTermMemory(project_id="r1_gate", user_id="u_r1", embeddings=emb,
+                              store=store, doc_type=doc, meter=meter)
+
+    # ① + ② 失败：计数、短路位、第二次不出门
+    cm = CostManager()
+    emb, store = _Emb(boom=True), _Store()
+    ltm = _ltm(emb, store, cm)
+    with _FloorCfg(mode="off", memory_mode="off"):
+        assert ltm.up is True, "①阳性对照失效：新实例的短路位天生是假的那 ② 就是恒绿"
+        assert asyncio.run(ltm.recall("任何任务")) == [], "①失效：挂了没退成空列表"
+        assert cm.recall_failures == 1, f"①失效：失败计数没落账，实得 {cm.recall_failures}"
+        assert ltm.up is False, "①失效：短路位没翻假"
+        asyncio.run(ltm.recall("任何任务"))
+        asyncio.run(ltm.recall("任何任务"))
+    assert emb.n == 1 and store.calls == 0, \
+        f"②失效：短路之后还打了 {emb.n} 发端点（每发实测白等 2316ms）"
+    assert cm.recall_failures == 1, f"②失效：跳过被重复计成失败（{cm.recall_failures}），分母就毁了"
+
+    # ③ 成功两格：记条数 / 记零命中
+    ok, cm3 = _Emb(), _Store([_Point(1, "甲"), _Point(2, "乙")])
+    cm_r = CostManager()
+    l3 = _ltm(ok, cm3, cm_r)
+    with _FloorCfg(mode="off", memory_mode="off"):
+        got = asyncio.run(l3.recall("任何任务", k=3))
+    assert len(got) == 2 and cm_r.recall_returned == 2, \
+        f"③失效：成功没记条数（返回 {len(got)} 条、计数 {cm_r.recall_returned}）"
+    assert cm_r.recall_zero_hits == 0 and cm_r.recall_failures == 0, "③阳性对照失效：成功的格子被记成了失败"
+    l4 = _ltm(_Emb(), _Store(), CostManager())
+    cm4 = l4.meter
+    with _FloorCfg(mode="off", memory_mode="off"):
+        assert asyncio.run(l4.recall("任何任务", k=3)) == [], "③失效：空库该回空列表"
+    assert cm4.recall_zero_hits == 1 and cm4.recall_returned == 0 and cm4.recall_failures == 0, \
+        f"③失效：零命中没被单独记（zero={cm4.recall_zero_hits} returned={cm4.recall_returned}）"
+
+    # ④ meter=None 不炸
+    l5 = _ltm(_Emb(boom=True), _Store(), None)
+    with _FloorCfg(mode="off", memory_mode="off"):
+        assert asyncio.run(l5.recall("任何任务")) == [], "④失效：没有账本就不该跑，但绝不能抛"
+
+    # ⑤ catch 已收口：**结构判定**，不是文案判定。第一版守卫只 grep 那两句旧 warning，
+    # 变异 mR4 换一个不带文案的 `except Exception: return ""` 就绕过去了（变异存活现证判据不够）。
+    # 现在直接读四个 caller 函数的源码，函数体里出现 `try`/`except` 即为复燃。
+    import ast
+    import inspect
+    import pathlib
+    import textwrap
+    from codeharness.roles.agent import Agent
+    from codeharness.roles.role_zero import RoleZero
+    root = pathlib.Path("E:/Codeharness/codeharness")
+    for owner, fname in ((RoleZero, "_ltm_recall"), (RoleZero, "_kb_recall"),
+                         (Agent, "_ltm_block"), (Agent, "_kb_block")):
+        src = textwrap.dedent(inspect.getsource(getattr(owner, fname)))
+        tries = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Try)]
+        assert not tries, f"⑤失效：{owner.__name__}.{fname} 里又长出 {len(tries)} 处 try/except" \
+                          f"（计数会漏在这一处，且「挂了」与「没资料」会重新混成一个长相）"
+    tool_txt = (root / "tools/__init__.py").read_text(encoding="utf-8")
+    assert "if not kb.up:" in tool_txt, "⑤失效：工具面退回「知识库里没有相关切片」那句假话了"
+    assert "召回不可用" in (root / "memory/longterm.py").read_text(encoding="utf-8"), \
+        "⑤失效：唯一那条 catch 没了——上面 ① 的读数就无从产生"
+    print("  ok  t42 读腿计数/短路/零命中三格齐，caller 那四处 catch 已收口且工具面不再把故障说成没资料")
+
+
+def t43_recall_counters_on_a_live_round_trip():
+    """R1 的**在线档**：t42 全在替身上跑，这一格要的是「真 Qdrant 上一次召回，账本上的数数得出来」。
+    补这一格的理由：本批恰恰是给「这条腿连不上」装表的，而普查现证生产里它 98% 的时间连不上
+    ⇒ 只在替身上亮的计数，等于从没在被计的那台服务上验证过。零花费（`DirEmbeddings` 本地定向向量）。
+    """
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.cost import CostManager
+    if not live_qdrant():
+        print("  t43 跳过（无 Qdrant）—— 这格要的就是在线读数")
+        return
+    # 自带一份 cos 表：三条切片的 dense 分全在 0.5 之下，① 用 `off` 档证明它们召得回，
+    # ③ 用 `score/0.5` 证明「全被砍」是**零命中**而不是失败。（用 C23 那张表不行：
+    # `DirEmbeddings._v` 对表外文本是 `self.cos[text]` ⇒ KeyError，会被记成 fail=1，
+    # 而 fail 一旦落下短路位就翻假，后面每一格都退化成「恒回空」的假绿——第一版就是这么红的。）
+    R1_Q = "重置链接为什么先发一次性令牌"
+    R1_T = {"令牌过期时间为五分钟": 0.34, "重置流程需要先校验旧密码": 0.28, "邮件模板由运维维护": 0.19}
+    cm = CostManager()
+    ltm = LongTermMemory(project_id="r1_live", user_id="u_r1live",
+                         embeddings=DirEmbeddings(R1_T, R1_Q),
+                         store=gate_store(), doc_type="kb", meter=cm)
+    asyncio.run(ltm.drop())
+    try:
+        asyncio.run(ltm.overflow([Message(content=t, role="user") for t in R1_T]))
+        with _FloorCfg(mode="off", memory_mode="off"):
+            got = asyncio.run(ltm.recall(R1_Q, k=2))
+        assert got, "①失效：真库里写了三片，一次召回却空（那 t42 的计数形状根本没有在线凭据）"
+        assert cm.recall_returned == len(got), \
+            f"①失效：`recall_returned` 与真返回条数不符（计数 {cm.recall_returned} vs 实回 {len(got)}）"
+        assert (cm.recall_failures, cm.recall_zero_hits) == (0, 0), \
+            f"②失效：一次成功的召回被记成失败或空返回（{cm.recall_failures}/{cm.recall_zero_hits}）"
+        assert ltm.up is True, "②失效：成功一轮之后短路位却是假 ⇒ 整场会被一次成功之外的东西掐掉"
+
+        # ③ 零命中：把线抬到三条都过不去，`recall` 必须回空且**只**加 `recall_zero_hits`
+        with _FloorCfg(mode="score", memory_mode="off", oversample=3, min_score=0.5):
+            none_ = asyncio.run(ltm.recall(R1_Q, k=3))
+        assert none_ == [] and cm.recall_zero_hits == 1 and cm.recall_failures == 0, \
+            (f"③失效：砍空没被单独记（回 {len(none_)} 条、zero={cm.recall_zero_hits} "
+             f"fail={cm.recall_failures}）")
+
+        # ④ 端点真挂一次：在线下的形状与离线 t42① 必须一致（计数 +1、回空、短路位翻假）
+        ltm.embeddings = BoomEmbeddings()
+        before = cm.recall_failures
+        assert asyncio.run(ltm.recall(R1_Q, k=2)) == [], "④失效：端点挂了却没降级成空"
+        assert cm.recall_failures == before + 1 and ltm.up is False, \
+            f"④失效：在线失败没落账（failures={cm.recall_failures} up={ltm.up}）"
+        assert asyncio.run(ltm.recall(R1_Q, k=2)) == [], "④失效：短路之后该直接回空"
+        assert cm.recall_failures == before + 1, "④失效：被跳过的那次又计了一笔（分母就假了）"
+    finally:
+        asyncio.run(ltm.drop())
+    print("  ok  t43 在线档：真 Qdrant 上一次召回的条数/零命中/失败三笔都对得上，且失败后跳过不重复计数")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -1657,7 +1809,9 @@ def main():
               t38_both_recall_legs_clamp_their_query,
               t39_recall_floor_applies_per_leg,
               t40_exp_signature_is_embedded_the_same_on_both_sides,
-              t41_cut_hard_split_is_linear_and_byte_identical]
+              t41_cut_hard_split_is_linear_and_byte_identical,
+              t42_recall_metering_and_short_circuit,
+              t43_recall_counters_on_a_live_round_trip]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

@@ -220,8 +220,12 @@ def t6_import_repo_junction_cannot_escape():
         ok_link = _make_junction(repo / "junc", secret_dir)
         _make_junction(repo / "loop", wp)          # 指回祖先的环
         try:
+            # `save_name` 必须**每跑唯一**：`import_repo` 是先 `load_from` 同名图再合并写回的，
+            # 固定名字会让断言读到别的跑留下的图（09-28 现证：C85 修前那次演示把 SECRET 节点写进了
+            # `workspace/s11_junc/c85.json`，此后本格无论剪枝对不对都永久红——本次 node_count=2
+            # 而渲染出 1895 行、1070 条边，就是这么来的）。
             r = c.post(f"/api/sessions/{sid}/workspace/import_repo",
-                       json={"repo_path": str(repo), "save_name": "c85"})
+                       json={"repo_path": str(repo), "save_name": f"c85_{sid[:8]}"})
             assert r.status_code == 200, f"junction 场景不该打爆端点：{r.status_code} {r.text[:200]}"
             body = r.json()
             raw = _json.dumps(body, ensure_ascii=False)
