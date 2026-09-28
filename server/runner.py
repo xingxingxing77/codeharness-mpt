@@ -16,7 +16,7 @@ from langgraph.types import Command
 from server.bridges import SESSION_ID
 from server.sessions import Session, SessionStatus
 
-PROSE_DEDUPE_CAP = 40000   # 每场留存的「已逐片发过的散文」上限，只给去重判断用（超出丢最老的）
+LIVE_BLOCKS = ("Thought", "Docs", "Task")   # 能承载逐片正文的块：打字机就投进这一笔所在的那块
 MIN_PROSE = 24          # structured 流里「算散文」的下限（字符）。09-29 活体现证过两头：
 # 80 会把真散文挡在门外（一场 dynamic 跑的 thought 实测 64 字，一格没发），而 24 仍然把枚举值
 # 与字段名关在外面（`REQUIREMENT`=11、`en`=2、`original_requirements`=21）。
@@ -220,9 +220,10 @@ class SessionRunner:
         # (sid, run_id) -> 该笔调用的散文抽取器。同样按 run_id 不按节点名：一笔一个状态机，
         # 收口（on_chat_model_end）即弃，否则跨笔调用会把上一笔的成员进度带过来。
         self._prose: dict[tuple[str, str], _ProseStream] = {}
-        # sid -> 本场已逐片发出去的散文（拼接串，封顶见 PROSE_DEDUPE_CAP）。给 sink 转发处
-        # 做「同一句话不再整段重发」用，见 _make_sink。
-        self._prose_out: dict[str, str] = {}
+        # sid -> 这一笔 LLM 调用的逐片该投进哪一块：内核报道槽里**最后开着且未收口**的那块
+        # （`Thought`/`Docs`/`Task`，值带它的 block 名），没有就由 `_translate` 落 `stream-{node}` 兜底。
+        # 于是文档块自己就在流：逐片进 `live`，内核定稿（`content`）一到前端把 `live` 整段撤掉。
+        self._live_blk: dict[str, tuple] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def start(self, session: Session):
@@ -567,31 +568,20 @@ class SessionRunner:
         bus = self.bus
 
         def sink(event: dict):                    # 普通函数（桥接铁律）
-            # 打字机已经逐片发过这句话，内核那块就别再整段贴一遍（09-29 活体现证：同一段思考
-            # 在 `stream-think` 与内核 Thought 块各出现一次——两条源本来就各成一行，改抽散文后
-            # 它们的内容第一次变得可读且相同，重复才显出来）。判据是**包含**不是相等：内核发的
-            # 定稿可能是抽取器输出的母串（抽取器只挑达标成员，内核发整段 thought）。
-            if event.get("name") == "content" and self._already_streamed(sid, event.get("value")):
-                return
+            # 记一块「现在能收逐片正文的」：内核块在 `async with` 里先开（meta 走到这儿），
+            # 它里面那一笔 LLM 调用的散文就投进它；收口即撤。上一版的「整段重发去重」
+            # （比一下内核定稿是不是已逐片发过的那句话、是就丢掉）到此作废——逐片走 `live`
+            # 通道、定稿走 `content`，两份内容在结构上就不会同屏，不必再靠字符串比对去猜。
+            uid, nm = event.get("uuid"), event.get("name")
+            if uid:
+                if nm == "end_marker":
+                    if self._live_blk.get(sid, (None,))[0] == uid:
+                        self._live_blk.pop(sid, None)
+                elif event.get("block") in LIVE_BLOCKS:
+                    self._live_blk[sid] = (uid, event.get("block"))
             bus.publish(sid, kind="report", **event)
 
         return sink
-
-    def _already_streamed(self, sid: str, value) -> bool:
-        """内核整段正文与本场已逐片发过的散文比对：命中即丢掉这一次重复上屏。"""
-        text = value if isinstance(value, str) else str(value or "")
-        if not text.strip():
-            return False
-        acc = self._prose_out.get(sid)
-        if not acc:
-            return False
-        if text not in acc:
-            return False
-        # 丢的这一刻要能追回来：留一声可 grep 的响（INFO 才同时进 console 与日志文件——
-        # `define_log_level` 的 print=INFO / logfile=DEBUG，写 debug 就只有翻文件才看得见）。
-        # 一场会话最多每轮一行，不吵。
-        logger.info(f"[stream-dedupe] {sid} 整段正文已在打字机里逐片发过，不再重发（{len(text)} 字）")
-        return True
 
     @contextmanager
     def _session_ctx(self, sid: str):
@@ -660,7 +650,7 @@ class SessionRunner:
             self._call_t0.pop(k, None)
         for k in [k for k in self._prose if k[0] == sid]:
             self._prose.pop(k, None)
-        self._prose_out.pop(sid, None)
+        self._live_blk.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
             self.projects.pop(sid, None)
@@ -857,8 +847,10 @@ class SessionRunner:
             # 而不是空 `content`，前端的 Think 行据此进 running 态扫光，而 `fts`（首 token 时刻）
             # 与成本读数一个都不动——拿静默期冒充首 token 就是假读数。
             node = ev.get("metadata", {}).get("langgraph_node", "")
-            self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
-                             name="meta", value={"streaming": node}, role=node)
+            # 内核已经有块开着就不再另起一行——那一行本来就在那儿、就是 running 态。
+            if not self._live_blk.get(sid):
+                self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
+                                 name="meta", value={"streaming": node}, role=node)
         elif kind == "on_chat_model_end":
             self._sync_cost(sid)
             if rid:
@@ -885,10 +877,17 @@ class SessionRunner:
             # 首 token 只认第一个**有散文**的分片；没采到就是 None，不拿收口时刻凑一个假 TTFT。
             if slot is not None and slot[1] is None:
                 slot[1] = time.time()
-            self.bus.publish(sid, kind="report", block="Thought",
-                             uuid=f"stream-{node}", name="content",
-                             value=piece, role=node)
-            self._prose_out[sid] = (self._prose_out.get(sid, "") + piece)[-PROSE_DEDUPE_CAP:]
+            # 落点 = 这一笔所在的那块（内核开着的），没有才落 `stream-{node}` 兜底；
+            # 名字用 `live`：内核定稿是 `content`，两者在前端各占一格（正文 = tokens + live，
+            # content 一到就把 live 清空），所以永远不会出现两份同屏。
+            tgt = self._live_blk.get(sid)
+            if tgt:
+                uid, btype = tgt
+                self.bus.publish(sid, kind="report", block=btype,
+                                 uuid=uid, name="live", value=piece, role=node)
+            else:
+                self.bus.publish(sid, kind="report", block="Thought",
+                                 uuid=f"stream-{node}", name="live", value=piece, role=node)
         # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
         # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
         # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，

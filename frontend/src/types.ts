@@ -78,6 +78,9 @@ export interface Block {
   closed: boolean
   meta: any
   tokens: string[]
+  /** 打字机逐片（report 的 `live` 事件）：内核定稿的 `content` 一到就整段撤掉。
+   *  正文 = `tokens` + `live`，所以流式期看得见、收口后不会两份叠着。 */
+  live: string[]
   doc: any
   obj: any
   lines: string[]

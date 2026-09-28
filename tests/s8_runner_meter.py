@@ -648,15 +648,16 @@ async def t12_prose_from_structured_stream():
     meta = {"langgraph_node": "PM"}
 
     def contents(uuid=None, after=0):
+        """这一笔之后落在某块上的正文事件（逐片走 live、定稿走 content，两边都要能取到）。"""
         return [e for e in bus.history(s.id)[after:] if e.kind == "report"
-                and e.name == "content" and (uuid is None or e.uuid == uuid)]
+                and e.name in ("live", "content") and (uuid is None or e.uuid == uuid)]
 
     runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "r1", "metadata": meta})
     opened = [e for e in bus.history(s.id) if e.kind == "report" and e.uuid == "stream-PM"]
     assert opened and opened[0].name == "meta", \
         f"start 没建块、或建块发的不是 meta（静默期全黑／fts 被点着是两种坏法）：{[e.name for e in opened]}"
-    assert not [e for e in opened if e.name == "content"], \
-        "静默期发 content ⇒ 前端把 b.fts 点着，TTFT 从「真散文首片」变成「调用派发」= 假读数"
+    assert not [e for e in opened if e.name in ("content", "live")], \
+        "静默期就发正文 ⇒ 前端把 b.fts 点着，TTFT 从「真散文首片」变成「调用派发」= 假读数"
     assert runner._call_t0[(s.id, "r1")][1] is None, "start 就把 ft 写了，span 的 TTFT 是编的"
 
     mark = len(bus.history(s.id))
@@ -701,25 +702,39 @@ async def t12_prose_from_structured_stream():
                              "data": {"chunk": type("C", (), {"content": [{"type": "text", "text": "x"}]})()}})
     assert not contents(None, mark), "内容块形态（content 非 str）不该发布"
 
-    # ⑥ 去重（09-29 活体现证的形状）：打字机逐片发过那句话之后，内核那块**整段**再发同一句
-    #    就不再上屏——两条源各成一行是既有形状，改抽散文后它们的内容第一次变得既可读又相同。
-    #    判据是「包含」不是「相等」：内核发的定稿可能是抽取器输出的母串。
-    kmark = len(bus.history(s.id))
-    sink = runner._make_sink(s.id)
-    sink({"block": "Thought", "uuid": "kern-1", "name": "meta", "value": {"type": "react"}, "role": "PM"})
-    sink({"block": "Thought", "uuid": "kern-1", "name": "content", "value": want, "role": "PM"})
-    sink({"block": "Thought", "uuid": "kern-1", "name": "content", "value": "抽取器没发过的一行事实", "role": "PM"})
-    sink({"block": "Thought", "uuid": "kern-1", "name": "end_marker", "value": None, "role": "PM"})
-    kevs = [e for e in bus.history(s.id)[kmark:] if e.kind == "report" and e.uuid == "kern-1"]
-    kcont = [e.value for e in kevs if e.name == "content"]
-    assert kcont == ["抽取器没发过的一行事实"], f"⑥ 该丢的没丢或不该丢的被吞了：{kcont}"
-    assert [e.name for e in kevs if e.name in ("meta", "end_marker")] == ["meta", "end_marker"], \
-        f"⑥ 阳性对照失守：只该丢正文，块本身（meta/收口）还得照发：{[e.name for e in kevs]}"
-    runner._forget(s.id, terminal=True)
-    assert s.id not in runner._prose_out, "散会没清比对串（长跑会一直攒）"
-    _ok("t12", "structured 的逐片 JSON 抽成散文才上屏：start 建块不占 fts、逐片与参照实现逐字一致、"
-               "收口清状态机、同节点第二笔重抽；裸文本原样透传、短字段与内容块零发布；"
-               "内核整段重发同一句被去重（未发过的一行事实照发，块本身 meta/收口照发）")
+    # ⑥ 落点：内核块开着时，逐片进**那块**（不另起一行）；块收口后落点释放，下一笔回 `stream-{node}`。
+    #    这条取代了上一版的「整段重发去重」——逐片走 live、定稿走 content，两份内容在结构上就不会
+    #    同屏，不必再靠字符串比对去猜（`_prose_out`/`_already_streamed` 已随之删除）。
+    tmp2, store2, bus2, runner2, s2 = await _make_runner()
+    runner2.costs[s2.id] = CostManager()
+    sink2 = runner2._make_sink(s2.id)
+    sink2({"block": "Docs", "uuid": "doc-1", "name": "meta", "value": {"type": "prd"}, "role": "PM"})
+    runner2._translate(s2.id, {"event": "on_chat_model_start", "run_id": "q1",
+                               "metadata": {"langgraph_node": "act"}})
+    early = [e for e in bus2.history(s2.id) if e.kind == "report"]
+    assert not [e for e in early if str(e.uuid or "").startswith("stream-")], \
+        "⑥ 内核块开着还另起一行 ⇒ 又回到两份同屏的老形状"
+    for i in range(0, len(txt), 9):
+        runner2._translate(s2.id, {"event": "on_chat_model_stream", "run_id": "q1",
+                                   "metadata": {"langgraph_node": "act"},
+                                   "data": {"chunk": AIMessage(content=txt[i:i + 9])}})
+    live = [e for e in bus2.history(s2.id) if e.name == "live"]
+    assert live and all(e.uuid == "doc-1" and e.block == "Docs" for e in live), \
+        f"⑥ 逐片没投进开着的那块：{[(e.uuid, e.block) for e in live][:3]}"
+    assert "".join(e.value for e in live) == want, "⑥ 换了落点，抽出来的散文不该变"
+    sink2({"block": "Docs", "uuid": "doc-1", "name": "content", "value": "## 定稿", "role": "PM"})
+    sink2({"block": "Docs", "uuid": "doc-1", "name": "end_marker", "value": None, "role": "PM"})
+    runner2._translate(s2.id, {"event": "on_chat_model_stream", "run_id": "q2",
+                               "metadata": {"langgraph_node": "act"},
+                               "data": {"chunk": AIMessage(content=txt)}})
+    late = [e for e in bus2.history(s2.id) if e.name == "live" and e.uuid == "stream-act"]
+    assert late and "".join(e.value for e in late) == want, \
+        "⑥ 块收口后落点没释放：下一笔还往那块里投（那块已经收口，用户看不见）"
+    runner2._forget(s2.id, terminal=True)
+    assert s2.id not in runner2._live_blk, "散会没清落点表（长跑会一直攒）"
+    _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
+               "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
+               "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}")
 
 
 def t13_assembly_ledger_identity_recall():

@@ -90,7 +90,7 @@ const store = useSessionStore()
 const ui = useUiStore()
 
 const b = computed(() => props.b)
-const text = computed(() => b.value.tokens.join(''))
+const text = computed(() => b.value.tokens.join('') + b.value.live.join(''))
 const open = computed(() => !b.value.closed)
 const isProse = computed(() => b.value.type === 'Docs')
 /** 轮内 error 行（B1）：store 把 traceback 按行存进 lines，行里只报最后一行非空——

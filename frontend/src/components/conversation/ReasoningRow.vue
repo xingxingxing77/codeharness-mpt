@@ -39,7 +39,7 @@ const props = defineProps<{ b: Block; isOpen: boolean }>()
 
 const rowEl = ref<{ $el: HTMLElement } | null>(null)
 const folded = ref(false)
-const text = computed(() => props.b.tokens.join(''))
+const text = computed(() => props.b.tokens.join('') + props.b.live.join(''))
 const running = computed(() => !props.b.closed)
 const body = computed(() => sliceHeadTail(text.value, DEFAULT_MAX_LINES, folded.value))
 

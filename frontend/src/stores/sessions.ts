@@ -27,6 +27,7 @@ function newBlock(ev: WEvent): Block {
     closed: false,
     meta: null,
     tokens: [],
+    live: [],
     doc: null,
     obj: null,
     lines: [],
@@ -297,6 +298,7 @@ export const useSessionStore = defineStore('sessions', {
           continue
         }
         tail.tokens = head.tokens.concat(tail.tokens)
+        tail.live = head.live.concat(tail.live)
         tail.lines = head.lines.concat(tail.lines)
         tail.raw = head.raw.concat(tail.raw)
         if (head.ts !== undefined) tail.ts = head.ts
@@ -437,17 +439,24 @@ export const useSessionStore = defineStore('sessions', {
           if (b.ts === undefined) b.ts = ev.ts
           b.lastTs = ev.ts
           if (ev.cursor) b.endCursor = ev.cursor   // B3：分叉点要按块拿游标
-          if (ev.name === 'content' && b.fts === undefined) b.fts = ev.ts
+          if ((ev.name === 'content' || ev.name === 'live') && b.fts === undefined) b.fts = ev.ts
         }
         switch (ev.name) {
           case 'meta':
             b.meta = ev.value
             break
           case 'content':
-            // 同一节点在一场里被调多次，第二笔的流落在上一笔的 end_marker 之后：不开回来
-            // 这一行就既不振「运行中」也不跟着滚（游标单调那条闸在前面，重放与乱序都到不了这儿）。
+            // 内核的定稿到了：在飞的逐片整段撤掉（两份内容同屏是本仓要治的重复，不是过渡态）。
             if (b.closed) b.closed = false
+            b.live = []
             b.tokens.push(String(ev.value ?? ''))
+            break
+          case 'live':
+            // 打字机逐片：后端 `server/runner.py` 从 LLM 流里抽出的散文，投进这一笔所在的那一块
+            // （开着的内核块，没有就落 `stream-{node}`）。它只进 `live`，绝不进 `tokens`——
+            // 所以定稿来了直接清空就行，不需要任何「比对是不是同一句话」的猜。
+            if (b.closed) b.closed = false
+            b.live.push(String(ev.value ?? ''))
             break
           case 'document':
             b.doc = ev.value
@@ -630,6 +639,7 @@ export const useSessionStore = defineStore('sessions', {
         lastTs: Date.now() / 1000,
         meta: null,
         tokens: [content],
+        live: [],
         doc: null,
         obj: null,
         lines: [],

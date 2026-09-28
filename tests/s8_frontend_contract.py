@@ -1997,11 +1997,13 @@ def t28_stream_ux_batch():
     assert "class _ProseStream" in runner, "t28① 抽取器没了（JSON 原文会重新直接上屏）"
     assert "MIN_PROSE = 24" in runner, "t28① 达标下限被改动（判据里的成员挑选会变；80 是活体证伪的旧值）"
     assert "value=chunk.content" not in runner, "t28① 又拿 chunk.content 原样发布了"
-    assert "value=piece" in runner, "t28① 抽出来的散文没接进发布"
-    assert "self._already_streamed(sid, event.get(\"value\"))" in runner, \
-        "t28① 内核整段重发的去重没了（同一段思考又会各上一遍）"
-    assert "self._prose_out[sid] = (self._prose_out.get(sid, \"\") + piece)[-PROSE_DEDUPE_CAP:]" in runner, \
-        "t28① 比对串没跟着发布累加（去重会退化成永不命中）"
+    assert runner.count('name="live"') == 2,         f"t28① 逐片通道该在两个落点各一条（内核块 / stream- 兜底），现命中 {runner.count('name=\"live\"')} 条"
+    assert 'LIVE_BLOCKS = ("Thought", "Docs", "Task")' in runner, "t28① 可承载逐片的块类型被改"
+    assert "self._live_blk[sid] = (uid, event.get(\"block\"))" in runner, \
+        "t28① 落点不再由报道槽登记（逐片会全部掉进 stream-{node}，文档块又不流了）"
+    # 上一版靠字符串比对丢掉整段重发；这一版由通道分开（live=逐片、content=定稿）——旧 machinery 不许复活
+    for dead in ("_already_streamed", "_prose_out", "PROSE_DEDUPE_CAP"):
+        assert dead not in runner, f"t28① 字符串比对式去重复活了：{dead}"
     assert "_ProseStream()).feed(text)" in runner, "t28① 抽取器没接在流分支上（`piece = text` 那种绕法会把 JSON 原文直接打上去）"
     assert "structured 输出不进这里做打字机" not in runner, \
         "t28① 那句「structured 不走打字机」的旧注释回来了（它正是这次病灶的登记处）"
@@ -2015,13 +2017,25 @@ def t28_stream_ux_batch():
 
     # ③ 前端两条：收口后的第二笔要开回来；空白 Think 行不渲染
     ss = rd("stores/sessions.ts")
-    assert "if (b.closed) b.closed = false" in ss, "t28③ content 不再重开已闭合块（第二笔静默上屏）"
-    assert "b.tokens.push(String(ev.value ?? ''))" in ss, "t28③ 阳性对照失守：连正文累加都没了"
+    assert "if (b.closed) b.closed = false" in ss, "t28③ 已闭合块不再被重开（第二笔静默上屏）"
+    assert ss.count("if (b.closed) b.closed = false") == 2, \
+        f"t28③ content 与 live 各要一条重开，现命中 {ss.count('if (b.closed) b.closed = false')} 条"
+    assert "case 'live':" in ss and "b.live.push(String(ev.value ?? ''))" in ss, \
+        "t28③ live 分支没了（逐片无处可落）"
+    assert "b.live = []" in ss, "t28③ 定稿不撤逐片 ⇒ 同一块里两份内容同屏"
+    assert "ev.name === 'live'" in ss, "t28③ fts 不认逐片首片（TTFT 会退到定稿那一刻）"
+    assert "b.tokens.push(String(ev.value ?? ''))" in ss, "t28③ 阳性对照失守：连定稿累加都没了"
+    ty = rd("types.ts")
+    assert "live: string[]" in ty, "t28③ Block 少了 live 字段"
+    assert "tokens.join('') + b.value.live.join('')" in rd("components/conversation/ChatNode.vue"), \
+        "t28③ ChatNode 的正文不含逐片（流式期看不见长出来的字）"
+    assert "tokens.join('') + props.b.live.join('')" in rd("components/conversation/ReasoningRow.vue"), \
+        "t28③ Think 行的正文不含逐片"
     cn = rd("components/conversation/ChatNode.vue")
     assert "b.type === 'Thought' && (open || text)" in cn, "t28③ 空白 Think 行又占一行了"
     assert "<ReasoningRow" in cn, "t28③ 阳性对照失守：Think 行的渲染器被整条删掉了"
     print("  ok  t28 流式 UX 批文本守卫：抽取器在位、structured 原文不许直发、静默期建块发 meta"
-          "不占 fts、前端重开与空白行两条都在、内核整段重发的去重与比对串累加都在")
+          "不占 fts、逐片走 live + 定稿撤流 + 落点登记三处接线都在，字符串比对式去重不许复活")
 
 
 def main():
