@@ -10,8 +10,6 @@
   与 per-session 强制边界（S7）冲突；N2 扩展点要工具面时再按会话内口径重写。
 源里 workspace 改名（_rename_workspace + rename_root）在 per-session 目录制下没有对应物：
 project_name 只进产物字段与报道，不动会话目录。"""
-import json
-
 from pydantic import BaseModel, Field
 
 from codeharness.base.action import BaseAction
@@ -147,31 +145,34 @@ class WritePRD(BaseAction):
     # 消息形态与原来一致（[PRD_SYSTEM_PROMPT, prefix+上下文]）。
 
     async def _new_prd(self, store: ArtifactStore, msg: Message) -> PRDOutput:
-        from codeharness.report import docs_block
+        from codeharness.report import block_markdown, docs_block
         async with docs_block("prd", role="PM") as rep:
             prd: PRDOutput = await self._structured(
                 f"{self.prefix}\n{CONTEXT_TEMPLATE.format(project_name='', requirements=msg.content)}",
                 schema=PRDOutput, system=PRD_SYSTEM_CALIBRATED)
-            await rep.content(prd.model_dump_json())
+            await rep.content(block_markdown(prd))
         await self._save(store, prd)
         return prd
 
     async def _merge(self, store: ArtifactStore, msg: Message, old: Document) -> PRDOutput:
         """源 _merge(:254) + _update_prd：REFINED_PRD 用同一组字段、NEW_REQ_TEMPLATE 做底。"""
-        from codeharness.report import docs_block
+        from codeharness.report import block_markdown, docs_block
         async with docs_block("prd-update", role="PM") as rep:
             refined: PRDOutput = await self._structured(
                 f"{self.prefix}\n{NEW_REQ_TEMPLATE.format(old_prd=old.content, requirements=msg.content)}",
                 schema=PRDOutput, system=PRD_SYSTEM_CALIBRATED)
-            await rep.content(refined.model_dump_json())
+            await rep.content(block_markdown(refined))
         await self._save(store, refined)
         return refined
 
     async def _save(self, store: ArtifactStore, prd: PRDOutput):
         """PRD json + 人读 md（源 save_pdf 的 C 方案替身）+ 象限图 `.mmd`（不渲染，前端消费）。"""
+        from codeharness.report import block_markdown
         await store.save(RepoName.PRD, Document(filename=DocName.PRD, content=prd.model_dump_json()))
-        await store.save(RepoName.PRD, Document(filename=DocName.PRD_MD, content=json.dumps(
-            prd.model_dump(), ensure_ascii=False, indent=2)))
+        # `prd.md` 是给人读的那一份：从前这里落的是 `json.dumps(indent=2)`——名字叫 .md、内容是 JSON。
+        # 全仓对 PRD_MD 只有一个「文件存在」断言（s6），没有任何一方按 JSON 解析它，改渲染格式零下游冲击；
+        # 机器要读的那份是 `prd.json`（上一行），格式一字未动。
+        await store.save(RepoName.PRD, Document(filename=DocName.PRD_MD, content=block_markdown(prd)))
         if prd.competitive_quadrant_chart:      # 源 :273 _save_competitive_analysis 的落盘半边
             await store.save(RepoName.RESOURCES, Document(
                 filename="competitive_analysis.mmd", content=prd.competitive_quadrant_chart))

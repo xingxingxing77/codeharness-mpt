@@ -83,7 +83,7 @@ class WriteTasks(BaseAction):
     output_schema = TaskList
 
     async def run(self, msg: Message) -> Message:
-        from codeharness.report import task_block
+        from codeharness.report import block_markdown, task_block
         store = ArtifactStore.active()
         design = await store.get(RepoName.DOCS, DocName.DESIGN_JSON) or await store.get(RepoName.DOCS, DocName.DESIGN)
         context = design.content if design else msg.content
@@ -99,7 +99,7 @@ class WriteTasks(BaseAction):
         async with task_block(role="PMManager") as rep:
             tasks: TaskList = await self._structured(
                 f"{self.prefix}\n{prompt}", schema=TaskList, system=system)
-            await rep.content(tasks.model_dump_json())
+            await rep.content(block_markdown(tasks))   # Task 行的正文：人读渲染，不是 schema dump
 
         if not tasks.task_list:
             # 空清单会生成零条 Send：路由不报错，会话以 finished 收场却一行代码都没写（真模型实测）

@@ -366,12 +366,60 @@ def t14_tool_call_report():
         _fail(f"14. 超长参数没截断（事件流不该搬 300 字模式串）：{long_args!r}")
 
 
+def t15_block_markdown_not_schema_dump():
+    """块正文的口径：Docs/Task 那几块发**渲染后的 markdown**，不是 schema dump。
+
+    09-28 用户报的「输出会带有一大块文本出现」有另一半在这里：`ChatNode.vue` 把 Docs 当
+    markdown 正文渲染、Task 行也只是标题 + 文本，**前端全仓没有一处 `JSON.parse` 块正文**，
+    而动作们塞进去的是 `model_dump_json()`（实测一跑：PRD 块 4965 字、Design 块 5741 字全是 JSON）。
+    """
+    import pathlib
+
+    from codeharness.actions.project_management import TaskItem, TaskList
+    from codeharness.actions.write_prd import PRDOutput
+    from codeharness.report import block_markdown
+
+    prd = PRDOutput(language="en", programming_language="Vite, React", original_requirements="一段需求",
+                    project_name="demo", product_goals=["g1 长句子", "g2"],
+                    requirement_pool=[["F001", "main.py", "登录"], ["F002", "api.py", "接口"]],
+                    requirement_analysis="需求分析正文", anything_unclear="无")
+    md = block_markdown(prd)
+    assert not md.lstrip().startswith("{"), f"正文还是 JSON 开头：{md[:50]!r}"
+    assert '"language"' not in md and "## requirement analysis" in md, md[:120]
+    assert "- F001 | main.py | 登录" in md, "内层标量列表该一行一条（表形字段）"
+
+    tasks = TaskList(task_list=[TaskItem(filename="src/main.jsx", task_id="T001", instruction="入口"),
+                                TaskItem(filename="src/App.jsx", task_id="T002",
+                                         dependent_task_ids=["T001"], instruction="正文段落")],
+                     required_packages=["react"], shared_knowledge="只用静态页")
+    tm = block_markdown(tasks)
+    assert "{" not in tm and '"' not in tm, f"块正文里出现了 JSON 字符：{tm[:60]!r}"
+    assert "\n  - task_id: T001" in tm, "一条任务该是一个子弹头 + 缩进字段（平铺会丢分组）"
+    assert block_markdown(PRDOutput()).strip() == "## language\nen_us", "空 schema 只剩有默认值的字段"
+
+    # 一族四处收齐 + 落盘侧的阳性对照：机器读的那几份仍逐字是 JSON。
+    src = {f: pathlib.Path("codeharness/actions/" + f).read_text(encoding="utf-8")
+           for f in ("write_prd.py", "design_api.py", "project_management.py")}
+    leak = [f for f, s in src.items() if "rep.content(" in s and ".content(" in s
+            and any(l.strip().startswith("await rep.content(") and "model_dump_json" in l
+                    for l in s.splitlines())]
+    assert not leak, f"往块正文里塞 schema dump 的形状复燃：{leak}"
+    wp = src["write_prd.py"]
+    assert "Document(filename=DocName.PRD, content=prd.model_dump_json())" in wp, \
+        "阳性对照失守：机器要解析的 prd.json 不再是 JSON（下游按 JSON 读它）"
+    assert "Document(filename=DocName.PRD_MD, content=block_markdown(prd))" in wp, \
+        "prd.md 又落回 JSON 转储（它全仓零解析方，只给人读）"
+    assert "content=design.model_dump_json()))" in src["design_api.py"], \
+        "阳性对照失守：design.json 的落盘格式被动了"
+
+
 def main():
     checks = [t1_class_surface, t2_blocktype_vocabulary, t3_payload_shape, t4_path_absolute,
               t5_context_manager_and_hooks, t6_llm_stream_bridge,
               t7_retry_targets_only_missing, t8_no_retry_when_complete, t9_empty_semantics,
               t10_merge_never_clobbers, t11_partial_schema_keys, t12_plain_text_path_untouched,
-              t13_artifact_filename_gate, t14_tool_call_report]
+              t13_artifact_filename_gate, t14_tool_call_report,
+              t15_block_markdown_not_schema_dump]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

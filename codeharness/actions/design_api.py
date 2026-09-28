@@ -75,7 +75,7 @@ class WriteDesign(BaseAction):
         async with docs_block("design", role="Architect") as rep:
             design: DesignOutput = await self._structured(
                 f"{self.prefix}\n{prompt}", schema=DesignOutput, system=system)
-            await rep.content(design.model_dump_json())
+            await rep.content(self._markdown(design))   # 块面是 markdown 正文，发人读渲染而不是 schema dump
 
         await store.save(RepoName.DOCS, Document(filename=DocName.DESIGN_JSON,
                                                  content=design.model_dump_json()))

@@ -427,3 +427,53 @@ async def task_block(role: str = ""):
         yield rep
     finally:
         await rep.close()
+
+
+def _md_lines(val, depth: int = 0) -> list:
+    """把嵌套的 list/dict 摊成 markdown 列表行（值只到标量为止）。"""
+    pad = "  " * depth
+    if isinstance(val, dict):
+        out = []
+        for k, v in val.items():
+            if isinstance(v, (dict, list)) and v:
+                out.append(f"{pad}- {k}:")
+                out += _md_lines(v, depth + 1)
+            elif v:
+                out.append(f"{pad}- {k}: {v}")
+        return out
+    if isinstance(val, list):
+        out = []
+        for item in val:
+            if isinstance(item, list):
+                out.append(f"{pad}- " + " | ".join(str(x) for x in item))   # 一行一条（requirement_pool 那种表）
+            elif isinstance(item, dict):
+                # 一条记录 = 一个子弹头，其余字段缩进在它下面（平铺会让「哪几行属于同一条」丢掉）
+                lines = _md_lines(item, 0)
+                if lines:
+                    head, *rest = lines
+                    out.append(f"{pad}- {head[2:]}")
+                    out += [f"{pad}  {l}" for l in rest]
+            else:
+                out.append(f"{pad}- {item}")
+        return out
+    return [f"{pad}{val}"]
+
+
+def block_markdown(model) -> str:
+    """schema 实例 → 「字段名 + 值」的 markdown，Docs/Task 块的正文口径。
+
+    为什么不发 `model_dump_json()`：那块面是按 markdown 渲染的正文（`ChatNode.vue` 的 Docs 走
+    `MarkdownText`，Task 行也只是标题 + 文本，前端没有任何一处 `JSON.parse` 块正文），塞进去的
+    `{"language": "en", ...}` 就是一大坨读不懂的字符——09-28 实测一跑里 PRD 块 4965 字、Design 块
+    5741 字全是 JSON，用户报的「输出会带有一大块文本出现」有另一半在这里。
+    落盘产物不受影响：机器要解析的那几份（`prd.json`/`design.json`/`tasks`）照旧是 JSON。
+    """
+    parts = []
+    for key, val in model.model_dump().items():
+        title = "## " + key.replace("_", " ")
+        if isinstance(val, str):
+            if val.strip():
+                parts.append(f"{title}\n{val.strip()}")
+        elif val:
+            parts.append(title + "\n" + "\n".join(_md_lines(val)))
+    return "\n\n".join(parts) + "\n"
