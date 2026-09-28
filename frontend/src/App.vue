@@ -39,6 +39,7 @@ import { onMounted, watch } from 'vue'
 import { useSessionStore } from './stores/sessions'
 import { useUiStore } from './stores/ui'
 import { useAuthStore } from './stores/auth'
+import { useToastStore } from './stores/toast'
 import AppFrame from './components/frame/AppFrame.vue'
 import ComposerCard from './components/composer/ComposerCard.vue'
 import GoalBar from './components/composer/GoalBar.vue'
@@ -60,13 +61,18 @@ onMounted(async () => {
   try {
     await auth.init()
   } catch { /* health 挂了也照旧进主界面，后续请求自行报错 */ }
-  if (!auth.needLogin) store.init()
+  if (!auth.needLogin) store.init().catch((e) => {
+    // 静默失败会把「加载失败」说成侧栏的「还没有会话」（C96 族假话）——留一声
+    useToastStore().push(`会话列表加载失败：${(e as Error).message || '未知错误'}`, 'error')
+  })
 })
 // 登录成功（needLogin 翻假）后补拉会话列表
 watch(
   () => auth.needLogin,
   (v, old) => {
-    if (old && !v) store.init()
+    if (old && !v) store.init().catch((e) => {
+    useToastStore().push(`会话列表加载失败：${(e as Error).message || '未知错误'}`, 'error')
+  })
   }
 )
 </script>

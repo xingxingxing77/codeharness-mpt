@@ -13,9 +13,8 @@
     <div v-for="proj in projects" :key="proj.name" class="env-card">
       <Icon name="folder" :size="16" />
       <span class="ename">{{ proj.name }}</span>
-      <span class="eorg">{{ proj.org }}</span>
       <span class="grow" />
-      <button class="add-btn" @click="addEnv(proj.name)">
+      <button class="add-btn" :aria-label="`为 ${proj.name} 添加环境变量`" @click="addEnv(proj.name)">
         <Icon name="plus" :size="14" />
       </button>
     </div>
@@ -32,13 +31,12 @@ const store = useSessionStore()
 const message = useToastStore()
 
 /* 参考图格式：项目名 + 所属组织（灰字），此处用真实项目 + 占位组织名 */
-const ORGS: Record<string, string> = { MetaGPT: 'geekan', OpenHarness: 'HKUDS' }
 
 const projects = computed(() => {
   const names = store.projects().map((p) => p.name)
   if (!names.includes('MetaGPT')) names.unshift('MetaGPT')
   if (!names.includes('OpenHarness')) names.push('OpenHarness')
-  return names.map((name) => ({ name, org: ORGS[name] || 'workspace' }))
+  return names.map((name) => ({ name }))
 })
 
 function addProject() {
@@ -81,11 +79,6 @@ function addEnv(name: string) {
   font-size: 13.5px;
   font-weight: 600;
   color: var(--text);
-}
-
-.eorg {
-  font-size: 12.5px;
-  color: var(--text-3);
 }
 
 .add-btn {

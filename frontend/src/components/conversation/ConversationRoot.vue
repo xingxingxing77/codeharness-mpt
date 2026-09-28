@@ -47,7 +47,7 @@
     <div ref="scrollEl" class="scroller" data-conversation-scroll @scroll="onScroll">
       <div v-show="ui.centerView === 'chat'" ref="flowEl" class="column" data-chat-flow>
         <div v-if="!store.blockList.length" class="placeholder">
-          {{ store.isRunning ? '等待智能体输出…' : '暂无事件' }}
+          {{ store.loadingFirst ? '载入中…' : store.isRunning ? '等待智能体输出…' : '暂无事件' }}
         </div>
 
         <!-- 加载更早（B2）：服务端 has_more 说前面还有事件才现身，所以它不是一颗永远点不动的假钮 -->

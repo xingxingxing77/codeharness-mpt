@@ -39,7 +39,10 @@
         添加
       </button>
     </div>
-    <div class="sgroup empty">没有已屏蔽的域名</div>
+    <div v-if="!p.blockedDomains.length" class="sgroup empty">没有已屏蔽的域名</div>
+    <div v-else class="sgroup">
+      <Row v-for="d in p.blockedDomains" :key="d" :title="d" />
+    </div>
 
     <div class="list-sec">
       <div>
@@ -52,7 +55,10 @@
         添加
       </button>
     </div>
-    <div class="sgroup empty">没有允许的域名</div>
+    <div v-if="!p.allowedDomains.length" class="sgroup empty">没有允许的域名</div>
+    <div v-else class="sgroup">
+      <Row v-for="d in p.allowedDomains" :key="d" :title="d" />
+    </div>
   </div>
 </template>
 

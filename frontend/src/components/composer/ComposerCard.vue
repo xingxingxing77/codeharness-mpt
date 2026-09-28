@@ -44,8 +44,10 @@
           </template>
         </VMenu>
         <span v-else-if="model" class="modelChip" :title="model">{{ model }}</span>
+        <!-- 运行中+空输入=停止（没有可发的 steer，唯一有意义动作）；有内容=发送。v-if 原为
+              isRunning && !editable，而 editable 恒含 isRunning ⇒ 恒假，鼠标停止入口死掉。 -->
         <button
-          v-if="store.isRunning && !editable"
+          v-if="store.isRunning && props.stoppable && !content.trim()"
           class="primary"
           aria-label="停止生成"
           title="停止生成"
@@ -193,8 +195,8 @@ function onKey(e: KeyboardEvent) {
   const send = prefs.sendWithCtrlOnly ? (e.ctrlKey || e.metaKey) : !e.shiftKey
   if (!send) return
   e.preventDefault()
-  // 运行中且允许打断时，发送键承担「停止」
-  if (store.isRunning && props.stoppable) emit('stop')
+  // 与主按钮同语义：运行中+空输入=停止，有内容=发送（steer）
+  if (store.isRunning && props.stoppable && !content.value.trim()) emit('stop')
   else submit()
 }
 

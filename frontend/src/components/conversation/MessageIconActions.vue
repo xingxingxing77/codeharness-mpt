@@ -73,8 +73,10 @@ const store = useSessionStore()
 const vote = computed(() => (props.feedbackKey ? store.feedback[props.feedbackKey] : undefined))
 
 /** 同一枚再点一次=取消（DELETE）；换票=直接 PUT 覆盖（用户在纠错，不是脏数据）。 */
+const casting = ref(false)
 async function cast(v: 'like' | 'dislike') {
-  if (!store.currentId || !props.feedbackKey) return
+  if (casting.value || !store.currentId || !props.feedbackKey) return
+  casting.value = true
   try {
     const r = vote.value === v
       ? await api.deleteFeedback(store.currentId, props.feedbackKey)
@@ -84,6 +86,8 @@ async function cast(v: 'like' | 'dislike') {
     store.feedback = normalizeVotes(r.feedback || {})
   } catch (e) {
     toast.push((e as Error).message, 'error')   // C93：toast store 没有 fail 方法（旧码在此抛 TypeError，用户零提示）；值域/越权的原文照说，不猜文案
+  } finally {
+    casting.value = false
   }
 }
 const copied = ref(false)

@@ -1884,6 +1884,54 @@ def t25_frontend_one_liners_c92_c96():
     assert 'class="empty">还没有会话' in wb and 'class="empty">载入中' in wb,         "t25/C96 阳性对照失守：两个空态文案被删了"
 
 
+def t26_ui_bugfix_batch():
+    """UI 排查批（09-28，Explore 14 条 + Emil 清单 grep）落地判据——文本级守卫（t25 同款）。
+    每条修法都有对应的现象依据（文件:行号），变异脚本 E:/tmp/ch_ui_mutate.py 各退回一处验牙。"""
+    root = pathlib.Path("frontend/src")
+    rd = lambda r: (root / r).read_text(encoding="utf-8")
+
+    # ① ComposerCard 停止钮死键：v-if 恒假（editable 恒含 isRunning）⇒ 鼠标停止入口死。
+    #    修 = 同位互换真实现：运行中+空输入=停止，有内容=发送（与 Enter 键同语义）。
+    cc = rd("components/composer/ComposerCard.vue")
+    assert 'v-if="store.isRunning && props.stoppable && !content.trim()"' in cc, "t26① 停止钮又死了"
+    assert "store.isRunning && props.stoppable && !content.value.trim()) emit('stop')" in cc,         "t26① 键盘与鼠标语义脱钩（Enter 恒 stop，有内容也停）"
+    assert 'class="primary"' in cc and 'disabled="!canSend' in cc, "t26① 阳性对照失守：发送钮没了"
+
+    # ② 反馈连点 / 归档置顶连点防重入
+    mia = rd("components/conversation/MessageIconActions.vue")
+    assert "if (casting.value" in mia and "casting.value = false" in mia, "t26② 反馈防重入没了"
+    wb = rd("components/sidebar/WorkspaceBrowser.vue")
+    assert wb.count("if (patching.value) return") == 2 and wb.count("patching.value = false") == 2,         "t26② 归档/置顶防重入没了（两处各一对）"
+
+    # ③ fork 失败静默 → toast；init 失败静默 → toast（不许把「加载失败」说成「还没有会话」）
+    tt = rd("components/conversation/TurnTail.vue")
+    assert "toast.push((e as Error).message || '分叉失败', 'error')" in tt, "t26③ fork 静默失败回来了"
+    ap = (root.parent / "src/App.vue").read_text(encoding="utf-8")
+    assert ap.count("store.init().catch") == 2 and "会话列表加载失败" in ap, "t26③ init 静默失败回来了"
+
+    # ④ 首屏未载完不说「暂无事件」
+    cr = rd("components/conversation/ConversationRoot.vue")
+    assert "store.loadingFirst ? '载入中…'" in cr, "t26④ 首屏空态没接 loadingFirst"
+    ss = rd("stores/sessions.ts")
+    assert "loadingFirst: false" in ss and ss.count("this.loadingFirst = true") == 1,         "t26④ store 侧 loadingFirst 标志没了"
+
+    # ⑤ 假档案/假读数/伪随机热力图删除（ProfilePage）；域名假空态读真 store（BrowserPage）
+    pp = rd("components/settings/ProfilePage.vue")
+    for bad in ("沙湾 二哥", "@lubiyue931", "1分 11秒", "最长任务时长", "12.9898", "peakTokens"):
+        assert bad not in pp, f"t26⑤ 假读数「{bad}」回来了"
+    assert "useAuthStore" in pp and "累计费用" in pp and "store.sessions.length" in pp,         "t26⑤ 阳性对照失守：真数据源也没接"
+    bp = rd("components/settings/BrowserPage.vue")
+    assert 'v-if="!p.blockedDomains.length"' in bp and 'v-if="!p.allowedDomains.length"' in bp,         "t26⑤ 域名列表没读真 store"
+
+    # ⑥ 图标按钮可访问名（rail 态两处 + EnvPage 加号）
+    sb = rd("components/sidebar/SidebarRoot.vue")
+    assert ''':aria-label="wide ? undefined : '设置'"''' in sb, "t26⑥ rail 态设置钮无可访问名"
+    assert "退出登录" in sb, "t26⑥ rail 态退出钮无可访问名"
+    ep = rd("components/settings/EnvPage.vue")
+    assert ':aria-label="`为 ${proj.name} 添加环境变量`"' in ep, "t26⑥ 加号钮无可访问名"
+    assert "eorg" not in ep and "geekan" not in ep, "t26⑥ 假归属 org 又渲染回来了"
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1894,7 +1942,8 @@ def main():
               t17_goal_surface, t18_steer_queue, t19_fork_surface,
               t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface,
               t23_run_after_fork, t24_checkpoint_to_chat_jump,
-              t25_frontend_one_liners_c92_c96)
+              t25_frontend_one_liners_c92_c96,
+              t26_ui_bugfix_batch)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

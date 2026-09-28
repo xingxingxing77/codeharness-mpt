@@ -49,6 +49,8 @@ async function forkHere() {
       ? `已分叉，但产物只带走前 ${r.copied_files} 份（源目录更大，其余没拷过来）`
       : `已分叉：带走 ${r.carried_events} 条事件与 ${r.copied_files} 份产物`,
       r.copied_truncated ? 'warn' : 'success')
+  } catch (e) {
+    toast.push((e as Error).message || '分叉失败', 'error')
   } finally {
     busy.value = false
   }

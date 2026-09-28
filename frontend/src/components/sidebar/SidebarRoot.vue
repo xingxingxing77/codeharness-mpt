@@ -36,7 +36,7 @@
     <div class="footArea">
       <!-- 参考项目这里是一个空的 footer.action 位；本项目 auth 开着就必须有退出入口 -->
       <div v-if="auth.enabled && auth.user" class="footerActions">
-        <button class="userRow" @click="doLogout">
+        <button class="userRow" :aria-label="wide ? undefined : '退出登录'" @click="doLogout">
           <DsIcon name="user" :size="16" />
           <span v-if="wide" class="uName">{{ auth.user }}</span>
           <span v-if="wide" class="uOut">退出</span>
@@ -47,6 +47,7 @@
           class="settingsTrigger"
           :class="{ rail: !wide }"
           aria-haspopup="dialog"
+          :aria-label="wide ? undefined : '设置'"
           :aria-expanded="ui.settingsFull"
           @click.stop="ui.settingsFull = true"
         >

@@ -75,6 +75,7 @@ export const useSessionStore = defineStore('sessions', {
     earliestCursor: '',
     hasMoreEarlier: false,
     loadingEarlier: false,
+    loadingFirst: false,
     /** 退化路径：后端未带 cursor 时才用 seq。Redis 总线的 seq≈1.79e18 过 JSON.parse
      *  会舍入到 ulp=256，同毫秒内上千事件塌缩成几个值，拿它去重会吞事件。 */
     lastSeq: 0,
@@ -215,6 +216,7 @@ export const useSessionStore = defineStore('sessions', {
 
     /** 拉最新一屏历史。成功后 lastCursor 落在页尾，connect() 从那儿只收增量。 */
     async loadFirstPage(sid: string) {
+      this.loadingFirst = true
       try {
         const r = await api.eventHistory(sid, { limit: HISTORY_PAGE })
         if (sid !== this.currentId) return          // 连点两个会话：慢的那次不许把别人的块画进来
@@ -223,6 +225,8 @@ export const useSessionStore = defineStore('sessions', {
         this.hasMoreEarlier = !!r.has_more
       } catch {
         /* 历史拉不到就退回老行为：connect() 里 after='' 会让服务端整段回放 */
+      } finally {
+        this.loadingFirst = false
       }
       if (sid === this.currentId) this.connect()
     },

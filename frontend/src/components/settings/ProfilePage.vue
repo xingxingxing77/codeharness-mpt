@@ -1,83 +1,51 @@
 <template>
   <div class="spage">
     <div class="profile-top">
-      <div class="avatar">LU</div>
-      <div class="pname">沙湾 二哥</div>
-      <div class="pmeta">
-        @lubiyue931 <span class="dot">·</span> <span class="plan-badge">Free</span>
-      </div>
+      <div class="avatar">{{ avatar }}</div>
+      <div class="pname">{{ auth.user || '未登录' }}</div>
     </div>
 
+    <!-- 下方只渲染有真数据源的格子：原先五格里三格是写死的死文案、热力图是伪随机
+         假分布——没有后端路由就没有前端读数，删而不编（s8 t26 的守卫在扫这些字面量）。 -->
     <div class="stat-card">
       <div class="stat-cell">
         <div class="v">{{ fmt(totalTokens) }}</div>
         <div class="k">累计 Token 数</div>
       </div>
       <div class="stat-cell">
-        <div class="v">{{ fmt(peakTokens) }}</div>
-        <div class="k">峰值 Token 数</div>
+        <div class="v">{{ fmtCost(costCny) }}</div>
+        <div class="k">累计费用</div>
       </div>
       <div class="stat-cell">
-        <div class="v">1分 11秒</div>
-        <div class="k">最长任务时长</div>
+        <div class="v">{{ fmt(sessionCount) }}</div>
+        <div class="k">会话数</div>
       </div>
-      <div class="stat-cell">
-        <div class="v">0 天</div>
-        <div class="k">当前连续天数</div>
-      </div>
-      <div class="stat-cell">
-        <div class="v">1 天</div>
-        <div class="k">最长连续天数</div>
-      </div>
-    </div>
-
-    <div class="act-head">
-      <span class="act-t">Token 活动</span>
-      <span class="act-tabs">
-        <span
-          v-for="t in ['每日', '每周', '累计']"
-          :key="t"
-          :class="{ on: tab === t }"
-          @click="tab = t"
-        >{{ t }}</span>
-      </span>
-    </div>
-    <div class="heat">
-      <i v-for="(c, i) in cells" :key="i" :class="{ on: c }" />
-    </div>
-    <div class="months">
-      <span v-for="m in months" :key="m">{{ m }}</span>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
+import { useAuthStore } from '../../stores/auth'
 import { useSessionStore } from '../../stores/sessions'
 
 const store = useSessionStore()
-const tab = ref('每日')
+const auth = useAuthStore()
 
+const avatar = computed(() => (auth.user || '?').slice(0, 2).toUpperCase())
 const cost = computed(() => store.cost || {})
 const totalTokens = computed(() => (cost.value.total_prompt_tokens ?? 0) + (cost.value.total_completion_tokens ?? 0))
-const peakTokens = computed(() => Math.max(totalTokens.value, 0))
+const costCny = computed(() => cost.value.cny ?? 0)
+const sessionCount = computed(() => store.sessions.length)
 
 function fmt(n: number): string {
   if (n >= 10000) return `${(n / 10000).toFixed(1)}万`
   return String(n)
 }
 
-/* 热力图：53 周 x 7 天，确定性伪随机分布，少量活跃格 */
-const cells = computed(() => {
-  const arr: boolean[] = []
-  for (let i = 0; i < 53 * 7; i++) {
-    const h = Math.sin(i * 12.9898) * 43758.5453
-    arr.push(h - Math.floor(h) > 0.965)
-  }
-  return arr
-})
-
-const months = ['10月', '11月', '12月', '1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月']
+function fmtCost(n: number): string {
+  return `¥${n.toFixed(4)}`
+}
 </script>
 
 <style scoped>

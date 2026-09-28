@@ -297,20 +297,29 @@ async function submitRename() {
   }
 }
 
+const patching = ref(false)
 async function onArchive(s: Session) {
+  if (patching.value) return
+  patching.value = true
   try {
     await store.patchSession(s.id, { archived: !s.archived })
     toast.push(s.archived ? '已取消归档' : '已归档', 'success')
   } catch (e) {
     toast.push((e as Error).message, 'error')
+  } finally {
+    patching.value = false
   }
 }
 
 async function onPin(s: Session) {
+  if (patching.value) return
+  patching.value = true
   try {
     await store.patchSession(s.id, { pinned: !s.pinned })
   } catch (e) {
     toast.push((e as Error).message, 'error')
+  } finally {
+    patching.value = false
   }
 }
 
