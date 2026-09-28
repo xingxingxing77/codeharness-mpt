@@ -120,8 +120,22 @@ class LongTermMemory:
         from codeharness.runtime import CURRENT_PROJECT
         return CURRENT_PROJECT.get()
 
-    @span("memory.overflow", as_type="embedding")
     async def overflow(self, msgs: list[Message]) -> int:
+        """写腿的唯一出口（R4）。**异常照旧外抛**——R2 刻意不把 catch 收进来，因为
+        `agent._ltm_flush` 的游标只在成功时进位（C34 的「失败留到下轮重试」），吞掉就等于悄悄改掉重试。
+        但不收 catch 不等于不计数：数在这里点，抛出行为逐字不变。"""
+        try:
+            n = await self._overflow_inner(msgs)
+        except Exception as e:
+            self._count("overflow_failed")
+            # 不短路：写腿每次溢出都该再试一次（区别于读腿那 2316ms 的热路径白等）
+            logger.warning(f"{self.doc_type} 溢出入库失败（不短路，下批照试）：{type(e).__name__}: {e}")
+            raise
+        self._count("overflow_written", n)
+        return n
+
+    @span("memory.overflow", as_type="embedding")
+    async def _overflow_inner(self, msgs: list[Message]) -> int:
         """工作记忆溢出时批量入库（调用方：RoleZero._compress）。入库前按 content 去重。"""
         seen, uniq = set(), []
         for m in msgs:

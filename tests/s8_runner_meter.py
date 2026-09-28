@@ -102,6 +102,13 @@ def t2_seeded_ledger():
     r1_missing = _seeded_ledger({"total_prompt_tokens": 7})
     assert (r1_missing.recall_failures, r1_missing.recall_zero_hits, r1_missing.recall_returned) == (0, 0, 0), \
         "R1：老记录没有这三个键 ⇒ 退 0，不炸也不编数"
+    # R4：写腿那两笔同规播种与带出（点数与次数成对，见 cost.py 的字段注释）
+    r4 = _seeded_ledger({"overflow_failed": 3, "overflow_written": 48})
+    assert (r4.overflow_failed, r4.overflow_written) == (3, 48), \
+        f"R4 回归：写腿两笔没被播种（{r4.overflow_failed}/{r4.overflow_written}）"
+    snap4 = cost_snapshot(r4)
+    assert (snap4["overflow_failed"], snap4["overflow_written"]) == (3, 48), \
+        f"R4 回归：写腿两笔没被快照带出：{snap4}"
     _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 六个观测计数（C78 三笔 + R1 召回三笔），"
               "缺项/坏项退 0 不炸，且不回读混币种 total_cost")
 
@@ -341,11 +348,13 @@ def t8_two_currency_buckets():
     # **申报口**——守卫不红才说明有人偷偷加了字段没登记。
     assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
                           "truncated_calls", "unknown_command_calls", "empty_output_calls",
-                          "recall_failures", "recall_zero_hits", "recall_returned"}, snap
+                          "recall_failures", "recall_zero_hits", "recall_returned",
+                          "overflow_failed", "overflow_written"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
     assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"],
-            snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"]) == (0,) * 6, \
-        f"这一格没制造无效调用、也没走召回，六个计数却非 0（那就是恒亮的告警）：{snap}"
+            snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"],
+            snap["overflow_failed"], snap["overflow_written"]) == (0,) * 8, \
+        f"这一格没制造无效调用、也没走召回与溢出，八个计数却非 0（那就是恒亮的告警）：{snap}"
 
     # C19：正文空＝这一发花了钱没产出（真云端实测最贵那发 ¥0.914、24.5 万 ct、正文是空串，
     # 而它既不进截断也不进未知命令）。三格一起钉：空的要计上、**只调工具不说话的不算浪费**（阳性对照）、

@@ -1782,6 +1782,81 @@ def t43_recall_counters_on_a_live_round_trip():
     print("  ok  t43 在线档：真 Qdrant 上一次召回的条数/零命中/失败三笔都对得上，且失败后跳过不重复计数")
 
 
+def t44_overflow_counters_keep_the_retry_semantics():
+    """R4（09-29）：写腿装上两笔计数，但**外抛行为必须一字不变**。
+    这条分界线是本批最容易做错的地方：`agent._ltm_flush` 的游标只在成功时进位（C34 的「失败留到下轮
+    重试」），一旦为了计数把异常吞掉，重试就静默消失了——那比没计数更坏。所以四格：
+
+      ① 失败 ⇒ 计数 +1、`overflow_written` 不动、**异常照抛**、第二次仍然打端点（不短路）；
+      ② 成功 ⇒ `overflow_written` 等于 store 真收的点数（不是消息条数：一条长消息会切成多点）；
+      ③ `meter=None` ⇒ 不炸也不计数（自测/无账本装配的合法形状）；
+      ④ 阳性对照 ⇒ ①的「抛」与②的「不抛」必须是同一份代码的两种输入，不是两格各测一次别的。
+    """
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.cost import CostManager
+    from codeharness.schema import Message
+
+    class _Emb:
+        def __init__(self, boom=False):
+            self.n, self.boom = 0, boom
+
+        async def aembed_documents(self, texts):
+            self.n += 1
+            if self.boom:
+                raise ConnectionError("embedding 端点不在线")
+            return [[0.1] * 8 for _ in texts]
+
+        async def aembed_query(self, q):
+            return [0.1] * 8
+
+    class _Store:
+        def __init__(self):
+            self.written = 0
+
+        async def write(self, points):
+            self.written = len(list(points))
+            return self.written
+
+    def _ltm(emb, store, meter):
+        return LongTermMemory(project_id="r4_gate", user_id="u_r4", embeddings=emb,
+                              store=store, doc_type="memory", meter=meter)
+
+    # ① 失败：抛、计数、不短路
+    cm = CostManager()
+    emb, store = _Emb(boom=True), _Store()
+    ltm = _ltm(emb, store, cm)
+    for i in (1, 2):
+        try:
+            asyncio.run(ltm.overflow([Message(content="第一条很长的一段话", role="user")]))
+            raise AssertionError(f"①失效：第 {i} 次溢出没抛异常（C34 的重试语义被吞了）")
+        except ConnectionError:
+            pass
+    assert cm.overflow_failed == 2 and cm.overflow_written == 0, \
+        f"①失效：写腿失败没数对（failed={cm.overflow_failed} written={cm.overflow_written}）"
+    assert emb.n == 2, f"①失效：写腿被短路成只试一次了（端点被打 {emb.n} 次）——它不该短路"
+
+    # ② 成功：记的是**点数**不是条数
+    cm2 = CostManager()
+    ok_emb, ok_store = _Emb(), _Store()
+    ltm2 = _ltm(ok_emb, ok_store, cm2)
+    n = asyncio.run(ltm2.overflow([Message(content="甲" * 1500, role="user"),
+                                   Message(content="乙", role="user")]))
+    assert n == ok_store.written == cm2.overflow_written, \
+        f"②失效：三处点数不一致（返回 {n} / store {ok_store.written} / 账本 {cm2.overflow_written}）"
+    assert cm2.overflow_written >= 2, \
+        f"②失效：长消息没被切点（written={cm2.overflow_written}）⇒ 这条格在测一个不存在的形状"
+    assert cm2.overflow_failed == 0, "②阳性对照失守：成功的溢出也被记成失败"
+
+    # ③ 没有账本
+    ltm3 = _ltm(_Emb(boom=True), _Store(), None)
+    try:
+        asyncio.run(ltm3.overflow([Message(content="丙", role="user")]))
+        raise AssertionError("③失效：meter=None 时异常不该消失")
+    except ConnectionError:
+        pass
+    print("  ok  t44 写腿两笔计数到位且外抛未变（失败仍重试、成功记点数、无账本不炸）")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -1811,7 +1886,8 @@ def main():
               t40_exp_signature_is_embedded_the_same_on_both_sides,
               t41_cut_hard_split_is_linear_and_byte_identical,
               t42_recall_metering_and_short_circuit,
-              t43_recall_counters_on_a_live_round_trip]
+              t43_recall_counters_on_a_live_round_trip,
+              t44_overflow_counters_keep_the_retry_semantics]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

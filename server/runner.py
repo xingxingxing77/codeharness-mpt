@@ -16,7 +16,9 @@ from langgraph.types import Command
 from server.bridges import SESSION_ID
 from server.sessions import Session, SessionStatus
 
-MIN_PROSE = 80          # structured 流里「算散文」的下限；短过它的成员当字段名/枚举值丢掉
+MIN_PROSE = 24          # structured 流里「算散文」的下限（字符）。09-29 活体现证过两头：
+# 80 会把真散文挡在门外（一场 dynamic 跑的 thought 实测 64 字，一格没发），而 24 仍然把枚举值
+# 与字段名关在外面（`REQUIREMENT`=11、`en`=2、`original_requirements`=21）。
 
 _HEX = "0123456789abcdefABCDEF"
 _ESC = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -36,7 +38,7 @@ class _ProseStream:
     JSON 模式不建语法树，只认字符串成员并解转义（含 `\\uXXXX` 与被切片切断的代理对）。
 
     ponytail: 按「成员长度」判定，不区分 key 与 value、也不排除回显字段——`original_requirements`
-    长过 80 时会先把用户自己的需求打出来。升级路径：拿 `on_chat_model_start` 的 `data.input`
+    长过门槛（现值 24）时会先把用户自己的需求打出来。升级路径：拿 `on_chat_model_start` 的 `data.input`
     文本做子串去重，并记住 key 名。
     """
 
@@ -164,6 +166,9 @@ def _seeded_ledger(saved: dict):
     cm.recall_failures = int(saved.get("recall_failures", 0) or 0)
     cm.recall_zero_hits = int(saved.get("recall_zero_hits", 0) or 0)
     cm.recall_returned = int(saved.get("recall_returned", 0) or 0)
+    # R4：写腿那两笔同规（点数与次数成对，缺前者就分不清「没失败」与「压根没写过」）
+    cm.overflow_failed = int(saved.get("overflow_failed", 0) or 0)
+    cm.overflow_written = int(saved.get("overflow_written", 0) or 0)
     return cm
 
 
@@ -182,7 +187,9 @@ def cost_snapshot(cm) -> dict:
             # R1：召回链观测（成功率 = returned/(returned+zero_hits)，可用性看 failures）。
             "recall_failures": getattr(cm, "recall_failures", 0),
             "recall_zero_hits": getattr(cm, "recall_zero_hits", 0),
-            "recall_returned": getattr(cm, "recall_returned", 0)}
+            "recall_returned": getattr(cm, "recall_returned", 0),
+            "overflow_failed": getattr(cm, "overflow_failed", 0),
+            "overflow_written": getattr(cm, "overflow_written", 0)}
 
 
 class SessionRunner:

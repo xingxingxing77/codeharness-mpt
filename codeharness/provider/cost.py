@@ -60,6 +60,13 @@ class CostManager(BaseModel):
     recall_failures: int = 0
     recall_zero_hits: int = 0
     recall_returned: int = 0
+    # R4（09-29）：**写腿**两笔。为什么单独两笔而不并进上面三笔：`overflow` 的异常刻意留在 caller
+    # （`agent._ltm_flush` 的游标只在成功时进位＝C34 的「失败留到下轮重试」语义，R2 因此不收 catch），
+    # 但「不收 catch」不等于「不计数」——数在 `overflow` 内部点、异常照旧外抛，两边语义一字未动。
+    # 这两笔配成对才读得出账：`overflow_written` 是存进去的**点数**，`overflow_failed` 是**次数**；
+    # 没有前者，后者为零也可能是「压根没写过东西」。
+    overflow_failed: int = 0
+    overflow_written: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""
