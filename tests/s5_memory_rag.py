@@ -1857,6 +1857,70 @@ def t44_overflow_counters_keep_the_retry_semantics():
     print("  ok  t44 写腿两笔计数到位且外抛未变（失败仍重试、成功记点数、无账本不炸）")
 
 
+def t45_shared_readers_short_circuit_once_per_session():
+    """R2 短路的**现场形状**：三个角色共用同一对读腿（`default_team`/`classic_team` 就是这么装的），
+    跑若干轮 think，端点必须**总共只被打两次**（memory + kb 各一次），而不是「每轮每腿一次」。
+
+    为什么不能只靠 t42② 那条组件级断言：它证的是「同一个实例第二次不再打」，而真装配里**每个角色各自的
+    实例**会不会各打一次、共享实例会不会被谁重置——只有多角色多轮才看得见。普查现证每跳 2316ms、
+    两腿串行 ⇒ 「每轮 4.6s+」能不能真被省掉，取决于这一格。
+
+      ① 四轮 think（两角色 × 两轮）后端点调用数 == 2、`recall_failures == 2`；
+      ② 阳性对照：换成**不共享**的四条腿 ⇒ 失败数就该是 4（证明 ① 的 2 来自共享+短路，不是恒为 2）；
+      ③ 短路之后 `returned` 与 `zero_hits` 都还是 0（跳过不许冒充「查过且没有」）。
+    """
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.cost import CostManager
+
+    class _Dead:
+        def __init__(self):
+            self.n = 0
+
+        async def aembed_query(self, q):
+            self.n += 1
+            raise ConnectionError("embedding 端点不在线")
+
+    class _Null:
+        async def search(self, *a, **kw):
+            return []
+
+    def _pair(dead, cm):
+        return (LongTermMemory(project_id="r5_gate", user_id="u_r5", embeddings=dead,
+                               store=_Null(), meter=cm),
+                LongTermMemory(project_id="r5_gate", user_id="u_r5", embeddings=dead,
+                               store=_Null(), doc_type="kb", meter=cm))
+
+    st = {"task": "写个 PRD", "history": [], "experience": "", "respond_language": "中文",
+          "finished": False}
+    # ① 共享一对读腿
+    dead, cm = _Dead(), CostManager()
+    ltm, kb = _pair(dead, cm)
+    roles = []
+    for _ in range(2):
+        r = _role(memory_k=5)
+        r.ltm, r.kb = ltm, kb
+        roles.append(r)
+    for r in roles:
+        for _ in range(2):
+            asyncio.run(r._think(dict(st)))
+    assert dead.n == 2, f"①失效：端点被打 {dead.n} 次（共享一对读腿 + 短路应当只 2 次，每跳实测白等 2316ms）"
+    assert cm.recall_failures == 2, f"①失效：失败计数 {cm.recall_failures}（每腿一次、跳过不重复计）"
+
+    # ② 阳性对照：不共享就该是 4 次
+    dead2, cm2 = _Dead(), CostManager()
+    for _ in range(2):
+        r = _role(memory_k=5)
+        r.ltm, r.kb = _pair(dead2, cm2)
+        asyncio.run(r._think(dict(st)))
+    assert dead2.n == 4, f"②对照失守：四条独立的腿本该各打一次（4），实得 {dead2.n} ⇒ ① 的 2 是恒真不是短路"
+    assert cm2.recall_failures == 4, f"②对照失守：{cm2.recall_failures}"
+
+    # ③ 跳过不许冒充「查过且没有」
+    assert cm.recall_returned == 0 and cm.recall_zero_hits == 0, \
+        f"③失效：被跳过的调用产生了读数（returned={cm.recall_returned} zero={cm.recall_zero_hits}）"
+    print("  ok  t45 共享读腿四轮 think 只打两跳端点（不共享的四条腿则打四跳）⇒ 短路按整场生效")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -1887,7 +1951,8 @@ def main():
               t41_cut_hard_split_is_linear_and_byte_identical,
               t42_recall_metering_and_short_circuit,
               t43_recall_counters_on_a_live_round_trip,
-              t44_overflow_counters_keep_the_retry_semantics]
+              t44_overflow_counters_keep_the_retry_semantics,
+              t45_shared_readers_short_circuit_once_per_session]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
