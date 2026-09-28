@@ -28,7 +28,23 @@
 """
 import re
 import tempfile
+import time
 from pathlib import Path
+
+
+def _unlink_retry(p: Path, tries: int = 5):
+    """Windows 的文件锁是**瞬时**的：索引器/AV 会握住刚写完的文件零点几秒，`unlink` 撞
+    `PermissionError [WinError 5]`（2026-09-28 实测 t23 清理段撞过一次、现场目录随后可删）。
+    删不掉就等 0.2s 重试，5 次不行才抛——留下脏文件会让下一次跑 t23 的 `before` 带上它
+    （见调用点注释），所以不能 `ignore_errors` 了事。"""
+    for i in range(tries):
+        try:
+            p.unlink()
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.2)
 
 ROOT = Path(__file__).resolve().parent.parent
 FE = ROOT / "frontend" / "src"
@@ -1508,7 +1524,7 @@ def t23_run_after_fork():
             try:
                 dirty = snap(p["workspace"])
             finally:
-                probe.unlink()      # 不管断言红不绿都得清：留着它，下一次跑 `before` 就带上脏文件，
+                _unlink_retry(probe)      # 不管断言红不绿都得清：留着它，下一次跑 `before` 就带上脏文件，
                 shutil.rmtree(_P(p["workspace"]) / "_子场残留", ignore_errors=True)   # 对照会假红成「恒真」
             assert dirty != before, "③恒真：源场目录被改了都没报出来，这条断言没有牙"
             assert snap(p["workspace"]) == before, "③对照没复原（清理漏了，下一格会假绿）"
