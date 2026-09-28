@@ -589,9 +589,10 @@ async def events(sid: str, request: Request, after: str = "", user: str = Depend
     _owned(request, sid, user)
 
     async def gen():
-        q = bus.subscribe(sid)
+        q = await bus.subscribe(sid)
         try:
-            for ev in bus.history(sid, after):
+            # C90：`history` 是同步 Redis 调用，挪出事件循环（与 subscribe 里读流尾同款）。
+            for ev in await asyncio.to_thread(bus.history, sid, after):
                 yield f"data: {ev.model_dump_json()}\n\n"
             while True:
                 try:

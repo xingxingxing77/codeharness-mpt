@@ -289,7 +289,7 @@ def t17_event_bus_thread_safe():
     try:
         async def case():
             bus = SessionEventBus()
-            q = bus.subscribe("sC")
+            q = await bus.subscribe("sC")
             errs = []
 
             def hammer():
@@ -317,7 +317,7 @@ def t17_event_bus_thread_safe():
             assert [e.seq for e in hist] == sorted(e.seq for e in hist), "history 非升序"
 
             # ② 跨线程投递 + 同 loop 快路
-            q2 = bus.subscribe("sD")
+            q2 = await bus.subscribe("sD")
 
             def fire():
                 bus.publish("sD", kind="log", value="from-thread")
@@ -692,7 +692,7 @@ async def t12_sse_reconnect_continuity():
         collapsed = {int(float(e.seq)) for e in burst}
         assert len(collapsed) < 1000, "float64 未塌缩说明环境不符，此断言的保护失效"
         assert len(bus.history("sR")) == before + 1000
-        q = bus.subscribe("sR")                                          # 补完后从流尾续推
+        q = await bus.subscribe("sR")                                          # 补完后从流尾续推
         bus.publish("sR", kind="report", block="Thought", value="live")
         await bus.flush_now()
         try:
@@ -883,13 +883,100 @@ async def t14_control_listener_survives_a_dropped_pubsub():
         settings.redis.db = keep_db
 
 
+async def t21_sse_queue_bounded_and_offloop():
+    """C90（09-28 全量审查批）：SSE 订阅队列**有界**（慢消费丢最旧）+ 建流「读流尾」不在 loop 上。
+
+    现象：`RedisEventBus.subscribe` 原先 `asyncio.Queue()` **无界**——一条慢消费（后台标签页、
+    断了没关的 SSE 连接）把内存拖到 O(未消费事件数)，一场的 token delta 就是成千上万条；
+    且在 **loop 线程**上直接跑同步 Redis 读流尾（「亚毫秒」是同机房 RTT 的平均值不是上界，
+    Redis 一 hiccup 整个 loop 的所有会话一起卡）。
+    修法：队列 `maxsize=MAX_SSE_QUEUE` 满了丢**最旧**（游标语义下旧事件重连走
+    `/events/history` 补，每 500 条留一行 `[sse-drop]` warning）；读流尾 `await
+    asyncio.to_thread(...)`；进程内 `SessionEventBus.subscribe` 一起改 async（调用方统一 await）。
+
+    三格：
+      ① **有界 + 丢最旧**：不消费灌 MAX+50 条 + 一条哨兵 ⇒ 队列恰好 MAX 条、队首是被丢后
+         的第一第（c51）、哨兵（最新）在队尾；
+      ② 留 `[sse-drop]` warning（静默丢不许）；
+      ③ **不在 loop 上**：把 `_sync.xrevrange` 换成睡 0.3s 的假货再建流，事件循环照常跳
+         （s19 t1 的 tick 计数同款；修复前是同步调用 ⇒ ticks=0）。
+    """
+    import io
+    import time as _t
+    from codeharness.logs import logger               # s7 里 logger 也是局部导入（同 C76 的 t17）
+    from platforms.event_store import MAX_SSE_QUEUE, RedisEventBus
+    bus = RedisEventBus(TEST_DB)
+    bus.start()
+    try:
+        # ③ 建流不卡 loop：同步读流尾换成睡 0.3s 的假货，loop 的 ticker 照常跳
+        ticks = {"n": 0}
+        orig_xrev = bus._sync.xrevrange
+        bus._sync.xrevrange = lambda *a, **k: (_t.sleep(0.3), [])[1]
+        try:
+            stop = asyncio.Event()
+
+            async def ticker():
+                while not stop.is_set():
+                    ticks["n"] += 1
+                    await asyncio.sleep(0.05)
+            tk = asyncio.create_task(ticker())
+            try:
+                q0 = await asyncio.wait_for(bus.subscribe("sC90x"), timeout=10)
+            finally:
+                stop.set()
+                await tk
+        finally:
+            bus._sync.xrevrange = orig_xrev
+        assert ticks["n"] >= 3, \
+            f"t21③ 建流期间 loop 只跳了 {ticks['n']} 次（0.3s/50ms 应约 6 次）——读流尾还在 loop 上"
+        bus.unsubscribe("sC90x", q0)
+
+        # ①② 有界 + 丢最旧 + warning
+        sid = "sC90"
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="WARNING")
+        try:
+            q = await bus.subscribe(sid)                 # 从流尾起：此前流里的事件不进队列
+            for i in range(MAX_SSE_QUEUE + 50):
+                bus.publish(sid, kind="report", block="Thought", value=f"c{i}")
+            bus.publish(sid, kind="report", block="Thought", value="SENTINEL")
+            await bus.flush_now()
+
+            async def _sentinel_in(limit=20.0):
+                end = asyncio.get_running_loop().time() + limit
+                while asyncio.get_running_loop().time() < end:
+                    if any(getattr(x, "value", "") == "SENTINEL" for x in list(q._queue)):
+                        return True
+                    await asyncio.sleep(0.05)
+                return False
+            assert await _sentinel_in(), "哨兵 20s 没进队列（reader 没跑？）"
+            got = []
+            while not q.empty():
+                got.append(q.get_nowait())
+            assert len(got) == MAX_SSE_QUEUE, \
+                f"t21① 队列里 {len(got)} 条（该恰好 {MAX_SSE_QUEUE}——无界队列这里会是 {MAX_SSE_QUEUE + 51}）"
+            assert got[-1].value == "SENTINEL", f"t21① 最新的哨兵必须还在（丢的是最旧）：{got[-1].value!r}"
+            assert got[0].value == "c51", \
+                f"t21① 队首是 {got[0].value!r}（该是 c51：MAX+51 条里丢掉最旧 51 条）"
+            assert "[sse-drop]" in buf.getvalue(), \
+                f"t21② 丢了事件却没留可 grep 的 warning：{buf.getvalue()[:200]!r}"
+        finally:
+            logger.remove(hid)
+            bus.unsubscribe(sid, q)
+        _ok("t21", f"SSE 订阅队列有界：灌 {MAX_SSE_QUEUE + 51} 条 ⇒ 队列恰好 {MAX_SSE_QUEUE} 条、"
+                   f"丢的是最旧 51 条（哨兵在队尾）、[sse-drop] 有留、建流不卡 loop（ticks={ticks['n']}）")
+    finally:
+        await bus.aclose()
+
+
 async def _redis_suite():
     _flush_test_db()
     for fn in (t2_dual_worker_replay, t3_cross_worker_stop, t4_cross_worker_chat,
                t5_quota_no_oversell, t6_metering_over_redis_bus, t7_trace_spans,
                t8_field_level_concurrency, t9_app_wires_redis_mode,
                t12_sse_reconnect_continuity, t13_dual_runner_fakellm_line,
-               t14_control_listener_survives_a_dropped_pubsub):
+               t14_control_listener_survives_a_dropped_pubsub,
+               t21_sse_queue_bounded_and_offloop):
         print(f"  … {fn.__name__}", flush=True)
         try:
             # 看门狗：redis 路的任何一条卡死 60s 直接点名——挂住的门禁比失败的门禁更难查
@@ -1080,7 +1167,7 @@ def main():
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 20/20 全绿（双配置）")
+    print("\ns7_platform: 21/21 全绿（双配置）")
 
 
 if __name__ == "__main__":

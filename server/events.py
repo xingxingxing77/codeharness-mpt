@@ -104,7 +104,9 @@ class SessionEventBus:
         out = [ev for ev in snap if (not a or ev.cursor > a) and (not b or ev.cursor < b)]
         return out[-limit:] if limit and limit > 0 else out
 
-    def subscribe(self, sid: str) -> asyncio.Queue:
+    async def subscribe(self, sid: str) -> asyncio.Queue:
+        """C90：改 async 与 Redis 版 `RedisEventBus.subscribe` **同形**——调用方（/events 路由）
+        服务两种 bus，接口必须一致。本实现无 I/O，async 只是形状。"""
         _, subs = self._ensure(sid)
         q: asyncio.Queue = asyncio.Queue()
         subs[q] = asyncio.get_running_loop()

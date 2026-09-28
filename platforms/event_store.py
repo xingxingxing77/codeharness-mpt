@@ -24,6 +24,13 @@ from codeharness.logs import logger
 from server.events import Event, MAX_EVENTS_PER_SESSION, norm_cursor
 
 STREAM = "ch:ev:{}"
+
+# C90（09-28 审查批）：每条 SSE 连接的订阅队列上界。原先 `asyncio.Queue()` 无界——一条慢消费
+# （后台标签页、断了没关的连接）把内存拖到 O(未消费事件数)，而事件里 token delta 占大头、
+# 一场跑下来成千上万条。满了好：丢**最旧**（游标语义下旧事件重连走 `/events/history` 补得回来），
+# 丢满 500 条留一行可 grep 的 warning。要「一条不丢」得上 Redis 消费组（XREADGROUP + PEL），
+# SSE 场景不值得——见 subscribe 里的 ponytail。
+MAX_SSE_QUEUE = 4096
 _RING_MAX = 20000
 
 
@@ -168,18 +175,30 @@ class RedisEventBus:
             rows = self._sync.xrange(key, min=lo, max=hi)
         return [_ev_from(eid, fields) for eid, fields in rows]
 
-    def subscribe(self, sid: str) -> asyncio.Queue:
+    async def subscribe(self, sid: str) -> asyncio.Queue:
         """从**当前流尾**开始收（历史由调用方自己走 history()，与进程内 bus 同一分工）。
 
         流尾游标必须**在返回前**钉死：留给 reader 首次被调度时才取，则 `subscribe()` 与
         那次取尾之间落库的事件会被算进「流尾」而永久跳过。`/events` 的走法正是
         subscribe → history → 续推，那批事件既不在已取的历史里、XREAD 又从它之后开始读
         → SSE 静默丢事件（t12 偶发红的真因，不是测试独有的问题）。钉在返回后，语义是
-        「至少一次」，重复由前端按 cursor 去重。"""
-        q: asyncio.Queue = asyncio.Queue()
+        「至少一次」，重复由前端按 cursor 去重。
+
+        C90（09-28 审查批）两处：① 返回的队列**有界**（`MAX_SSE_QUEUE`，满了丢最旧）——
+        原先无界，一条慢消费的 SSE 连接能把内存拖到 O(未消费事件数)；② 建流那次「读流尾」
+        **挪出事件循环**（`asyncio.to_thread`）——原先直接在 loop 线程上跑同步 Redis
+        （`self._sync`），「亚毫秒」说的是同机房 RTT 的平均值不是上界，Redis 一 hiccup
+        整个 loop 的所有会话一起卡。改 async 后与进程内 `SessionEventBus.subscribe` 同形
+        （那边也改成了 async，调用方统一 `await`）。
+        ponytail: 丢最旧 = 该连接重连前收不到被丢的那几条（重连走 history 补）；`dropped`
+        每 500 条留一行可 grep 的 warning。要「一条不丢」得给每条连接一个消费组
+        （XREADGROUP + PEL），SSE 场景不值得。
+        """
+        q: asyncio.Queue = asyncio.Queue(maxsize=MAX_SSE_QUEUE)
         key = STREAM.format(sid)
-        tail = self._sync.xrevrange(key, count=1)     # 与 history 同一个同步出口，亚毫秒
+        tail = await asyncio.to_thread(self._sync.xrevrange, key, count=1)
         start = tail[0][0] if tail else "0-0"
+        dropped = {"n": 0}
 
         async def _reader():
             nonlocal start
@@ -192,7 +211,19 @@ class RedisEventBus:
                 for _, entries in resp:
                     for eid, fields in entries:
                         start = eid
-                        q.put_nowait(_ev_from(eid, fields))
+                        ev = _ev_from(eid, fields)
+                        try:
+                            q.put_nowait(ev)
+                        except asyncio.QueueFull:
+                            try:                 # 丢最旧：游标语义下旧的可由 history 补
+                                q.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            dropped["n"] += 1
+                            if dropped["n"] % 500 == 1:
+                                logger.warning(f"[sse-drop] {key} 消费端太慢，已丢最旧 "
+                                               f"{dropped['n']} 条（重连走 /events/history 补）")
+                            q.put_nowait(ev)
 
         self._readers[q] = asyncio.get_running_loop().create_task(_reader())
         return q
