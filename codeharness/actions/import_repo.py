@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -79,15 +80,50 @@ class ImportRepo(Action):
         
         # 递归扫描目录和文件
         # ponytail: 上限是「超过 MAX_IMPORT_NODES 就只取前若干个」，不是按目录重要性取舍
-        #           （rglob 是任意序）。升级路径 = 先剪掉 node_modules/.git 这类目录再扫。
-        for item in repo_path.rglob("*"):
+        #           （os.walk 自顶向下、同层字典序，rglob 是任意序）。升级路径 = 按目录重要性取舍。
+        # C85（C40/B4 同族第三处）：不用 `rglob("*")`——3.13 的 pathlib glob 会跟 junction
+        # 下探出仓库（本机现证：junction 指向的 SECRET 文件进了 rglob 结果；junction 的
+        # `is_symlink()` 是 False，s12 t5 有实测，os.walk 的 followlinks=False 也拦不住它），
+        # 把宿主任意目录的结构扫进 SPO 图与 `.mmd`，还可能挨一次全盘遍历。os.walk 自顶向下
+        # 才有**剪枝**的口子（rglob 给不了），剪三刀：
+        #   ① `.git`/`node_modules` 不下探——巨型目录，剪了扫描才有实际上的界；
+        #   ② resolve 后不在 repo_path 内的目录不下探也不收（junction/符号链接指出去那条腿）；
+        #   ③ resolve 后指向**已扫过**目录的不下探（指回祖先的环，原先会无限遍历）。
+        # 文件条目不用 ②——父目录进不来，文件名就指不出仓库外。
+        seen_dirs = {str(repo_path)}
+        for dirpath, dirnames, filenames in os.walk(repo_path):
             if len(node_set) > MAX_IMPORT_NODES:
                 truncated = True
                 break
-            if item.is_dir():
-                node_set.add(str(item))
-            elif item.is_file() and include_files:
-                node_set.add(str(item))
+            node_set.add(dirpath)
+            if include_files:
+                for n in filenames:
+                    if len(node_set) > MAX_IMPORT_NODES:
+                        truncated = True
+                        break
+                    node_set.add(str(Path(dirpath, n)))
+                if truncated:
+                    break
+            keep = []
+            for d in dirnames:
+                if len(node_set) > MAX_IMPORT_NODES:
+                    truncated = True
+                    break
+                if d in {".git", "node_modules"}:
+                    continue
+                p = Path(dirpath, d)
+                try:
+                    rp = p.resolve()
+                except OSError:
+                    continue
+                if not rp.is_relative_to(repo_path) or str(rp) in seen_dirs:
+                    continue
+                seen_dirs.add(str(rp))
+                keep.append(d)
+                node_set.add(str(p))
+            dirnames[:] = keep
+            if truncated:
+                break
         
         # 构建父子关系
         for node in node_set:

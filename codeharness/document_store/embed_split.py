@@ -67,12 +67,18 @@ def _cut(text: str, h: int) -> list[str]:
     buf: list[str] = []
     size = 0                                  # 当前块已占的字符数（含将要补的那个换行）
     for line in text.split("\n"):
-        while len(line) > h:                  # 单行本身超上限：先硬切，余下的走缓冲
+        if len(line) > h:                     # 单行本身超上限：先硬切，余下的走缓冲
             if buf:
                 chunks.append("\n".join(buf))
                 buf, size = [], 0
-            chunks.append(line[:h])
-            line = line[h:]
+            # C83：原 while 版每轮 `line = line[h:]` 对剩余全长再拷一遍，轮数 = L/h
+            # ⇒ O(L²/h)，2M/4M/8M 单行实测 0.284/1.317/5.388s（20MB 上限文件 ≈ 40s 纯 memcpy，
+            # 且发生在 `asyncio.to_thread` 里挂着请求）。range 一次切完摊成 O(L)；
+            # `(len-1)//h*h` 保住 while 版「余段（≤h）进缓冲、与后续行合并」的原语义——
+            # 逐字节等价性由 s5 t41① 钉着。
+            n = (len(line) - 1) // h * h
+            chunks.extend(line[i:i + h] for i in range(0, n, h))
+            line = line[n:]
         if buf and size + len(line) + 1 > h:
             chunks.append("\n".join(buf))
             buf, size = [], 0

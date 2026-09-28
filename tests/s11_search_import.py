@@ -181,6 +181,74 @@ def t5_import_repo_scale_guard():
     print(f"✅ 上限 5 → truncated=true 且 node_count={body['node_count']}（<13）；恢复上限后 truncated=false")
 
 
+def _make_junction(link, target) -> bool:
+    """造一个 Windows junction（NTFS，不需要管理员）；造不出来就回 False 让调用方标未验。
+    与 s12 t5 同款：junction 的 `is_dir()` 是 True、`is_symlink()` 是 False。"""
+    import subprocess
+    try:
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                           capture_output=True, text=True, encoding="gbk", errors="replace")
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def t6_import_repo_junction_cannot_escape():
+    """C85（C40/B4 同族第三处）：`import_repo` 的扫描原是 `repo_path.rglob("*")`——
+    3.13 的 pathlib glob 会跟 junction 下探出仓库（本机 3.13.5 现证：指外的 junction 里的
+    SECRET 文件进了 rglob 结果），把宿主任意目录的结构扫进 SPO 图与 `.mmd`（结构泄漏），
+    且 HTTP 层只判 repo_path 本身在会话工作区内，action 里没有第二道界。
+    修法 = os.walk 自顶向下剪枝（.git/node_modules、resolve 出界的目录、resolve 指回已扫目录的环）。
+    三格：
+      ① 指外的 junction：SECRET 文件名与目标目录名一个字都不许出现在产物里，junction 自己也不许收；
+      ② 指回祖先的环：仍 200 有界返回（环不许把扫描拖成无限）；
+      ③ **阳性对照**：repo 里真文件照旧进图（不是「整棵树扫空了所以安全」）。
+    """
+    import json as _json
+    import shutil
+
+    print("t6: import_repo junction 越界...", end=" ", flush=True)
+    with _isolated() as c:
+        s = c.post("/api/sessions", json={"idea": "junction 越界", "project_name": "s11_junc"}).json()
+        sid, wp = s["id"], Path(s["workspace"])
+        repo = wp / "repo"
+        repo.mkdir(parents=True, exist_ok=True)
+        (repo / "kept.py").write_text("x = 1\n", encoding="utf-8")
+        secret_dir = wp.parent / "s11_c85_secret"
+        secret_dir.mkdir(parents=True, exist_ok=True)
+        (secret_dir / "SECRET-C85.txt").write_text("topsecret\n", encoding="utf-8")
+        ok_link = _make_junction(repo / "junc", secret_dir)
+        _make_junction(repo / "loop", wp)          # 指回祖先的环
+        try:
+            r = c.post(f"/api/sessions/{sid}/workspace/import_repo",
+                       json={"repo_path": str(repo), "save_name": "c85"})
+            assert r.status_code == 200, f"junction 场景不该打爆端点：{r.status_code} {r.text[:200]}"
+            body = r.json()
+            raw = _json.dumps(body, ensure_ascii=False)
+            mmd = Path(body["saved_mmd"]).read_text(encoding="utf-8")
+            if ok_link:
+                for bad in ("SECRET-C85", "s11_c85_secret"):
+                    assert bad not in raw and bad not in mmd, \
+                        f"t6① 工作区外目录被 junction 扫进产物（C85）：{raw[:200]} / {mmd[:200]}"
+                assert "junc" not in mmd, f"t6① junction 目录本身不该收进图：{mmd[:200]}"
+            else:
+                print("⚠ 造不出 junction（非 NTFS/无权限）⇒ ① 未验", end=" ")
+            # ② 环有界：能返回 200 就是有界（旧 rglob 遇环要么无限遍历要么靠 MAX 截断）
+            assert body.get("truncated") is False, f"t6② 没撞上限却标了截断：{body}"
+            # ③ 阳性对照：真文件在图里（响应 body 只有计数，节点名看 .mmd 产物）
+            assert "kept.py" in mmd, f"t6③ 真文件没进图：{mmd[:200]}"
+            assert body["node_count"] >= 2, f"t6③ 节点数不对：{body}"
+        finally:
+            for lk in ("junc", "loop"):
+                try:
+                    import os
+                    os.rmdir(repo / lk)
+                except OSError:
+                    pass
+            shutil.rmtree(secret_dir, ignore_errors=True)
+    print("✅")
+
+
 def main():
     print("=" * 60)
     print("批次2: 仓库导入端点门禁")
@@ -191,7 +259,8 @@ def main():
         t3_import_repo_save_name_guard()
         t4_import_repo_cross_session_guard()
         t5_import_repo_scale_guard()
-        print("\n" + "=" * 60 + "\n✅ 全部通过 (5/5)\n" + "=" * 60)
+        t6_import_repo_junction_cannot_escape()
+        print("\n" + "=" * 60 + "\n✅ 全部通过 (6/6)\n" + "=" * 60)
         return 0
     except AssertionError as e:
         print(f"\n❌ 失败：{e}")

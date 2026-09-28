@@ -1507,6 +1507,57 @@ def t40_exp_signature_is_embedded_the_same_on_both_sides():
           f"（长 {len(long_sig)} 字 / 短 {len(short_sig)} 字各一组）")
 
 
+def t41_cut_hard_split_is_linear_and_byte_identical():
+    """C83（09-28 审查批）：`embed_split._cut` 的硬切分支原是平方级——
+    `while len(line) > h: chunks.append(line[:h]); line = line[h:]` 每轮对**剩余全长**重拷一遍，
+    轮数 = L/h ⇒ O(L²/h)。本机实测（3.13.5）单行 2M/4M/8M 字 ⇒ 0.284/1.317/5.388s（≈2× 输入 4× 时间），
+    一份 20MB 无换行文档（`upload_kb` 单文件上限）≈ 40s 纯 memcpy，且在 `asyncio.to_thread` 里挂着请求。
+    修法 = range 一次切完摊成 O(L)。两格：
+      ① **逐字节等价**（阳性对照，也是 ② 的资格证）：混合输入（多行 + 超长单行 + 空行 + 恰好 =h 的行）
+         跑修复版与参考实现（照抄 while 版）⇒ 切片序列完全一致——性能修法不许改语义，
+         C27 整条链（s15 t7/t8、t40 的两侧同源）都踩在这个出口上；
+      ② **线性读数**：8M 单行墙钟 < 3.0s（平方版 5.388s、线性版毫秒级，余量按最慢机器留），
+         且切片长度全部 ≤ h、按切点拼回能逐字节还原原文。
+    """
+    import time
+
+    from codeharness.configs.settings import settings
+    from codeharness.document_store.embed_split import _cut, split_for_embedding
+
+    def _ref(text: str, h: int) -> list[str]:     # 修前 while 版的参考实现，只在这里作对照
+        chunks, buf, size = [], [], 0
+        for line in text.split("\n"):
+            while len(line) > h:
+                if buf:
+                    chunks.append("\n".join(buf))
+                    buf, size = [], 0
+                chunks.append(line[:h])
+                line = line[h:]
+            if buf and size + len(line) + 1 > h:
+                chunks.append("\n".join(buf))
+                buf, size = [], 0
+            buf.append(line)
+            size += len(line) + 1
+        if buf:
+            chunks.append("\n".join(buf))
+        return [c for c in chunks if c]
+
+    h = settings.embedding.max_chars
+    mixed = "\n".join(["短行", "x" * (h + 1), "", "y" * (2 * h), "z" * h, "尾行"])
+    assert _cut(mixed, h) == _ref(mixed, h), "t41① 修复版与 while 版切片不一致（语义被改了）"
+    assert split_for_embedding([mixed], h) == _ref(mixed, h), "t41① 出口路径不一致"
+
+    line = "长" * 8_000_000
+    t0 = time.perf_counter()
+    out = _cut(line, h)
+    dt = time.perf_counter() - t0
+    assert dt < 3.0, f"t41② 8M 单行硬切耗时 {dt:.3f}s——平方级又回来了（修前实测 5.388s）"
+    assert all(len(c) <= h for c in out), f"t41② 切片超上限：{max(len(c) for c in out)}"
+    assert "".join(out) == line, "t41② 硬切切片拼不回原文（丢字/重字）"
+    print(f"  ok  t41① 混合输入与 while 版逐字节一致；② 8M 单行 {dt:.3f}s（<3.0s，修前 5.388s）、"
+          f"{len(out)} 片全 ≤{h} 且拼回逐字节还原")
+
+
 def _leg_ltm(user: str, project: str, doc_type: str):
     """把 t34 那四条文本灌进**指定那条腿**（`doc_type` 进点 id 派生式 ⇒ 两腿的点互不顶，见 t33）。"""
     from codeharness.memory.longterm import LongTermMemory
@@ -1605,7 +1656,8 @@ def main():
               t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer,
               t38_both_recall_legs_clamp_their_query,
               t39_recall_floor_applies_per_leg,
-              t40_exp_signature_is_embedded_the_same_on_both_sides]
+              t40_exp_signature_is_embedded_the_same_on_both_sides,
+              t41_cut_hard_split_is_linear_and_byte_identical]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

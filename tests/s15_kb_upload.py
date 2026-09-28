@@ -1764,6 +1764,95 @@ def t19_upload_receipt_counts_dedup():
         CURRENT_USER.reset(tok_u)
 
 
+def t20_upload_streams_per_file_not_whole_batch():
+    """C84（09-28 审查批）：`upload_kb` 原把**整批**的切片、向量、Point 全量攒在内存
+    （`pairs` 一把攒、`aembed_documents` 一把递、`points` 一把建——单请求上限 20 文件 × 20MB ⇒
+    最坏 400MB 正文 + ~35 万点 × 1024 维 ≈ 2.9GB 同时驻留，铁律 26 有 778MB 就打爆的先例）。
+    修法 = 按文件分批：切一批 → 嵌一批 → 删旧 → 落库一批，跨文件去重只留 id 串。
+    替身格（不碰 Qdrant），四格：
+      ① **嵌入按文件分批**：spy embeddings 记每次调用的批量 ⇒ 恰好每文件一次、
+         单次批量 = 那份文件的切片数（整批攒的老写法是一次 `len(两份总和)`）；
+      ② **B2 顺序在批处理化后仍成立**：每份文件都是先 `delete_scope` 再 `write`
+         （替身 store 按序记调用）；阳性对照=两份文件的点一份不少全落库；
+      ③ **回执恒等式**（C67）：uploaded == chunk - dedup、write 收到的 id 全局唯一、
+         累计写出数 == uploaded；
+      ④ **跨文件重复**：同一份传两遍（t19 的形状挪到分批世界）⇒ 第二遍零嵌入零写入、
+         dedup_count 记满、恒等式不破。
+    """
+    content_a = "# 文件甲\n\n" + "".join(f"甲的正文第{i}行，用来让 256 切块器切出多片。\n" for i in range(40))
+    content_b = "# 文件乙\n\n" + "".join(f"乙的正文第{i}行，内容与甲完全不同，各算各的点。\n" for i in range(40))
+    tmp = Path(tempfile.mkdtemp())
+    fa, fb = _write_faq(tmp, "a.md", content_a), _write_faq(tmp, "b.md", content_b)
+    tok_p, tok_u = CURRENT_PROJECT.set(PROJ), CURRENT_USER.set("u_c84")
+
+    class _SpyEmb(HashEmbeddings):
+        def __init__(self):
+            super().__init__()
+            self.batch_sizes = []
+
+        async def aembed_documents(self, ts):
+            self.batch_sizes.append(len(ts))
+            return await super().aembed_documents(ts)
+
+    class _RecStore:
+        def __init__(self):
+            self.points = []
+            self.calls = []                       # ("delete", src) / ("write", n) 按发生序
+
+        async def write(self, points):
+            self.calls.append(("write", len(points)))
+            self.points.extend(points)
+            return len(points)
+
+        async def ensure(self, dim):
+            pass
+
+        async def delete_scope(self, **kw):
+            self.calls.append(("delete", kw.get("source")))
+            return 0
+
+    try:
+        single = asyncio.run(_action(_RecStore(), _SpyEmb(), [fa]))
+        n = single["chunk_count"]                     # 每份文件的切片数（④ 的基数）
+        rec, spy = _RecStore(), _SpyEmb()
+        out = asyncio.run(_action(rec, spy, [fa, fb]))
+        # ① 每文件一批：调用次数 == 2、单批 == 那份文件的切片数（整批攒则只有 1 次且是总和）
+        assert len(spy.batch_sizes) == 2, \
+            f"t20① 嵌入调用 {len(spy.batch_sizes)} 次（要 2 次=每文件一批，整批攒是 1 次）：{spy.batch_sizes}"
+        assert sum(spy.batch_sizes) == out["chunk_count"], \
+            f"t20① 批量之和与 chunk_count 对不上：{spy.batch_sizes} vs {out['chunk_count']}"
+        # ② 先删旧再灌新，且两份都在：calls 形如 delete(a) write(a) delete(b) write(b)
+        order = [c[0] for c in rec.calls]
+        assert order == ["delete", "write", "delete", "write"], \
+            f"t20② 调用序不是逐文件『先删后灌』：{rec.calls}"
+        assert rec.calls[0][1] == "a.md" and rec.calls[2][1] == "b.md", f"t20② 删错对象：{rec.calls}"
+        # ③ 回执恒等式 + 全落库（阳性对照：批处理化没弄丢任何一份的内容）
+        assert out["uploaded_count"] == out["chunk_count"] - out["dedup_count"] == len(rec.points), \
+            f"t20③ 恒等式破了：{out} vs 写出 {len(rec.points)}"
+        ids = [p.id for p in rec.points]
+        assert len(ids) == len(set(ids)), f"t20③ write 收到的 id 有重复：{len(ids)} vs {len(set(ids))}"
+        srcs = {p.extra.get("source") for p in rec.points}
+        assert srcs == {"a.md", "b.md"}, f"t20③ 阳性对照失守：两份文件的点没全落库（{srcs}）"
+        print(f"  ok  t20① 嵌入 {spy.batch_sizes}（每文件一批，共 {out['chunk_count']} 片）；"
+              f"② 逐文件先删后灌；③ uploaded={out['uploaded_count']} 与写出数一致、id 全局唯一")
+
+        # ④ 同一份传两遍：第二遍零嵌入零写入，dedup 记满
+        rec2, spy2 = _RecStore(), _SpyEmb()
+        out2 = asyncio.run(_action(rec2, spy2, [fa, fa]))
+        assert out2["chunk_count"] == 2 * n, f"t20④ chunk_count 不对：{out2}（每份 {n} 片）"
+        assert out2["dedup_count"] == n and out2["uploaded_count"] == len(rec2.points), \
+            f"t20④ 重复没被记满：{out2}"
+        assert spy2.batch_sizes == [n, n], \
+            f"t20④ 第二遍还发嵌入请求了：{spy2.batch_sizes}"
+        assert [c[0] for c in rec2.calls] == ["delete", "write"], f"t20④ 第二遍有写入：{rec2.calls}"
+        print(f"  ok  t20④ 同份两遍：chunk={out2['chunk_count']}、dedup={out2['dedup_count']}、"
+              f"uploaded={out2['uploaded_count']}（第二遍零嵌入零写入）")
+    finally:
+        CURRENT_PROJECT.reset(tok_p)
+        CURRENT_USER.reset(tok_u)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     from codeharness.configs.settings import settings
     if settings.langfuse.enabled:
@@ -1784,7 +1873,8 @@ def main():
               t16_reupload_modified_doc_drops_the_old_slices,
               t17_uppercase_suffix_is_not_a_second_whitelist,
               t18_rerank_index_may_arrive_as_a_string,
-              t19_upload_receipt_counts_dedup]
+              t19_upload_receipt_counts_dedup,
+              t20_upload_streams_per_file_not_whole_batch]
     for f in checks:
         f()
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "

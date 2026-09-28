@@ -97,7 +97,10 @@ class UploadKB(Action):
         scope = f"{doc_type}/{user_id}/{CURRENT_PROJECT.get()}"
 
         errors: list[str] = []
-        slices: list[tuple[str, dict]] = []
+        seen: set[str] = set()          # 跨文件去重只记 id 串（便宜）；点本体不再全批驻留
+        written_total = 0
+        chunk_total = 0
+        dedup_count = 0
         for filepath in files:
             try:
                 found = await asyncio.to_thread(_texts_of, Path(filepath))
@@ -109,50 +112,54 @@ class UploadKB(Action):
                 continue
             if not found:
                 errors.append(f"{Path(filepath).name}: 没读出可切片的文本")
-            slices += found
-
-        if not slices:
-            return {"uploaded_count": 0, "chunk_count": 0, "errors": errors}
-        # C27 + C21 的接缝：**逐片过出口**，块和它的来源一起往下走（整批一次过就把这个对应关系洗掉了）。
-        # 上游那个 256 的切块器只在有换行处生效，`.docx` 整篇一块、`.pdf` 一页一块且不看长度——
-        # 不过这一道，超长切片的尾巴会被端点静默截掉（读数见 `document_store/embed_split.py` 模块头）。
-        # `chunk_count` 报**切完之后**的数：它回答的是「库里有多少个可检索切片」，不是「读出来几段」。
-        pairs = [(c, meta) for text, meta in slices for c in split_for_embedding([text])]
-        vectors = await embeddings.aembed_documents([c for c, _ in pairs])
-        points = []
-        for (text, meta), vec in zip(pairs, vectors):
-            if not vec:
                 continue
-            # C21：出处只记**文件名**。`TextLoader`/`PyPDFLoader` 给的 `source` 是服务端绝对路径
-            # （本机实测 `C:\Users\…\Temp\tmpxxxx\b.md`），原样进 payload 就等于把服务器目录结构顺着
-            # 召回结果漏到界面上；而端点本来就按 basename 落进 `kb/`（`workspace.py` 门口剥过一层），
-            # 所以文件名既是稳定键也是全部有意义的信息。
-            src = Path(str(meta.get("source") or "")).name
-            # C21：点 id 的派生式**带上 source**。只由内容派生时，同一句话出现在两份文档里会算出
-            # 同一个点——后写的把先写的**连出处一起顶掉**，于是「只下架这一份」要么带走别份的切片、
-            # 要么留下一条 attribution 已错的僵尸点（与 C4 那条「租户必须在派生里」同族）。
-            # 代价照 C4/C12/C27 先例写在头里：改造前的老点没有 source、与新点**并存**，
-            # 且按 `source` 过滤删不到它们（读侧按 payload 走，不看 id）；dev 不迁移清洗。
-            extra = {"source": src}
-            if meta.get("page") is not None:
-                extra["page"] = meta["page"]
-            points.append(Point(id=point_id(f"{scope}/{src}", text), text=text, dense=list(vec),
-                                doc_type=doc_type, user_id=user_id, project=CURRENT_PROJECT.get(),
-                                extra=extra))
-        await _purge_old(store, doc_type, user_id, pairs)     # B2：先删这份文件的旧切片，再灌
-        # C67（用户拍 (a)）：回执口径 = **去重后**的实际落库数。point_id 由 scope+source+内容
-        # 派生 ⇒ 同文件里重复的行/页、两份文件同段，算出同一个点；`store.write` 是 upsert、
-        # 后写顶前写，库里最终就是「每个 id 一份」——回执按 len(points) 报等于把重复算成功
-        # （留账原文「回执数是去重前」）。去重保**最后一个**（与 upsert 的顶替语义一致），
-        # 被顶掉的那几条在 `dedup_count` 里单独交代，明细不给假数。
-        dedup: dict = {}
-        for pt in points:
-            dedup[pt.id] = pt
-        dedup_count = len(points) - len(dedup)
-        points = list(dedup.values())
-        written = await store.write(points)
-        return {"uploaded_count": written, "chunk_count": len(pairs), "dedup_count": dedup_count,
-                "errors": errors}
+            # C27 + C21 的接缝：**逐片过出口**，块和它的来源一起往下走（整批一次过就把这个对应关系洗掉了）。
+            # 上游那个 256 的切块器只在有换行处生效，`.docx` 整篇一块、`.pdf` 一页一块且不看长度——
+            # 不过这一道，超长切片的尾巴会被端点静默截掉（读数见 `document_store/embed_split.py` 模块头）。
+            # `chunk_count` 报**切完之后**的数：它回答的是「库里有多少个可检索切片」，不是「读出来几段」。
+            # C84：**按文件分批**——切一批 → 嵌一批 → 删旧 → 落库一批。原先把整批的 pairs/向量/Point
+            # 全量攒在内存：单请求上限 20 文件 × 20MB ⇒ 最坏 400MB 正文 + ~35 万点 × 1024 维 ≈ 2.9GB
+            # 同时驻留（铁律 26 有 778MB 就打爆的先例）。代价①：中途失败时已处理完的文件**已落库**
+            # （原来是全有或全无），响应仍是异常路径、errors 口径不变；代价②：跨文件重复 id
+            # （同 scope+source+文本才可能）保**先**传的那份——同 id ⇒ 文本全同，两份最多差 page
+            # 元数据，召回侧不可分辨；份内重复仍由 seen 一并去重（C67 的恒等式由 s15 t19/t20 钉着）。
+            pairs = [(c, meta) for text, meta in found for c in split_for_embedding([text])]
+            vectors = await embeddings.aembed_documents([c for c, _ in pairs])
+            points = []
+            for (text, meta), vec in zip(pairs, vectors):
+                if not vec:
+                    continue
+                # C21：出处只记**文件名**。`TextLoader`/`PyPDFLoader` 给的 `source` 是服务端绝对路径
+                # （本机实测 `C:\Users\…\Temp\tmpxxxx\b.md`），原样进 payload 就等于把服务器目录结构顺着
+                # 召回结果漏到界面上；而端点本来就按 basename 落进 `kb/`（`workspace.py` 门口剥过一层），
+                # 所以文件名既是稳定键也是全部有意义的信息。
+                src = Path(str(meta.get("source") or "")).name
+                # C21：点 id 的派生式**带上 source**。只由内容派生时，同一句话出现在两份文档里会算出
+                # 同一个点——后写的把先写的**连出处一起顶掉**，于是「只下架这一份」要么带走别份的切片、
+                # 要么留下一条 attribution 已错的僵尸点（与 C4 那条「租户必须在派生里」同族）。
+                # 代价照 C4/C12/C27 先例写在头里：改造前的老点没有 source、与新点**并存**，
+                # 且按 `source` 过滤删不到它们（读侧按 payload 走，不看 id）；dev 不迁移清洗。
+                extra = {"source": src}
+                if meta.get("page") is not None:
+                    extra["page"] = meta["page"]
+                pt = Point(id=point_id(f"{scope}/{src}", text), text=text, dense=list(vec),
+                           doc_type=doc_type, user_id=user_id, project=CURRENT_PROJECT.get(),
+                           extra=extra)
+                if pt.id in seen:               # C67：回执口径 = 去重后；重复的那条不再写
+                    dedup_count += 1
+                    continue
+                seen.add(pt.id)
+                points.append(pt)
+            chunk_total += len(pairs)
+            if points:
+                await _purge_old(store, doc_type, user_id, pairs)  # B2：先删这份文件的旧切片，再灌
+                written_total += await store.write(points)
+        if not chunk_total:
+            return {"uploaded_count": 0, "chunk_count": 0, "errors": errors}
+        # C67（用户拍 (a)）：uploaded_count == chunk_count - dedup_count，write 收到的 id 全局唯一
+        # （upsert 语义下库里最终就是「每个 id 一份」），被顶掉的那几条在 `dedup_count` 里单独交代。
+        return {"uploaded_count": written_total, "chunk_count": chunk_total,
+                "dedup_count": dedup_count, "errors": errors}
 
 
 async def _purge_old(store, doc_type: str, user_id: str, pairs: list) -> None:
