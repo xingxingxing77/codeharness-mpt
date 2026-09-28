@@ -51,16 +51,39 @@ def enabled() -> bool:
     return bool(_mod() and c.enabled and c.public_key and c.secret_key)
 
 
+def _silence_pydantic_serializer_noise() -> None:
+    """C81：N9 噪音的**带作用域**滤网（幂等：client() 只建一次链，但守卫再加一层）。"""
+    import warnings
+
+    if getattr(warnings, "_c81_seam_filter", False):
+        return
+    prev = warnings.showwarning
+
+    def _show(message, category, filename, lineno, file=None, line=None):
+        if "Pydantic serializer warnings" in str(message):
+            import inspect
+            if any("langfuse" in fr.filename for fr in inspect.stack()):
+                return                      # 只丢 langfuse 序列化 seam 上的那一条
+        prev(message, category, filename, lineno, file, line)
+
+    warnings._c81_seam_filter = True
+    warnings.showwarning = _show
+
+
 def client():
     if not enabled():
         return None
     global _client
     if _client is None:
-        import warnings
         # N9 伴随噪音，在接缝处一次滤掉：handler 把 structured 链（include_raw 形态）
         # 的输出序列化给 OTel 时，pydantic 打 PydanticSerializationUnexpectedValue
         # （raw/parsed 字段类型对不上）——只影响日志观感，span 数据完整（真会话实测）。
-        warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
+        # C81：滤法从「进程级 filterwarnings、永不还原」改成**带作用域**的 showwarning
+        # 包装——原写法让开着 Langfuse 的进程从此吞掉**任何**代码路径的同类序列化告警
+        # （包括我们自己的模型真配错了，那正是要看见的）。这条噪音发生在 span 回调栈里
+        # （不在建链栈上），catch_warnings 包不住，所以只在「消息匹配 + 栈里真有 langfuse」
+        # 时丢弃，其余原样交回上一个 showwarning（判据 s2 t22 三向）。
+        _silence_pydantic_serializer_noise()
         from codeharness.configs.settings import settings
         Langfuse = _mod()[0]
         c = settings.langfuse

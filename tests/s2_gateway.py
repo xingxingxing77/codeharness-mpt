@@ -303,10 +303,11 @@ def t10_settings():
         _fail("10. 源字段名是 max_token（单数），必须一致，否则逐字复制的取不到属性")
     if LLMConfig(max_token=-1).max_token != 4096:
         _fail("10. max_token 非正值未回落 4096")
-    for f in ("api_type", "api_version", "pricing_plan", "access_key", "secret_key", "session_token",
+    # C80 后名单收窄：pricing_plan/proxy/use_system_prompt/reasoning/reasoning_max_token/best_of
+    # 六个零读取死字段已删（终态钉在 t21②），这里只保「还在配面上」的源字段
+    for f in ("api_type", "api_version", "access_key", "secret_key", "session_token",
               "endpoint", "app_id", "api_secret", "domain", "region_name", "top_p", "top_k", "stream",
-              "timeout", "context_length", "proxy", "calc_usage", "compress_type", "use_system_prompt",
-              "reasoning", "reasoning_max_token"):
+              "timeout", "context_length", "calc_usage", "compress_type"):
         if f not in LLMConfig.model_fields:
             _fail(f"10. LLMConfig 缺源字段 {f}")
     if LLMType("openai") is not LLMType.OPENAI or len(LLMType) < 27:
@@ -1122,6 +1123,95 @@ def t19_structured_goes_through_compression():
     assert isinstance(got3[0], SystemMessage) and got3[0].content == "你是助手。", got3[0]
 
 
+def t20_c79_token_counting_never_leaves_the_process():
+    """C79+C82（09-28 审查批）：计数函数不许出网、死件删除。
+      ① model 名含 claude 的计数走本地 tiktoken 回落（旧实现真调 `anthropic.Client()`
+         出网——无 key/无网即抛、这笔请求不进成本账不入观测；离线无 key 环境里旧码当场抛）；
+      ② 文本守卫：`import anthropic` / `count_claude_message_tokens` 不许回来；
+      ③ C82：`get_max_completion_tokens` 死件删除（**复核改判**：立号说它「表外模型直抛、
+         default 不用」——那个守卫从初版 770f37d 就在，地雷断言不成立；剩下的实质只有
+         零调用本身，按死件删）。`TOKEN_MAX` 留着（text.py 两处真读）。
+    """
+    import codeharness.utils.token_counter as tc
+    msgs = [{"role": "system", "content": "你是助手"}, {"role": "user", "content": "写个快排"}]
+    n = tc.count_message_tokens(msgs, "claude-3-5-sonnet")
+    assert isinstance(n, int) and n > 0, f"t20① claude 计数没走本地回落：{n!r}"
+    n2 = tc.count_output_tokens("写个快排", "claude-3-opus")
+    assert isinstance(n2, int) and n2 > 0, f"t20① count_output_tokens 同病：{n2!r}"
+    src = open("codeharness/utils/token_counter.py", encoding="utf-8").read()
+    assert "import anthropic" not in src and "count_claude_message_tokens" not in src,         "t20② anthropic 出网计数路复燃了（C79）"
+    assert not hasattr(tc, "get_max_completion_tokens") and "def get_max_completion_tokens" not in src,         "t20③ 死件 get_max_completion_tokens 复活了（C82）"
+    assert hasattr(tc, "TOKEN_MAX") and "TOKEN_MAX" in src, "t20③ TOKEN_MAX 不许误删（text.py 真读它）"
+
+
+def t21_c80_llm_config_terminal_states():
+    """C80（09-28 审查批）：11 个「可配不可用」字段逐个判决，不许留第三种状态。
+      ① 接进 _build 的五个：top_k/seed/repetition_penalty（model_kwargs 透传）与
+         logprobs/top_logprobs（ChatOpenAI 具名字段）——显式配置时真进请求对象；
+         **阳性对照**=默认配置下 kwargs 与请求形状逐项不变（默认档字节零变化）；
+      ② 删除的六个钉死终态：pricing_plan/proxy/use_system_prompt/reasoning/
+         reasoning_max_token/best_of 不许再出现在配面上。
+    """
+    from codeharness.configs.llm_config import LLMConfig
+    from codeharness.provider.gateway import LLMGateway
+
+    m = LLMGateway._build(LLMConfig(api_key="x", model="gpt-4o", top_k=5, seed=42,
+                                    repetition_penalty=0.9, logprobs=True, top_logprobs=3))
+    assert m.model_kwargs.get("top_k") == 5 and m.model_kwargs.get("repetition_penalty") == 0.9,         f"t21① 显式配置没进请求：{m.model_kwargs}"
+    assert m.seed == 42, f"t21① seed 没接进具名字段：{m.seed!r}"
+    assert m.logprobs is True and m.top_logprobs == 3, f"t21① logprobs 两字段没接：{m.logprobs}/{m.top_logprobs}"
+    d = LLMGateway._build(LLMConfig(api_key="x", model="gpt-4o"))
+    assert not d.model_kwargs, f"t21① 阳性对照失守：默认档 model_kwargs 应为空，实为 {d.model_kwargs}"
+    assert not d.logprobs and not d.top_logprobs, f"t21① 阳性对照失守：默认档 logprobs 应空：{d.logprobs}"
+    for f in ("pricing_plan", "proxy", "use_system_prompt", "reasoning", "reasoning_max_token", "best_of"):
+        assert f not in LLMConfig.model_fields, f"t21② 死字段 {f} 又回来了（C80 终态被破坏）"
+
+
+def t22_c81_serializer_noise_filter_is_scoped():
+    """C81（09-28 审查批）：N9 噪音的滤网从「进程级 filterwarnings、永不还原」换成
+    带作用域的 showwarning 包装——三向：
+      ① 消息匹配 + 栈里真有 langfuse ⇒ 丢弃（seam 噪音照旧静音）；
+      ② **同一条消息**在 langfuse 之外的任何地方 ⇒ 原样放行（别人家的/我们自己的序列化
+         错误必须看得见——这正是原 filterwarnings 吞掉的）；
+      ③ 别的消息在 langfuse 栈里 ⇒ 原样放行（滤网只滤那一条）。
+    栈伪造：code.replace(co_filename=…) 把测试函数的帧文件名指到一个含 "langfuse" 的
+    假路径——滤网按帧文件名认栈，真 langfuse 包在不在都不影响这格的确定性。
+    """
+    import pathlib
+    import warnings
+
+    from codeharness.observability import _silence_pydantic_serializer_noise
+
+    seen = []
+    real = warnings.showwarning
+    warnings.showwarning = lambda *a, **k: seen.append(a[0])
+    try:
+        _silence_pydantic_serializer_noise()
+        lf_dir = str(pathlib.Path("codeharness/observability.py").parent / "langfuse_fake_pkg")
+
+        def _in_lf():
+            warnings.warn("Pydantic serializer warnings: PydanticSerializationUnexpectedValue")
+
+        _in_lf.__code__ = _in_lf.__code__.replace(co_filename=lf_dir)
+        _in_lf()
+        assert not seen, f"t22① seam 上的噪音没被丢（滤网失效）：{seen}"
+        # ② 同一条消息在 langfuse 之外：必须放行
+        warnings.warn("Pydantic serializer warnings: PydanticSerializationUnexpectedValue")
+        assert len(seen) == 1, f"t22② langfuse 之外的同类告警也被吞了（进程级滤网回来了）：{len(seen)}"
+        # ③ 别的消息在 langfuse 栈里：必须放行
+
+        def _in_lf_other():
+            warnings.warn("另一条正经告警")
+
+        _in_lf_other.__code__ = _in_lf_other.__code__.replace(co_filename=lf_dir)
+        _in_lf_other()
+        assert len(seen) == 2, f"t22③ 滤网把别的告警也吞了：{len(seen)}"
+    finally:
+        warnings.showwarning = real
+        if getattr(warnings, "_c81_seam_filter", False):
+            del warnings._c81_seam_filter
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
@@ -1129,7 +1219,10 @@ def main():
               t13_usage_field_shapes, t14_retry_predicate, t15_stream_deadline,
               t16_structured_failure_accounts, t17_ratelimit_single_owner,
               t18_embedding_leg_has_explicit_bounds,
-              t19_structured_goes_through_compression]
+              t19_structured_goes_through_compression,
+              t20_c79_token_counting_never_leaves_the_process,
+              t21_c80_llm_config_terminal_states,
+              t22_c81_serializer_noise_filter_is_scoped]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

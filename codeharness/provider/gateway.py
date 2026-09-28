@@ -85,8 +85,24 @@ class LLMGateway:
             kwargs["presence_penalty"] = cfg.presence_penalty
         if cfg.frequency_penalty:
             kwargs["frequency_penalty"] = cfg.frequency_penalty
+        # C80：可配可用的三个无具名字段经 model_kwargs 透传（api_version 同通道）——只在
+        # 显式配置（非默认值）时发，默认档请求字节与修前完全一致。原先 top_k/seed/
+        # repetition_penalty 是「.env 写了也静默不生效」的假通路。
+        model_kwargs = {}
         if cfg.api_version:
-            kwargs["model_kwargs"] = {"api_version": cfg.api_version}
+            model_kwargs["api_version"] = cfg.api_version
+        if cfg.top_k:
+            model_kwargs["top_k"] = cfg.top_k
+        if cfg.repetition_penalty != 1.0:
+            model_kwargs["repetition_penalty"] = cfg.repetition_penalty
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
+        if cfg.seed is not None:               # seed 是 ChatOpenAI 具名字段（走 model_kwargs
+            kwargs["seed"] = cfg.seed          # 会被 SDK 挪字段并打 UserWarning）
+        if cfg.logprobs:                       # 这两个是 ChatOpenAI 具名字段，直接接
+            kwargs["logprobs"] = True
+        if cfg.top_logprobs is not None:
+            kwargs["top_logprobs"] = cfg.top_logprobs
         return ChatOpenAI(**kwargs)
 
     def _count_tokens_direct(self, messages: Union[str, list, None]) -> int:

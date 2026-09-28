@@ -10,7 +10,6 @@ ref3: https://github.com/Significant-Gravitas/Auto-GPT/blob/master/autogpt/llm/t
 ref4: https://github.com/hwchase17/langchain/blob/master/langchain/chat_models/openai.py
 ref5: https://ai.google.dev/models/gemini
 """
-import anthropic
 import tiktoken
 
 from codeharness.logs import logger
@@ -312,25 +311,11 @@ SPARK_TOKENS = {
 }
 
 
-def count_claude_message_tokens(messages: list[dict], model: str) -> int:
-    # rough estimation for models newer than claude-2.1, needs api_key or auth_token
-    ac = anthropic.Client()
-    system_prompt = ""
-    new_messages = []
-    for msg in messages:
-        if msg.get("role") == "system":
-            system_prompt = msg.get("content")
-        else:
-            new_messages.append(msg)
-    num_tokens = ac.beta.messages.count_tokens(messages=new_messages, model=model, system=system_prompt)
-    return num_tokens.input_tokens
-
-
 def count_message_tokens(messages, model="gpt-3.5-turbo-0125"):
     """Return the number of tokens used by a list of messages."""
-    if "claude" in model:
-        num_tokens = count_claude_message_tokens(messages, model)
-        return num_tokens
+    # C79：claude 不再有专用分支——原先真调 anthropic SDK 数 token（纯计数函数里出网、
+    # 无 key/无网即抛、且这笔请求不进成本账不入观测），现在与其它表外模型同走 tiktoken 回落。
+
     try:
         encoding = tiktoken.encoding_for_model(model)
     except KeyError:
@@ -384,11 +369,14 @@ def count_message_tokens(messages, model="gpt-3.5-turbo-0125"):
         tokens_per_message = 0  # ignore conversation message template prefix
         tokens_per_name = 0
     else:
-        raise NotImplementedError(
-            f"num_tokens_from_messages() is not implemented for model {model}. "
-            f"See https://cookbook.openai.com/examples/how_to_count_tokens_with_tiktoken "
-            f"for information on how messages are converted to tokens."
-        )
+        # C79 同族收尾：表外模型不再抛 NotImplementedError（一个纯计数函数的地雷；
+        # claude 专用分支删掉后也会落到这里）——与上面「编码回落」同一形状，按
+        # gpt 系模板估算并喊一声。唯一生产读法 utils/text.py 走的是字符串路径，
+        # 这里兜底保证它永远整体可用。
+        logger.info(f"Warning: model {model} not in the known message-template table. "
+                    f"Estimating with the gpt template over cl100k_base.")
+        tokens_per_message = 3
+        tokens_per_name = 1
     num_tokens = 0
     for message in messages:
         num_tokens += tokens_per_message
@@ -417,10 +405,6 @@ def count_output_tokens(string: str, model: str) -> int:
     Returns:
         int: The number of tokens in the text string.
     """
-    if "claude" in model:
-        messages = [{"role": "assistant", "content": string}]
-        num_tokens = count_claude_message_tokens(messages, model)
-        return num_tokens
     try:
         encoding = tiktoken.encoding_for_model(model)
     except KeyError:
@@ -429,16 +413,7 @@ def count_output_tokens(string: str, model: str) -> int:
     return len(encoding.encode(string))
 
 
-def get_max_completion_tokens(messages: list[dict], model: str, default: int) -> int:
-    """Calculate the maximum number of completion tokens for a given model and list of messages.
-
-    Args:
-        messages: A list of messages.
-        model: The model name.
-
-    Returns:
-        The maximum number of completion tokens.
-    """
-    if model not in TOKEN_MAX:
-        return default
-    return TOKEN_MAX[model] - count_message_tokens(messages, model) - 1
+# C82：原 `get_max_completion_tokens` 死件删除（全仓零调用）。立号说它「表外模型直抛、
+# default 形参不用」——复核改判：那个守卫 `if model not in TOKEN_MAX: return default` 从
+# 初版 770f37d 就在，地雷断言不成立；它剩下的实质只有「零调用」本身，按死件删除。
+# TOKEN_MAX 留着：`utils/text.py` 的 reduce_message_length 两处真读它。

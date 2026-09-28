@@ -5,6 +5,10 @@
 判定 `改`（R7）：**字段名与默认值逐字照源**，但载体从源的 `YamlModel` 换成 pydantic v2
 `BaseModel`（由 `configs/settings.py` 的 `BaseSettings` 以 `LLM__FIELD` 双下划线注入）。
 
+C80（09-28 审查批）修订：上面那条「逐字照源」的 pin 收窄——6 个全仓零读取、且在
+OpenAI 兼容面上没有落点的源抄字段（`pricing_plan`/`reasoning`/`reasoning_max_token`/
+`best_of`/`proxy`/`use_system_prompt`）删除，理由留在各删除点；s2 t10 的字段名单同步。
+
 ⚠ 三处名字极易写错、且会静默失效的点，已在门禁里锁住：
 1. 源字段是 **`max_token`（单数）**，不是 `max_tokens`
 2. 源 `timeout: int = 600`；本仓经 `const.LLM_API_TIMEOUT = 300` 收紧（慢端点尽快失败重连，
@@ -68,7 +72,7 @@ class LLMConfig(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     api_version: Optional[str] = None
     model: Optional[str] = None  # also stands for DEPLOYMENT_NAME
-    pricing_plan: Optional[str] = None  # Cost Settlement Plan Parameters.
+    # C80 删了 `pricing_plan`：成本结算用的是本仓 `provider/token_costs.py` 的表，这个源抄字段零读取。
 
     # 厂商专有凭据（S10 各适配器按 api_type 取用）
     access_key: Optional[str] = None
@@ -89,7 +93,7 @@ class LLMConfig(BaseModel):
     stop: Optional[str] = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
-    best_of: Optional[int] = None
+    # C80 删了 `best_of`：completions 时代的参数，chat completions 与 ChatOpenAI 都没有落点。
     n: Optional[int] = None
     stream: bool = True
     seed: Optional[int] = None
@@ -99,14 +103,16 @@ class LLMConfig(BaseModel):
     context_length: Optional[int] = None  # Max input tokens
     compress_threshold: float = 0.8  # 压缩阈值：保留最近 messages 的比例（0~1）
 
-    proxy: Optional[str] = None
+    # C80 删了 `proxy`：接它要给 SDK 换 httpx client（同步+异步两份），无人配置过；
+    # 环境代理本来就由 httpx trust_env 接住。删掉的是「可配不可用」的静默假通路。
     calc_usage: bool = True
 
     # 消息压缩与 RoleZero 相关
     compress_type: CompressType = CompressType.NO_COMPRESS
-    use_system_prompt: bool = True
-    reasoning: bool = False
-    reasoning_max_token: int = 4000  # reasoning budget tokens, usually smaller than max_token
+    # C80 删了 `use_system_prompt`：本栈的 system 段由角色 prompt 装配层决定（永远有），
+    # 这个开关从没有读者。
+    # C80 删了 `reasoning`/`reasoning_max_token`：OpenAI 兼容面上没有载荷落点（StepFun 的
+    # thinking 自动走、reasoning 计入 completion），真需要时由 S10 那个厂商适配器自带字段。
 
     @field_validator("max_token")
     @classmethod
