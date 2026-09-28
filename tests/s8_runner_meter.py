@@ -695,6 +695,86 @@ async def t12_prose_from_structured_stream():
                "收口清状态机、同节点第二笔重抽；裸文本原样透传、短字段与内容块零发布")
 
 
+def t13_assembly_ledger_identity_recall():
+    """R1 未验①的可信部分：**真装配出来的读者，计数到底落在哪一本账上**——零花费、离线。
+
+    t43 证的是「召回的三笔语义对」（手搭的 LongTermMemory），t10 证的是「账本从 GET 出口看得见」
+    （但它 `enable_rag=False`，压根不走召回）。中间缺的那截正是本格的靶子：**装配期的 `meter=` 指认**。
+    它断了不会有人报错——三条装配路里漏一条（`build_hired_role` 那种「顺手挂 kb」的地方最容易漏），
+    计数就永远恒 0，而恒 0 是最像结论的假读数。
+
+      ① 三条装配路（dynamic / classic / 现场招人）的每条读腿，`meter` 必须是**同一个** manager 对象；
+      ② 一次真失败的召回（embedding 指死端口，铁律 6 的唯一合法零花费姿势）必须把数记进**那一份**账本，
+         并且短路位翻假、第二次不再出门；
+      ③ 反对照：`meter=None` 时同样的失败**不产生任何计数**——证明 ② 的 +1 是那条指认带来的，不是恒亮。
+    """
+    from codeharness.configs.settings import settings
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.cost import CostManager
+    from codeharness.team import build_hired_role, classic_team, default_team
+
+    keep = (settings.enable_rag, settings.embedding.base_url, settings.embedding.api_key)
+    settings.enable_rag = True
+    settings.embedding.base_url = "http://127.0.0.1:1/v1"      # 死端口：不发任何云端请求
+    settings.embedding.api_key = "dead"
+    try:
+        cm = CostManager()
+        dyn = default_team(_make_llm_for(cm))
+        cls = classic_team(_make_llm_for(cm))
+        hired = build_hired_role({"name": "RecallProbe", "profile": "p", "goal": "g",
+                                  "tools": []}, _make_llm_for(cm))
+        legs = [(n, getattr(a, "ltm", None), "ltm") for n, a in dyn.items()] + \
+               [(n, getattr(a, "kb", None), "kb") for n, a in dyn.items()] + \
+               [(n, getattr(a, "ltm", None), "ltm") for n, a in cls.items()] + \
+               [(n, getattr(a, "kb", None), "kb") for n, a in cls.items()] + \
+               [("RecallProbe", hired.kb, "kb")]
+        legs = [(n, l, tag) for n, l, tag in legs if l is not None]
+        assert legs, "①装配出来一个读者都没有（enable_rag 真管事了没？）"
+        for n, l, tag in legs:
+            assert l.meter is cm, f"①断了：{n}.{tag} 的计数不落进 runner 那本账（会是恒 0 的假读数）"
+
+        # ② 真失败一次：记进那一份账本、短路、第二次不出门
+        probe = dyn[next(iter(dyn))].ltm
+        calls = 0
+
+        class _Dead:
+            """只给 `recall` 用到的那一个方法——不必去继承 OpenAIEmbeddings（那是给自己造坑）。"""
+
+            async def aembed_query(self, q):
+                nonlocal calls
+                calls += 1
+                raise ConnectionError("embedding 端点不在线")
+
+        probe.embeddings = _Dead()
+        before = cm.recall_failures
+        assert asyncio.run(probe.recall("任何任务", k=3)) == [], "②失效：失败没降级成空"
+        assert cm.recall_failures == before + 1, \
+            f"②失效：真失败没落进那本账（{before}→{cm.recall_failures}）"
+        assert cm.recall_returned == 0 and cm.recall_zero_hits == 0, \
+            f"②失效：失败被记成了条数或零命中（returned={cm.recall_returned} zero={cm.recall_zero_hits}）"
+        assert probe.up is False
+        asyncio.run(probe.recall("任何任务", k=3))
+        assert calls == 1 and cm.recall_failures == before + 1, \
+            f"②失效：短路没生效（端点被打了 {calls} 次，每次实测白等 2316ms）"
+
+        # ③ 反对照：没有 meter 就没有计数
+        alone = LongTermMemory(project_id="p", embeddings=_Dead(), doc_type="kb", store=probe.store)
+        alone.embeddings = _Dead()
+        assert asyncio.run(alone.recall("任何任务", k=3)) == [] and alone.meter is None, \
+            "③对照失守：meter=None 那条路不该炸，也不该有计数"
+        assert cm.recall_failures == before + 1, "③对照失守：没接账本的读者把数记到了公共账上"
+        _ok("t13", f"装配身份：{len(legs)} 条读腿的 meter 全是同一本账；真失败一次 ⇒ "
+                   f"recall_failures {before}→{cm.recall_failures} 且第二次不出门；meter=None 不计数")
+    finally:
+        settings.enable_rag, settings.embedding.base_url, settings.embedding.api_key = keep
+
+
+def _make_llm_for(cm):
+    """给装配函数造一个网关：`cost_manager` 必须是外面那一份（这正是被测的那根线）。"""
+    from codeharness.provider.gateway import LLMGateway
+    return LLMGateway(cost_manager=cm)
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -708,7 +788,8 @@ def main():
     t8_two_currency_buckets()
     t10_cost_injection_end_to_end()      # C19 未验②：注入链端到端（要起本机桩，放最后）
     asyncio.run(t12_prose_from_structured_stream())   # 流式 UX 批：抽取器与翻译层接线
-    print("\ns8_runner_meter: 12/12 全绿")
+    t13_assembly_ledger_identity_recall()             # R1 未验①可信部分：装配期的 meter 指认（零花费）
+    print("\ns8_runner_meter: 13/13 全绿")
 
 
 if __name__ == "__main__":
