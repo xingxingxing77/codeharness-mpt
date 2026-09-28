@@ -2004,7 +2004,8 @@ def t28_stream_ux_batch():
     # 上一版靠字符串比对丢掉整段重发；这一版由通道分开（live=逐片、content=定稿）——旧 machinery 不许复活
     for dead in ("_already_streamed", "_prose_out", "PROSE_DEDUPE_CAP"):
         assert dead not in runner, f"t28① 字符串比对式去重复活了：{dead}"
-    assert "_ProseStream()).feed(text)" in runner, "t28① 抽取器没接在流分支上（`piece = text` 那种绕法会把 JSON 原文直接打上去）"
+    assert "_ProseStream(self._prompts.get((sid, rid), \"\"))" in runner,         "t28① 抽取器建起来时不带这笔的 prompt ⇒ 回显判定静默空转（现证踩过两次：形状猜错就是空转）"
+    assert "piece = ps.feed(text)" in runner, "t28① 抽取器没接在流分支上（`piece = text` 那种绕法会把 JSON 原文直接打上去）"
     assert "structured 输出不进这里做打字机" not in runner, \
         "t28① 那句「structured 不走打字机」的旧注释回来了（它正是这次病灶的登记处）"
 

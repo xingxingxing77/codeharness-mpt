@@ -17,6 +17,42 @@ from server.bridges import SESSION_ID
 from server.sessions import Session, SessionStatus
 
 LIVE_BLOCKS = ("Thought", "Docs", "Task")   # 能承载逐片正文的块：打字机就投进这一笔所在的那块
+def _prompt_text(data: dict) -> str:
+    """`on_chat_model_start` 事件里这一笔的输入文本，拼成一串给回显判定用。
+
+    只在这一笔的存活期里持有（`on_chat_model_end` 即弃），封顶 `_ECHO_PROBE_CAP` 字符——
+    prompt 通常几万字，而回显判定只需要「成员前缀是否原样出现在输入里」，取尾部更有用
+    （用户需求一般在最后那条 HumanMessage 上）。
+    """
+    msgs = (data or {}).get("input")
+    if msgs is None:
+        msgs = (data or {}).get("messages")
+    parts = []
+
+    def walk(x):
+        # 形状两种都见过，都得认：直连 chat model 的 `astream_events` 给扁平列表，
+        # 而 structured 链走 `ainvoke` 时 langchain 发的是**批式嵌套**（`[[msg, …], …]`）。
+        # 09-29 踩过：只认扁平 ⇒ 真会话里抽到空串 ⇒ 回显规则静默空转（离线复现现证）。
+        if isinstance(x, str):
+            parts.append(x)
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+        elif isinstance(x, dict):
+            # 真会话现证：`data["input"]` 是个 dict（键在 `messages`/`prompts` 之间漂），
+            # 只认列表会抽到空串 ⇒ 回显规则静默空转（离线 SSE 桩复现，`type(input)=dict`）
+            for y in x.values():
+                walk(y)
+        else:
+            c = getattr(x, "content", None)
+            if c is not None:
+                walk(c)
+
+    walk(msgs)
+    return "".join(parts)[-_ECHO_PROBE_CAP:]
+
+
+_ECHO_PROBE_CAP = 200_000
 MIN_PROSE = 24          # structured 流里「算散文」的下限（字符）。09-29 活体现证过两头：
 # 80 会把真散文挡在门外（一场 dynamic 跑的 thought 实测 64 字，一格没发），而 24 仍然把枚举值
 # 与字段名关在外面（`REQUIREMENT`=11、`en`=2、`original_requirements`=21）。
@@ -38,14 +74,17 @@ class _ProseStream:
     三态：0 未定型（攒首部空白，裸文本要整段还回去）/ 1 JSON / 2 裸文本原样透传（＝改动前行为）。
     JSON 模式不建语法树，只认字符串成员并解转义（含 `\\uXXXX` 与被切片切断的代理对）。
 
-    ponytail: 按「成员长度」判定，不区分 key 与 value、也不排除回显字段——`original_requirements`
-    长过门槛（现值 24）时会先把用户自己的需求打出来。升级路径：拿 `on_chat_model_start` 的 `data.input`
-    文本做子串去重，并记住 key 名。
+    按「成员长度」判定、不区分 key 与 value；回显字段靠**这一笔的 prompt 文本**排（`_prompt_text`），
+    但值原样出现在输入里的那种（`original_requirements` 抄用户的话）不发。仍不认 key 名（key 都短过门槛）。
     """
 
-    __slots__ = ("mode", "head", "in_str", "phase", "ubuf", "hi", "decoded", "locked", "emitted")
+    __slots__ = ("mode", "head", "in_str", "phase", "ubuf", "hi", "decoded", "locked", "emitted",
+                 "echo", "skipping", "echoed")
 
-    def __init__(self):
+    def __init__(self, echo: str = ""):
+        self.echo = echo or ""    # 这笔调用的 prompt 文本：成员前缀命中它 ⇒ 是回显，不是模型的话
+        self.skipping = False     # 当前成员已判定为回显，整段丢掉
+        self.echoed = 0           # 被判定为回显而丢掉的成员数（判据要数这个，不看日志）
         self.mode = 0
         self.head = ""            # 未定型期攒的分片（裸文本要整段还回去，不能吞首部空白）
         self.in_str = False
@@ -99,7 +138,7 @@ class _ProseStream:
                 self.phase = 1
                 continue
             if ch == '"':
-                self.in_str = self.locked = False
+                self.in_str = self.locked = self.skipping = False
                 self.decoded = ""             # 达标与否都从头找下一个成员
                 continue
             self._emit(ch, out)
@@ -120,19 +159,26 @@ class _ProseStream:
         return chr(v)
 
     def _emit(self, ch: str, out: list):
-        if not ch:
+        if not ch or self.skipping:
             return
         if self.locked:
             out.append(ch)
             return
         self.decoded += ch
-        if len(self.decoded) >= MIN_PROSE:
-            self.locked = True
-            if self.emitted:
-                out.append("\n")              # 成员之间给一个可见分隔
-            self.emitted = True
-            out.append(self.decoded)
-            self.decoded = ""
+        if len(self.decoded) < MIN_PROSE:
+            return
+        cand, self.decoded = self.decoded, ""
+        # 回显排除：达标前缀原样出现在这笔的 prompt 里 ⇒ 那是模型把用户的需求抄了一遍，
+        # 09-29 经典线活体现证它在逐片最前面（`做一个极小的静态网页，用一段话解释二分查找…`）。
+        # 整段跳过、继续找下一个成员；判定只看一次（前缀命中即定，不逐字再判）。
+        if self.echo and cand in self.echo:
+            self.skipping, self.echoed = True, self.echoed + 1
+            return
+        self.locked = True
+        if self.emitted:
+            out.append("\n")                  # 成员之间给一个可见分隔
+        self.emitted = True
+        out.append(cand)
 
 
 def _now() -> str:
@@ -220,6 +266,7 @@ class SessionRunner:
         # (sid, run_id) -> 该笔调用的散文抽取器。同样按 run_id 不按节点名：一笔一个状态机，
         # 收口（on_chat_model_end）即弃，否则跨笔调用会把上一笔的成员进度带过来。
         self._prose: dict[tuple[str, str], _ProseStream] = {}
+        self._prompts: dict[tuple[str, str], str] = {}   # (sid, run_id) -> 这笔的输入文本（回显判定用）
         # sid -> 这一笔 LLM 调用的逐片该投进哪一块：内核报道槽里**最后开着且未收口**的那块
         # （`Thought`/`Docs`/`Task`，值带它的 block 名），没有就由 `_translate` 落 `stream-{node}` 兜底。
         # 于是文档块自己就在流：逐片进 `live`，内核定稿（`content`）一到前端把 `live` 整段撤掉。
@@ -650,6 +697,8 @@ class SessionRunner:
             self._call_t0.pop(k, None)
         for k in [k for k in self._prose if k[0] == sid]:
             self._prose.pop(k, None)
+        for k in [k for k in self._prompts if k[0] == sid]:
+            self._prompts.pop(k, None)
         self._live_blk.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
@@ -840,6 +889,7 @@ class SessionRunner:
         if kind == "on_chat_model_start":
             if rid:
                 self._call_t0[(sid, rid)] = [time.time(), None]
+                self._prompts[(sid, rid)] = _prompt_text(ev.get("data") or {})
             # 静默期要有东西可看：思考型模型在首 token 前实测要等 40~51 秒，而这段时间**没有**
             # 真文本可发——reasoning 增量拿不到（langchain-openai 1.5.1 的 `chat_models/base.py`
             # 模块头「API scope」明文：第三方私有字段如 `reasoning_content` 不被提取；09-28 现证
@@ -855,6 +905,7 @@ class SessionRunner:
             self._sync_cost(sid)
             if rid:
                 self._prose.pop((sid, rid), None)
+                self._prompts.pop((sid, rid), None)
             # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）
             node = ev.get("metadata", {}).get("langgraph_node", "")
             self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
@@ -869,7 +920,10 @@ class SessionRunner:
             text = raw if isinstance(raw, str) else ""
             if not text:
                 return
-            piece = self._prose.setdefault((sid, rid), _ProseStream()).feed(text)
+            ps = self._prose.get((sid, rid))
+            if ps is None:
+                ps = self._prose[(sid, rid)] = _ProseStream(self._prompts.get((sid, rid), ""))
+            piece = ps.feed(text)
             if not piece:
                 return                    # 结构脚手架与短字段不上屏
             node = ev.get("metadata", {}).get("langgraph_node", "")

@@ -732,9 +732,49 @@ async def t12_prose_from_structured_stream():
         "⑥ 块收口后落点没释放：下一笔还往那块里投（那块已经收口，用户看不见）"
     runner2._forget(s2.id, terminal=True)
     assert s2.id not in runner2._live_blk, "散会没清落点表（长跑会一直攒）"
+
+    # ⑦ 回显排除：值原样出现在这一笔的输入里 ⇒ 那是模型在抄用户的话，不发。
+    #    09-29 经典线活体（会话 `b2d49b85`）现证逐片最前面就是那句需求原文，紧跟其后的才是模型自己的话。
+    from langchain_core.messages import SystemMessage
+
+    echo_line = "做一个极小的静态网页，用一段话解释二分查找是什么。不要写测试，不要部署。"
+    fresh = "构建加载速度极快、无冗余资源的轻量静态网页，仅用于传递二分查找的核心概念与适用场景。"
+    txt2 = json.dumps({"original_requirements": echo_line, "requirement_analysis": fresh,
+                       "anything_unclear": "无"}, ensure_ascii=False, indent=2)
+    mark = len(bus.history(s.id))
+    #    形状按**现证**钉（`E:/tmp/ch_diag_stream.py` 用 SSE 桩打真 astream_events 量出来的）：
+    #    structured 链的 `data["input"]` 是 `{"messages": […]}` 这个 dict，不是列表——
+    #    前两版分别只认扁平列表与批式嵌套列表，真会话里都抽到空串、规则静默空转，判据却全绿。
+    runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "r7", "metadata": meta,
+                             "data": {"input": {"messages": [
+                                 SystemMessage(content="系统提示……用户需求：" + echo_line)]}}})
+    assert (s.id, "r7") in runner._prompts, "⑦ start 没把这笔的输入文本存下来（回显判定无从下手）"
+    for i in range(0, len(txt2), 11):
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r7", "metadata": meta,
+                                 "data": {"chunk": AIMessage(content=txt2[i:i + 11])}})
+    got7 = "".join(e.value for e in contents("stream-PM", mark))
+    assert got7 == fresh, f"⑦ 回显没被排除，或把模型自己的话也吞了：{got7[:70]!r}"
+    assert runner._prose[(s.id, "r7")].echoed == 1, "⑦ 回显计数没记上（判据就只能去看日志）"
+    runner._translate(s.id, {"event": "on_chat_model_end", "run_id": "r7", "metadata": meta})
+    assert (s.id, "r7") not in runner._prompts, "⑦ 收口没清输入文本（一笔几万字，长跑会一直攒）"
+    mark = len(bus.history(s.id))
+    runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r8", "metadata": meta,
+                             "data": {"chunk": AIMessage(content=txt2)}})
+    got8 = "".join(e.value for e in contents("stream-PM", mark))
+    assert echo_line in got8 and fresh in got8, f"⑦ 阳性对照失守（没存到 prompt 时不该排除任何东西）：{got8[:70]!r}"
+    mark = len(bus.history(s.id))
+    runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "r9", "metadata": meta,
+                             "data": {"input": [SystemMessage(content="系统提示……用户需求：" + echo_line)]}})
+    for i in range(0, len(txt2), 13):
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r9", "metadata": meta,
+                                 "data": {"chunk": AIMessage(content=txt2[i:i + 13])}})
+    got9 = "".join(e.value for e in contents("stream-PM", mark))
+    assert got9 == fresh, f"⑦ 扁平列表形状没被认出来（只认 dict＝半条规则）：{got9[:70]!r}"
+    runner._translate(s.id, {"event": "on_chat_model_end", "run_id": "r9", "metadata": meta})
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
                "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
-               "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}")
+               "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}；"
+               "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）")
 
 
 def t13_assembly_ledger_identity_recall():
