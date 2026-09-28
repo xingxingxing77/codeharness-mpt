@@ -37,7 +37,6 @@ class ZeroThought(BaseModel):
 class RoleZeroState(TypedDict):
     task: str
     history: list          # [{thought, commands:[{command_name,args}], results:[{name,result}]}]
-    experience: str
     respond_language: str
     finished: bool
     # C59：`_act` 执行到第几条命令的**续跑游标**（0 = 从头）。中断恢复时 LangGraph 从节点开头重跑
@@ -344,8 +343,11 @@ class RoleZero:
             self.brain = await self.brain.loads(self._brain_key())
         self._observe(s)                              # 源 :295：上一轮命令结果进记忆，否则下一轮看不见
         await self._compress()
-        experience = s.get("experience", "")
-        if self.ltm and not experience:                       # 源 :213 _retrieve_experience + 第 4 步 recall
+        # R6：`experience` 曾是子图 state 的一个键，但全仓**没有任何生产者**写过它（普查现证 155/155 场
+        # 该键恒为空串 ⇒ 下面那道 `not experience` 守卫恒真、每轮照召）。删的是 state 通道与恒真守卫，
+        # **局部变量与 `CMD_PROMPT` 的 `{experience}` 槽位都保留**——A4 那批判据是靠 prompt 文本判读写路的。
+        experience = ""
+        if self.ltm:                                            # 源 :213 _retrieve_experience + 第 4 步 recall
             experience = await self._ltm_recall(s["task"])
         # 知识库单独一次召回、单独一条 system 消息：它不是「角色自己的经验」，混进 experience 槽
         # 会让 prompt 里「经验」两个字骗人（A4 那批就是靠 prompt 文本判读写路的）。
@@ -570,7 +572,7 @@ class RoleZero:
                                                 cause_by=RequirementTag.USER_REQUIREMENT)
                     except Exception as e:
                         logger.warning(f"plan_fn({type(self.plan_fn).__name__}) 失败，退回无规划: {type(e).__name__}: {e}")
-            sub = await graph.ainvoke({"task": task, "history": [], "experience": "",
+            sub = await graph.ainvoke({"task": task, "history": [],
                                        "respond_language": "中文", "finished": False,
                                        # C59：新一跑从第 0 条命令开始（不传也行——`_act`/`_ask`/`gate`
                                        # 都按 `s.get("act_cursor") or 0` 兜底，这里写出来只为读代码时看得见）

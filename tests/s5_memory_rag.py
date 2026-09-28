@@ -1921,6 +1921,77 @@ def t45_shared_readers_short_circuit_once_per_session():
     print("  ok  t45 共享读腿四轮 think 只打两跳端点（不共享的四条腿则打四跳）⇒ 短路按整场生效")
 
 
+def t46_experience_state_key_is_gone_and_recall_still_happens():
+    """R6（甲案）：`RoleZeroState.experience` 是**零生产者的死键**，删它必须证明行为逐字不变。
+    普查现证 155/155 场该键恒为空串 ⇒ `if self.ltm and not experience` 恒真 ⇒ 删掉读与守卫后
+    「每轮都召」本来就是今天的实情。三格（照 C77 的 `s16 t12` 形状：注解 / 行为 / 复燃守卫）：
+
+      ① `RoleZeroState` 的注解里不许再有 `experience`（结构判定，不是 grep 注释）；
+      ② **行为格**：两轮 think 都真打了读腿（`召回次数 == 2`）且两轮的 prompt 里都带着那段经验
+         ——**阳性对照**：把 `ltm` 摘掉就应当一轮都不打、prompt 里也没有那段（否则 ② 是恒绿）；
+      ③ 复燃守卫：`role_zero.py` 里不许再出现 state 形态的读写（`s.get("experience"` / `"experience":`），
+         但 `CMD_PROMPT.format(experience=...)` 与 `self.example or experience` **必须还在**——
+         那是 prompt 槽位与被保留的静态覆写口，删了才是真事故（A4 那批靠 prompt 文本判读写路）。
+    """
+    import inspect
+    import json
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.roles.role_zero import RoleZero, RoleZeroState
+    from codeharness.schema import Message
+
+    # ① 结构
+    assert "experience" not in RoleZeroState.__annotations__, \
+        f"①失效：state 注解里又长出 experience（现存键：{sorted(RoleZeroState.__annotations__)}）"
+
+    class _Emb:
+        def __init__(self):
+            self.n = 0
+
+        async def aembed_query(self, q):
+            self.n += 1
+            return [0.42] * 8
+
+    class _Store:
+        async def search(self, query, dense, **kw):
+            class P:
+                id, score = "1", 0.9
+                payload = {"text": "上次这个项目里机票上限按一千八百元执行",
+                           "role": "user", "cause_by": "", "sent_from": ""}
+            return [P()]
+
+    emb = _Emb()
+    ltm = LongTermMemory(project_id="r6_gate", user_id="u_r6", embeddings=emb, store=_Store())
+    st = {"task": "报销怎么走", "history": [], "respond_language": "中文", "finished": False,
+          "act_cursor": 0, "pending_ask": False, "experience": ""}   # 夹具仍带旧键：langgraph 静默忽略
+    r = _role(memory_k=5)
+    r.ltm = ltm
+    with _FloorCfg(mode="off", memory_mode="off"):
+        asyncio.run(r._think(dict(st)))
+        second = dict(st, history=[{"thought": "t", "commands": [], "results": []}])
+        asyncio.run(r._think(second))
+    assert emb.n == 2, f"②失效：两轮 think 只打了 {emb.n} 次读腿（守卫删掉后应当每轮照召）"
+    prompts = [str(c) for c in r.llm.payloads]
+    assert all("一千八百" in p for p in prompts[-2:]), \
+        f"②失效：某一轮的 prompt 里没带上召回到的那段经验：{prompts[-1][-200:]}"
+
+    # 阳性对照：没挂 ltm 就一轮都不该打
+    emb2 = _Emb()
+    r2 = _role(memory_k=5)
+    r2.ltm = None
+    with _FloorCfg(mode="off", memory_mode="off"):
+        asyncio.run(r2._think(dict(st)))
+    assert emb2.n == 0, f"②阳性对照失守：没挂 ltm 却也打了读腿（{emb2.n} 次）"
+    assert "一千八百" not in str(r2.llm.payloads[-1]), "②阳性对照失守：没挂 ltm 而 prompt 里却有经验段"
+
+    # ③ 复燃守卫
+    src = inspect.getsource(inspect.getmodule(RoleZero))
+    for bad in ('s.get("experience"', '"experience":'):
+        assert bad not in src, f"③失效：state 形态的读写「{bad}」回来了"
+    for must in ("format(experience=experience", "self.example or experience"):
+        assert must in src, f"③失效：prompt 槽位/{must} 被一起删了——那是该留的"
+    print("  ok  t46 死键已除：注解无它、两轮照召且都带经验段、prompt 槽位与静态覆写口都还在")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -1952,7 +2023,8 @@ def main():
               t42_recall_metering_and_short_circuit,
               t43_recall_counters_on_a_live_round_trip,
               t44_overflow_counters_keep_the_retry_semantics,
-              t45_shared_readers_short_circuit_once_per_session]
+              t45_shared_readers_short_circuit_once_per_session,
+              t46_experience_state_key_is_gone_and_recall_still_happens]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
