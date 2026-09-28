@@ -446,7 +446,7 @@ class SessionRunner:
         from codeharness.runtime import (CURRENT_PROJECT, CURRENT_SESSION, REPORT_SINK, CHAT_SINK,
                                          CURRENT_USER, APPROVAL_IO, PERMISSION)
         from codeharness.observability import session_attributes
-        from platforms.approval_store import ApprovalStore
+        from platforms.approval_store import ledger_for
         session = self.store.get(sid)
         pairs = (
             (SESSION_ID, SESSION_ID.set(sid)),
@@ -461,7 +461,10 @@ class SessionRunner:
                                             if session else "default")),
             # 取不到会话时按最严的 readonly（多问一次，不是放行一切）
             (PERMISSION, PERMISSION.set(getattr(session, "permission", "") or "readonly")),
-            (APPROVAL_IO, APPROVAL_IO.set(ApprovalStore(sid))),
+            # C87：走 `ledger_for` 唯一出口——原先这里无条件建 Redis 版，而 app.py 在 Redis 不可达时
+            # 只把 store/bus 退回进程内，台账没退 ⇒ 只读档第一个写工具就在 gate 上 ConnectionError，
+            # 且与 approvals 路由那条读路对不上（见 approval_store.py 的注释）。
+            (APPROVAL_IO, APPROVAL_IO.set(ledger_for(sid))),
         )
         with ExitStack() as stack:
             stack.enter_context(session_attributes(self.store.get(sid), self.projects.get(sid, sid)))

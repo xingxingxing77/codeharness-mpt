@@ -68,6 +68,78 @@ def _ts(raw: str) -> float:
         return 0.0
 
 
+class InProcessApprovalStore:
+    """无 Redis 档的审批台账（C87）：与 `ApprovalStore` **同形**（鸭子类型，不设共同基类）。
+
+    用两个 dict 复刻那两个 HASH 的语义——`_items` = 待批（`ch:appr:{sid}`）、`_decisions` = 回执
+    （`:decisions`）：`request` 的「id 已在 ⇒ False」复刻 HSETNX（gate 重放不会登记两次）、
+    `decide` 的 `setdefault` 复刻「首个回执生效」。生命周期跟随进程（没有 TTL）：无 Redis 的
+    部署本来就是单机单进程，条目随进程走，不会跨进程丢也不会无限涨。
+    """
+
+    def __init__(self, sid: str):
+        self.sid = sid                # 内核 gate 侧要用；与 Redis 版同形
+        self._items: dict[str, dict] = {}
+        self._decisions: dict[str, str] = {}
+
+    def request(self, item: dict) -> bool:
+        """登记一条待批；返回是否新建（False = 重放命中，已问过）——HSETNX 语义。"""
+        if item["id"] in self._items:
+            return False
+        self._items[item["id"]] = dict(item)
+        return True
+
+    def pending(self) -> list[dict]:
+        return [self._items[k] for k in sorted(
+            (k for k in self._items if k not in self._decisions),
+            key=lambda k: self._items[k].get("ts", 0.0))]
+
+    def decide(self, aid: str, outcome: str) -> str:
+        """首个回执生效，后来的忽略（两个人同时点也只认第一个）——HSETNX 语义。"""
+        return self._decisions.setdefault(aid, outcome)
+
+    def decision(self, aid: str) -> str | None:
+        return self._decisions.get(aid)
+
+    def settled(self) -> list[dict]:
+        return [{**self._items[aid], "outcome": out}
+                for aid, out in sorted(self._decisions.items(),
+                                       key=lambda kv: self._items.get(kv[0], {}).get("ts", 0.0))
+                if aid in self._items]
+
+    def item(self, aid: str) -> dict | None:
+        return self._items.get(aid)
+
+
+# C87（09-28 审查批）：台账有**两条读路**——跑图的 `_session_ctx`（写待批/读回执）与 HTTP 的
+# approvals 路由（列待批/写回执）。Redis 档两路各建各的 `ApprovalStore` 没事（真源在 Redis）；
+# 进程内档必须**同一个对象**，否则内核登记的卡 HTTP 永远看不见。所以给一个唯一出口 + 每会话
+# 注册表，两条读路都改走它。模式**首次调用时定死**（与 app.py 启动时定 store/bus 的口径一致）：
+# `use_redis` 且 ping 得通走 Redis 版；否则退进程内并留一句可 grep 的 warning。定了就不回头
+# ——Redis 后来才起来的进程要重启才切（app.py 的 store/bus 同款口径）。
+_MODE: str | None = None
+_MEM: dict[str, InProcessApprovalStore] = {}
+
+
+def ledger_for(sid: str):
+    """按实际可达性挑台账实现；两条读路必须都走这个出口（理由见上）。"""
+    global _MODE
+    if _MODE is None:
+        if settings.platform.use_redis:
+            try:
+                redis.Redis.from_url(settings.redis.to_url()).ping()
+                _MODE = "redis"
+            except Exception as e:
+                from codeharness.logs import logger
+                logger.warning(f"PLATFORM__USE_REDIS 已置位但 Redis 不可达——审批台账退回进程内实现: "
+                               f"{type(e).__name__}: {e}")
+        if _MODE is None:
+            _MODE = "memory"
+    if _MODE == "redis":
+        return ApprovalStore(sid)
+    return _MEM.setdefault(sid, InProcessApprovalStore(sid))
+
+
 def new_item(aid: str, tool: str, args_preview: str, reason: str,
              tier_required: str, tier_session: str, node: str = "") -> dict:
     return {"id": aid, "tool": tool, "args_preview": args_preview, "reason": reason,

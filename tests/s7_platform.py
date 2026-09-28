@@ -967,6 +967,101 @@ def t19_entry_body_limits_and_deploy_coherence():
                f"业务 {need // 1048576}MB")
 
 
+def t20_approval_ledger_dual_impl_and_two_readers():
+    """C87（09-28 全量审查批）：审批台账的两条读路必须拿到**同一个**台账，且无 Redis 档真有实现。
+
+    现象：`runner._session_ctx` 无条件建 Redis 版 `ApprovalStore(sid)`，approvals 路由又各建各的
+    ——Redis 不可达的部署（app.py 明写「退回进程内实现」）里，store/bus 都退了、**唯独台账没退**：
+    只读档（默认）第一个写工具就在 gate 上 `ConnectionError`；且两条读路各拿各的对象、永远对不上。
+    修法 = `platforms/approval_store.py::ledger_for(sid)` 唯一出口（模式首调定死 + 每会话注册表），
+    两条读路都改走它。
+
+    三格：
+      ① 两条读路同对象：进程内档同 sid 两次 `ledger_for` 是**同一个实例**（Redis 档各建各的、
+         真源在 Redis，天然成立——按配置分支断言，别把「同对象」错钉到 Redis 档上）；
+      ② 进程内实现与 Redis 版**同语义**：request 新建 True/重放 False（HSETNX）、pending 按 ts
+         排序且滤掉已决议、decide 首个回执生效、decision/settled/item 各半；
+      ③ 端到端（TestClient）：往 `ledger_for(sid)` 登记 → GET /approvals 真列出来 → POST respond
+         真回执 → 再 GET 卡没了、重复回执按首个生效（「内核登记的卡 HTTP 能读能回」）。
+         `answer_human` 按 t11 的先例打桩——这格盯的是台账，不是图的恢复。
+    """
+    from platforms.approval_store import (ApprovalStore, InProcessApprovalStore, ledger_for,
+                                          new_item)
+    # ⓪ 模式判定（C87 的另一半）：「use_redis 关」与「置位但不可达」都必须退到进程内——
+    # 修前 app.py 只把 store/bus 退了，台账没退（这正是原症状）。`_MODE` 与 from_url 都要在
+    # finally 里还原，否则污染本进程后面的格。
+    import platforms.approval_store as ap
+    import redis as _redis
+    from codeharness.configs.settings import settings
+    saved = (ap._MODE, settings.platform.use_redis, ap.redis.Redis.from_url)
+    try:
+        ap._MODE = None
+        settings.platform.use_redis = False
+        led = ap.ledger_for("s7t20mode")
+        assert isinstance(led, InProcessApprovalStore), \
+            f"use_redis 关却给了 {type(led).__name__}（台账没跟着 store/bus 一起退）"
+        ap._MODE = None
+        settings.platform.use_redis = True
+
+        def _down(*_a, **_k):
+            raise _redis.ConnectionError("s7t20: redis down")
+        ap.redis.Redis.from_url = staticmethod(_down)
+        led2 = ap.ledger_for("s7t20down")
+        assert isinstance(led2, InProcessApprovalStore), \
+            f"置位但不可达却给了 {type(led2).__name__}（C87 的原症状没治）"
+        assert ap._MODE == "memory", "退回进程内时模式没记下来（下一次又会去 ping）"
+    finally:
+        ap._MODE, settings.platform.use_redis, ap.redis.Redis.from_url = saved
+
+    # ① 两条读路同对象
+    a, b = ledger_for("s7t20"), ledger_for("s7t20")
+    if isinstance(a, InProcessApprovalStore):
+        assert a is b, "进程内档两次 ledger_for 不是同一个对象（两条读路会对不上，C87 的根因）"
+    else:
+        assert isinstance(a, ApprovalStore) and isinstance(b, ApprovalStore), \
+            f"redis 档该给 ApprovalStore，实际 {type(a).__name__}"
+
+    # ② 进程内实现与 Redis 版同语义
+    mem = InProcessApprovalStore("s7t20mem")
+    it0 = new_item("a0", "read_file", "{}", "只读不用批", "readonly", "readonly")
+    it1 = new_item("a1", "write_file", '{"path":"x"}', "要写盘", "workspace_write", "readonly")
+    assert mem.request(it1) is True and mem.request(it1) is False, "重放必须命中（HSETNX 语义）"
+    assert mem.request(it0) is True
+    assert [x["id"] for x in mem.pending()] == ["a0", "a1"], "pending 该按 ts 排序"
+    assert mem.decide("a1", "rejected") == "rejected" \
+        and mem.decide("a1", "allowed-once") == "rejected", "首个回执生效，后来的改不动"
+    assert mem.decision("a1") == "rejected" and mem.decision("a0") is None
+    assert [x["id"] for x in mem.pending()] == ["a0"], "已决议的要从 pending 里滤掉"
+    assert mem.settled()[0]["id"] == "a1" and mem.settled()[0]["outcome"] == "rejected"
+    assert mem.item("a0")["tool"] == "read_file" and mem.item("nope") is None
+
+    # ③ 端到端：内核侧登记的卡，HTTP 读得到、回执得掉
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        import server.app as sa
+        with TestClient(sa.create_app()) as c:
+            sid = c.post("/api/sessions",
+                         json={"idea": "审批台账", "project_name": "s7ledger"}).json()["id"]
+            c.app.state.runner.answer_human = lambda _sid, _content: False   # t11 同款打桩
+            ledger_for(sid).request(new_item("aid-e2e", "write_file", '{"path":"x"}', "要写盘",
+                                             "workspace_write", "readonly"))
+            r = c.get(f"/api/sessions/{sid}/approvals")
+            assert [x["id"] for x in r.json()["pending"]] == ["aid-e2e"], \
+                f"HTTP 读不到内核登记的卡（两条读路没对上）：{r.text[:150]}"
+            rr = c.post(f"/api/sessions/{sid}/approvals/aid-e2e/respond", json={"outcome": "rejected"})
+            assert rr.status_code == 200, f"回执失败：{rr.text[:150]}"
+            assert c.get(f"/api/sessions/{sid}/approvals").json()["pending"] == [], "回执后卡还在"
+            again = c.post(f"/api/sessions/{sid}/approvals/aid-e2e/respond",
+                           json={"outcome": "allowed-once"}).json()
+            assert again["outcome"] == "rejected", f"重复回执没按首个生效：{again}"
+    finally:
+        ss.SESSIONS_FILE = keep
+    _ok("t20", "审批台账：两条读路同对象（进程内档注册表 / Redis 档真源）、内存实现与 Redis 版同语义、"
+               "HTTP 列卡与回执端到端真通")
+
+
 def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
@@ -976,15 +1071,16 @@ def main():
     t17_event_bus_thread_safe()
     t18_shutdown_flush_is_bounded()
     t19_entry_body_limits_and_deploy_coherence()
+    t20_approval_ledger_dual_impl_and_two_readers()
     global REDIS_UP
     REDIS_UP = _redis_up()
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 8/8 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19），redis 路待环境")
+        print("\ns7_platform: 9/9 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 19/19 全绿（双配置）")
+    print("\ns7_platform: 20/20 全绿（双配置）")
 
 
 if __name__ == "__main__":

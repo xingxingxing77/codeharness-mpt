@@ -24,20 +24,20 @@ class RespondReq(BaseModel):
 
 @router.get("/{sid}/approvals")
 def list_approvals(sid: str, request: Request, user: str = Depends(current_user)):
-    from platforms.approval_store import ApprovalStore
+    from platforms.approval_store import ledger_for
     from server.api.sessions import _owned
     _owned(request, sid, user)
-    st = ApprovalStore(sid)
+    st = ledger_for(sid)          # C87：与跑图那条读路同对象（进程内档靠每会话注册表）
     return {"pending": st.pending(), "decided": st.settled()}
 
 
 @router.post("/{sid}/approvals/{aid}/respond")
 async def respond(sid: str, aid: str, req: RespondReq, request: Request,
                   user: str = Depends(current_user)):
-    from platforms.approval_store import ApprovalStore
+    from platforms.approval_store import ledger_for
     from server.api.sessions import _get, _owned
     _owned(request, sid, user)
-    st = ApprovalStore(sid)
+    st = ledger_for(sid)          # C87：同上
     if st.item(aid) is None:              # 台账里没这条：可能是伪造 id，也可能是被 TTL 清了
         raise HTTPException(404, f"approval {aid} not found")
     outcome = st.decide(aid, req.outcome)             # 首个回执生效，重复回执返回原结论
