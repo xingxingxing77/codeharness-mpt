@@ -16,6 +16,7 @@ from langgraph.types import Command
 from server.bridges import SESSION_ID
 from server.sessions import Session, SessionStatus
 
+PROSE_DEDUPE_CAP = 40000   # 每场留存的「已逐片发过的散文」上限，只给去重判断用（超出丢最老的）
 MIN_PROSE = 24          # structured 流里「算散文」的下限（字符）。09-29 活体现证过两头：
 # 80 会把真散文挡在门外（一场 dynamic 跑的 thought 实测 64 字，一格没发），而 24 仍然把枚举值
 # 与字段名关在外面（`REQUIREMENT`=11、`en`=2、`original_requirements`=21）。
@@ -219,6 +220,9 @@ class SessionRunner:
         # (sid, run_id) -> 该笔调用的散文抽取器。同样按 run_id 不按节点名：一笔一个状态机，
         # 收口（on_chat_model_end）即弃，否则跨笔调用会把上一笔的成员进度带过来。
         self._prose: dict[tuple[str, str], _ProseStream] = {}
+        # sid -> 本场已逐片发出去的散文（拼接串，封顶见 PROSE_DEDUPE_CAP）。给 sink 转发处
+        # 做「同一句话不再整段重发」用，见 _make_sink。
+        self._prose_out: dict[str, str] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def start(self, session: Session):
@@ -563,9 +567,31 @@ class SessionRunner:
         bus = self.bus
 
         def sink(event: dict):                    # 普通函数（桥接铁律）
+            # 打字机已经逐片发过这句话，内核那块就别再整段贴一遍（09-29 活体现证：同一段思考
+            # 在 `stream-think` 与内核 Thought 块各出现一次——两条源本来就各成一行，改抽散文后
+            # 它们的内容第一次变得可读且相同，重复才显出来）。判据是**包含**不是相等：内核发的
+            # 定稿可能是抽取器输出的母串（抽取器只挑达标成员，内核发整段 thought）。
+            if event.get("name") == "content" and self._already_streamed(sid, event.get("value")):
+                return
             bus.publish(sid, kind="report", **event)
 
         return sink
+
+    def _already_streamed(self, sid: str, value) -> bool:
+        """内核整段正文与本场已逐片发过的散文比对：命中即丢掉这一次重复上屏。"""
+        text = value if isinstance(value, str) else str(value or "")
+        if not text.strip():
+            return False
+        acc = self._prose_out.get(sid)
+        if not acc:
+            return False
+        if text not in acc:
+            return False
+        # 丢的这一刻要能追回来：留一声可 grep 的响（INFO 才同时进 console 与日志文件——
+        # `define_log_level` 的 print=INFO / logfile=DEBUG，写 debug 就只有翻文件才看得见）。
+        # 一场会话最多每轮一行，不吵。
+        logger.info(f"[stream-dedupe] {sid} 整段正文已在打字机里逐片发过，不再重发（{len(text)} 字）")
+        return True
 
     @contextmanager
     def _session_ctx(self, sid: str):
@@ -634,6 +660,7 @@ class SessionRunner:
             self._call_t0.pop(k, None)
         for k in [k for k in self._prose if k[0] == sid]:
             self._prose.pop(k, None)
+        self._prose_out.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
             self.projects.pop(sid, None)
@@ -861,6 +888,7 @@ class SessionRunner:
             self.bus.publish(sid, kind="report", block="Thought",
                              uuid=f"stream-{node}", name="content",
                              value=piece, role=node)
+            self._prose_out[sid] = (self._prose_out.get(sid, "") + piece)[-PROSE_DEDUPE_CAP:]
         # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
         # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
         # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，

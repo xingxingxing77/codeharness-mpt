@@ -700,8 +700,26 @@ async def t12_prose_from_structured_stream():
     runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r5", "metadata": meta,
                              "data": {"chunk": type("C", (), {"content": [{"type": "text", "text": "x"}]})()}})
     assert not contents(None, mark), "内容块形态（content 非 str）不该发布"
+
+    # ⑥ 去重（09-29 活体现证的形状）：打字机逐片发过那句话之后，内核那块**整段**再发同一句
+    #    就不再上屏——两条源各成一行是既有形状，改抽散文后它们的内容第一次变得既可读又相同。
+    #    判据是「包含」不是「相等」：内核发的定稿可能是抽取器输出的母串。
+    kmark = len(bus.history(s.id))
+    sink = runner._make_sink(s.id)
+    sink({"block": "Thought", "uuid": "kern-1", "name": "meta", "value": {"type": "react"}, "role": "PM"})
+    sink({"block": "Thought", "uuid": "kern-1", "name": "content", "value": want, "role": "PM"})
+    sink({"block": "Thought", "uuid": "kern-1", "name": "content", "value": "抽取器没发过的一行事实", "role": "PM"})
+    sink({"block": "Thought", "uuid": "kern-1", "name": "end_marker", "value": None, "role": "PM"})
+    kevs = [e for e in bus.history(s.id)[kmark:] if e.kind == "report" and e.uuid == "kern-1"]
+    kcont = [e.value for e in kevs if e.name == "content"]
+    assert kcont == ["抽取器没发过的一行事实"], f"⑥ 该丢的没丢或不该丢的被吞了：{kcont}"
+    assert [e.name for e in kevs if e.name in ("meta", "end_marker")] == ["meta", "end_marker"], \
+        f"⑥ 阳性对照失守：只该丢正文，块本身（meta/收口）还得照发：{[e.name for e in kevs]}"
+    runner._forget(s.id, terminal=True)
+    assert s.id not in runner._prose_out, "散会没清比对串（长跑会一直攒）"
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏：start 建块不占 fts、逐片与参照实现逐字一致、"
-               "收口清状态机、同节点第二笔重抽；裸文本原样透传、短字段与内容块零发布")
+               "收口清状态机、同节点第二笔重抽；裸文本原样透传、短字段与内容块零发布；"
+               "内核整段重发同一句被去重（未发过的一行事实照发，块本身 meta/收口照发）")
 
 
 def t13_assembly_ledger_identity_recall():
