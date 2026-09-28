@@ -1992,6 +1992,88 @@ def t46_experience_state_key_is_gone_and_recall_still_happens():
     print("  ok  t46 死键已除：注解无它、两轮照召且都带经验段、prompt 槽位与静态覆写口都还在")
 
 
+def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
+    """R7：一族「按字符切掉却不留痕迹」的截断，改成共享件 `clip(text, n)`——**含标记后总长仍 ≤ n**。
+
+    病：`read_file` 读一个 4 万字的文件，模型拿到前 2 万字**且看不出是被切的**，于是把半截当全量下
+    结论（C96/R3 同族「把故障演成空态」，这次骗的是模型自己）。规格与十处站点在 `plan/rag-knowledge.md` §1.5。
+
+    四格：
+      ① 超长 ⇒ 末尾带标记、总长 ≤ n（拿七个真实预算逐个量，含非 str 入参——工具产出本来就是任意对象）；
+      ② **阳性对照**：不超长 ⇒ 一字都不多（少了这格，「恒挂标记」也能骗过 ①）；
+      ③ 标记里的「原长」是被裁文本的**真值**不是预算 n（写错成 n 就是又一处谎）；
+      ④ 复燃守卫打在 **AST** 上，且**双向**钉：那些预算整数不许再作为切片上界出现，同时每个文件的
+         `clip(` 调用数不许少——只查「切片没了」会放过「把截断整个删掉」那种更糟的复燃（上下文预算
+         就是这么被悄悄放宽的）。数字不许 grep：注释与文档里同样躺着 20000/10000 这些数。
+         守卫自己带阳性对照：同一套采集必须看得见一个仍然活着的切片（`plan_and_act.py` 的 2000/6000
+         在 R7 范围外，正好当探针），否则「一个都没找到」既是修复成功也是采集器坏了。
+    """
+    import ast
+    import importlib
+    import inspect
+    import re
+
+    from codeharness.utils.text import clip
+
+    MARK = re.compile(r"…\[已截断，原长 (\d+) 字\]$")
+
+    # ① + ③：七个真实预算逐个量（500 是复盘 prompt 里 stdout 那一档，20000 是 read_file/沙箱那一档）
+    for n in (500, 2000, 3000, 4000, 8000, 10000, 20000):
+        for extra in (1, 7, n * 3):            # 刚好超一点 / 超一些 / 超很多
+            src = "甲" * (n + extra)
+            got = clip(src, n)
+            m = MARK.search(got)
+            assert m, f"①失效：len={len(src)} > n={n} 却没挂标记，尾部是 {got[-24:]!r}"
+            assert len(got) == n, (f"①失效：含标记总长 {len(got)} ≠ 预算 {n}——标记要么走了额外额度"
+                                   f"（等于悄悄放宽预算，s4:129 那条 `<= 10000` 就不再被含住），要么没挤占正文")
+            assert got[:m.start()] == src[:m.start()], f"①失效：{n}+{extra} 那一档留下的不是原文前缀"
+            assert int(m.group(1)) == len(src), f"③失效：标记写的是「原长 {m.group(1)}」，真值是 {len(src)}"
+            assert int(m.group(1)) != n, f"③失效：标记里的「原长」等于预算 n={n}——那是把裁剪写成了长度"
+
+    # 非 str 入参：role_zero 那个站点喂的是任意工具产出
+    big = {"rows": ["x" * 5000]}
+    assert MARK.search(clip(big, 4000)), "①失效：非 str 入参（工具产出常是 dict/list）没被裁后被标记"
+
+    # ② 阳性对照：不超长必须一字不多
+    for n in (500, 20000):
+        for src in ("", "甲" * n, "乙" * (n - 1)):
+            assert clip(src, n) == src, f"②失效：len={len(src)} ≤ n={n} 却被改了（恒挂标记骗过了 ①）"
+        assert clip(n, n) == str(n), "②失效：短的非 str 入参被改写（本该只是 str() 一遍）"
+
+    # ④ 复燃守卫：(模块, 该文件里不许再作为切片上界出现的预算, 该文件应有的 clip 调用数)
+    SITES = [("codeharness.tools", {20000, 10000, 8000}, 4),          # read_file / shell / 搜索 / 知识库工具
+             ("codeharness.tools.sandbox", {20000}, 2),               # stdout / stderr
+             ("codeharness.actions.run_code", {500, 10000, 3000}, 3),  # 复盘两段 + 失败消息里的 stderr
+             ("codeharness.roles.role_zero", {4000}, 1),              # 动态线工具结果回喂
+             ("codeharness.roles.agent", {2000}, 1)]                  # 经典线收件进 prompt
+
+    def _collect(src_text):
+        """采出「切片上界常量」与「clip( 调用数」，两处共用一次 parse。"""
+        consts, calls = [], 0
+        for node in ast.walk(ast.parse(src_text)):
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice) \
+                    and isinstance(node.slice.upper, ast.Constant) and isinstance(node.slice.upper.value, int):
+                consts.append(node.slice.upper.value)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "clip":
+                calls += 1
+        return consts, calls
+
+    # 采集器的阳性对照：inline 源码里那两个切片必须被看见、clip 计数必须数得出
+    seen, ncalls = _collect("def _probe(x, y):\n    return x[:123] + clip(y, 7)\n")
+    assert seen == [123] and ncalls == 1, f"④采集器坏了（阳性对照）：切片应见 [123]、clip 应数 1，实得 {seen}/{ncalls}"
+
+    for mod_name, banned, want_clips in SITES:
+        mod = importlib.import_module(mod_name)
+        src_text = inspect.getsource(mod)
+        consts, calls = _collect(src_text)
+        back = sorted(banned & set(consts))
+        assert not back, (f"④失效：{mod_name} 里这些预算又回到切片上界 {back}"
+                          f"（该文件现存切片上界：{sorted(set(consts))}）——静默截断复燃")
+        assert calls == want_clips, (f"④失效：{mod_name} 里 clip() 调用 {calls} 处，站点应有 {want_clips} 处"
+                                     f"——少一处不是修好了，是把截断整个删了（预算被悄悄放宽）")
+    print("  ok  t47 clip 三格（七档预算+非 str / 不超长一字不多 / 原长是真值）与 AST 双向守卫全绿")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -2024,7 +2106,8 @@ def main():
               t43_recall_counters_on_a_live_round_trip,
               t44_overflow_counters_keep_the_retry_semantics,
               t45_shared_readers_short_circuit_once_per_session,
-              t46_experience_state_key_is_gone_and_recall_still_happens]
+              t46_experience_state_key_is_gone_and_recall_still_happens,
+              t47_clip_marks_the_truncation_and_the_sites_still_call_it]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

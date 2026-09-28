@@ -8,6 +8,7 @@ from pathlib import Path
 from codeharness.runtime import session_root
 from codeharness.schema import RunCodeContext, RunCodeResult
 from codeharness.tools._boundary import safe_session_path
+from codeharness.utils.text import clip
 
 DEVNULL = asyncio.subprocess.DEVNULL
 
@@ -92,8 +93,8 @@ async def run_proc(argv, cwd: Path | None = None, timeout: int = 60, shell: bool
         except asyncio.CancelledError:
             pass                                 # 二次取消：收尸尽力而为，但**必须**把取消原样抛出去
         raise
-    return RunCodeResult(stdout=out.decode(errors="replace")[:20000],
-                         stderr=err.decode(errors="replace")[:20000],
+    return RunCodeResult(stdout=clip(out.decode(errors="replace"), 20000),
+                         stderr=clip(err.decode(errors="replace"), 20000),
                          return_code=-1 if timed_out else (proc.returncode or 0))
 
 

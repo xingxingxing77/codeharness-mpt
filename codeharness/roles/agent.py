@@ -5,6 +5,7 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 from codeharness.const import MESSAGE_ROUTE_TO_SELF
 from codeharness.schema import Message
+from codeharness.utils.text import clip
 
 
 class ActionChoice(BaseModel):
@@ -184,7 +185,7 @@ class Agent:
         # C76（09-28 审查批）：prompt 提成变量——兜底那一路要**拿同一串**再问一次（见下）。
         prompt = (self.build_prefix()
                   + "\n可选动作: " + ", ".join(names)
-                  + "\n最新消息:\n" + (s["inbox"][-1].content[:2000] if s["inbox"] else "")
+                  + "\n最新消息:\n" + (clip(s["inbox"][-1].content, 2000) if s["inbox"] else "")
                   + "\n根据最新消息选择下一个动作；全部完成填 END。")
         async with thought_block(role=self.profile["name"]) as rep:
             try:

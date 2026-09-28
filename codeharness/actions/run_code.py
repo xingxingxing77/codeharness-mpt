@@ -7,6 +7,7 @@ import sys
 from codeharness.base.action import BaseAction
 from codeharness.const import MESSAGE_ROUTE_TO_SELF, RepoName
 from codeharness.utils.common import parse_recipient
+from codeharness.utils.text import clip
 from codeharness.document_store.artifact_store import ArtifactStore
 from codeharness.logs import logger
 from codeharness.schema import Document, Message, RunCodeContext, RunCodeResult
@@ -80,7 +81,7 @@ class RunCode(BaseAction):
             combined.summary = await self._aask(PROMPT_TEMPLATE.format(context=TEMPLATE_CONTEXT.format(
                 code_file_name=ctx.code_filename, code=(code_doc.content if code_doc else ctx.code or ""),
                 test_file_name=ctx.test_filename, test_code=(test_doc.content if test_doc else ctx.test_code or ""),
-                command=" ".join(ctx.command), outs=combined.stdout[:500], errs=combined.stderr[:10000])))
+                command=" ".join(ctx.command), outs=clip(combined.stdout, 500), errs=clip(combined.stderr, 10000))))
         except Exception as e:
             logger.warning(f"RunCode 复盘失败，按无摘要存档: {type(e).__name__}: {e}")
         # 命名对齐源 write_code.py:52 的消费侧：`test_{code_filename}.json`——WriteCode 下一轮
@@ -104,6 +105,6 @@ class RunCode(BaseAction):
             send_to = {"Engineer"}                                  # 源 mappings：具名投给开发角色
             instruct, schema = {"filename": ctx.code_filename}, "CodingContext"
         return Message(content=(f"测试通过\n{combined.summary}" if ok
-                                else f"测试失败:\n{combined.stderr[:3000]}\n{combined.summary}"),
+                                else f"测试失败:\n{clip(combined.stderr, 3000)}\n{combined.summary}"),
                        role="assistant", cause_by=self.name, sent_from="QA",
                        send_to=send_to, instruct_content=instruct, instruct_schema=schema)

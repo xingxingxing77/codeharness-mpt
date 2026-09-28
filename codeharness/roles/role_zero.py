@@ -6,6 +6,7 @@ ask_human(:456)/reply_to_human(:465)/_end(:474) → interrupt/记录/END。
 纯问函数，命中=跳过模型；默认全关，`EXP_POOL__ENABLED/ENABLE_READ/ENABLE_WRITE` 开）。"""
 import asyncio
 import json
+from codeharness.utils.text import clip   # R7
 from datetime import datetime
 from typing import TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -469,7 +470,7 @@ class RoleZero:
                         # 只发事实（工具名+参数摘要+结果首行），动词与摘要由前端派生。
                         from codeharness.report import tool_call_report
                         await tool_call_report(name, args, out)
-                        results.append({"name": name, "result": str(out)[:4000]})
+                        results.append({"name": name, "result": clip(out, 4000)})
                     else:
                         # T4-③：这是「召回/名册漏了」这件事在线上**唯一数得出来**的信号——命中率要真值才算得出
                         # （线上没有真值），但「模型要的命令不在它这一轮看见的工具面里」是一条就是一次回喂 +

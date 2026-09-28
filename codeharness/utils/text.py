@@ -127,3 +127,22 @@ def _split_text_with_ends(text: str, sep: str = "."):
             parts = []
     if parts:
         yield "".join(parts)
+
+
+
+def clip(text, n: int) -> str:
+    """按字符裁到 n 个，裁掉了就把「原长多少」挂在末尾——**含标记后总长仍 ≤ n**。
+
+    为什么必须有这句：被切的正文此前看不出被切，模型会把半截当全量下结论（C96/R3 那族的「把故障
+    演成空态」，这次被骗的是模型自己）。为什么额度从正文里扣：调用点那个上限的语义是「这条结果最多
+    占多少上下文」，标记若走额外额度等于悄悄放宽预算，且 `tests/s4_tools.py:129` 那条 `<= 10000`
+    可以一字不改。措辞只数得出不判断（C16：不写「已省略无关内容」那种替读者下结论的话）。
+
+    ponytail: `n` 比标记本身（约 16 字）还小时正文只能为 0、总长会超过 `n`。最小调用点是 500，够不到；
+    真要下探到那个量级就得先砍措辞，不是改这里。
+    """
+    s = text if isinstance(text, str) else str(text)
+    if len(s) <= n:
+        return s
+    note = "…[已截断，原长 " + str(len(s)) + " 字]"
+    return s[:max(n - len(note), 0)] + note

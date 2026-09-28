@@ -1,6 +1,7 @@
 """工具层：@tool 造 LangChain 工具，@register_tool 登记进 TOOL_REGISTRY（R8 剩下的那半件）。
 工具输出统一打 log_tool_output（第 1 步 logs.py 的槽）+ 报道块（report.py）——前端面板数据源。
 文件与命令工具的边界 = runtime.session_root()，按会话隔离（S4 判 `新`）。"""
+from codeharness.utils.text import clip   # R7
 from langchain_core.tools import tool
 from codeharness.logs import ToolLogItem, log_tool_output
 from codeharness.tools._boundary import safe_session_path as _safe   # 边界判据统一放 _boundary（台账 #7）
@@ -37,7 +38,7 @@ def read_file(path: str) -> str:
     t = _safe(path)
     if not t or not t.exists():
         return f"文件不存在: {path}"
-    return t.read_text(encoding="utf-8")[:20000]
+    return clip(t.read_text(encoding="utf-8"), 20000)
 
 
 @register_tool(tags=["terminal"])
@@ -51,7 +52,7 @@ async def execute_shell_async(command: str, timeout: int = 60) -> str:
     async with terminal_block() as rep:                     # 前端 Terminal 块（cmd+output 流式）
         await rep.cmd(command)
         r = await run_proc(command, shell=True, timeout=timeout)
-        text = ((r.stdout + r.stderr).strip() or "(无输出)")[:10000]
+        text = clip((r.stdout + r.stderr).strip() or "(无输出)", 10000)
         await rep.output(text)
         return text
 
@@ -69,7 +70,7 @@ async def search_internet(query: str) -> str:
         return f"[搜索暂不可用: {e}]"
     text = "\n\n".join(f"{i}. {r['title']}\n   {r['link']}\n   {r['snippet']}"
                        for i, r in enumerate(rows, 1))
-    return (text or "[搜索无结果]")[:8000]
+    return clip(text or "[搜索无结果]", 8000)
 
 
 @register_tool(tags=["retrieval"])
@@ -98,7 +99,7 @@ async def search_knowledge_base(query: str) -> str:
         # 一处，异常不再飘到这里。`s15 t15⑤` 钉的就是这句里必须带真实异常类名（C16：不许写成
         # 「存储不可用」那种猜出来的措辞），所以这个字段是判据要求的形状，不是顺手加的日志尾巴。
         return f"[知识库检索暂不可用: {kb.last_error or '未知原因'}]"
-    return (blocks or "[知识库里没有与这句相关的切片]")[:8000]
+    return clip(blocks or "[知识库里没有与这句相关的切片]", 8000)
 
 
 from codeharness.tools.libs import terminal as _terminal      # noqa: F401  副作用：terminal_command 登记
