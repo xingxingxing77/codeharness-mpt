@@ -1932,6 +1932,44 @@ def t26_ui_bugfix_batch():
     assert "eorg" not in ep and "geekan" not in ep, "t26⑥ 假归属 org 又渲染回来了"
 
 
+def t28_stream_ux_batch():
+    """流式 UX 批（09-28 用户报「前端不是流式输出、输出会带一大块文本出现」）的文本级守卫。
+
+    行为牙不在这儿：抽取器与翻译层接线在 `tests/s8_runner_meter.py` 的 t12（真 `_translate` +
+    bus，12 格），store 的建块/重开/fts 在 `frontend/scripts/check_stream_reopen.mjs`（14 格）。
+    这一格防的是**复燃**：把 JSON 原文重新直发、或把静默期的建块改成 content（那就是假 TTFT）。
+    """
+    root = pathlib.Path("frontend/src")
+    rd = lambda r: (root / r).read_text(encoding="utf-8")
+    runner = pathlib.Path("server/runner.py").read_text(encoding="utf-8")
+
+    # ① 抽取器接在翻译层：structured 的逐片 JSON 抽成散文才上屏
+    assert "class _ProseStream" in runner, "t28① 抽取器没了（JSON 原文会重新直接上屏）"
+    assert "MIN_PROSE = 80" in runner, "t28① 达标下限被改动（判据里的成员挑选会变）"
+    assert "value=chunk.content" not in runner, "t28① 又拿 chunk.content 原样发布了"
+    assert "value=piece" in runner, "t28① 抽出来的散文没接进发布"
+    assert "_ProseStream()).feed(text)" in runner, "t28① 抽取器没接在流分支上（`piece = text` 那种绕法会把 JSON 原文直接打上去）"
+    assert "structured 输出不进这里做打字机" not in runner, \
+        "t28① 那句「structured 不走打字机」的旧注释回来了（它正是这次病灶的登记处）"
+
+    # ② 静默期建块：发 meta 不是 content（content 会点着 fts = 假 TTFT）
+    start_seg = runner.split("if kind == \"on_chat_model_start\"", 1)
+    assert len(start_seg) == 2, "t28② start 分支形状变了，守卫指不准位置"
+    seg = start_seg[1].split("elif kind == \"on_chat_model_end\"", 1)[0]
+    assert 'name="meta"' in seg, f"t28② start 没在建块（40~51 秒静默期又是一片黑）：{seg[:120]!r}"
+    assert 'name="content"' not in seg, "t28② start 改发 content ⇒ fts 被静默期点着，TTFT 成假读数"
+
+    # ③ 前端两条：收口后的第二笔要开回来；空白 Think 行不渲染
+    ss = rd("stores/sessions.ts")
+    assert "if (b.closed) b.closed = false" in ss, "t28③ content 不再重开已闭合块（第二笔静默上屏）"
+    assert "b.tokens.push(String(ev.value ?? ''))" in ss, "t28③ 阳性对照失守：连正文累加都没了"
+    cn = rd("components/conversation/ChatNode.vue")
+    assert "b.type === 'Thought' && (open || text)" in cn, "t28③ 空白 Think 行又占一行了"
+    assert "<ReasoningRow" in cn, "t28③ 阳性对照失守：Think 行的渲染器被整条删掉了"
+    print("  ok  t28 流式 UX 批文本守卫：抽取器在位、structured 原文不许直发、静默期建块发 meta"
+          "不占 fts、前端重开与空白行两条都在")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -1943,7 +1981,8 @@ def main():
               t20_icon_names_resolve, t21_hire_surface, t22_feedback_surface,
               t23_run_after_fork, t24_checkpoint_to_chat_jump,
               t25_frontend_one_liners_c92_c96,
-              t26_ui_bugfix_batch)
+              t26_ui_bugfix_batch,
+              t28_stream_ux_batch)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

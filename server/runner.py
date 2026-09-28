@@ -2,7 +2,8 @@
 1) 会话任务入口装七个 ContextVar（SESSION_ID/CURRENT_PROJECT/CURRENT_SESSION/REPORT_SINK/CHAT_SINK/…）——
    内核的报道与插话因此零依赖 web 层；`CURRENT_PROJECT` 是产物目录名、`CURRENT_SESSION` 是会话身份（③），
    两者刻意分开（见 `codeharness/runtime.py` 里 CURRENT_SESSION 的注释）；
-2) astream_events 里只翻译两件事：LLM token（Thought 打字机）与 interrupt（ask_human）；
+2) astream_events 里只翻译两件事：LLM token（Thought 打字机——structured 的逐片 JSON 在这儿抽成
+   散文再上屏，见 `_ProseStream`）与 interrupt（ask_human）；
    其余块事件全部来自内核报道槽（report.py），此处只做 sink→bus 转发；
 3) 人工回答 = 同 graph 实例 + 同 thread_id 的 Command(resume)，且必须重装同一套 ContextVar。"""
 import asyncio
@@ -14,6 +15,121 @@ from codeharness.logs import logger
 from langgraph.types import Command
 from server.bridges import SESSION_ID
 from server.sessions import Session, SessionStatus
+
+MIN_PROSE = 80          # structured 流里「算散文」的下限；短过它的成员当字段名/枚举值丢掉
+
+_HEX = "0123456789abcdefABCDEF"
+_ESC = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_REPL = "\ufffd"
+
+
+class _ProseStream:
+    """structured 调用的逐片 JSON → 只发布其中达标的字符串成员（模型的真散文）。
+
+    为什么在翻译层抽：内核拿不到 token 流——`structured()` 走 `runnable.ainvoke`（C17 钉死的
+    usage 记账口径，换 astream 逐块累加会把 usage 与截断信号丢掉），而 `astream_events` 的
+    `on_chat_model_stream` 本来就把逐片 JSON 送到这里。改之前这一路是**原样上屏**：09-28 实测
+    一跑 956 片、15177 字的 `{\n  "language": "en"...`，而正文要等内核解析完才整段落地——
+    用户报的「不是流式输出」+「一大块文本出现」正是这两下。
+
+    三态：0 未定型（攒首部空白，裸文本要整段还回去）/ 1 JSON / 2 裸文本原样透传（＝改动前行为）。
+    JSON 模式不建语法树，只认字符串成员并解转义（含 `\\uXXXX` 与被切片切断的代理对）。
+
+    ponytail: 按「成员长度」判定，不区分 key 与 value、也不排除回显字段——`original_requirements`
+    长过 80 时会先把用户自己的需求打出来。升级路径：拿 `on_chat_model_start` 的 `data.input`
+    文本做子串去重，并记住 key 名。
+    """
+
+    __slots__ = ("mode", "head", "in_str", "phase", "ubuf", "hi", "decoded", "locked", "emitted")
+
+    def __init__(self):
+        self.mode = 0
+        self.head = ""            # 未定型期攒的分片（裸文本要整段还回去，不能吞首部空白）
+        self.in_str = False
+        self.phase = 0            # 0 正常 / 1 刚见反斜杠 / 2 正在攒 \\u 的十六进制
+        self.ubuf = ""
+        self.hi = None            # 攒着的高位代理（代理对被切断时跨片合回来）
+        self.decoded = ""         # 未达标前攒的已解文本
+        self.locked = False       # 已达标，开始逐片外发
+        self.emitted = False      # 本笔已发过成员（决定要不要补换行分隔）
+
+    def feed(self, text: str) -> str:
+        """喂一片 `chunk.content`，回应当发布的片段（可能是空串）。"""
+        if not text:
+            return ""
+        if self.mode == 2:
+            return text
+        if self.mode == 0:
+            self.head += text
+            probe = self.head.lstrip()
+            if not probe:
+                return ""                     # 全是空白，还没资格定型
+            self.mode = 1 if probe[0] == "{" else 2
+            text, self.head = self.head, ""
+            if self.mode == 2:
+                return text
+        out = []
+        for ch in text:
+            if not self.in_str:
+                if ch == '"':
+                    self.in_str = True
+                continue
+            if self.phase == 1:
+                self.phase = 0
+                if ch == "u":
+                    self.phase, self.ubuf = 2, ""
+                    continue
+                self._emit(_ESC.get(ch, ch), out)
+                continue
+            if self.phase == 2:
+                if ch not in _HEX:
+                    self.phase, self.ubuf = 0, ""
+                    self._emit(ch, out)       # 非法转义：按字面收
+                    continue
+                self.ubuf += ch
+                if len(self.ubuf) < 4:
+                    continue
+                v, self.ubuf, self.phase = int(self.ubuf, 16), "", 0
+                self._emit(self._code(v), out)
+                continue
+            if ch == "\\":
+                self.phase = 1
+                continue
+            if ch == '"':
+                self.in_str = self.locked = False
+                self.decoded = ""             # 达标与否都从头找下一个成员
+                continue
+            self._emit(ch, out)
+        return "".join(out)
+
+    def _code(self, v: int) -> str:
+        if 0xD800 <= v <= 0xDBFF:
+            self.hi = v
+            return ""
+        if 0xDC00 <= v <= 0xDFFF:
+            if self.hi is not None:
+                hi, self.hi = self.hi, None
+                return chr(0x10000 + ((hi - 0xD800) << 10) + (v - 0xDC00))
+            return _REPL
+        if self.hi is not None:
+            self.hi = None
+            return _REPL
+        return chr(v)
+
+    def _emit(self, ch: str, out: list):
+        if not ch:
+            return
+        if self.locked:
+            out.append(ch)
+            return
+        self.decoded += ch
+        if len(self.decoded) >= MIN_PROSE:
+            self.locked = True
+            if self.emitted:
+                out.append("\n")              # 成员之间给一个可见分隔
+            self.emitted = True
+            out.append(self.decoded)
+            self.decoded = ""
 
 
 def _now() -> str:
@@ -84,6 +200,9 @@ class SessionRunner:
         # (sid, run_id) -> [派发时刻, 首 token 时刻]。键用 run_id 不用节点名：同一节点在一跑里
         # 会被调多次（n_round 循环），按节点名会把复用/并发的调用串成一条。
         self._call_t0: dict[tuple[str, str], list] = {}
+        # (sid, run_id) -> 该笔调用的散文抽取器。同样按 run_id 不按节点名：一笔一个状态机，
+        # 收口（on_chat_model_end）即弃，否则跨笔调用会把上一笔的成员进度带过来。
+        self._prose: dict[tuple[str, str], _ProseStream] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def start(self, session: Session):
@@ -497,6 +616,8 @@ class SessionRunner:
         # 中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净，否则永久留着
         for k in [k for k in self._call_t0 if k[0] == sid]:
             self._call_t0.pop(k, None)
+        for k in [k for k in self._prose if k[0] == sid]:
+            self._prose.pop(k, None)
         if terminal:
             self.graphs.pop(sid, None)
             self.projects.pop(sid, None)
@@ -686,25 +807,44 @@ class SessionRunner:
         if kind == "on_chat_model_start":
             if rid:
                 self._call_t0[(sid, rid)] = [time.time(), None]
+            # 静默期要有东西可看：思考型模型在首 token 前实测要等 40~51 秒，而这段时间**没有**
+            # 真文本可发——reasoning 增量拿不到（langchain-openai 1.5.1 的 `chat_models/base.py`
+            # 模块头「API scope」明文：第三方私有字段如 `reasoning_content` 不被提取；09-28 现证
+            # 逐片数 `additional_kwargs` 恒 0）。所以这里只把这一笔的流块**建起来**：发 `meta`
+            # 而不是空 `content`，前端的 Think 行据此进 running 态扫光，而 `fts`（首 token 时刻）
+            # 与成本读数一个都不动——拿静默期冒充首 token 就是假读数。
+            node = ev.get("metadata", {}).get("langgraph_node", "")
+            self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
+                             name="meta", value={"streaming": node}, role=node)
         elif kind == "on_chat_model_end":
             self._sync_cost(sid)
+            if rid:
+                self._prose.pop((sid, rid), None)
             # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）
             node = ev.get("metadata", {}).get("langgraph_node", "")
             self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
                              name="end_marker", value=None, role=node)
             self._trace_span(sid, node, self._call_t0.pop((sid, rid), None) if rid else None)
         elif kind == "on_chat_model_stream":
-            # structured 输出不进这里做打字机（内核 Thought 块整段上屏）；这里只兜底裸文本流
+            # structured 的逐片 JSON 在这儿抽成散文（`_ProseStream` 的 docstring 记了为什么）；
+            # 裸文本流原样透传，与改动前逐字一致。
             chunk = ev["data"]["chunk"]
-            if getattr(chunk, "content", ""):
-                node = ev.get("metadata", {}).get("langgraph_node", "")
-                slot = self._call_t0.get((sid, rid)) if rid else None
-                # 首 token 只认第一个有内容的分片；没采到就是 None，不拿收口时刻凑一个假 TTFT。
-                if slot is not None and slot[1] is None:
-                    slot[1] = time.time()
-                self.bus.publish(sid, kind="report", block="Thought",
-                                 uuid=f"stream-{node}", name="content",
-                                 value=chunk.content, role=node)
+            raw = getattr(chunk, "content", "")
+            # 内容块形态（非 str）没有可抽的字符流，与改动前一致地跳过。
+            text = raw if isinstance(raw, str) else ""
+            if not text:
+                return
+            piece = self._prose.setdefault((sid, rid), _ProseStream()).feed(text)
+            if not piece:
+                return                    # 结构脚手架与短字段不上屏
+            node = ev.get("metadata", {}).get("langgraph_node", "")
+            slot = self._call_t0.get((sid, rid)) if rid else None
+            # 首 token 只认第一个**有散文**的分片；没采到就是 None，不拿收口时刻凑一个假 TTFT。
+            if slot is not None and slot[1] is None:
+                slot[1] = time.time()
+            self.bus.publish(sid, kind="report", block="Thought",
+                             uuid=f"stream-{node}", name="content",
+                             value=piece, role=node)
         # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
         # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
         # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，

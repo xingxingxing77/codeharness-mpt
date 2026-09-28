@@ -444,6 +444,9 @@ export const useSessionStore = defineStore('sessions', {
             b.meta = ev.value
             break
           case 'content':
+            // 同一节点在一场里被调多次，第二笔的流落在上一笔的 end_marker 之后：不开回来
+            // 这一行就既不振「运行中」也不跟着滚（游标单调那条闸在前面，重放与乱序都到不了这儿）。
+            if (b.closed) b.closed = false
             b.tokens.push(String(ev.value ?? ''))
             break
           case 'document':

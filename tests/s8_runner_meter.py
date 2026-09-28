@@ -268,7 +268,7 @@ def t6_events_history_bounded():
 
 async def t7_span_timing():
     """span 必须带派发时刻与首 token 时刻：尾行 TTFT、StatsLine、台账耗时列全吃这两个字段。
-    没采到 run_id 的老路（structured 输出不走打字机）落 null 而不是 0——前端据此不显示读数，
+    没采到 run_id 的老路（拿不到 run_id 就没有这笔的计时）落 null 而不是 0——前端据此不显示读数，
     显示一个恒为 0 的 TTFT 比缺数更坏。"""
     tmp, store, bus, runner, s = await _make_runner()
     rows = []
@@ -570,6 +570,116 @@ def t10_cost_injection_end_to_end():
         shutil.rmtree(Path("workspace") / project, ignore_errors=True)
 
 
+async def t12_prose_from_structured_stream():
+    """流式 UX 批：structured 的逐片 JSON 必须在翻译层抽成散文才上屏。
+
+    病灶是第一手录像（09-28 一场真跑的 SSE，`stream-act` 块 956 片 / 15177 字）：JSON 原文
+    `{\
+  "language": "en"...` 被**原样**当打字机发出去，而正文要等内核解析完整段落地——
+    用户报的「为什么前端不是流式输出」+「一大块文本出现」正是这两下。
+
+    ① 抽取器与 stdlib 参照实现（`json.decoder.scanstring` 独立走一遍）逐字一致，且对切法不敏感
+       （整片 / 3 字 / 1 字三种切法同结果——转义与代理对被切断也不能变）；
+    ② 接线（真 `_translate` + bus）：`on_chat_model_start` 建块发的是 `meta` 而不是 `content`
+       （静默期有得看，但不占 fts、不编 TTFT），JSON 逐片只出散文，收口清掉这笔的状态机，
+       同节点第二笔重新抽（不沿用上一笔的进度）；
+    ③ 裸文本流原样透传（改动前行为，一字不差）；
+    ④ 全是短字段的结构化输出 ⇒ 零发布（阳性对照：结构脚手架一个字符都不许漏出去）；
+    ⑤ 内容块形态（`content` 不是 str）不发布、也不炸。
+    """
+    from json.decoder import scanstring
+    from server.runner import MIN_PROSE, _ProseStream
+
+    long_a = ("快排是典型的分治排序算法，核心逻辑是选取基准元素将待排序数组划分为「小于等于基准」"
+              "和「大于基准」的两个子数组，再递归对子数组执行相同排序逻辑，平均时间复杂度 O(n log n)。")
+    long_b = ("Second goal: a technically accurate, concise explanation of binary search that a "
+              "non-technical reader can follow in under sixty seconds.")
+    txt = json.dumps({"language": "en", "original_requirements": "短需求",
+                      "product_goals": [long_a], "requirement_analysis": long_b},
+                     ensure_ascii=False, indent=2)
+
+    def ref(s):
+        """参照实现：按序列化顺序扫所有字符串成员，取长度达标者按序用换行接起来。"""
+        found, i = [], 0
+        while i < len(s):
+            if s[i] == '"':
+                v, end = scanstring(s, i + 1, False)
+                if len(v) >= MIN_PROSE:
+                    found.append(v)
+                i = end
+            else:
+                i += 1
+        return "\n".join(found)
+
+    want = ref(txt)
+    assert want == long_a + "\n" + long_b, f"参照实现挑的成员不对：{want[:60]!r}"
+    for step in (len(txt), 3, 1):
+        pr = _ProseStream()
+        got = "".join(pr.feed(txt[i:i + step]) for i in range(0, len(txt), step))
+        assert got == want, f"切法 step={step} 改写了结果：{got[:60]!r}"
+    assert "{" not in want and '": ' not in want, f"抽出来的还是 JSON：{want[:40]!r}"
+
+    tmp, store, bus, runner, s = await _make_runner()
+    runner.costs[s.id] = CostManager()
+    meta = {"langgraph_node": "PM"}
+
+    def contents(uuid=None, after=0):
+        return [e for e in bus.history(s.id)[after:] if e.kind == "report"
+                and e.name == "content" and (uuid is None or e.uuid == uuid)]
+
+    runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "r1", "metadata": meta})
+    opened = [e for e in bus.history(s.id) if e.kind == "report" and e.uuid == "stream-PM"]
+    assert opened and opened[0].name == "meta", \
+        f"start 没建块、或建块发的不是 meta（静默期全黑／fts 被点着是两种坏法）：{[e.name for e in opened]}"
+    assert not [e for e in opened if e.name == "content"], \
+        "静默期发 content ⇒ 前端把 b.fts 点着，TTFT 从「真散文首片」变成「调用派发」= 假读数"
+    assert runner._call_t0[(s.id, "r1")][1] is None, "start 就把 ft 写了，span 的 TTFT 是编的"
+
+    mark = len(bus.history(s.id))
+    for i in range(0, len(txt), 7):
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r1", "metadata": meta,
+                                 "data": {"chunk": AIMessage(content=txt[i:i + 7])}})
+    got = "".join(e.value for e in contents("stream-PM", mark))
+    assert got == want, f"逐片抽出来的散文与参照实现不符：{got[:60]!r}"
+    leak = [e.value for e in contents("stream-PM", mark) if "{" in e.value or '"language"' in e.value]
+    assert not leak, f"结构脚手架漏上屏：{leak[:2]}"
+    assert runner._call_t0[(s.id, "r1")][1] is not None, "散文首片没点着 ft"
+
+    runner._translate(s.id, {"event": "on_chat_model_end", "run_id": "r1", "metadata": meta})
+    assert (s.id, "r1") not in runner._prose, "收口没清抽取器，长跑会一直攒状态机"
+    assert [e for e in bus.history(s.id) if e.name == "end_marker" and e.uuid == "stream-PM"], \
+        "end 不收口 stream 块 ⇒ 跑完了光标一直闪（与 t7 同族）"
+
+    mark = len(bus.history(s.id))
+    runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r2", "metadata": meta,
+                             "data": {"chunk": AIMessage(content=txt)}})
+    got2 = "".join(e.value for e in contents("stream-PM", mark))
+    assert got2 == want, f"同节点第二笔没重新抽（沿用了上一笔的进度）：{got2[:60]!r}"
+
+    raw_txt = "这是没有 JSON 包裹的裸文本流，逐片到达时应当一字不差地透传回来。"
+    mark = len(bus.history(s.id))
+    runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "r3",
+                             "metadata": {"langgraph_node": "raw"}})
+    for i in range(0, len(raw_txt), 4):
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r3",
+                                 "metadata": {"langgraph_node": "raw"},
+                                 "data": {"chunk": AIMessage(content=raw_txt[i:i + 4])}})
+    assert "".join(e.value for e in contents("stream-raw", mark)) == raw_txt, "裸文本流被抽取器吃了"
+
+    short = json.dumps({"issue_type": "REQUIREMENT", "reason": "短"}, ensure_ascii=False, indent=2)
+    mark = len(bus.history(s.id))
+    runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r4", "metadata": meta,
+                             "data": {"chunk": AIMessage(content=short)}})
+    assert not contents(None, mark), f"全是短字段也该零发布（别把 {short[:12]!r} 打上去）"
+
+    mark = len(bus.history(s.id))
+    runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "r5", "metadata": meta,
+                             "data": {"chunk": type("C", (), {"content": [{"type": "text", "text": "x"}]})()}})
+    assert not contents(None, mark), "内容块形态（content 非 str）不该发布"
+    _ok("t12", "structured 的逐片 JSON 抽成散文才上屏：start 建块不占 fts、逐片与参照实现逐字一致、"
+               "收口清状态机、同节点第二笔重抽；裸文本原样透传、短字段与内容块零发布")
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -582,7 +692,8 @@ def main():
     t9_two_endpoints_one_ledger()
     t8_two_currency_buckets()
     t10_cost_injection_end_to_end()      # C19 未验②：注入链端到端（要起本机桩，放最后）
-    print("\ns8_runner_meter: 11/11 全绿")
+    asyncio.run(t12_prose_from_structured_stream())   # 流式 UX 批：抽取器与翻译层接线
+    print("\ns8_runner_meter: 12/12 全绿")
 
 
 if __name__ == "__main__":

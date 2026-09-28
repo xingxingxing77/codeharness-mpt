@@ -7,8 +7,11 @@
     </div>
   </div>
 
-  <!-- Thought：Think 折叠披露行（参考项目里它从来不是正文） -->
-  <ReasoningRow v-else-if="b.type === 'Thought'" :b="b" :is-open="isOpen" @toggle="(k, v) => $emit('toggle', k, v)" />
+  <!-- Thought：Think 折叠披露行（参考项目里它从来不是正文）。
+       收口后仍一个字没有的行不渲染：打字机改抽真散文后，短字段的结构化调用（选动作那一类）
+       全程零发布，留一行空白 Think 比原来的 JSON 乱码更没有信息；运行中照旧渲染——
+       首 token 前那 40~51 秒的静默期就靠这一行的扫光表态。 -->
+  <ReasoningRow v-else-if="b.type === 'Thought' && (open || text)" :b="b" :is-open="isOpen" @toggle="(k, v) => $emit('toggle', k, v)" />
 
   <!-- Docs：全宽正文 + 产物链接 -->
   <div v-else-if="isProse" class="prose" :data-chat-anchor-key="b.key" :data-streaming="open ? 'true' : undefined">
