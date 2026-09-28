@@ -1995,7 +1995,7 @@ def t28_stream_ux_batch():
 
     # ① 抽取器接在翻译层：structured 的逐片 JSON 抽成散文才上屏
     assert "class _ProseStream" in runner, "t28① 抽取器没了（JSON 原文会重新直接上屏）"
-    assert "MIN_PROSE = 80" in runner, "t28① 达标下限被改动（判据里的成员挑选会变）"
+    assert "MIN_PROSE = 24" in runner, "t28① 达标下限被改动（判据里的成员挑选会变；80 是活体证伪的旧值）"
     assert "value=chunk.content" not in runner, "t28① 又拿 chunk.content 原样发布了"
     assert "value=piece" in runner, "t28① 抽出来的散文没接进发布"
     assert "_ProseStream()).feed(text)" in runner, "t28① 抽取器没接在流分支上（`piece = text` 那种绕法会把 JSON 原文直接打上去）"
