@@ -1165,6 +1165,60 @@ def t51_write_path_pins_encoding_and_newline():
           f"PYTHONUTF8=0 子进程写出的仍是 utf-8+LF、两文件的文本写调用全带 encoding+newline")
 
 
+def t52_action_tree_is_importable_and_tier_names_have_a_home():
+    """删掉 `requirement_analysis/requirement/pic2txt.py` 这座孤岛之后，把「为什么删」变成常驻不变量。
+
+    起因（09-29 普查，R7 §1.5 的副产品）：`pic2txt.py` 四处坏引用——`:18` 从 `utils.text` 导
+    `encode_image`（真身在 `utils/common.py:831`）⇒ **模块级 ImportError**；`:21` 的装饰器
+    `register_tool` 早被 R8 摘掉却还在用；`:22` 的基类 `Action` 从没 import；`:96` 调
+    `self._aask(prompt, images=...)` 而 `base/action.py:65` 的 `_aask` 根本没有 `images` 通道
+    （`provider/gateway.py:11` 明写「源 `aask` 的 `images` 参数未搬」）。它**全仓零消费者**
+    （`requirement/__init__.py` 是空的、父包只导 `evaluate_action`）⇒ 所以从没炸过，
+    但 `tools/_approval.py` 的分级表里躺着 `"Pic2Txt"` 这个名字，谁哪天把那批 action 挂进注册表，
+    就炸在 import 上。拍板口径：删岛（补多模态通道属另一件，本仓按能力覆盖验收、不追源文件数）。
+
+    两格都打在**整棵 actions 树**上，不是只盯被删那一处：
+      ① actions 树里**每个模块都必须 import 得起来**（接线雷区清零）；**仪器对照**：采集器必须
+         真数到 ≥30 个模块——数到 0 既可能是「全修好了」也可能是采集器坏了，后者更常见。
+      ② `ACTION_TIER` 里**每个名字都必须对应一个真能 import 到的 Action 类**；**仪器对照**：
+         同一个判定函数必须认得出 `"WritePRD"` 有归宿、认得出 `"NoSuchActionXYZ"` 没有——
+         缺了这条，「一个都没缺」这句结论可能是恒绿的空函数给的。
+    """
+    import importlib
+    import pkgutil
+
+    import codeharness.actions as actions_pkg
+
+    from codeharness.tools._approval import ACTION_TIER
+
+    mods, fails, classes = 0, [], set()
+    for m in pkgutil.walk_packages(actions_pkg.__path__, actions_pkg.__name__ + "."):
+        mods += 1
+        try:
+            mod = importlib.import_module(m.name)
+        except Exception as e:                              # 不许静默跳过：这一条就是这个格存在的理由
+            fails.append((m.name, f"{type(e).__name__}: {str(e)[:80]}"))
+            continue
+        for n in dir(mod):
+            o = getattr(mod, n, None)
+            if isinstance(o, type) and getattr(o, "__module__", "") == m.name:
+                classes.add(n)
+
+    assert mods >= 30, f"①仪器坏了：actions 树只数到 {mods} 个模块（现值应 ≥30），采集没跑起来谈不上「零失败」"
+    assert not fails, f"①失效：actions 树里有 import 不起来的模块（接线雷区）：{fails}"
+
+    def homeless(names):
+        return sorted(n for n in names if n not in classes)
+
+    assert homeless({"WritePRD"}) == [], "②仪器坏了：真存在的 Action 被判成无归宿（判定函数恒真）"
+    assert homeless({"NoSuchActionXYZ"}) == ["NoSuchActionXYZ"], \
+        "②仪器坏了：假名字没被判成无归宿（判定函数恒假，整个 ② 会恒绿）"
+    loose = homeless(ACTION_TIER.keys())
+    assert not loose, f"②失效：分级表里这些名字没有可达的 Action 类（免审/分级给了不存在的东西）：{loose}"
+
+    print(f"  ok  t52 actions 树 {mods} 个模块全部可 import、分级表 {len(ACTION_TIER)} 个名字个个有归宿")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1207,7 +1261,8 @@ def main():
               t47_new_held_out_after_desc_normalization,
               t48_editor_read_path_is_locale_independent, t49_cancel_reaps_child_and_pumps,
               t50_tool_state_is_keyed_by_session_not_project_name,
-              t51_write_path_pins_encoding_and_newline]
+              t51_write_path_pins_encoding_and_newline,
+              t52_action_tree_is_importable_and_tier_names_have_a_home]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

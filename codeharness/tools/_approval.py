@@ -48,7 +48,7 @@ _ACTION_WORKSPACE = {                                   # 产出 Document / 写�
     "EvaluateAction", "WriteFramework", "WriteContent", "WriteDesign", "WriteDirectory",
     "WriteTasks", "WriteCode", "WriteCodeReview", "WriteCodePlanAndChange", "WriteTest",
     "WriteTeachingPlan", "SummarizeCode", "RebuildClassView", "FixBug", "PrepareDocuments",
-    "ExtractReadMe", "Pic2Txt", "InvoiceOCR", "DetectInteraction", "CompressExternalInterfaces",
+    "ExtractReadMe", "InvoiceOCR", "DetectInteraction", "CompressExternalInterfaces",
 }
 ACTION_TIER = {**{n: "readonly" for n in _ACTION_READONLY},
                **{n: "workspace_write" for n in _ACTION_WORKSPACE},

@@ -28,7 +28,7 @@ tests/s6_sop.py
 | 2b 搜索研究 | `research` 343 · `search_enhanced_qa` 292 · `search_and_summarize` 147 · `generate_questions` 25 · `analyze_requirements` 76 | ~880 | 联网部分走 S4 的 tool 注册表,**不在 Action 里直接发 HTTP** |
 | 2c 代码理解 | `import_repo` 226 · `rebuild_class_view` 235 · `rebuild_sequence_view` 605 · `summarize_code` 123 · `extract_readme` 123 | ~1,310 | **两个硬前置**：① `repo_parser.py`（你现项目 63 行 vs 源 1,023）；② `utils/{graph_repository,di_graph_repository,visual_graph_repo}.py` 724 行 —— SPO 三元组知识图谱存储，这四个 Action 全靠它落 `graph_repo/*.json`。**该三件套我原先误判为 `弃`，自查后已改判 `改`**（详见判定表 §一 末第二条纪律） |
 | 2d `di/` | `write_plan` 88 · `write_analysis_code` 74 · `execute_nb_code` 328 · `ask_review` 62 | ~550 | `execute_nb_code` 走 `sandbox`;无 kernel 环境测试标 optional skip |
-| 2e 垂直 SOP 模板 | `requirement_analysis/` 12 件 | ~1,400 | **平台视角:这不是必须内核,是一个 SOP 模板**。批 5 做,且可以先只做 `write_trd` + `evaluate_trd` 打通模板机制 |
+| 2e 垂直 SOP 模板 | `requirement_analysis/` 11 件（09-29 删 `requirement/pic2txt.py`：四处坏引用、全仓零消费者） | ~1,400 | **平台视角:这不是必须内核,是一个 SOP 模板**。批 5 做,且可以先只做 `write_trd` + `evaluate_trd` 打通模板机制 |
 | 2f 交互类 | `talk_action` 168 · `skill_action` 113 · `invoice_ocr` 189 · `write_docstring` 218 · `write_teaching_plan` 191 · `write_tutorial` 65 · `prepare_interview` 25 | ~950 | OCR/TTS 类外部服务判 `弃`,落点可省 |
 
 **每个 Action 的统一改造动作**(五处,逐文件重复):
