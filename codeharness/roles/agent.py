@@ -101,7 +101,7 @@ class Agent:
                 else (s.get("memory") or [None])[-1])
         args = {"cause_by": str(getattr(trig, "cause_by", "") or ""),
                 "send_from": str(getattr(trig, "send_from", "") or ""),
-                "content": (getattr(trig, "content", "") or "")[:500],
+                "content": clip(getattr(trig, "content", "") or "", 500),
                 "instruct": getattr(trig, "instruct_content", None) or {}}
         return name, args
 

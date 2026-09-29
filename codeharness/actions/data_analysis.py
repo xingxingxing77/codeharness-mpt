@@ -3,6 +3,7 @@ WriteAnalysisCode（源 actions/di/write_analysis_code.py 语义）+ RunPythonCo
 from codeharness.base.action import BaseAction
 from codeharness.schema import Message
 from codeharness.tools.sandbox import run_python_code
+from codeharness.utils.text import clip
 
 ANALYSIS_CODE_PROMPT = """You are a data analyst. Write ONE complete Python script (single ```python block) that:
 1. Generates or loads the data described in the task (no network required — synthesize deterministic sample data).
@@ -23,5 +24,5 @@ class RunPythonCode(BaseAction):
     async def run(self, msg: Message) -> Message:
         result = await run_python_code(msg.content)
         output = result.stdout or result.stderr
-        return Message(content=f"[执行结果 rc={result.return_code}]\n{output[:4000]}",
+        return Message(content=f"[执行结果 rc={result.return_code}]\n{clip(output, 4000)}",
                        role="assistant", cause_by=self.name, sent_from="DataAnalyst")

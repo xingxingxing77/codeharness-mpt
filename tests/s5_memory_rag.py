@@ -2041,11 +2041,17 @@ def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
         assert clip(n, n) == str(n), "②失效：短的非 str 入参被改写（本该只是 str() 一遍）"
 
     # ④ 复燃守卫：(模块, 该文件里不许再作为切片上界出现的预算, 该文件应有的 clip 调用数)
+    # 站点 16 处 = 规格 §1.5 那 10 处 + 同形补收 6 处（run_code:107、data_analysis、debug_error、
+    # plan_and_act 两处、agent 审批摘要）。banned 只列**这些站点用过**的预算整数：文件里其余
+    # [:60]/[:120]/[:200] 是一行式摘要与异常文案片段（设计就是取前 N 字），不属于本族，不钉。
     SITES = [("codeharness.tools", {20000, 10000, 8000}, 4),          # read_file / shell / 搜索 / 知识库工具
              ("codeharness.tools.sandbox", {20000}, 2),               # stdout / stderr
              ("codeharness.actions.run_code", {500, 10000, 3000}, 3),  # 复盘两段 + 失败消息里的 stderr
+             ("codeharness.actions.data_analysis", {4000}, 1),         # 沙箱产出回喂下一轮
+             ("codeharness.actions.debug_error", {4000}, 1),           # 修复 prompt 的 logs 段
+             ("codeharness.strategy.plan_and_act", {2000, 6000}, 2),   # 人看的验收载荷 / 汇总 prompt
              ("codeharness.roles.role_zero", {4000}, 1),              # 动态线工具结果回喂
-             ("codeharness.roles.agent", {2000}, 1)]                  # 经典线收件进 prompt
+             ("codeharness.roles.agent", {500, 2000}, 2)]             # 经典线收件进 prompt / 审批卡摘要
 
     def _collect(src_text):
         """采出「切片上界常量」与「clip( 调用数」，两处共用一次 parse。"""

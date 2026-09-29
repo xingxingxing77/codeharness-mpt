@@ -14,6 +14,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 from codeharness.schema import Message
 from codeharness.actions.data_analysis import WriteAnalysisCode, RunPythonCode
+from codeharness.utils.text import clip
 
 # 源 actions/di/ask_review.py:13 逐字
 CONTINUE_WORDS = ["confirm", "continue", "c", "yes", "y"]
@@ -125,7 +126,7 @@ class PlanAndActAgent:
             return {"finished": True}                       # 失败即停（可接 replan，源同语义）
         if not self.auto_run:
             reply = interrupt({"review": "task", "task": last.get("task", ""),
-                               "output": str(last.get("output", ""))[:2000]})
+                               "output": clip(last.get("output", ""), 2000)})
             if not _confirmed(reply):
                 return {"finished": False}
         nxt = s["task_idx"] + 1
@@ -134,7 +135,7 @@ class PlanAndActAgent:
     async def _summarize(self, s: PlanAndActState):
         summary = await self.llm.aask(
             "汇总以下任务执行结果，输出数据分析结论：\n" +
-            json.dumps(s["results"], ensure_ascii=False)[:6000], tag="DataInterpreter")
+            clip(json.dumps(s["results"], ensure_ascii=False), 6000), tag="DataInterpreter")
         return {"results": s["results"] + [{"task": "__summary__", "output": summary}]}
 
     def as_node(self, name: str):
