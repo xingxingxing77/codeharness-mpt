@@ -919,12 +919,33 @@ async def t12_prose_from_structured_stream():
     runner6._forget(s6.id, terminal=True)
     runner7._forget(s7.id, terminal=True)
 
+    # ⑩ 经典线那笔「选动作」（ActionChoice）：这块挂名单**今天不改一个字节**，这句话得有读数而不是口号。
+    #    现证的边界：装配出的 11 个动作名最长 22 字（`WriteCodePlanAndChange`），够不到 MIN_PROSE=24，只差 2 字。
+    from codeharness.roles.agent import ActionChoice
+
+    def feed(only, txt, step=5):
+        ps = _ProseStream("", only)
+        return "".join(ps.feed(txt[i:i + step]) for i in range(0, len(txt), step))
+
+    think8 = "上游产物已就绪，本步该写代码了；先确认文件名与设计里的接口一致，再决定要不要补一轮评审。"
+    a_txt = json.dumps({"thought": think8, "action": "WriteCodePlanAndChange"}, ensure_ascii=False, indent=2)
+    assert ActionChoice.prose_fields == ("thought",), "⑩ ActionChoice 没声明名单（这块今天全靠长度兜着）"
+    assert len("WriteCodePlanAndChange") < MIN_PROSE <= len("summarize_and_rewrite_the_whole_module"), \
+        "⑩ 这条判据的前提变了（真动作名长过门槛，或顶界那档不够长），下面两格的含义要重写"
+    assert feed(None, a_txt) == feed(ActionChoice.prose_fields, a_txt) == think8, \
+        f"⑩ 挂名单该零差别：不挂={feed(None, a_txt)[:40]!r} 挂={feed(ActionChoice.prose_fields, a_txt)[:40]!r}"
+    over = json.dumps({"thought": "该写代码了，这一步很短。", "action": "summarize_and_rewrite_the_whole_module"},
+                      ensure_ascii=False, indent=2)
+    assert "summarize_and_rewrite_the_whole_module" in feed(None, over), \
+        "⑩ 阳性对照失守：按长度挑那一版本该把这个 36 字的动作名整条打上屏（不然这条守卫防的是不存在的形状）"
+    assert feed(("thought",), over) == "", "⑩ 名单没挡住顶到界的动作名（挂它就没意义了）"
+
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
                "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
                "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}；"
                "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）；"
                "块声明 `prose_fields` 时按**键名**门控（mermaid 源码、键名本身、commands 的 args 正文都不上屏，"
-               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出；Task 块靠开块那条 `meta` 进落点表（没它就只落兜底行，做了阳性对照）")
+               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出；Task 块靠开块那条 `meta` 进落点表（没它就只落兜底行，做了阳性对照）；ActionChoice 挂名单今天零差别、而顶到界那档（36 字动作名）只有挂名单的不发")
 
 
 def t13_assembly_ledger_identity_recall():

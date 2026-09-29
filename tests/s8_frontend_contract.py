@@ -2058,8 +2058,9 @@ def t28_stream_ux_batch():
     from codeharness.actions.design_api import DesignOutput
     from codeharness.actions.project_management import TaskList
     from codeharness.actions.write_prd import PRDOutput
+    from codeharness.roles.agent import ActionChoice
     from codeharness.roles.role_zero import ZeroThought
-    for schema in (PRDOutput, DesignOutput, ZeroThought, TaskList):
+    for schema in (PRDOutput, DesignOutput, ZeroThought, TaskList, ActionChoice):
         spec = schema.model_json_schema()
         # 名单是按键名认的，而抽取器在任意一层都拿「当前层的键名」去比对 ⇒ 校验也得按整棵树认：
         # instruction 不在 TaskList 的 properties 里，它在 task_list 每一项（TaskItem）里面。
@@ -2073,7 +2074,7 @@ def t28_stream_ux_batch():
                                 "file_list", "requirement_pool", "competitive_quadrant_chart",
                                 "data_structures_and_interfaces", "program_call_flow", "commands",
                                 "filename", "task_id", "dependent_task_ids", "required_packages",
-                                "task_list"}), \
+                                "task_list", "action"}), \
             f"t28④ {schema.__name__} 把标识符/文件名/图表源码或抄用户原话的字段放进了名单"
     assert 'docs_block("prd", role="PM", prose=PRDOutput)' in \
         pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd 开块没带名单"
@@ -2084,6 +2085,11 @@ def t28_stream_ux_batch():
     pm = pathlib.Path("codeharness/actions/project_management.py").read_text(encoding="utf-8")
     assert 'task_block(role="PMManager", prose=TaskList)' in pm, \
         "t28④ WriteTasks 的开块处没把 TaskList 的名单带进去"
+    ag = pathlib.Path("codeharness/roles/agent.py").read_text(encoding="utf-8")
+    assert 'thought_block(role=self.profile["name"], prose=ActionChoice)' in ag, \
+        "t28④ 经典线那笔选动作的开块处没带名单（门控点漏了这一处，动作名长过门槛就整条上屏）"
+    plain = ag.count('thought_block(role=self.profile["name"])')
+    assert plain == 2,         't28④ 经典线另两处 thought_block 是纯 content 广播（里面没有模型调用），不该被顺手写成门控点：现命中 ' + str(plain) + ' 处'
     r0 = pathlib.Path("codeharness/roles/role_zero.py").read_text(encoding="utf-8")
     assert 'thought_block(role=self.profile["name"], prose=ZeroThought)' in r0, \
         "t28④ 动态线的思考块没声明名单（要写进文件的正文会重新进流）"

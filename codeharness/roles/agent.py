@@ -1,6 +1,6 @@
 """单智能体 = role.py 语义的 LangGraph 化。
 对照：_observe(:399)/_think(:340)/_act(:381)/_react(:458)/_get_prefix(:323) 逐行翻译见 docs/05。"""
-from typing import TypedDict
+from typing import ClassVar, TypedDict
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 from codeharness.const import MESSAGE_ROUTE_TO_SELF
@@ -10,6 +10,12 @@ from codeharness.utils.text import clip
 
 class ActionChoice(BaseModel):
     """REACT 模式的 LLM 决策（替代源 STATE_TEMPLATE 数字游戏，roles/prompt.py）"""
+
+    # 打字机只放行这段思考。**今天它不改一个字节**（现证：装配出的 11 个动作名最长 22 字 =
+    # `WriteCodePlanAndChange`，够不到 MIN_PROSE=24，`only=None` 与挂名单两种口径输出逐字相同），
+    # 挂它挡的是那个只差 2 字的边界：动作名一旦长过 24 就会整条打上屏（顶到界那档已现证）。
+    prose_fields: ClassVar[tuple] = ("thought",)
+
     thought: str
     action: str            # action 名或 "END"
 
@@ -187,7 +193,7 @@ class Agent:
                   + "\n可选动作: " + ", ".join(names)
                   + "\n最新消息:\n" + (clip(s["inbox"][-1].content, 2000) if s["inbox"] else "")
                   + "\n根据最新消息选择下一个动作；全部完成填 END。")
-        async with thought_block(role=self.profile["name"]) as rep:
+        async with thought_block(role=self.profile["name"], prose=ActionChoice) as rep:
             try:
                 choice: ActionChoice = await self.llm.structured(ActionChoice).ainvoke(prompt)
             except Exception as e:
