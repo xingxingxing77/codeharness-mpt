@@ -2080,6 +2080,61 @@ def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
     print("  ok  t47 clip 三格（七档预算+非 str / 不超长一字不多 / 原长是真值）与 AST 双向守卫全绿")
 
 
+def t48_metric_round_trips_its_own_dump():
+    """`Metric.score` 的注解是 `Score` 而默认值是 `None`——**类型在骗默认值**。
+
+    现证形状（不是留账原话那句「`model_dump()` 会抛」，dump 不抛）：`Metric()` 构造不抛、
+    `model_dump()` 出来的 `{'score': None}` **自己 validate 不回来**，dict 与 json 两条往返各抛一次
+    `ValidationError: score`（pydantic 2.13.4 默认不校验 default，所以只有回读/显式传 None 才现形）。
+    经验池的读写正是「dump 进 payload、validate 回对象」那条路，且 `decorator.py:5` 的自述就写着
+    「`Metric.score` 留 None 不造数据」——照它自己的意图写 `Metric(score=None)` 当场炸。
+
+    三格：① 两条自往返 + 显式 None 两形都不抛且 `.score is None`（这四形正是修前的红形状）；
+    ② **阳性对照**：放宽成 `Any` 那种假修必须当场红——`Metric(score="甲")` 仍要抛，
+       而真 `Score(val=7)` 往返后 `val` 还是 7（信息没被抹平）；
+    ③ 复燃守卫打在 **AST** 上：`Metric` 里 `score` 的注解必须是含 None 的联合类型，默认值仍是 None。
+    """
+    import ast
+    import inspect
+
+    from codeharness.exp_pool.schema import Metric, Score
+
+    # ① 修前的四形红形状，现在必须全过
+    m = Metric()
+    assert Metric.model_validate(m.model_dump()).score is None, "①失效：dict 自往返仍然 validate 不回来"
+    assert Metric.model_validate_json(m.model_dump_json()).score is None, "①失效：json 自往返仍然 validate 不回来"
+    assert Metric(score=None).score is None, "①失效：显式按 docstring 的意图留 None 仍抛"
+    assert Metric.model_validate({"score": None}).score is None, "①失效：payload 里带 score:null 仍抛"
+
+    # ② 阳性对照：可空不等于不设防。假修（放宽成 object/Any）在这里红——
+    #    注意 **dict 不在拒绝名单里**：pydantic 的 smart 模式把 `{'val': 7}` 强制成 Score 是正当行为，
+    #    把它当「放宽」判过是本格第一版的错（chainM 的 head 当场红给我看的正是这条错判）。
+    for bad in ("甲", 7, ["val", 7]):
+        try:
+            Metric(score=bad)
+        except Exception:
+            pass
+        else:
+            raise AssertionError(f"②失效：score={bad!r} 竟然通过——类型被放宽成 object/Any 了，这不是修是藏")
+    coerced = Metric(score={"val": 7, "reason": "好"})
+    assert isinstance(coerced.score, Score) and coerced.score.val == 7, \
+        f"②失效：dict 载荷没被强制成 Score（读回形状变了）：{coerced.score!r}"
+    back = Metric.model_validate_json(Metric(score=Score(val=7, reason="好")).model_dump_json())
+    assert (back.score.val, back.score.reason) == (7, "好"), f"②失效：真 Score 往返后变了形：{back.score}"
+
+    # ③ AST 守卫：注解必须是联合类型且含 None
+    cls = next(node for node in ast.walk(ast.parse(inspect.getsource(inspect.getmodule(Metric))))
+               if isinstance(node, ast.ClassDef) and node.name == "Metric")
+    ann = next(node for node in cls.body
+               if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", "") == "score")
+    a = ast.unparse(ann.annotation)
+    assert ("|" in a or a.startswith("Optional[")) and "None" in a, \
+        f"③失效：Metric.score 的注解是 {a!r}，既不是联合也不是 Optional——默认 None 又没人认领了"
+    default = ast.literal_eval(next(k.value for k in ann.value.keywords if k.arg == "default"))
+    assert default is None, f"③失效：默认值不再是 None（现值 {default!r}），本格的形状变了就要重判"
+    print("  ok  t48 Metric 自往返两条都回得来、score 仍受类型约束（非 Any）、AST 钉住可空注解")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -2113,7 +2168,8 @@ def main():
               t44_overflow_counters_keep_the_retry_semantics,
               t45_shared_readers_short_circuit_once_per_session,
               t46_experience_state_key_is_gone_and_recall_still_happens,
-              t47_clip_marks_the_truncation_and_the_sites_still_call_it]
+              t47_clip_marks_the_truncation_and_the_sites_still_call_it,
+              t48_metric_round_trips_its_own_dump]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
