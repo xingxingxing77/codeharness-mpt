@@ -771,10 +771,96 @@ async def t12_prose_from_structured_stream():
     got9 = "".join(e.value for e in contents("stream-PM", mark))
     assert got9 == fresh, f"⑦ 扁平列表形状没被认出来（只认 dict＝半条规则）：{got9[:70]!r}"
     runner._translate(s.id, {"event": "on_chat_model_end", "run_id": "r9", "metadata": meta})
+
+    # ⑧ 白名单门控：块开块 meta 里声明了 `prose_fields` ⇒ 逐片只放行名单里的字段。
+    #    这一格同时钉住「按长度挑」那一版的两个漏（都是现证，不是设想）：
+    #    `data_structures_and_interfaces`（30 字）长过 MIN_PROSE=24，作为**键名**被打上屏；
+    #    `program_call_flow` 的值是 mermaid 源码，也长过门槛。名单之外还有嵌套一层：
+    #    `commands[].args.content` 是要写进文件的正文，它绝不该出现在思考行里。
+    #    名单里**必须有一个多项列表字段**（`product_goals`）：变异刀 m8「把每个闭合的串都当键名」在第一版
+    #    判据里三支全存活——值闭合后键名失焦成「上一个串的文字」，而当时名单内每个字段只有一个值，
+    #    失焦与不误发观察不到。列表的第二项就是那个可观察处（真 payload 里 `product_goals`/`user_stories`
+    #    /`competitive_analysis` 都是 list[str]，这不是设想）。
+    appr = "用 Flask 起一个静态站点，路由只有一条 index，页面里用一段话解释二分查找的三步。"
+    goal_a = "第一条目标：让读者六十秒内明白二分查找在比较什么、为什么每次都少一半。"
+    goal_b = "第二条目标：页面零依赖、打开即用，不需要构建步骤也不需要后端服务。"
+    unclear = "没有需要澄清的地方，需求已经足够确定一个静态页面的范围。"
+    design_txt = json.dumps({
+        "implementation_approach": appr,
+        "product_goals": [goal_a, goal_b],
+        "file_list": ["index.html", "app.py"],
+        "data_structures_and_interfaces": "classDiagram\n    Class01 <|-- AveryLongClass : 这条是 mermaid 源码",
+        "program_call_flow": "sequenceDiagram\n    A->>B: 这条也是 mermaid 源码",
+        "anything_unclear": unclear}, ensure_ascii=False, indent=2)
+
+    tmp3, store3, bus3, runner3, s3 = await _make_runner()
+    runner3.costs[s3.id] = CostManager()
+    sink3 = runner3._make_sink(s3.id)
+    sink3({"block": "Docs", "uuid": "doc-2", "name": "meta", "role": "Architect",
+           "value": {"type": "design",
+           "prose_fields": ["implementation_approach", "product_goals", "anything_unclear"]}})
+    assert runner3._live_blk[s3.id][2] == ["implementation_approach", "product_goals", "anything_unclear"], \
+        "⑧ 开块 meta 里的名单没跟着块登记（门控拿不到名单＝静默退回按长度挑，正是本仓踩过两次的空转形状）"
+    # 名单要活得过非 meta 事件：内核在块里发 object/content 时不带 value 里的那些键
+    sink3({"block": "Docs", "uuid": "doc-2", "name": "path", "value": "design.md", "role": "Architect"})
+    assert runner3._live_blk[s3.id][2] is not None, "⑧ 一个非 meta 事件就把登记好的名单冲掉了"
+
+    for i in range(0, len(design_txt), 6):
+        runner3._translate(s3.id, {"event": "on_chat_model_stream", "run_id": "g1",
+                                   "metadata": {"langgraph_node": "Arch"},
+                                   "data": {"chunk": AIMessage(content=design_txt[i:i + 6])}})
+    live8 = [e for e in bus3.history(s3.id) if e.name == "live"]
+    assert live8 and all(e.uuid == "doc-2" and e.block == "Docs" for e in live8), \
+        f"⑧ 门控过的逐片没投进声明名单的那块：{[(e.uuid, e.block) for e in live8][:3]}"
+    got8 = "".join(e.value for e in live8)
+    assert got8 == appr + "\n" + goal_a + "\n" + goal_b + "\n" + unclear, \
+        f"⑧ 名单内的字段没照发（列表的第二项被丢掉＝键名在值闭合后失焦），或发多了：{got8[:70]!r}"
+    for banned in ("classDiagram", "sequenceDiagram", "data_structures_and_interfaces"):
+        assert banned not in got8, f"⑧ 名单外的成员漏上屏：{banned!r}"
+
+    # 阳性对照：同一份 payload，块**没声明**名单 ⇒ 退回按长度挑，那三样都该出现。
+    # 少了这一格，「名单外不发」与「门槛太高没发」在判据里是同一个绿。
+    tmp4, store4, bus4, runner4, s4 = await _make_runner()
+    runner4.costs[s4.id] = CostManager()
+    sink4 = runner4._make_sink(s4.id)
+    sink4({"block": "Docs", "uuid": "doc-3", "name": "meta", "value": {"type": "design"}, "role": "Arch"})
+    assert runner4._live_blk[s4.id][2] is None, "⑧ 没声明名单却拿到了名单（阳性对照自己先失效）"
+    for i in range(0, len(design_txt), 9):
+        runner4._translate(s4.id, {"event": "on_chat_model_stream", "run_id": "g2",
+                                   "metadata": {"langgraph_node": "Arch"},
+                                   "data": {"chunk": AIMessage(content=design_txt[i:i + 9])}})
+    got4 = "".join(e.value for e in bus4.history(s4.id) if e.name == "live")
+    assert got4 == ref(design_txt), f"⑧ 无名单时行为该与「按长度挑」那一版逐字一致（参照实现）：{got4[:70]!r}"
+    assert "data_structures_and_interfaces" in got4, "⑧ 阳性对照没复现旧漏（说明参照实现没覆盖到键名）"
+    runner4._forget(s4.id, terminal=True)
+
+    # ⑧c 嵌套一层：动态线的 ZeroThought 只放行 `thought`，`commands[].args.content` 不发
+    think = "先写一个 index.html，再让 app.py 以静态方式服务它；这一轮只需要两个文件。"
+    file_body = "<!DOCTYPE html><html><body>这段是要写进文件的整页正文，绝不该出现在思考行里。</body></html>"
+    ztxt = json.dumps({"thought": think,
+                       "commands": [{"command_name": "write_files",
+                                     "args": {"filename": "static/index.html", "content": file_body}}]},
+                      ensure_ascii=False, indent=2)
+    sink3({"block": "Thought", "uuid": "doc-2", "name": "end_marker", "value": None, "role": "Architect"})
+    sink3({"block": "Thought", "uuid": "zt-1", "name": "meta", "role": "Zero",
+           "value": {"type": "react", "prose_fields": ["thought"]}})
+    for i in range(0, len(ztxt), 7):
+        runner3._translate(s3.id, {"event": "on_chat_model_stream", "run_id": "g3",
+                                   "metadata": {"langgraph_node": "act"},
+                                   "data": {"chunk": AIMessage(content=ztxt[i:i + 7])}})
+    live9 = [e.value for e in bus3.history(s3.id) if e.name == "live" and e.uuid == "zt-1"]
+    assert "".join(live9) == think, f"⑧c 思考行里混进了别的东西（args 正文/枚举值）：{(''.join(live9))[:70]!r}"
+    sink3({"block": "Thought", "uuid": "zt-1", "name": "content", "value": think, "role": "Zero"})
+    sink3({"block": "Thought", "uuid": "zt-1", "name": "end_marker", "value": None, "role": "Zero"})
+    assert runner3._live_blk.get(s3.id) is None, "⑧c 块收口后落点没释放"
+    runner3._forget(s3.id, terminal=True)
+
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
                "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
                "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}；"
-               "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）")
+               "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）；"
+               "块声明 `prose_fields` 时按**键名**门控（mermaid 源码、键名本身、commands 的 args 正文都不上屏，"
+               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出）")
 
 
 def t13_assembly_ledger_identity_recall():

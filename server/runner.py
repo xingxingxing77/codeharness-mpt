@@ -56,6 +56,10 @@ _ECHO_PROBE_CAP = 200_000
 MIN_PROSE = 24          # structured 流里「算散文」的下限（字符）。09-29 活体现证过两头：
 # 80 会把真散文挡在门外（一场 dynamic 跑的 thought 实测 64 字，一格没发），而 24 仍然把枚举值
 # 与字段名关在外面（`REQUIREMENT`=11、`en`=2、`original_requirements`=21）。
+# 长度只是**兜底**门槛：块若声明了 `prose_fields`（见 `codeharness/report.py` 的 `_meta_with_prose`），
+# 门控按字段语义挑成员，长度门槛退到名单之内——因为「够长」挡不住键名本身（现证
+# `data_structures_and_interfaces`=30、`competitive_quadrant_chart`=26 都长过 24，作为键名被打上屏）。
+_KEY_CAP = 128        # 键名全长上限：超过就不是字段名，该成员按「名单外」处理（本仓最长的键 30 字）。
 
 _HEX = "0123456789abcdefABCDEF"
 _ESC = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -74,14 +78,21 @@ class _ProseStream:
     三态：0 未定型（攒首部空白，裸文本要整段还回去）/ 1 JSON / 2 裸文本原样透传（＝改动前行为）。
     JSON 模式不建语法树，只认字符串成员并解转义（含 `\\uXXXX` 与被切片切断的代理对）。
 
-    按「成员长度」判定、不区分 key 与 value；回显字段靠**这一笔的 prompt 文本**排（`_prompt_text`），
-    但值原样出现在输入里的那种（`original_requirements` 抄用户的话）不发。仍不认 key 名（key 都短过门槛）。
+    挑选有两道：`only`（块声明的正文字段名单，按**键名**门控）与 `MIN_PROSE`（长度兜底）。名单靠
+    「字符串闭合后紧跟冒号 ⇒ 刚才是键名」认出来，不建语法树；`only=None` 时整套键名跟踪都不启动，
+    行为与只有长度门槛那一版逐字相同（没声明名单的 schema 一个字节都不变）。回显字段靠**这一笔的
+    prompt 文本**排（`_prompt_text`），值原样出现在输入里的那种（`original_requirements` 抄用户的话）不发。
     """
 
     __slots__ = ("mode", "head", "in_str", "phase", "ubuf", "hi", "decoded", "locked", "emitted",
-                 "echo", "skipping", "echoed")
+                 "echo", "skipping", "echoed", "only", "key", "buf", "pending")
 
-    def __init__(self, echo: str = ""):
+    def __init__(self, echo: str = "", only=None):
+        # 名单缺失＝不门控。frozenset 而非 list：`in` 的语义是「这个字段名在不在名单里」，不看顺序。
+        self.only = frozenset(only) if only is not None else None
+        self.key = None           # 当前值所属的键名（最近一个后跟冒号的字符串）
+        self.buf = ""             # 当前字符串的全长文本，只在判定它是键名时用
+        self.pending = False      # 刚闭合一个字符串，还没看见后面第一个非空白字符
         self.echo = echo or ""    # 这笔调用的 prompt 文本：成员前缀命中它 ⇒ 是回显，不是模型的话
         self.skipping = False     # 当前成员已判定为回显，整段丢掉
         self.echoed = 0           # 被判定为回显而丢掉的成员数（判据要数这个，不看日志）
@@ -115,6 +126,16 @@ class _ProseStream:
             if not self.in_str:
                 if ch == '"':
                     self.in_str = True
+                    if self.only is not None:
+                        self.buf = ""
+                elif self.pending:
+                    # 字符串后面第一个非空白字符是冒号 ⇒ 刚闭合的那个是**键名**，记下它给后面的值用；
+                    # 是别的（逗号/右括号/数组元素之间的下一个串）⇒ 它是个值，键名沿用上一个。
+                    if ch in " \t\r\n":
+                        continue
+                    if ch == ":":
+                        self.key = self.buf
+                    self.pending = False
                 continue
             if self.phase == 1:
                 self.phase = 0
@@ -140,6 +161,8 @@ class _ProseStream:
             if ch == '"':
                 self.in_str = self.locked = self.skipping = False
                 self.decoded = ""             # 达标与否都从头找下一个成员
+                if self.only is not None:
+                    self.pending = True       # 是键名还是值，等下一个非空白字符说话
                 continue
             self._emit(ch, out)
         return "".join(out)
@@ -161,6 +184,11 @@ class _ProseStream:
     def _emit(self, ch: str, out: list):
         if not ch or self.skipping:
             return
+        if self.only is not None:
+            if len(self.buf) < _KEY_CAP:
+                self.buf += ch        # 键名要全长才能比对，值也要走这一格（超限只影响键名判定）
+            if self.key not in self.only:
+                return                # 名单外的字段：一个字都不发，等定稿一次性出现
         if self.locked:
             out.append(ch)
             return
@@ -626,7 +654,14 @@ class SessionRunner:
                     if self._live_blk.get(sid, (None,))[0] == uid:
                         self._live_blk.pop(sid, None)
                 elif event.get("block") in LIVE_BLOCKS:
-                    self._live_blk[sid] = (uid, event.get("block"))
+                    # 第三格是这块声明的正文字段名单（来自开块那条 meta）：逐片抽散文时按它门控。
+                    # 非 meta 事件不带名单，沿用同 uid 已登记的那份；换了块则不继承（各块各的 schema）。
+                    v = event.get("value")
+                    fields = v.get("prose_fields") if nm == "meta" and isinstance(v, dict) else None
+                    prev = self._live_blk.get(sid)
+                    if fields is None and prev and prev[0] == uid:
+                        fields = prev[2]
+                    self._live_blk[sid] = (uid, event.get("block"), fields)
             bus.publish(sid, kind="report", **event)
 
         return sink
@@ -929,7 +964,11 @@ class SessionRunner:
                 return
             ps = self._prose.get((sid, rid))
             if ps is None:
-                ps = self._prose[(sid, rid)] = _ProseStream(self._prompts.get((sid, rid), ""))
+                # 名单在**建抽取器那一刻**取当前开着的块那份：块的 meta 一定先于这一笔的首片到达
+                # （`async with` 先开块再发调用），所以取到的就是这一块自己的名单。
+                blk = self._live_blk.get(sid)
+                ps = self._prose[(sid, rid)] = _ProseStream(self._prompts.get((sid, rid), ""),
+                                                            blk[2] if blk else None)
             piece = ps.feed(text)
             if not piece:
                 return                    # 结构脚手架与短字段不上屏
@@ -944,7 +983,7 @@ class SessionRunner:
             tgt = self._live_blk.get(sid)
             if tgt:
                 self._used_kernel_block[(sid, rid)] = True
-                uid, btype = tgt
+                uid, btype = tgt[0], tgt[1]
                 self.bus.publish(sid, kind="report", block=btype,
                                  uuid=uid, name="live", value=piece, role=node)
             else:

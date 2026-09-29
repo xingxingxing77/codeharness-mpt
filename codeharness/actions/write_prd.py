@@ -10,6 +10,8 @@
   与 per-session 强制边界（S7）冲突；N2 扩展点要工具面时再按会话内口径重写。
 源里 workspace 改名（_rename_workspace + rename_root）在 per-session 目录制下没有对应物：
 project_name 只进产物字段与报道，不动会话目录。"""
+from typing import ClassVar
+
 from pydantic import BaseModel, Field
 
 from codeharness.base.action import BaseAction
@@ -65,6 +67,11 @@ PRD_SYSTEM_CALIBRATED = PRD_SYSTEM_PROMPT + PRD_STACK_CALIBRATION
 
 class PRDOutput(BaseModel):
     """= write_prd_an.py NODES/REFINED_NODES 的 12 字段（REFINED_* 与 WRITE_PRD_* 字段同构，共用本 schema）"""
+
+    # 打字机白名单：只有这些是「模型写给人读的话」，其余（标识符、抄用户需求的 original_requirements、
+    # 图表源码与表格行）留在定稿里一次性出现。ClassVar ⇒ 不进 schema、不上 wire。
+    prose_fields: ClassVar[tuple] = ("product_goals", "user_stories", "competitive_analysis",
+                                     "requirement_analysis", "ui_design_draft", "anything_unclear")
 
     language: str = "en_us"
     programming_language: str = ""
@@ -146,7 +153,7 @@ class WritePRD(BaseAction):
 
     async def _new_prd(self, store: ArtifactStore, msg: Message) -> PRDOutput:
         from codeharness.report import block_markdown, docs_block
-        async with docs_block("prd", role="PM") as rep:
+        async with docs_block("prd", role="PM", prose=PRDOutput) as rep:
             prd: PRDOutput = await self._structured(
                 f"{self.prefix}\n{CONTEXT_TEMPLATE.format(project_name='', requirements=msg.content)}",
                 schema=PRDOutput, system=PRD_SYSTEM_CALIBRATED)
@@ -157,7 +164,7 @@ class WritePRD(BaseAction):
     async def _merge(self, store: ArtifactStore, msg: Message, old: Document) -> PRDOutput:
         """源 _merge(:254) + _update_prd：REFINED_PRD 用同一组字段、NEW_REQ_TEMPLATE 做底。"""
         from codeharness.report import block_markdown, docs_block
-        async with docs_block("prd-update", role="PM") as rep:
+        async with docs_block("prd-update", role="PM", prose=PRDOutput) as rep:
             refined: PRDOutput = await self._structured(
                 f"{self.prefix}\n{NEW_REQ_TEMPLATE.format(old_prd=old.content, requirements=msg.content)}",
                 schema=PRDOutput, system=PRD_SYSTEM_CALIBRATED)

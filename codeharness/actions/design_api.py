@@ -6,6 +6,8 @@
   + 两图 `.mmd`（方案 C：不后端渲染，S8 前端消费；对应源 mermaid_to_file 的 DATA_API_DESIGN/SEQ_FLOW 两族产物）；
 - 源的多 PRD 文件循环与 changed_files 记账属 ProjectRepo 制，本仓单 PRD 会话制不搬；
 - `_execute_api` 同 WritePRD 判 `推迟`（per-session 边界，S7 后按会话内口径重写）。"""
+from typing import ClassVar
+
 from pydantic import BaseModel, Field
 
 from codeharness.base.action import BaseAction
@@ -46,6 +48,11 @@ Fields and requirements (follow EXACTLY):
 class DesignOutput(BaseModel):
     """= DESIGN_API_NODE 五字段（REFINED_DESIGN_NODE 字段同构，只差 prompt 措辞）"""
 
+    # 两份 mermaid 源码与 file_list 不是散文（定稿里它们是 fenced 块与清单），名单只放行说理的两段。
+    # 顺带关掉一类漏：`data_structures_and_interfaces` 有 30 字，长过 MIN_PROSE=24，白名单之前它作为
+    # **键名**会被当散文打上屏。
+    prose_fields: ClassVar[tuple] = ("implementation_approach", "anything_unclear")
+
     implementation_approach: str = ""
     file_list: list[str] = Field(default_factory=list)
     data_structures_and_interfaces: str = ""      # mermaid classDiagram
@@ -72,7 +79,7 @@ class WriteDesign(BaseAction):
         else:
             prompt, system = context, DESIGN_SYSTEM_PROMPT
 
-        async with docs_block("design", role="Architect") as rep:
+        async with docs_block("design", role="Architect", prose=DesignOutput) as rep:
             design: DesignOutput = await self._structured(
                 f"{self.prefix}\n{prompt}", schema=DesignOutput, system=system)
             await rep.content(self._markdown(design))   # 块面是 markdown 正文，发人读渲染而不是 schema dump

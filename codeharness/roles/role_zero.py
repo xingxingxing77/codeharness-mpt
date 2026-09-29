@@ -8,7 +8,7 @@ import asyncio
 import json
 from codeharness.utils.text import clip   # R7
 from datetime import datetime
-from typing import TypedDict
+from typing import ClassVar, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
@@ -31,6 +31,11 @@ from codeharness.tools.tool_recall import select_for_prompt
 
 class ZeroThought(BaseModel):
     """输出契约：structured 强约束（替代源 parse_commands + JSON_REPAIR 重试）"""
+
+    # 打字机只放行这段思考；`commands` 里的 args（要写的文件正文、命令参数）不是给人读的散文，
+    # `command_name` 是枚举值——它们都在定稿与随后的工具块里各自出现。
+    prose_fields: ClassVar[tuple] = ("thought",)
+
     thought: str
     commands: list[Command] = Field(default_factory=list)
 
@@ -375,7 +380,7 @@ class RoleZero:
         if err:                                               # 源 utils/reflection.py：重复失败 → 自反思
             experience = (experience + "\n" +
                           await reflect(self.llm, s["task"], s["history"], err)).strip()
-        async with thought_block(role=self.profile["name"]) as rep:
+        async with thought_block(role=self.profile["name"], prose=ZeroThought) as rep:
             # R3：读腿短路要在对话流里说一句（措辞收成 `report.recall_notice` 一处）。
             # 放在这里而不是 `_think` 开头：本轮的召回刚刚跑完，`up` 是这一轮的读数。
             from codeharness.report import recall_notice

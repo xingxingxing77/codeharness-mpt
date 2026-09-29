@@ -333,11 +333,23 @@ class BlockReporter:
         return os.path.abspath(str(p))
 
 
+def _meta_with_prose(meta: dict | None, prose) -> dict | None:
+    """把 schema 声明的「正文字段」名单塞进这块自己的 meta（不另发控制事件、不加新分派键）。
+
+    `prose_fields` 是给 `server/runner.py` 的打字机看的：逐片只放行名单里的字段，其余（枚举值、
+    项目名、两份 mermaid 源码、`command_name`）留在定稿里一次性出现。名单**缺失**＝不门控，
+    照旧只按长度挑——没声明的 schema 一个字节的行为都不变。前端只读 `meta.type`（DocsBlock
+    的标题、ThoughtBlock 的剧本标记），多这一个键不影响任何标题/图标。
+    """
+    keys = getattr(prose, "prose_fields", None) if prose is not None else None
+    return meta if keys is None else {**(meta or {}), "prose_fields": list(keys)}
+
+
 @asynccontextmanager
-async def thought_block(role: str = "", meta: dict | None = None):
+async def thought_block(role: str = "", meta: dict | None = None, prose=None):
     """Thought 块：think 节点用。meta 默认 {"type": "react"}（前端 ThoughtBlock 的剧本标记）"""
     rep = BlockReporter(BlockType.THOUGHT.value, role)
-    await rep.meta(meta or {"type": "react"})
+    await rep.meta(_meta_with_prose(meta or {"type": "react"}, prose))
     try:
         yield rep
     finally:
@@ -366,10 +378,10 @@ async def editor_block(filename: str, role: str = ""):
 
 
 @asynccontextmanager
-async def docs_block(doc_type: str, role: str = ""):
+async def docs_block(doc_type: str, role: str = "", prose=None):
     """Docs 块：PRD/设计文档用。meta.type 决定前端标题（DocsBlock.vue TYPE_NAMES）"""
     rep = BlockReporter(BlockType.DOCS.value, role)
-    await rep.meta({"type": doc_type})
+    await rep.meta(_meta_with_prose({"type": doc_type}, prose))
     try:
         yield rep
     finally:

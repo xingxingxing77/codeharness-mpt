@@ -1999,12 +1999,13 @@ def t28_stream_ux_batch():
     assert "value=chunk.content" not in runner, "t28① 又拿 chunk.content 原样发布了"
     assert runner.count('name="live"') == 2,         f"t28① 逐片通道该在两个落点各一条（内核块 / stream- 兜底），现命中 {runner.count('name=\"live\"')} 条"
     assert 'LIVE_BLOCKS = ("Thought", "Docs", "Task")' in runner, "t28① 可承载逐片的块类型被改"
-    assert "self._live_blk[sid] = (uid, event.get(\"block\"))" in runner, \
+    assert 'self._live_blk[sid] = (uid, event.get("block"), fields)' in runner, \
         "t28① 落点不再由报道槽登记（逐片会全部掉进 stream-{node}，文档块又不流了）"
     # 上一版靠字符串比对丢掉整段重发；这一版由通道分开（live=逐片、content=定稿）——旧 machinery 不许复活
     for dead in ("_already_streamed", "_prose_out", "PROSE_DEDUPE_CAP"):
         assert dead not in runner, f"t28① 字符串比对式去重复活了：{dead}"
-    assert "_ProseStream(self._prompts.get((sid, rid), \"\"))" in runner,         "t28① 抽取器建起来时不带这笔的 prompt ⇒ 回显判定静默空转（现证踩过两次：形状猜错就是空转）"
+    assert "_ProseStream(self._prompts.get((sid, rid), \"\")" in runner, \
+        "t28① 抽取器建起来时不带这笔的 prompt ⇒ 回显判定静默空转（现证踩过两次：形状猜错就是空转）"
     assert "piece = ps.feed(text)" in runner, "t28① 抽取器没接在流分支上（`piece = text` 那种绕法会把 JSON 原文直接打上去）"
     assert "structured 输出不进这里做打字机" not in runner, \
         "t28① 那句「structured 不走打字机」的旧注释回来了（它正是这次病灶的登记处）"
@@ -2035,8 +2036,39 @@ def t28_stream_ux_batch():
     cn = rd("components/conversation/ChatNode.vue")
     assert "b.type === 'Thought' && (open || text)" in cn, "t28③ 空白 Think 行又占一行了"
     assert "<ReasoningRow" in cn, "t28③ 阳性对照失守：Think 行的渲染器被整条删掉了"
+    # ④ 白名单门控（09-29 第六件）：名单要从 schema 一路走到抽取器，四段接线一段都不能缺。
+    #    更要紧的是**名单里的名字必须真是那个 schema 的字段**——打错一个字母不报错，
+    #    只让那个字段静默落在名单外（本仓「规则静默空转」那一族，已现证三次）。
+    rp = pathlib.Path("codeharness/report.py").read_text(encoding="utf-8")
+    n_meta = rp.count("_meta_with_prose(")
+    assert n_meta >= 3, f"t28④ 名单进 meta 走的是共享件，被绕过＝开块处各拼字符串就会漂：现命中 {n_meta} 处"
+    assert '"prose_fields": list(keys)' in rp, "t28④ meta 里不带 prose_fields ⇒ 翻译层永远拿不到名单"
+    assert 'v.get("prose_fields")' in runner, "t28④ 报道槽不读 meta 里的名单（落点登记退回两格）"
+    assert "if self.key not in self.only:" in runner, \
+        "t28④ 抽取器不按名单门控（JSON 里的键名与 mermaid 源码又会打上屏）"
+    assert "if self.only is not None" in runner, \
+        "t28④ 门控没被「名单缺失＝不门控」兜住 ⇒ 没声明名单的 schema 行为会变（本批的硬承诺）"
+    from codeharness.actions.design_api import DesignOutput
+    from codeharness.actions.write_prd import PRDOutput
+    from codeharness.roles.role_zero import ZeroThought
+    for schema in (PRDOutput, DesignOutput, ZeroThought):
+        declared, real = set(schema.prose_fields), set(schema.model_fields)
+        assert declared and declared <= real, \
+            f"t28④ {schema.__name__}.prose_fields 里有不存在的字段名（打错＝该字段静默不上屏）：{sorted(declared - real)}"
+        assert not (declared & {"language", "project_name", "programming_language", "original_requirements"}), \
+            f"t28④ {schema.__name__} 把标识符或抄用户原话的字段放进了名单"
+    assert 'docs_block("prd", role="PM", prose=PRDOutput)' in \
+        pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd 开块没带名单"
+    assert 'docs_block("prd-update", role="PM", prose=PRDOutput)' in \
+        pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd-update 开块没带名单"
+    assert 'docs_block("design", role="Architect", prose=DesignOutput)' in \
+        pathlib.Path("codeharness/actions/design_api.py").read_text(encoding="utf-8"), "t28④ design 开块没带名单"
+    r0 = pathlib.Path("codeharness/roles/role_zero.py").read_text(encoding="utf-8")
+    assert 'thought_block(role=self.profile["name"], prose=ZeroThought)' in r0, \
+        "t28④ 动态线的思考块没声明名单（要写进文件的正文会重新进流）"
     print("  ok  t28 流式 UX 批文本守卫：抽取器在位、structured 原文不许直发、静默期建块发 meta"
-          "不占 fts、逐片走 live + 定稿撤流 + 落点登记三处接线都在，字符串比对式去重不许复活")
+          "不占 fts、逐片走 live + 定稿撤流 + 落点登记三处接线都在，字符串比对式去重不许复活；"
+          "白名单四段接线在位，且名单里的名字真是那个 schema 的字段")
 
 
 def main():

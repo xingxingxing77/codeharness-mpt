@@ -8,6 +8,8 @@
 把假修好戳穿的是两场付费真跑。这台桩走的是**真 `astream_events` + 真 `with_structured_output`**，
 所以事件的形状、`live`/`content` 两条通道、落点登记、回显计数全都是现取的，不用猜也不用花钱。
 它同时是「事件形状不许凭印象钉进判据」这条教训的可复跑凭证。
+⑥ 那一格还顺手挡掉另一类空转：名单里打错一个字段名不会报错，只会让该字段静默落回名单外——
+   所以对照用的是「没声明名单」那一跑，它必须把 `programming_language` 打回流里。
 """
 import asyncio
 import json
@@ -69,7 +71,7 @@ class Stub(BaseHTTPRequestHandler):
         pass
 
 
-async def run_case(name, schema_cls, msgs, open_block_uuid=None):
+async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=None):
     """跑一笔真 structured 调用，把事件灌进真 `SessionRunner._translate`，返回总线上的块序列。"""
     from langchain_openai import ChatOpenAI
     from codeharness.provider.cost import CostManager
@@ -87,8 +89,11 @@ async def run_case(name, schema_cls, msgs, open_block_uuid=None):
     runner.costs[s.id] = CostManager()      # 本工装不判账，只判流；给一份账免得 _sync_cost 走空路
 
     if open_block_uuid:            # 模拟内核 `async with docs_block(...)`：先开一块
+        val = {"type": "prd"}
+        if prose_fields:           # 真开块时这一格由 `report._meta_with_prose` 填（schema 的 ClassVar）
+            val["prose_fields"] = list(prose_fields)
         runner._make_sink(s.id)({"block": "Docs", "uuid": open_block_uuid, "name": "meta",
-                                 "value": {"type": "prd"}, "role": "PM"})
+                                 "value": val, "role": "PM"})
 
     m = ChatOpenAI(model="step-3.5-flash", api_key="stub", base_url=BASE_URL, streaming=True)
     r = m.with_structured_output(schema_cls.model_json_schema(), include_raw=True,
@@ -154,7 +159,27 @@ async def main():
         if _prompt_text(data).find("用户需求") < 0:
             fails.append(f"⑤ `_prompt_text` 认不出{shape}形状")
 
-    print("\n" + ("\n".join(f"❌ {f}" for f in fails) if fails else "✅ 五条全过（零花费）"))
+    # ⑥ 白名单门控：块声明 `prose_fields` 后，名单外那个 30 字的 `programming_language` 值
+    #    （"Vite, React, MUI, Tailwind CSS"，长过 MIN_PROSE=24）不再进流；名单内的照旧。
+    #    阳性对照＝同一份 payload、同一块、meta **不带**名单 ⇒ 那一行必须回到流里，
+    #    否则「没发」到底是门控挡掉的还是门槛挡掉的，判据分不出来。
+    gated, seqg, _ = await run_case("白名单门控", PRDOutput, msgs, open_block_uuid="doc-9",
+                                    prose_fields=PRDOutput.prose_fields)
+    free, seqf, _ = await run_case("同一份 payload、没声明名单", PRDOutput, msgs, open_block_uuid="doc-8")
+    STACK = "Vite, React, MUI, Tailwind CSS"
+    if STACK in gated:
+        fails.append("⑥ 名单外的字段还在流里（门控没接上：名单没进 meta／没登记／没传给抽取器）")
+    if PROSE not in gated:
+        fails.append("⑥ 名单内的字段被一起挡掉了（门控挑错了对象）")
+    if GOALS[1] not in gated:
+        # `product_goals` 在名单里且有两项长文本：值闭合后键名失焦那一类错只在这里看得见
+        fails.append("⑥ 名单内列表的第二项没出来（值闭合后键名失焦成上一个串的文字）")
+    if STACK not in free:
+        fails.append(f"⑥ 阳性对照失守：没声明名单时{STACK!r}本该出现（说明门槛或桩自己变了）")
+    if not any(n == "live" and u == "doc-9" for n, u, _ in seqg):
+        fails.append("⑥ 门控过的逐片没落进声明名单的那块")
+
+    print("\n" + ("\n".join(f"❌ {f}" for f in fails) if fails else "✅ 六条全过（零花费）"))
     return 1 if fails else 0
 
 
