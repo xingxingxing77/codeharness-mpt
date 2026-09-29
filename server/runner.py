@@ -267,6 +267,7 @@ class SessionRunner:
         # 收口（on_chat_model_end）即弃，否则跨笔调用会把上一笔的成员进度带过来。
         self._prose: dict[tuple[str, str], _ProseStream] = {}
         self._prompts: dict[tuple[str, str], str] = {}   # (sid, run_id) -> 这笔的输入文本（回显判定用）
+        self._used_kernel_block: dict[tuple[str, str], bool] = {}   # (sid, run_id) -> 这一笔是否落进了内核块
         # sid -> 这一笔 LLM 调用的逐片该投进哪一块：内核报道槽里**最后开着且未收口**的那块
         # （`Thought`/`Docs`/`Task`，值带它的 block 名），没有就由 `_translate` 落 `stream-{node}` 兜底。
         # 于是文档块自己就在流：逐片进 `live`，内核定稿（`content`）一到前端把 `live` 整段撤掉。
@@ -699,6 +700,8 @@ class SessionRunner:
             self._prose.pop(k, None)
         for k in [k for k in self._prompts if k[0] == sid]:
             self._prompts.pop(k, None)
+        for k in [k for k in self._used_kernel_block if k[0] == sid]:
+            self._used_kernel_block.pop(k, None)
         self._live_blk.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
@@ -903,13 +906,17 @@ class SessionRunner:
                                  name="meta", value={"streaming": node}, role=node)
         elif kind == "on_chat_model_end":
             self._sync_cost(sid)
+            used_kernel = bool(self._used_kernel_block.pop((sid, rid), None))
             if rid:
                 self._prose.pop((sid, rid), None)
                 self._prompts.pop((sid, rid), None)
-            # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）
+            # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）。
+            # 但**落进内核块的那一笔不替兜底行收口**：那一行这一笔压根没碰，收它等于替别人关
+            # （离线工装现证过这条多余事件；孤立 end_marker 前端虽有守卫，长流里那行若被上一笔开过就会被无端关掉）。
             node = ev.get("metadata", {}).get("langgraph_node", "")
-            self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
-                             name="end_marker", value=None, role=node)
+            if not used_kernel:      # 落进内核块的那一笔不替兜底行收口，其余照旧（t3/t7 钉的就是它）
+                self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
+                                 name="end_marker", value=None, role=node)
             self._trace_span(sid, node, self._call_t0.pop((sid, rid), None) if rid else None)
         elif kind == "on_chat_model_stream":
             # structured 的逐片 JSON 在这儿抽成散文（`_ProseStream` 的 docstring 记了为什么）；
@@ -936,6 +943,7 @@ class SessionRunner:
             # content 一到就把 live 清空），所以永远不会出现两份同屏。
             tgt = self._live_blk.get(sid)
             if tgt:
+                self._used_kernel_block[(sid, rid)] = True
                 uid, btype = tgt
                 self.bus.publish(sid, kind="report", block=btype,
                                  uuid=uid, name="live", value=piece, role=node)
