@@ -1875,8 +1875,8 @@ def main():
               t18_rerank_index_may_arrive_as_a_string,
               t19_upload_receipt_counts_dedup,
               t20_upload_streams_per_file_not_whole_batch]
-    for f in checks:
-        f()
+    from _gatecov import run_all, verdict
+    skipped, silent = run_all(checks)
     print(f"\nS15 门禁通过：{len(checks)} 组（知识库端到端：摄取→召回→进模型 + 向量服务不可达的可见结局 "
           f"+ C26 的白名单两态 + C22 的来源标记（含页码 0 起下标换算）+ C23 的相关性下限 + C30 的下架单份路由 + "
           f"C31 的租户两侧同源 + C24 的可主动调检索工具 + B2 的重传改版清旧切片 + "
@@ -1885,6 +1885,8 @@ def main():
           f"{'已实跑' if live_qdrant() else '**跳过 Qdrant 那六格**'} / "
           f"{'已实跑' if live_embedding() else '**跳过 t12**'}；"
           f"t6/t7/t8/t9/t11/t17/t18 都不依赖在线服务（死端口 + 替身 + 假 kb + 本地桩），任何环境都必须跑到")
+    print(f"S15 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
+          + verdict(skipped, silent))
 
 
 if __name__ == "__main__":

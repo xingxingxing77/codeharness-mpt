@@ -2240,8 +2240,8 @@ def main():
     if not live_embedding():
         print(f"⚠ 真 embedding 不在线（{settings.embedding.base_url} / {settings.embedding.model}）："
               f"t25 跳过——语义路径的门禁要连 ollama 跑一次才算数。")
-    for fn in checks:
-        fn()
+    from _gatecov import run_all, verdict
+    skipped, silent = run_all(checks)          # 覆盖率从**观察**算，不靠每格记得印一行（见 `_gatecov.py`）
     try:
         sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
                          db=settings.redis.db).delete(*KEYS)
@@ -2262,6 +2262,9 @@ def main():
           f"+ S5.2 R9 检索 7 组（集合形态 named+sparse+INT8+租户索引/单集合双向隔离/"
           f"sparse 下标跨进程稳定/长期记忆入库幂等与召回字段/召回真进 prompt/"
           f"embedding 下线只降级/hit-rate@5 对照表存盘）")
+    from _gatecov import verdict
+    print(f"S5 覆盖率：{len(checks)} 组里真判 "
+          f"{len(checks) - len(skipped) - len(silent)} 组" + verdict(skipped, silent))
 
 
 if __name__ == "__main__":

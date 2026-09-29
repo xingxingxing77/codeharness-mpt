@@ -1266,9 +1266,8 @@ def main():
               t50_tool_state_is_keyed_by_session_not_project_name,
               t51_write_path_pins_encoding_and_newline,
               t52_action_tree_is_importable_and_tier_names_have_a_home]
-    for c in checks:
-        c()
-        print(f"  ok  {c.__name__}")
+    from _gatecov import run_all, verdict
+    skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
         shutil.rmtree(BASE, ignore_errors=True)   # Windows：刚被 taskkill 的句柄要几百毫秒才释放
         if not BASE.exists():
@@ -1291,6 +1290,8 @@ def main():
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
           f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline）")
+    print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
+          + verdict(skipped, silent))
 
 
 if __name__ == "__main__":
