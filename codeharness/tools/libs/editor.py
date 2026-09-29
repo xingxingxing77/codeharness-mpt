@@ -558,6 +558,7 @@ class Editor(BaseModel):
         temp_file_path = ""
         src_abs_path = file_name.resolve()
         first_error_line = None
+        applied = False
         # The file to store previous content and will be removed automatically.
         temp_backup_file = tempfile.NamedTemporaryFile("w", delete=True, encoding="utf-8", newline="")
 
@@ -596,6 +597,7 @@ class Editor(BaseModel):
 
             # Replace the original file with the temporary file atomically
             shutil.move(temp_file_path, src_abs_path)
+            applied = True
 
             # Handle linting
             # NOTE: we need to get env var inside this function
@@ -669,19 +671,33 @@ class Editor(BaseModel):
         except ValueError as e:
             return f"Invalid input: {e}\n"
         except Exception as e:
-            guidance_message = self._get_indentation_info(content, start or len(lines))
-            guidance_message += (
-                "You either need to 1) Specify the correct start/end line arguments or 2) Enlarge the range of original code.\n"
-                "DO NOT re-run the same failed edit command. Running it again will lead to the same error."
-            )
-            error_info = ERROR_GUIDANCE.format(
-                linter_error_msg=LINTER_ERROR_MSG + str(e),
-                window_after_applied=self._print_window(file_name, start or len(lines), 100),
-                window_before_applied=self._print_window(Path(temp_backup_file.name), start or len(lines), 100),
-                guidance_message=guidance_message,
-            ).strip()
+            # 这里**不能**用 temp_backup_file 盖回源文件：那份备份只在 `enable_auto_lint` 那半支里被写过
+            # （`:605`），默认关时它是一个从没写入过的空文件，盖下去＝把源文件清成 0 字节。
+            # `applied` 决定文件此刻是被替换过（无原文可恢复）还是原样（本来不需恢复），两半各说实话。
+            if applied:
+                error_info = (
+                    f"{type(e).__name__}: {e}\n"
+                    "[The edit WAS already applied to the file when this error happened. This method keeps no copy "
+                    "of the original content and cannot roll the file back. Read the file before retrying; "
+                    "DO NOT re-run the same failed edit command — the lines you targeted have moved.]"
+                ).strip()
+            else:
+                # `content` 是**待写入**的新内容，行数可以比原文件少（append 就是这样：1 行 vs 原 3 行），
+                # 而 `_get_indentation_info` 按原文件的行号去索引它 ⇒ 处理分支自己 IndexError，
+                # 把真错换成一句「list index out of range」。这里按 content 的实际行数夹一下。
+                shown = min(start or len(lines), max(1, len(content.split("\n"))))
+                guidance_message = self._get_indentation_info(content, shown)
+                guidance_message += (
+                    "You either need to 1) Specify the correct start/end line arguments or 2) Enlarge the range of original code.\n"
+                    "DO NOT re-run the same failed edit command. Running it again will lead to the same error."
+                )
+                error_info = ERROR_GUIDANCE.format(
+                    linter_error_msg=f"{type(e).__name__}: {e}",
+                    window_after_applied=self._print_window(file_name, start or len(lines), 100),
+                    window_before_applied="[this method keeps no backup; the file on disk is unchanged]",
+                    guidance_message=guidance_message,
+                ).strip()
             # Clean up the temporary file if an error occurs
-            shutil.move(temp_backup_file.name, src_abs_path)
             if temp_file_path and Path(temp_file_path).exists():
                 Path(temp_file_path).unlink()
 

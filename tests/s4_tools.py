@@ -1222,6 +1222,137 @@ def t52_action_tree_is_importable_and_tier_names_have_a_home():
     print(f"  ok  t52 actions 树 {mods} 个模块全部可 import、分级表 {len(ACTION_TIER)} 个名字个个有归宿")
 
 
+def t53_editor_generic_except_never_overwrites_source():
+    """P0-1（09-30 审查批）：`Editor._edit_file_impl` 的泛捕获**不许**拿 `temp_backup_file` 盖回源文件。
+
+    形状：那份备份只在 `enable_auto_lint` 那半支里被写过，而该字段默认关、全仓无处置真
+    ⇒ 走到泛捕获时它是一个**从没写入过**的 `NamedTemporaryFile`，那次 `shutil.move(备份, 源)`
+    就是把源文件清成 0 字节。而 `:601` 的原子替换要么还没发生（源文件本就完好，不需要「恢复」），
+    要么已经发生（本方法手里没有任何原文可恢复）⇒ 两种情况都只能说实话，不能覆写。
+
+    现网到达与否（先量后动）：本机 `workspace/storage/checkpoints.db`（24.8 MB）按字节 grep，
+    `ERROR_GUIDANCE` 里最早那句 "This is how your edit would have looked if applied" = 0 次，
+    而**同库同法**的对照能数到成功回执 44 次 / 工具名 941 次 ⇒ 有牙的干净阴性，不是无样本。
+    所以这一支按「修形状」记账，不是救火。
+
+    本轮探针另外量到两条，都不在本格的断言里，账写在 `plan/team-runtime.md`：
+      · 泛捕获自己会先炸：`_get_indentation_info(content, start or len(lines))` 拿**原文件**的行号去索引
+        **待写入**的 `content`（append 时后者只有 1 行）⇒ `IndexError`，真错被换成一句假错。已夹住
+        ——① 能跑到断言就是这条的读数（夹之前它连回执都发不出去）。
+      · `enable_auto_lint=True` 那半支在本机走不到回滚：`_print_window(Path(temp_backup_file.name))`
+        去读一个仍开着的临时文件 ⇒ `PermissionError`（动作序列现证在台账），被 `except IOError` 接走，
+        于是编辑留在盘上、回执只说「文件处理出错」。Linux 容器里那步是通的 ⇒ 那处 move 不许删（④ 钉着）。
+
+    四格：
+      ① 主刀：异常发生在原子替换**之前** ⇒ 源文件逐字不变 + 回执说清「未应用」，并且不冒充
+         lint 支那句「你的编辑引入了语法错误」。修前这里该是 0 字节。
+      ② `applied` 那半：替换**之后**才炸 ⇒ 文件保留编辑后内容 + 回执如实说「已应用、本方法不留原文」。
+      ③ 阳性对照：lint 关的正常 append 仍成功（好路没被修坏，也保证 ①② 不是恒真）。
+      ④ AST 双向：泛捕获支里 `move(备份→源)` = 0 处，`enable_auto_lint` 那半支里 = 1 处
+         （一个恒假的判定函数会被后半条抓住，所以这格自带仪器对照）。
+    """
+    import ast
+    import shutil
+    import tempfile
+    from typing import ClassVar
+
+    from codeharness.tools.libs.editor import Editor
+
+    ORIG = "第一行\n第二行\n第三行\n".encode("utf-8")
+    ADDED = "追加的一行\n".encode("utf-8")
+
+    class _BoomBefore(Editor):
+        """炸在原子替换**之前**：任何不属于 LineNumberError/FileNotFoundError/OSError/ValueError 的内部错误。"""
+
+        @staticmethod
+        def _append_impl(lines, content):
+            raise RuntimeError("t53 注入：原子替换之前的内部错误")
+
+    class _BoomAfterLint(Editor):
+        """lint 开着，且炸在原子替换**之后**（第一次 `_lint_file` 正常返回新错误，第二次抛）。"""
+
+        n: ClassVar[int] = 0
+
+        def _lint_file(self, file_path):
+            _BoomAfterLint.n += 1
+            if _BoomAfterLint.n == 1:
+                return ("E0 broke\nE1 NEW broke", 2)
+            raise RuntimeError("t53 注入：原子替换之后的内部错误")
+
+    def _fresh():
+        d = Path(tempfile.mkdtemp(prefix="s4_t53_"))
+        (d / "t.py").write_bytes(ORIG)
+        return d
+
+    def _append(ed):
+        ed.open_file("t.py")
+        try:
+            return "returned", ed.append_file("t.py", "追加的一行\n")
+        except Exception as e:
+            return "raised", f"{type(e).__name__}: {e}"
+
+    def backup_moves(node):
+        """`node` 这段子树里，`shutil.move(temp_backup_file…, src_abs_path…)` 的行号。"""
+        return [m.lineno for m in ast.walk(node)
+                if isinstance(m, ast.Call) and ast.unparse(m.func) == "shutil.move"
+                and "temp_backup_file" in ast.unparse(m.args[0])]
+
+    dirs = []
+    try:
+        # ---- ① 主刀：修前这一步会把源文件清成 0 字节 ----
+        d = _fresh()
+        dirs.append(d)
+        kind, msg = _append(_BoomBefore(working_dir=str(d)))
+        now = (d / "t.py").read_bytes()
+        assert kind == "raised", f"①仪器坏了：注入的异常没炸出来（{kind}）⇒ 这一格会恒绿"
+        assert now == ORIG, f"①失效：替换之前就炸，源文件该逐字不变，实得 {len(now)} 字节 {now[:40]!r}"
+        assert "NOT been applied" in msg, f"①回执没说清文件此刻是什么状态：{msg[:200]!r}"
+        assert "RuntimeError: t53 注入" in msg, f"①真错被换成别的话了：{msg[:200]!r}"
+        assert "introduced new syntax error" not in msg, \
+            f"①泛捕获在冒充 lint 支的话术（这一支跟语法错误无关）：{msg[:200]!r}"
+
+        # ---- ② applied 那半：文件已经被替换过，本方法没有原文可恢复 ----
+        d = _fresh()
+        dirs.append(d)
+        _BoomAfterLint.n = 0
+        kind, msg = _append(_BoomAfterLint(working_dir=str(d), enable_auto_lint=True))
+        now = (d / "t.py").read_bytes()
+        assert kind == "raised", f"②仪器坏了：替换之后的异常没炸出来（{kind}）"
+        assert now == ORIG + ADDED, \
+            f"②编辑已随 `:601` 落定，文件该保留**编辑后**内容（0 字节＝那步覆写又回来了），实得 {now[:60]!r}"
+        assert "already applied" in msg and "keeps no copy" in msg, \
+            f"②没说实话：此刻文件是改过的，却说「未应用」会把人引去重试同一笔编辑：{msg[:220]!r}"
+
+        # ---- ③ 阳性对照：正常 append ----
+        d = _fresh()
+        dirs.append(d)
+        kind, msg = _append(Editor(working_dir=str(d)))
+        now = (d / "t.py").read_bytes()
+        assert kind == "returned" and now == ORIG + ADDED, \
+            f"③正常 append 被修坏了（结局 {kind}、字节 {len(now)}）：{msg[:160]!r}"
+
+        # ---- ④ AST 双向（泛捕获 0 处 / lint 支 1 处） ----
+        src = (Path(__file__).resolve().parents[1] / "codeharness" / "tools" / "libs" / "editor.py"
+               ).read_text(encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_edit_file_impl")
+        generic = [x for h in fn.body if isinstance(h, ast.Try) for x in h.handlers
+                   if x.type is not None and ast.unparse(x.type) == "Exception"][0]
+        lint_ifs = [x for x in ast.walk(fn) if isinstance(x, ast.If) and "enable_auto_lint" in ast.unparse(x.test)]
+        got_generic, got_lint = backup_moves(generic), [m for x in lint_ifs for m in backup_moves(x)]
+        assert not got_generic, f"④那步覆写又回来了（泛捕获里的 备份→源 move）：行 {got_generic}"
+        assert len(got_lint) == 1, \
+            f"④lint 那半支是 Linux 上唯一的真回滚，不许被顺手删掉，也不许判定函数恒假：实得 {got_lint}"
+    finally:
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        left = [str(d) for d in dirs if d.exists()]
+        assert not left, f"④t53 清场没做成，留下 {left}"
+
+    print(f"  ok  t53 P0-1：泛捕获不再拿恒空备份盖回源文件（①替换前炸→文件逐字不变、②替换后炸→保留编辑后内容"
+          f"并如实说『已应用』、③正常 append 仍成功、④AST 泛捕获 0 处 / lint 支 {got_lint} 处）")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1265,7 +1396,8 @@ def main():
               t48_editor_read_path_is_locale_independent, t49_cancel_reaps_child_and_pumps,
               t50_tool_state_is_keyed_by_session_not_project_name,
               t51_write_path_pins_encoding_and_newline,
-              t52_action_tree_is_importable_and_tier_names_have_a_home]
+              t52_action_tree_is_importable_and_tier_names_have_a_home,
+              t53_editor_generic_except_never_overwrites_source]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -1289,7 +1421,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 
