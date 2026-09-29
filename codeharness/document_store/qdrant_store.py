@@ -81,6 +81,14 @@ class QdrantStore:
         if self._ready:
             return
         if await self.client.collection_exists(self.collection):
+            # 维度先对得上再谈别的：同名集合是**上一把刻度**建的（64 维夹具建的 `s5gate`、或换过 embedding
+            # 端点之后），写新维度的向量会被服务端在**写入那一刻** 400 拒（09-29 真跑精排档炸的就是这句
+            # `expected dim: 64, got 1024`），而那条 400 在召回/上传路径上长成的是「存储不可用」——
+            # C16 那一族的谎：把「配置不匹配」演成「服务挂了」。这里当场点名两个数字，让它能被修对。
+            size = await self._existing_dim()
+            if size is not None and size != dim:
+                raise ValueError(f"集合 {self.collection} 是 {size} 维，当前 embedding 输出 {dim} 维——"
+                                 "换刻度必须换集合名或重建集合（分数阈值与已灌切片本来也不可跨刻度复用，C20/C23）")
             # C21：老集合是在 `source` 进 payload 之前建的。不在这里补那一道索引，「按 source 过滤 /
             # 下架单份文档」就退化成全扫——`ensure()` 每进程只走到一次，补它的市场价是一次 API 调用。
             await self._ensure_indexes()
@@ -94,6 +102,16 @@ class QdrantStore:
         )
         await self._ensure_indexes()
         self._ready = True
+
+    async def _existing_dim(self) -> int | None:
+        """现有集合的 dense 维度；读不到就返回 None（**不拦**——那是另一种故障，交回原来的路径去报）。"""
+        try:
+            v = (await self.client.get_collection(self.collection)).config.params.vectors
+            p = v.get(DENSE) if isinstance(v, dict) else None
+            return getattr(p, "size", None)
+        except Exception:
+            return None
+
 
     async def _ensure_indexes(self) -> None:
         """payload 上的 keyword 索引（`create_payload_index` 幂等，重复调没事）。

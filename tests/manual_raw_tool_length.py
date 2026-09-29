@@ -29,6 +29,7 @@ R7 之前的 527 条又被旧 `[:4000]` censored（只剩 3 条恰=4000 当下�
     F:/anaconda/python.exe -B tests/manual_raw_tool_length.py > E:/tmp/rawlen_live.out 2>&1
 """
 import json
+import os
 import shutil
 import sqlite3
 import sys
@@ -67,6 +68,13 @@ def record(station):
 
 
 def patch():
+    """把实例的全部落点挪出 dev；LLM 端点由 `main()` 决定（桩 or `.env` 真模型）。
+
+    为什么要这个开关：现网 A 档的**原始**分布一直没样本（09-29 现证 post-R7 队列 47/47 条都是 `end` 哨兵），
+    而 `clip` 继承上游原长之后，落盘标记写的就是最上游真值 ⇒ 只要有**一场真跑过工具的会话**，分布就能回收。
+    真流量的形状只有真模型驱动才算（桩驱动那五档是设计档位，不是流量）。**判据不在这**：模型这轮到底读不读
+    文件是它的自由（`PLAN.md` §6 第 28 条与「不拿模型脾气做 pass/fail」同一条），它没读就报「零样本 + 原因」。
+    """
     from codeharness.configs.settings import settings
     import codeharness.roles.role_zero as rzmod
     import codeharness.tools as toolsmod
@@ -87,6 +95,7 @@ def patch():
     toolsmod.clip = record("read_file")                          # 第一站：2 万
     rzmod.clip = record("role_zero回喂")                          # 第二站：A 档 4 千
     return settings
+
 
 
 class _Stub(BaseHTTPRequestHandler):
@@ -142,31 +151,70 @@ def read_back(thread_id):
     return got
 
 
+LIVE = os.environ.get("CH_LIVE_LLM") == "1"
+# 真模型那一场用的语料：一个中文长文 + 一个代码文件，尺寸跨过 4 千与 2 万两档（内容像真产物，不是纯重复字，
+# 否则「原始长度」量到的是我造的形状而不是模型的输入）。
+LIVE_FILES = {"notes_zh.md": 46000, "service.py": 12000}
+
+
+def dump_cmds(thread_id):
+    """把这一场各子图**实际发过的命令**读出来——零样本时必须能回答「那它干了什么」，不许只说没样本。"""
+    out = []
+    with sqlite3.connect(f"file:{CKDB}?mode=ro", uri=True) as conn:
+        saver = mtl.SqliteSaver(conn, serde=mtl._serde())
+        for ns, in conn.execute("select distinct checkpoint_ns from checkpoints where thread_id = ?", (thread_id,)):
+            tup = saver.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ns}})
+            cv = (tup.checkpoint.get("channel_values") or {}) if tup else {}
+            for step in (cv.get("history") or []):
+                if isinstance(step, dict) and step.get("commands"):
+                    out.append((ns, [f"{c.get('command_name')}({','.join((c.get('args') or {}).keys())})"
+                                     for c in step["commands"]]))
+    return out
+
+
 def main() -> int:
     settings = patch()
-    srv = HTTPServer(("127.0.0.1", 0), _Stub)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    settings.llm.base_url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
-    settings.llm.api_key = "stub-key"
+    srv = None
+    if not LIVE:
+        srv = HTTPServer(("127.0.0.1", 0), _Stub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        settings.llm.base_url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        settings.llm.api_key = "stub-key"
     root = PROBE / PROJECT
     root.mkdir(parents=True, exist_ok=True)
-    for n in SIZES:                       # 内容 = 同一个字重复 n 次 ⇒ 文件长度就是真值，没有别的加工
-        (root / f"big_{n}.txt").write_text("字" * n, encoding="utf-8", newline="")
+    if LIVE:
+        for name, n in LIVE_FILES.items():
+            body = "重置密码要先验证旧邮箱，系统发一次性验证码。" * 12 if name.endswith(".md") \
+                else "def handle(req):\n    return verify(req.token) + 1\n"
+            (root / name).write_text((body * (n // len(body) + 1))[:n], encoding="utf-8", newline="")
+        idea = ("用 read_file 工具把 notes_zh.md 整份读完（不要用 shell 去找文件），"
+                "然后告诉我它的最后一行写了什么")
+    else:
+        for n in SIZES:                   # 内容 = 同一个字重复 n 次 ⇒ 文件长度就是真值，没有别的加工
+            (root / f"big_{n}.txt").write_text("字" * n, encoding="utf-8", newline="")
+        idea = "读这几个大文件并各说一句"
     from fastapi.testclient import TestClient
     from server.app import create_app
     t0 = time.time()
     with TestClient(create_app()) as c:
-        sid = c.post("/api/sessions", json={"idea": "读这几个大文件并各说一句", "project_name": PROJECT,
-                                            "paradigm": "dynamic", "permission": "readonly"}).json()["id"]
+        sid = c.post("/api/sessions", json={"idea": idea, "project_name": PROJECT, "paradigm": "dynamic",
+                                            "permission": "readonly", "n_round": 3 if LIVE else 5}).json()["id"]
         assert c.post(f"/api/sessions/{sid}/start").status_code == 200, "起跑失败"
         status = None
-        for _ in range(240):
+        for _ in range(360 if LIVE else 240):          # **界写在起跑进程内**：真模型一场最多 180 秒
             time.sleep(0.5)
-            status = str(c.get(f"/api/sessions/{sid}").json().get("status"))
+            one = c.get(f"/api/sessions/{sid}").json()
+            status = str(one.get("status"))
             if status != "running":
                 break
-    srv.shutdown()
-    print(f"会话收工 status={status} 用时={round(time.time() - t0, 1)}s 桩第二发已用={_Stub.served}")
+        cost = {k: v for k, v in ((one.get("cost") or {}).items())
+                if any(w in k for w in ("cost", "token", "truncat", "rerank", "recall"))}
+    if srv:
+        srv.shutdown()
+    print(f"会话收工 status={status} 用时={round(time.time() - t0, 1)}s "
+          f"驱动={'真模型 ' + settings.llm.model if LIVE else '本机桩（第二发已用=' + str(_Stub.served) + '）'}")
+    if LIVE:
+        print(f"账本读数（GET 出口，真跑的花费就在这里报，不另算）= {cost}")
 
     print("\n站点读数（clip 之前收到的原始长度 / 落盘长度 / 被吃掉的字数）：")
     for station, n, raw, kept in REC:
@@ -174,24 +222,48 @@ def main() -> int:
               f"  {'带标记' if kept < raw else '无标记（阳性对照：不该有）'}")
     a_over = [r for r in REC if r[0] == "role_zero回喂" and r[2] > A_BUDGET]
     r_over = [r for r in REC if r[0] == "read_file" and r[2] > READ_BUDGET]
-    assert a_over, f"A 档那站没收到过超 {A_BUDGET} 的原始值 ⇒ 这场没 exercise 截断，读数作废"
-    assert r_over, f"第一站没收到过超 {READ_BUDGET} 的原始值 ⇒ 叠套那一格没证据"
+    if LIVE:
+        # 模型这一轮到底读不读文件是它的自由，不拿它做 pass/fail（§6 与「不拿模型脾气做判据」同一条）；
+        # 它没读就报「零样本 + 原因候选」，不拿桩那五档的读数冒充真流量。
+        if not REC:
+            print("\n**零样本**：这场真模型会话没有产生任何被 `clip` 处理的工具产出 ⇒ 现网 A 档原始分布仍无样本。")
+            for name, cmds in dump_cmds(sid):
+                print(f"  它这轮实际发的命令（ns={name[:22]}）= {cmds}")
+            print("  原因候选：选了别的命令 / 被 `permission` 档拦在网关（`results=[]` 就是被拦的形状）/ 收工太早。")
+            cleanup()                                   # 零样本这条路上也必须清场（第一版直接 return，留过残留）
+            return 3
+            return 3
+    else:
+        assert a_over, f"A 档那站没收到过超 {A_BUDGET} 的原始值 ⇒ 这场没 exercise 截断，读数作废"
+        assert r_over, f"第一站没收到过超 {READ_BUDGET} 的原始值 ⇒ 叠套那一格没证据"
 
     back = read_back(sid)
     marked = [b for b in back if b[3] == "marked"]
     got = sorted(b[2] for b in marked)
-    expect = sorted(n for n in SIZES if n > A_BUDGET)        # 越过 4 千那四档：4001 / 8000 / 20001 / 30000
     print(f"\n落盘回收：A 值 {len(back)} 条（`end` 之类也算），其中带标记 {len(marked)} 条，回收到的原长 = {got}")
-    assert got == expect, f"回收的原长该逐档回到**最上游真值** {expect}，实得 {got} ⇒ 叠套继承没生效，或读错了库"
-    assert set(got) <= {r[2] for r in REC} | set(SIZES), "回收值既不在埋计数里也不在文件长度里 ⇒ 两把尺不一致"
-    assert got.count(30000) == 1 and got.count(20001) == 1, (
-        "20001 字与 30000 字这两档在第二站必须**分得开**——修前它们同值 20000（第一站的标记躺在被切掉的那截里），"
-        "`clip` 继承上游原长之后才分得开，这就是本文件守着的那件事")
-    print(f"\nnested_claim：30000 字的文件 → 第一站落盘 {READ_BUDGET}（写「原长 30000 字」）"
-          f" → 第二站收到 {READ_BUDGET}、切到 {A_BUDGET}，落盘标记现在写的也是 **30000**（继承上游真值）；"
-          f"20001 字那一档写 20001 ⇒ 两档分得开。修前那一版两档同值 20000，"
-          f"账在 `plan/rag-knowledge.md` §1.5「nested_claim 失真」段（本轮由 `clip` 修掉，本文件改判为守修后的形状）。")
-    print("OK：A 档两站的原始长度、被吃掉的字数、以及叠套后「原长」继承上游真值——三件事都有读数（桩驱动，零花费）。")
+    if LIVE:
+        # 两把尺必须互相咬得上：回收到的原长要么等于埋计数在某一站收到的原始长度，要么等于本次造的文件长度
+        assert set(got) <= {r[2] for r in REC} | set(LIVE_FILES.values()), (
+            f"回收值 {got} 里出现了两把尺都不认的数 ⇒ 继承或读库有一处错")
+        print("（真流量这一场只断两把尺一致 + 有样本；不断「读了几档」——那是模型的自由）")
+    else:
+        expect = sorted(n for n in SIZES if n > A_BUDGET)        # 越过 4 千那四档：4001/8000/20001/30000
+        assert got == expect, f"回收的原长该逐档回到**最上游真值** {expect}，实得 {got} ⇒ 叠套继承没生效，或读错了库"
+        assert set(got) <= {r[2] for r in REC} | set(SIZES), "回收值既不在埋计数里也不在文件长度里 ⇒ 两把尺不一致"
+        assert got.count(30000) == 1 and got.count(20001) == 1, (
+            "20001 字与 30000 字这两档在第二站必须**分得开**——修前它们同值 20000（第一站的标记躺在被切掉的那截里），"
+            "`clip` 继承上游原长之后才分得开，这就是本文件守着的那件事")
+    if LIVE:
+        print(f"\n真流量这一场：A 档那站收到的原始长度分布 = {sorted(r[2] for r in REC if r[0].startswith('role_zero'))}"
+              f"（clip 之前，逐笔）；被吃掉最多的一档 = "
+              f"{max((r[2] - r[3], r[2]) for r in REC if r[0].startswith('role_zero')) if a_over or REC else '无'}")
+        print("OK：真模型驱动下「工具产出的原始长度」第一次有了可回收的落盘样本（花费见上面账本那行）。")
+    else:
+        print(f"\nnested_claim：30000 字的文件 → 第一站落盘 {READ_BUDGET}（写「原长 30000 字」）"
+              f" → 第二站收到 {READ_BUDGET}、切到 {A_BUDGET}，落盘标记现在写的也是 **30000**（继承上游真值）；"
+              f"20001 字那一档写 20001 ⇒ 两档分得开。修前那一版两档同值 20000，"
+              f"账在 `plan/rag-knowledge.md` §1.5「nested_claim 失真」段（本轮由 `clip` 修掉，本文件改判为守修后的形状）。")
+        print("OK：A 档两站的原始长度、被吃掉的字数、以及叠套后「原长」继承上游真值——三件事都有读数（桩驱动，零花费）。")
     if not cleanup():
         left = sorted(p.relative_to(PROBE).as_posix() for p in PROBE.rglob("*"))
         print(f"清场**没做成**：workspace/_probe_rawlen 还剩 {left}")

@@ -1391,8 +1391,12 @@ def t37_rerank_endpoint_real_answer():
         return
     from codeharness.memory.longterm import LongTermMemory
     from codeharness.provider.gateway import LLMGateway
+    from codeharness.document_store.qdrant_store import QdrantStore
+    # **不能用 `gate_store()`**：那是 64 维假 embedding 建的 `s5gate`，写 1024 维的真向量会被服务端
+    # `400 Vector dimension error: expected dim: 64, got 1024` 拒掉（09-29 真跑炸出来就是这句）。
+    # 与 t25 同一课：真刻度用专属集合，别和 64 维的夹具共用（`s5gate_bge` 的注释早就写着这句）。
     ltm = LongTermMemory(project_id="c23_live", embeddings=LLMGateway.embeddings(),
-                         user_id="u_c23live", store=gate_store(), doc_type="kb")
+                         user_id="u_c23live", store=QdrantStore(collection="s5gate_rerank"), doc_type="kb")
     asyncio.run(ltm.overflow([Message(content="重置密码要先验证旧邮箱，系统发一次性验证码", role="user"),
                               Message(content="城市马拉松的补给站每 5 公里一处", role="user")]))
     with _FloorCfg(mode="rerank", min_score=0.01):     # 线放到最低：这一格要量的是「顺序与分」，不是筛
@@ -2162,6 +2166,36 @@ def t48_metric_round_trips_its_own_dump():
     print("  ok  t48 Metric 自往返两条都回得来、score 仍受类型约束（非 Any）、AST 钉住可空注解")
 
 
+def t49_ensure_names_a_dimension_mismatch():
+    """换 embedding 刻度后同名集合会怎样：`ensure()` 必须**当场点名两个数字**，不能留给 upsert 去 400。
+
+    触发事实（09-29 真跑精排档）：64 维夹具建的 `s5gate` 上写 1024 维真向量 ⇒ 服务端在写入那一刻回
+    `400 Vector dimension error: expected dim: 64, got 1024`，而那条 400 在召回/上传路径上长成的是
+    「存储不可用」——C16 那一族的谎（把配置不匹配演成服务挂了）。
+    零花费：`ensure(dim)` 只要一个整数，不发 embedding；用的是本格自建、跑完即删的集合。离线显式跳过。
+    """
+    if not live_qdrant():
+        print("  t49 跳过（无 Qdrant）")
+        return
+    from codeharness.document_store.qdrant_store import QdrantStore
+    coll = "s5gate_dimchk"
+    try:
+        asyncio.run(QdrantStore(collection=coll).ensure(64))          # 上一把刻度先把集合建起来
+        try:
+            asyncio.run(QdrantStore(collection=coll).ensure(1024))    # 新实例，绕开 `_ready` 缓存
+            raise AssertionError("维度不符却没报错 ⇒ 守卫失效：下一站会以 400/「存储不可用」的形式炸")
+        except ValueError as e:
+            assert "64" in str(e) and "1024" in str(e) and coll in str(e), f"报错没点名两个数字与集合名：{e}"
+        asyncio.run(QdrantStore(collection=coll).ensure(64))          # **对照**：同刻度不该报错（守卫不能恒抛）
+        print(f"  ok  t49 维度不符被点名（{coll} 64 vs 1024），同刻度放行")
+    finally:
+        st = QdrantStore(collection=coll)
+        try:
+            asyncio.run(st.client.delete_collection(coll))
+        finally:
+            asyncio.run(st.client.close())
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -2196,11 +2230,12 @@ def main():
               t45_shared_readers_short_circuit_once_per_session,
               t46_experience_state_key_is_gone_and_recall_still_happens,
               t47_clip_marks_the_truncation_and_the_sites_still_call_it,
-              t48_metric_round_trips_its_own_dump]
+              t48_metric_round_trips_its_own_dump,
+              t49_ensure_names_a_dimension_mismatch]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
-        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23/t25 跳过。"
+        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23/t25/t34–t37/t39/t43/t49 跳过。"
               f"R9 这层的门禁必须起容器跑一次才算数。")
     if not live_embedding():
         print(f"⚠ 真 embedding 不在线（{settings.embedding.base_url} / {settings.embedding.model}）："
