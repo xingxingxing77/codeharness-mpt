@@ -42,7 +42,7 @@ def module_strings(path: Path) -> dict:
 
 def t1_prompts_verbatim():
     if not SRC.exists():
-        print("  t1 跳过（供体 E:/MetaGPT/prompts 不在本机）")
+        print(f"  t1 跳过（供体 {SRC} 不在本机）")
         return
     checked = 0
     for rel in PROMPT_FILES:

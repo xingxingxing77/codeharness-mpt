@@ -63,12 +63,25 @@ def t1_to_url_carries_credentials():
     print("  t1 to_url 带上凭据（含 @ : / 的百分号编码），无凭据时与改动前逐字节相同")
 
 
+SKIPPED: list[str] = []
+
+
+def _skip(name: str, why: str) -> None:
+    """「这格没判」必须被**数出来**，不能只印一行就过去。
+
+    09-29 现证的形状：收口行原本写死「全部通过（跳过项见上）」，而 6/6 全判那一跑也照印这句——
+    读的人分不清「都跑了」和「悄悄没跑」。现在它自己报跳了几格、跳了谁（`t44` 那条死门同族）。
+    """
+    SKIPPED.append(name)
+    print(f"  {name} 跳过：{why}")
+
+
 def t2_real_redis_requires_and_accepts():
     """一次性 redis-server 开 --requirepass：不带凭据 NOAUTH，带 to_url() 读写通。"""
     exe = Path("F:/Redis/redis-server.exe")
     cli = Path("F:/Redis/redis-cli.exe")
     if not exe.exists():
-        print(f"  t2 跳过：本机无 {exe}，真进程读数拿不到（t1 已钉住 URL 构造）")
+        _skip("t2", f"本机无 {exe}，真进程读数拿不到（t1 已钉住 URL 构造）")
         return
     port = _free_port()
     proc = subprocess.Popen([str(exe), "--port", str(port), "--requirepass", PW, "--save", ""],
@@ -233,8 +246,8 @@ def t5_real_qdrant_server_enforces_key():
             time.sleep(0.3)
             deadline -= 0.3
     if not url or not key:
-        print("  t5 跳过：没给 QDRANT_BINARY（或 QDRANT_URL+QDRANT_API_KEY）——服务端侧读数拿不到，"
-              "只能靠 t3 钉我们这端发头")
+        _skip("t5", "没给 QDRANT_BINARY（或 QDRANT_URL+QDRANT_API_KEY）——服务端侧读数拿不到，"
+                    "只能靠 t3 钉我们这端发头")
         return
     try:
         assert _http_status(url + "/collections") == 401, \
@@ -304,7 +317,7 @@ def t6_store_branch_only_with_password():
     """「backend 正常起」证明不了凭据通了——ping 不通时 app 会静默退回进程内实现。"""
     exe = Path("F:/Redis/redis-server.exe")
     if not exe.exists():
-        print("  t6 跳过：本机无 redis-server.exe，退不回「凭据丢了会怎样」这条读数")
+        _skip("t6", "本机无 redis-server.exe，退不回「凭据丢了会怎样」这条读数")
         return
     port = _free_port()
     cfg = RedisConfig(host="127.0.0.1", port=port, password=PW)   # 端口问系统要，绝不指 6379 共享实例
@@ -356,7 +369,9 @@ def main():
         t4_compose_and_example_wired()
         t5_real_qdrant_server_enforces_key()
         t6_store_branch_only_with_password()
-        print("\n" + "=" * 60 + "\n✅ 全部通过 (t1–t6，跳过项见上)\n" + "=" * 60)
+        verdict = ("t1–t6 全判，0 跳过" if not SKIPPED
+                   else f"{6 - len(SKIPPED)}/6 判了，**没判的格子：{SKIPPED}**（绿不代表这六条都验过）")
+        print("\n" + "=" * 60 + f"\n✅ 全部通过（{verdict}）\n" + "=" * 60)
         return 0
     except AssertionError as e:
         print(f"\n❌ 失败：{e}")
