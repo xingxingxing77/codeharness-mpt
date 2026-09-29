@@ -98,32 +98,46 @@ def pct(xs, p):
     return xs[min(len(xs) - 1, int(round(p / 100 * (len(xs) - 1))))] if xs else 0
 
 
-def harvest(vals):
-    """取两类文本长度：A=工具产出（history[].results[].result），B=消息正文。认不准的形状一律跳过。
+def texts(vals):
+    """两类**原文**：A=工具产出（`history[].results[].result`），B=消息正文。认不准的形状一律跳过。
 
-    A 这一档另走 `raw_len`：返回的是**原始**长度（标记里的原长 / 落盘值本身），同时把三档类别数出来，
-    这样「legacy 下界」不会混在真值里冒充频率。
+    与 `harvest` 分成两个函数是为了「同一份走查、两种问法」：长度档住在本文件，语料构成档在
+    `tests/manual_clip_token_units.py`。走查逻辑（角色子图的 history、分段 content）只此一份——
+    它在 `history` 形状上最容易写歪，各写一遍就是两处各歪一次（09-29 第一版只读 `ns=""` 就是这么错的）。
     """
-    a, b, cats = [], [], {"marked": 0, "legacy": 0, "plain": 0}
+    a, b = [], []
     hist = vals.get("history")
     if isinstance(hist, list):
         for step in hist:
             res = step.get("results") if isinstance(step, dict) else None
             for r in (res if isinstance(res, list) else []):
                 if isinstance(r, dict) and isinstance(r.get("result"), str):
-                    n, kind = raw_len(r["result"])
-                    a.append(n)
-                    cats[kind] += 1
+                    a.append(r["result"])
     msgs = vals.get("messages")
     for m in (msgs if isinstance(msgs, (list, tuple)) else []):
         content = getattr(m, "content", m.get("content") if isinstance(m, dict) else None)
         if isinstance(content, str):
-            b.append(len(content))
-        elif isinstance(content, list):                       # 分段 content：只数文本段
+            b.append(content)
+        elif isinstance(content, list):                         # 分段 content：只取文本段
             for part in content:
                 if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    b.append(len(part["text"]))
-    return a, b, cats
+                    b.append(part["text"])
+    return a, b
+
+
+def harvest(vals):
+    """长度读数：A 走 `raw_len`（**原始**长度 + 三档类别），B 取字符数。
+
+    A 返回的是原始长度（标记里的原长 / 落盘值本身），同时数出三档类别，这样「legacy 只知 ≥ 下界」
+    不会混在真值里冒充频率。
+    """
+    at, bt = texts(vals)
+    a, cats = [], {"marked": 0, "legacy": 0, "plain": 0}
+    for v in at:
+        n, kind = raw_len(v)
+        a.append(n)
+        cats[kind] += 1
+    return a, [len(x) for x in bt], cats
 
 
 def report(label, xs):
