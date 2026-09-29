@@ -2055,8 +2055,10 @@ def t28_stream_ux_batch():
         declared, real = set(schema.prose_fields), set(schema.model_fields)
         assert declared and declared <= real, \
             f"t28④ {schema.__name__}.prose_fields 里有不存在的字段名（打错＝该字段静默不上屏）：{sorted(declared - real)}"
-        assert not (declared & {"language", "project_name", "programming_language", "original_requirements"}), \
-            f"t28④ {schema.__name__} 把标识符或抄用户原话的字段放进了名单"
+        assert not (declared & {"language", "project_name", "programming_language", "original_requirements",
+                                "file_list", "requirement_pool", "competitive_quadrant_chart",
+                                "data_structures_and_interfaces", "program_call_flow", "commands"}), \
+            f"t28④ {schema.__name__} 把标识符/文件名/图表源码或抄用户原话的字段放进了名单"
     assert 'docs_block("prd", role="PM", prose=PRDOutput)' in \
         pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd 开块没带名单"
     assert 'docs_block("prd-update", role="PM", prose=PRDOutput)' in \

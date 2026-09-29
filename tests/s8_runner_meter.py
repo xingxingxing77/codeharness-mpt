@@ -788,7 +788,7 @@ async def t12_prose_from_structured_stream():
     design_txt = json.dumps({
         "implementation_approach": appr,
         "product_goals": [goal_a, goal_b],
-        "file_list": ["index.html", "app.py"],
+        "file_list": ["index.html", "app.py", "src/constants/explanation.js"],   # 28 字：活体现证的第四类漏
         "data_structures_and_interfaces": "classDiagram\n    Class01 <|-- AveryLongClass : 这条是 mermaid 源码",
         "program_call_flow": "sequenceDiagram\n    A->>B: 这条也是 mermaid 源码",
         "anything_unclear": unclear}, ensure_ascii=False, indent=2)
@@ -815,7 +815,8 @@ async def t12_prose_from_structured_stream():
     got8 = "".join(e.value for e in live8)
     assert got8 == appr + "\n" + goal_a + "\n" + goal_b + "\n" + unclear, \
         f"⑧ 名单内的字段没照发（列表的第二项被丢掉＝键名在值闭合后失焦），或发多了：{got8[:70]!r}"
-    for banned in ("classDiagram", "sequenceDiagram", "data_structures_and_interfaces"):
+    for banned in ("classDiagram", "sequenceDiagram", "data_structures_and_interfaces",
+                   "src/constants/explanation.js"):
         assert banned not in got8, f"⑧ 名单外的成员漏上屏：{banned!r}"
 
     # 阳性对照：同一份 payload，块**没声明**名单 ⇒ 退回按长度挑，那三样都该出现。
@@ -832,6 +833,7 @@ async def t12_prose_from_structured_stream():
     got4 = "".join(e.value for e in bus4.history(s4.id) if e.name == "live")
     assert got4 == ref(design_txt), f"⑧ 无名单时行为该与「按长度挑」那一版逐字一致（参照实现）：{got4[:70]!r}"
     assert "data_structures_and_interfaces" in got4, "⑧ 阳性对照没复现旧漏（说明参照实现没覆盖到键名）"
+    assert "src/constants/explanation.js" in got4, "⑧ 阳性对照没复现第四类漏（够长的文件名本该在按长度挑那一版里上屏）"
     runner4._forget(s4.id, terminal=True)
 
     # ⑧c 嵌套一层：动态线的 ZeroThought 只放行 `thought`，`commands[].args.content` 不发
