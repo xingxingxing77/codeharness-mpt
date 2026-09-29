@@ -5,11 +5,14 @@
 A 档 47 条**全是 `{"name": "end", "result": "[结束]"}`**（长度 4），R7 之后一场都没真跑过工具；
 R7 之前的 527 条又被旧 `[:4000]` censored（只剩 3 条恰=4000 当下界）。⇒ 原始分布只能**现跑一场、在 clip 之前埋计数**。
 
-它同时回答第二件事，而且是本轮真正的发现：**两站叠套时「原长」这个词会骗人**。
-`read_file` 自己先按 2 万切（`tools/__init__.py:41`），`role_zero` 再按 4 千切了回喂（`roles/role_zero.py:478`）。
-读一个 3 万字的文件：第一站输出**正好 20000**（结尾写着「原长 30000 字」），第二站把这 20000 再切到 4000——
+它还守着一件被这一场量出来、随后当场修掉的事：**两站叠套时「原长」这个词曾经骗人**。
+`read_file` 自己先按 2 万切（`tools/__init__.py:42`），`role_zero` 再按 4 千切了回喂（`roles/role_zero.py:478`）。
+修前读一个 3 万字的文件：第一站输出**正好 20000**（结尾写着「原长 30000 字」），第二站把这 20000 再切到 4000——
 第一站那句标记正好落在被切掉的那截里，于是模型（以及事后从落盘回收原长的人）看见的「原长」是 **20000**，
-比文件真大小少 1 万字；更糟的是 20001 字与 30000 字的文件在第二站**长得一模一样**。见 `nested_claim` 那格。
+比文件真大小少 1 万字；更糟的是 20001 字与 30000 字的文件在第二站**长得一模一样**。
+现 `clip` 会**继承上游原长**（`utils/text.py::_raw_len`），所以这一场跑出来的落盘标记写的是 30000——
+下面 `nested_claim` 那一格断言的就是修后的形状（两档必须重新分得开），修前的读数与账在
+`plan/rag-knowledge.md` §1.5「nested_claim 失真」段。
 
 三条边界，别把这场读成别的：
   · **桩不是真模型**（`plan/PLAN.md` §4 第 4 条、§6 第 6 条）：`_Stub` 只负责「命令里写 read_file」。本文件量的是
@@ -116,16 +119,19 @@ class _Stub(BaseHTTPRequestHandler):
         pass
 
 
-def read_back():
-    """拿同一把尺（`mtl.raw_len`）去读**本探针自己**那份 checkpoint，把落盘值里的原长回收出来。
+def read_back(thread_id):
+    """拿同一把尺（`mtl.raw_len`）读**本次这一场**的 checkpoint，把落盘值里的原长回收出来。
 
-    这是 `raw_len` 在真落盘上的阳性对照：合成自检只证明我解析我拼的串，这一格证明它解析产品写下的串。
+    必须按 `thread_id` 收口：这份库里可能留着上一跑的场次（09-29 现证——18:18 那一跑的
+    `Mike:eee58760…` 一直到 19:49 还在，标记写 20000；同一库新场次 `Mike:240fd2f3…` 写 20001/30000），
+    整库扫就把**修前与修后两代语义混成一个读数**，那才是最难发现的假绿。
+    这一格同时也是 `raw_len` 在真落盘上的阳性对照：合成自检只证明我解析我拼的串。
     """
     got = []
     with sqlite3.connect(f"file:{CKDB}?mode=ro", uri=True) as conn:
         saver = mtl.SqliteSaver(conn, serde=mtl._serde())
-        for tid, ns in conn.execute("select distinct thread_id, checkpoint_ns from checkpoints"):
-            tup = saver.get_tuple({"configurable": {"thread_id": tid, "checkpoint_ns": ns}})
+        for ns, in conn.execute("select distinct checkpoint_ns from checkpoints where thread_id = ?", (thread_id,)):
+            tup = saver.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ns}})
             cv = (tup.checkpoint.get("channel_values") or {}) if tup else {}
             for step in (cv.get("history") or []):
                 if not isinstance(step, dict):
@@ -171,22 +177,21 @@ def main() -> int:
     assert a_over, f"A 档那站没收到过超 {A_BUDGET} 的原始值 ⇒ 这场没 exercise 截断，读数作废"
     assert r_over, f"第一站没收到过超 {READ_BUDGET} 的原始值 ⇒ 叠套那一格没证据"
 
-    back = read_back()
+    back = read_back(sid)
     marked = [b for b in back if b[3] == "marked"]
-    print(f"\n落盘回收：A 值 {len(back)} 条（end 之类也算），其中带标记 {len(marked)} 条，"
-          f"回收到的原长 = {sorted(b[2] for b in marked)}")
-    assert marked, "落盘值一条都不带标记 ⇒ 要么没截断，要么读错了库"
-    assert {b[2] for b in marked} <= {r[2] for r in REC}, "回收的原长里有埋计数没见过的大值 ⇒ 两把尺不一致"
-
-    inner = next((r for r in r_over if r[2] == 30000), None)
-    outer = next((r for r in a_over if r[2] == READ_BUDGET), None)
-    assert inner and outer, "叠套那一格没拿到 30000→第一站→第二站 的成对读数"
-    rec_30000 = [b[2] for b in marked if b[2] == READ_BUDGET]
-    print(f"\nnested_claim：30000 字的文件 → 第一站落盘 {inner[3]}（原始 {inner[2]}）"
-          f" → 第二站收到 {outer[2]}、切到 {outer[3]}；"
-          f"落盘回收出来的「原长」= {sorted(set(rec_30000))} 与 20001 字那档**同值**"
-          f"（第一站的标记躺在被切掉的那截里）⇒ 「原长」在叠套链上只承认真上一站的输出。")
-    print("OK：A 档两站的原始长度、被吃掉的字数、以及叠套后「原长」失真都已有读数（桩驱动，零花费）。")
+    got = sorted(b[2] for b in marked)
+    expect = sorted(n for n in SIZES if n > A_BUDGET)        # 越过 4 千那四档：4001 / 8000 / 20001 / 30000
+    print(f"\n落盘回收：A 值 {len(back)} 条（`end` 之类也算），其中带标记 {len(marked)} 条，回收到的原长 = {got}")
+    assert got == expect, f"回收的原长该逐档回到**最上游真值** {expect}，实得 {got} ⇒ 叠套继承没生效，或读错了库"
+    assert set(got) <= {r[2] for r in REC} | set(SIZES), "回收值既不在埋计数里也不在文件长度里 ⇒ 两把尺不一致"
+    assert got.count(30000) == 1 and got.count(20001) == 1, (
+        "20001 字与 30000 字这两档在第二站必须**分得开**——修前它们同值 20000（第一站的标记躺在被切掉的那截里），"
+        "`clip` 继承上游原长之后才分得开，这就是本文件守着的那件事")
+    print(f"\nnested_claim：30000 字的文件 → 第一站落盘 {READ_BUDGET}（写「原长 30000 字」）"
+          f" → 第二站收到 {READ_BUDGET}、切到 {A_BUDGET}，落盘标记现在写的也是 **30000**（继承上游真值）；"
+          f"20001 字那一档写 20001 ⇒ 两档分得开。修前那一版两档同值 20000，"
+          f"账在 `plan/rag-knowledge.md` §1.5「nested_claim 失真」段（本轮由 `clip` 修掉，本文件改判为守修后的形状）。")
+    print("OK：A 档两站的原始长度、被吃掉的字数、以及叠套后「原长」继承上游真值——三件事都有读数（桩驱动，零花费）。")
     if not cleanup():
         left = sorted(p.relative_to(PROBE).as_posix() for p in PROBE.rglob("*"))
         print(f"清场**没做成**：workspace/_probe_rawlen 还剩 {left}")
@@ -196,19 +201,22 @@ def main() -> int:
 
 
 def cleanup():
-    """删掉本探针的目录，并**证它真没了**。
+    """删掉本探针的目录，并**证它真没了**——删完等 2 秒再逐项 stat。
 
-    第一版在这里写了 `shutil.rmtree(..., ignore_errors=True)` + 一句 `not PROBE.exists()`，结果印出
-    `False`：Windows 上 `checkpoints.db-shm/-wal` 会被最后一个 sqlite 连接多拖一小会儿（`s8` 加
-    `_unlink_retry` 同因），`ignore_errors` 把失败咽了下去、话却照说。所以重试而不是咽。
+    两版自纠都在这里：① 第一版 `shutil.rmtree(..., ignore_errors=True)` 把失败咽了、话照说
+    （印出「已删 = False」，`checkpoints.db-shm/-wal` 被最后一个连接拖住，s8 的 `_unlink_retry` 同因）；
+    ② 第二版改成「重试到 `not PROBE.exists()`」，18:18 那一跑照样印出 `= True`，而现证
+    `storage/checkpoints.db`（创建时刻 18:18:50）与 `rawlen_probe/big_*.txt` 一直活到 19:49 被下一跑覆盖。
+    ⇒ 异步 sqlite 线程还开着时，目录在删除挂起期对 `exists()` 可以不可见。所以这里删完**先睡 2 秒**，
+    再对目录与库文件逐项 `exists()`；任一项还在就判没删净（返回 False，`main` 里非零退出）。
     """
     import gc
-    for _ in range(20):
+    for _ in range(10):
         gc.collect()
         shutil.rmtree(PROBE, ignore_errors=True)
-        if not PROBE.exists():
+        time.sleep(2.0)
+        if not PROBE.exists() and not CKDB.exists():
             return True
-        time.sleep(0.5)
     return False
 
 

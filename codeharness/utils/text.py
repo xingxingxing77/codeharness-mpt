@@ -1,3 +1,4 @@
+import re
 from typing import Generator, Sequence
 
 from codeharness.utils.token_counter import TOKEN_MAX, count_output_tokens
@@ -130,6 +131,29 @@ def _split_text_with_ends(text: str, sep: str = "."):
 
 
 
+_TRUNC_NOTE = re.compile("…\\[已截断，原长 (\\d+) 字\\]$")
+
+
+def _raw_len(s: str) -> int:
+    """这段文本的**最上游**原长：它自己若带着上一站 `clip` 的标记，就继承那个数，而不是报自己的长度。
+
+    为什么要继承（09-29 现量，账在 `plan/rag-knowledge.md` §1.5「nested_claim 失真」）：两站叠套时——
+    `read_file` 先按 2 万切、`role_zero` 再按 4 千切——**上一站那句标记正好躺在被下一站切掉的那截里**，
+    于是 3 万字的文件回喂给模型时写着「原长 20000 字」，而 20001 字与 30000 字两个文件在第二站长得一模一样。
+    R7 修的是「每站自己不留痕」，这条补的是同一族谎的另一半——「链上留的痕只承认真上一站的输出」。
+
+    ponytail: 只认**结尾那一串、且数字大于当前长度**（真被截断过的必然如此）。读进来的正文自己以一句
+    `…[已截断，原长 999999 字]` 收尾且比它长，就会被继承——那是引用不是截断，但继承来的仍是「这段文本
+    自称的原长」而非新判断；要彻底分开得给标记加签名/定界符，不为没出现过的形状先加机制。
+    """
+    m = _TRUNC_NOTE.search(s)
+    if m:
+        n = int(m.group(1))
+        if n > len(s):
+            return n
+    return len(s)
+
+
 def clip(text, n: int) -> str:
     """按字符裁到 n 个，裁掉了就把「原长多少」挂在末尾——**含标记后总长仍 ≤ n**。
 
@@ -138,11 +162,14 @@ def clip(text, n: int) -> str:
     占多少上下文」，标记若走额外额度等于悄悄放宽预算，且 `tests/s4_tools.py:129` 那条 `<= 10000`
     可以一字不改。措辞只数得出不判断（C16：不写「已省略无关内容」那种替读者下结论的话）。
 
+    原长走 `_raw_len`（叠套时继承上游真值），不是 `len(s)`——单站行为不变，链上才说得出真话。
+
     ponytail: `n` 比标记本身（约 16 字）还小时正文只能为 0、总长会超过 `n`。最小调用点是 500，够不到；
     真要下探到那个量级就得先砍措辞，不是改这里。
     """
     s = text if isinstance(text, str) else str(text)
     if len(s) <= n:
         return s
-    note = "…[已截断，原长 " + str(len(s)) + " 字]"
+    note = "…[已截断，原长 " + str(_raw_len(s)) + " 字]"
     return s[:max(n - len(note), 0)] + note
+

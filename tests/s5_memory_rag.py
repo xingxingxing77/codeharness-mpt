@@ -1998,7 +1998,7 @@ def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
     病：`read_file` 读一个 4 万字的文件，模型拿到前 2 万字**且看不出是被切的**，于是把半截当全量下
     结论（C96/R3 同族「把故障演成空态」，这次骗的是模型自己）。规格与十处站点在 `plan/rag-knowledge.md` §1.5。
 
-    四格：
+    五格：
       ① 超长 ⇒ 末尾带标记、总长 ≤ n（拿七个真实预算逐个量，含非 str 入参——工具产出本来就是任意对象）；
       ② **阳性对照**：不超长 ⇒ 一字都不多（少了这格，「恒挂标记」也能骗过 ①）；
       ③ 标记里的「原长」是被裁文本的**真值**不是预算 n（写错成 n 就是又一处谎）；
@@ -2007,6 +2007,10 @@ def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
          就是这么被悄悄放宽的）。数字不许 grep：注释与文档里同样躺着 20000/10000 这些数。
          守卫自己带阳性对照：同一套采集必须看得见一个仍然活着的切片（`plan_and_act.py` 的 2000/6000
          在 R7 范围外，正好当探针），否则「一个都没找到」既是修复成功也是采集器坏了。
+      ⑤ 叠套继承：`clip(clip(x, 20000), 4000)` 的标记必须写**最上游的真值**（30000）而不是上一站的输出长度
+         （20000）——09-29 现量的「nested_claim 失真」。带两条对照：没被切过的文本行为逐字不变（继承不能
+         变成新的谎），以及正文自己以一句「原长 9 字」收尾时**不许**继承（那是引用不是截断，守卫按「数字
+         必须大于当前长度」判）。
     """
     import ast
     import importlib
@@ -2077,7 +2081,30 @@ def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
                           f"（该文件现存切片上界：{sorted(set(consts))}）——静默截断复燃")
         assert calls == want_clips, (f"④失效：{mod_name} 里 clip() 调用 {calls} 处，站点应有 {want_clips} 处"
                                      f"——少一处不是修好了，是把截断整个删了（预算被悄悄放宽）")
-    print("  ok  t47 clip 三格（七档预算+非 str / 不超长一字不多 / 原长是真值）与 AST 双向守卫全绿")
+    # ⑤ 叠套继承（nested_claim，同一族谎的另一半）：上一站的标记必须被继承下来。
+    #   不修的形状是——30000 字的文件经 `read_file`(2 万) 再到 `role_zero`(4 千)，第二站写着「原长 20000 字」，
+    #   而 20001 字与 30000 字两个文件在这一站长得一模一样：被第一站吃掉的 1 万字就此隐身（09-29 现量，
+    #   `tests/manual_raw_tool_length.py` 那一场）。
+    once = clip("字" * 30000, 20000)
+    assert int(MARK.search(once).group(1)) == 30000, "⑤基线坏了：第一站自己就该写上游真值"
+    twice = clip(once, 4000)
+    m5 = MARK.search(twice)
+    assert m5, f"⑤失效：叠套后尾部没有标记，实得 {twice[-24:]!r}"
+    assert len(twice) == 4000, f"⑤失效：叠套后总长 {len(twice)} ≠ 预算 4000（继承不许变成放宽额度）"
+    assert int(m5.group(1)) == 30000, (f"⑤失效：叠套后写的是「原长 {m5.group(1)} 字」——那是上一站的**输出**长度，"
+                                       f"文件真长 30000，第一站吃掉的 1 万字被洗掉了")
+    assert int(MARK.search(clip(twice, 1000)).group(1)) == 30000, "⑤失效：三叠没继承到同一个真值"
+    # ⑤ 对照一：没被切过的文本行为逐字不变（继承不能变成新的谎）
+    plain = clip("甲" * 5000, 4000)
+    assert int(MARK.search(plain).group(1)) == 5000 and len(plain) == 4000, "⑤对照一坏了：单站行为被改了"
+    # ⑤ 对照二（守卫）：正文**以**一句「原长 9 字」的标记收尾、而数字小于当前长度 ⇒ 那是引用，不许继承
+    quoted = "旁" * 40 + "…[已截断，原长 9 字]"
+    got_q = clip(quoted, len(quoted) - 1)
+    assert int(MARK.search(got_q).group(1)) == len(quoted), (f"⑤守卫失效：把正文引用的标记当成了上游截断，"
+                                                             f"写进 {MARK.search(got_q).group(1)}，该是 {len(quoted)}")
+
+    print("  ok  t47 clip 五格（七档预算+非 str / 不超长一字不多 / 原长是真值 / 叠套继承与它的两条对照 / "
+          "AST 双向守卫）全绿")
 
 
 def t48_metric_round_trips_its_own_dump():

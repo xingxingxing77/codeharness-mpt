@@ -35,6 +35,10 @@ def read_file(path: str) -> str:
     """读取工作区文件的全部内容（相对路径，越界即拒；单次最多回 2 万字符）。
     关键词：读、看、查看、打开看看、里面写了什么、念一下、全文、read、show、内容。
     示例：read_file(path="src/main.py")"""
+    # 口径（09-29 现量，账在 `plan/rag-knowledge.md` §1.5「4 千是动态线总闸」）：这 2 万只是**本工具的出口**，
+    # 结果回喂给角色时还要再过一次 `clip(out, 4000)`（`roles/role_zero.py:478`），所以动态线里模型对一次工具调用
+    # 最多看见约 3983 字正文。**别把这句写进上面那段描述**——`tool_recall.py:181` 拿 `t.description` 当召回语料，
+    # 改描述=改行为：实测把 `s4 t47` 的 22/22 held-out 现值漂成 21/22（现证 `E:/tmp/nc/s4_tools.out`）。
     t = _safe(path)
     if not t or not t.exists():
         return f"文件不存在: {path}"
