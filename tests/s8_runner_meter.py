@@ -612,7 +612,7 @@ async def t12_prose_from_structured_stream():
     ⑤ 内容块形态（`content` 不是 str）不发布、也不炸。
     """
     from json.decoder import scanstring
-    from server.runner import MIN_PROSE, _ProseStream
+    from server.runner import MIN_PROSE, _KEY_CAP, _ProseStream
 
     long_a = ("快排是典型的分治排序算法，核心逻辑是选取基准元素将待排序数组划分为「小于等于基准」"
               "和「大于基准」的两个子数组，再递归对子数组执行相同排序逻辑，平均时间复杂度 O(n log n)。")
@@ -940,10 +940,34 @@ async def t12_prose_from_structured_stream():
         "⑩ 阳性对照失守：按长度挑那一版本该把这个 36 字的动作名整条打上屏（不然这条守卫防的是不存在的形状）"
     assert feed(("thought",), over) == "", "⑩ 名单没挡住顶到界的动作名（挂它就没意义了）"
 
+    # ⑪ `_KEY_CAP` 那道界今天没人顶过（本仓最长的键 30 字）。它是**内存的界**：`buf` 攒的是当前字符串的
+    #    全长，而正文可以无限长，所以封顶必须生效；它的可观察后果是「键名超过 _KEY_CAP 一律当名单外」。
+    #    必须测**相邻两档**（正好 128 认得 / 129 不认）——只测 127 与 130 的话，界被写成 127 或 129 都照样绿。
+    #    读数（09-29 现取，E:/tmp/ch_prelock_proto2.out）：128 字键名发 35 字、129 字发 0 字、
+    #    正文 7000 字挂在 6 字键名下 7000 字全发且跑完 buf=128。
+    cap_key_ok = "q" * _KEY_CAP
+    cap_key_over = "q" * (_KEY_CAP + 1)
+    cap_prose = "这一段是给人读的理由说明，够长跨过散文门槛，用它看键名到底认没认出来。"
+    assert len(cap_prose) >= MIN_PROSE, "⑪ 前提变了：正文不够长，下面测的就不是名单而是长度门槛"
+    assert feed((cap_key_ok,), json.dumps({cap_key_ok: cap_prose}, ensure_ascii=False)) == cap_prose, \
+        f"⑪ 键名正好 {_KEY_CAP} 字（界内最后一点）认不出来 ⇒ 封顶写小了，长字段名会静默不上屏"
+    assert feed((cap_key_over,), json.dumps({cap_key_over: cap_prose}, ensure_ascii=False)) == "", \
+        f"⑪ 键名 {_KEY_CAP + 1} 字（越界一字）仍被当名单内 ⇒ buf 没封顶，那条界只剩注释"
+    ps_cap = _ProseStream("", ("reason",))
+    cap_long = json.dumps({"reason": cap_prose * 200}, ensure_ascii=False)
+    out_cap = "".join(ps_cap.feed(cap_long[k:k + 7]) for k in range(0, len(cap_long), 7))
+    assert out_cap == cap_prose * 200, f"⑪ 正文超长该照发（界只管键名不管正文）：发 {len(out_cap)} 字"
+    assert len(ps_cap.buf) <= _KEY_CAP, f"⑪ buf 被正文撑到 {len(ps_cap.buf)} 字 ⇒ 封顶失效（这条界的本意就是内存）"
+    r_none = feed(None, json.dumps({cap_key_over: cap_prose}, ensure_ascii=False))
+    assert len(r_none) == len(cap_key_over) + len(cap_prose) + 1, \
+        f"⑪ 阳性对照失守：only=None 时整套键名跟踪不启动，那个 {_KEY_CAP + 1} 字的键名自己长过门槛、" \
+        f"该整条上屏（第六件治的那个原始病形）：现发 {len(r_none)} 字"
+
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
                "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
                "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}；"
                "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）；"
+       "键名长过 `_KEY_CAP` 那界时整段按名单外处理（测的是**相邻两档** 128/129，不是 127/130——后者挡不住 off-by-one）；"
                "块声明 `prose_fields` 时按**键名**门控（mermaid 源码、键名本身、commands 的 args 正文都不上屏，"
                "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出；Task 块靠开块那条 `meta` 进落点表（没它就只落兜底行，做了阳性对照）；ActionChoice 挂名单今天零差别、而顶到界那档（36 字动作名）只有挂名单的不发")
 

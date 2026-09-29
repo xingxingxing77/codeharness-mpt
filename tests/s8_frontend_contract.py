@@ -2060,22 +2060,38 @@ def t28_stream_ux_batch():
     from codeharness.actions.write_prd import PRDOutput
     from codeharness.roles.agent import ActionChoice
     from codeharness.roles.role_zero import ZeroThought
+    # 名单是**手写**的 ⇒ 两个方向都得登记：进了名单的必须真是字段（打错一个字＝那条字段静默不上屏），
+    # 没进名单的必须说明它为什么不是散文（否则新增一个正文字段忘了挂名单＝同一条静默洞，界面看不出异常）。
+    # 后半是 09-29 第六件留的那条欠账：从前这里只钉得住前一半。`command_name` 是本轮补登记的第一个名字
+    # ——立这条的当天它就是红的（既不在名单、也没进过禁入表），而它本来就是命令标识符、不该上屏。
+    not_prose = {"language", "project_name", "programming_language", "original_requirements",
+                 "file_list", "requirement_pool", "competitive_quadrant_chart",
+                 "data_structures_and_interfaces", "program_call_flow", "commands",
+                 "filename", "task_id", "dependent_task_ids", "required_packages",
+                 "task_list", "action", "command_name"}
     for schema in (PRDOutput, DesignOutput, ZeroThought, TaskList, ActionChoice):
         spec = schema.model_json_schema()
         # 名单是按键名认的，而抽取器在任意一层都拿「当前层的键名」去比对 ⇒ 校验也得按整棵树认：
         # instruction 不在 TaskList 的 properties 里，它在 task_list 每一项（TaskItem）里面。
-        real = set(spec.get('properties', {}))
-        for sub in (spec.get('$defs') or {}).values():
-            real |= set(sub.get('properties', {}))
+        props = dict(spec.get("properties", {}))
+        for sub in (spec.get("$defs") or {}).values():
+            props.update(sub.get("properties") or {})
+        real = set(props)
         declared = set(schema.prose_fields)
         assert declared and declared <= real, \
             f"t28④ {schema.__name__}.prose_fields 里有不存在的字段名（打错＝该字段静默不上屏）：{sorted(declared - real)}"
-        assert not (declared & {"language", "project_name", "programming_language", "original_requirements",
-                                "file_list", "requirement_pool", "competitive_quadrant_chart",
-                                "data_structures_and_interfaces", "program_call_flow", "commands",
-                                "filename", "task_id", "dependent_task_ids", "required_packages",
-                                "task_list", "action"}), \
+        assert not (declared & not_prose), \
             f"t28④ {schema.__name__} 把标识符/文件名/图表源码或抄用户原话的字段放进了名单"
+        # 两遍登记的后半：**没进名单**的字符串类字段必须逐个出现在 `not_prose` 里。
+        # 字符串类 = type 含 string（含 anyOf 里带 string 的可空字段），或 list 的成员是 string。
+        # 「禁入表里不许有死名」那一半今天**不立**：commands/task_list/requirement_pool 是对象数组，
+        # 天生不在字符串类字段全集里（要立得按所有字段名认，那是第二格，本轮不加）。
+        strish = {f for f, s in props.items() if "string" in ({s.get("type")} | {
+                      x.get("type") for x in s.get("anyOf", []) if isinstance(x, dict)})
+                  or (s.get("items") or {}).get("type") == "string"}
+        unreg = sorted(strish - declared - not_prose)
+        assert not unreg, (f"t28④ {schema.__name__} 有字符串类字段两边都没登记（既不在 `prose_fields`、"
+                           f"也不在「不是散文」表里）：{unreg}——要么挂进名单，要么写进 not_prose 并说明为什么")
     assert 'docs_block("prd", role="PM", prose=PRDOutput)' in \
         pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd 开块没带名单"
     assert 'docs_block("prd-update", role="PM", prose=PRDOutput)' in \
@@ -2095,7 +2111,7 @@ def t28_stream_ux_batch():
         "t28④ 动态线的思考块没声明名单（要写进文件的正文会重新进流）"
     print("  ok  t28 流式 UX 批文本守卫：抽取器在位、structured 原文不许直发、静默期建块发 meta"
           "不占 fts、逐片走 live + 定稿撤流 + 落点登记三处接线都在，字符串比对式去重不许复活；"
-          "白名单四段接线在位，且名单里的名字真是那个 schema 的字段")
+          "白名单四段接线在位，且名单里的名字真是那个 schema 的字段、名单外的字符串字段逐个登记过")
 
 
 def main():
