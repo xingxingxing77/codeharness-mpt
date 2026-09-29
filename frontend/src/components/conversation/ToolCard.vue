@@ -38,7 +38,7 @@
       <span class="glyph">{{ t.is_finished ? '✓' : t.task_id === currentId ? '▶' : '○' }}</span>
       <span class="ttext">{{ t.instruction || t.description || t.task_id }}</span>
     </div>
-    <div v-if="!tasks.length" class="dim">{{ b.tokens.join('') || '暂无任务' }}</div>
+    <div v-if="!tasks.length" class="dim">{{ (b.tokens.join('') + b.live.join('')) || '暂无任务' }}</div>
   </div>
 
   <!-- Browser：标题 + 链接 + 截图（旧实现明确不画截图，这里补上） -->

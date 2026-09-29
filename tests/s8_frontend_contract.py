@@ -2033,6 +2033,10 @@ def t28_stream_ux_batch():
         "t28③ ChatNode 的正文不含逐片（流式期看不见长出来的字）"
     assert "tokens.join('') + props.b.live.join('')" in rd("components/conversation/ReasoningRow.vue"), \
         "t28③ Think 行的正文不含逐片"
+    # 第七件：逐片挪进 Task 块之后，那块的面必须显示它——不显示就等于把话藏起来
+    tc = rd("components/conversation/ToolCard.vue")
+    assert "(b.tokens.join('') + b.live.join('')) || '暂无任务'" in tc, \
+        "t28③ Task 卡的正文不含逐片（流式期那块还是「暂无任务」，挪进来也看不见）"
     cn = rd("components/conversation/ChatNode.vue")
     assert "b.type === 'Thought' && (open || text)" in cn, "t28③ 空白 Think 行又占一行了"
     assert "<ReasoningRow" in cn, "t28③ 阳性对照失守：Think 行的渲染器被整条删掉了"
@@ -2041,7 +2045,10 @@ def t28_stream_ux_batch():
     #    只让那个字段静默落在名单外（本仓「规则静默空转」那一族，已现证三次）。
     rp = pathlib.Path("codeharness/report.py").read_text(encoding="utf-8")
     n_meta = rp.count("_meta_with_prose(")
-    assert n_meta >= 3, f"t28④ 名单进 meta 走的是共享件，被绕过＝开块处各拼字符串就会漂：现命中 {n_meta} 处"
+    assert n_meta >= 4, f"t28④ 名单进 meta 走的是共享件，被绕过＝开块处各拼字符串就会漂：现命中 {n_meta} 处"
+    # Task 块靠这条 meta 才进得了落点表（`LIVE_BLOCKS` 里有它，从前却一个事件都不经过报道槽）
+    assert 'await rep.meta(_meta_with_prose({"type": "tasks"}, prose) or {})' in rp, \
+        "t28④ task_block 不再开块发 meta ⇒ Task 的逐片退回兜底行、名单挂不上（第四件的那条原则在这一块落空）"
     assert '"prose_fields": list(keys)' in rp, "t28④ meta 里不带 prose_fields ⇒ 翻译层永远拿不到名单"
     assert 'v.get("prose_fields")' in runner, "t28④ 报道槽不读 meta 里的名单（落点登记退回两格）"
     assert "if self.key not in self.only:" in runner, \
@@ -2049,15 +2056,24 @@ def t28_stream_ux_batch():
     assert "if self.only is not None" in runner, \
         "t28④ 门控没被「名单缺失＝不门控」兜住 ⇒ 没声明名单的 schema 行为会变（本批的硬承诺）"
     from codeharness.actions.design_api import DesignOutput
+    from codeharness.actions.project_management import TaskList
     from codeharness.actions.write_prd import PRDOutput
     from codeharness.roles.role_zero import ZeroThought
-    for schema in (PRDOutput, DesignOutput, ZeroThought):
-        declared, real = set(schema.prose_fields), set(schema.model_fields)
+    for schema in (PRDOutput, DesignOutput, ZeroThought, TaskList):
+        spec = schema.model_json_schema()
+        # 名单是按键名认的，而抽取器在任意一层都拿「当前层的键名」去比对 ⇒ 校验也得按整棵树认：
+        # instruction 不在 TaskList 的 properties 里，它在 task_list 每一项（TaskItem）里面。
+        real = set(spec.get('properties', {}))
+        for sub in (spec.get('$defs') or {}).values():
+            real |= set(sub.get('properties', {}))
+        declared = set(schema.prose_fields)
         assert declared and declared <= real, \
             f"t28④ {schema.__name__}.prose_fields 里有不存在的字段名（打错＝该字段静默不上屏）：{sorted(declared - real)}"
         assert not (declared & {"language", "project_name", "programming_language", "original_requirements",
                                 "file_list", "requirement_pool", "competitive_quadrant_chart",
-                                "data_structures_and_interfaces", "program_call_flow", "commands"}), \
+                                "data_structures_and_interfaces", "program_call_flow", "commands",
+                                "filename", "task_id", "dependent_task_ids", "required_packages",
+                                "task_list"}), \
             f"t28④ {schema.__name__} 把标识符/文件名/图表源码或抄用户原话的字段放进了名单"
     assert 'docs_block("prd", role="PM", prose=PRDOutput)' in \
         pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd 开块没带名单"
@@ -2065,6 +2081,9 @@ def t28_stream_ux_batch():
         pathlib.Path("codeharness/actions/write_prd.py").read_text(encoding="utf-8"), "t28④ prd-update 开块没带名单"
     assert 'docs_block("design", role="Architect", prose=DesignOutput)' in \
         pathlib.Path("codeharness/actions/design_api.py").read_text(encoding="utf-8"), "t28④ design 开块没带名单"
+    pm = pathlib.Path("codeharness/actions/project_management.py").read_text(encoding="utf-8")
+    assert 'task_block(role="PMManager", prose=TaskList)' in pm, \
+        "t28④ WriteTasks 的开块处没把 TaskList 的名单带进去"
     r0 = pathlib.Path("codeharness/roles/role_zero.py").read_text(encoding="utf-8")
     assert 'thought_block(role=self.profile["name"], prose=ZeroThought)' in r0, \
         "t28④ 动态线的思考块没声明名单（要写进文件的正文会重新进流）"

@@ -857,12 +857,74 @@ async def t12_prose_from_structured_stream():
     assert runner3._live_blk.get(s3.id) is None, "⑧c 块收口后落点没释放"
     runner3._forget(s3.id, terminal=True)
 
+    # ⑨ Task 块（第七件）：开块那条 `meta` 是它进落点表的**唯一入口**。改前 `task_block` 只建 reporter
+    #    就 yield，报道槽那条通道上一个事件都没有 ⇒ 那一笔调用的逐片只能落兜底行，名单也就挂不上。
+    instr_a = "在首页文件里写出这段解释：先讲清比较的对象是什么，再讲每一步为什么能砍掉一半候选。"
+    instr_b = "样式文件里只留排版与间距两类规则，不引入任何外部字体、图标、框架运行时与构建步骤。"
+    knowl = "产物必须是纯静态文件：浏览器直接打开即用，不依赖任何后端服务、打包器或第三方脚本。"
+    pkg_line = "本任务清单不需要任何第三方依赖，标准库与浏览器原生能力即可覆盖全部需求。"
+    ttxt = json.dumps({"task_list": [
+        {"filename": "src/index.html", "task_id": "T1", "instruction": instr_a},
+        {"filename": "src/constants/explanation.js", "task_id": "T2", "instruction": instr_b}],
+        "required_packages": [pkg_line], "shared_knowledge": knowl}, ensure_ascii=False, indent=2)
+
+    tmp5, store5, bus5, runner5, s5 = await _make_runner()
+    runner5.costs[s5.id] = CostManager()
+    sink5 = runner5._make_sink(s5.id)
+    sink5({"block": "Task", "uuid": "task-1", "name": "meta", "role": "PMManager",
+           "value": {"type": "tasks", "prose_fields": ["instruction", "shared_knowledge"]}})
+    runner5._translate(s5.id, {"event": "on_chat_model_start", "run_id": "k1",
+                               "metadata": {"langgraph_node": "PMManager"}})
+    assert not [e for e in bus5.history(s5.id) if str(e.uuid or "").startswith("stream-")], \
+        "⑨ Task 块开着还另起一行兜底（那条 meta 白发了——落点表根本没登记上）"
+    for i in range(0, len(ttxt), 8):
+        runner5._translate(s5.id, {"event": "on_chat_model_stream", "run_id": "k1",
+                                   "metadata": {"langgraph_node": "PMManager"},
+                                   "data": {"chunk": AIMessage(content=ttxt[i:i + 8])}})
+    tlive = [e for e in bus5.history(s5.id) if e.name == "live"]
+    assert tlive and all(e.uuid == "task-1" and e.block == "Task" for e in tlive), \
+        f"⑨ 逐片没进开着的那块 Task：{[(e.uuid, e.block) for e in tlive][:3]}"
+    got9 = "".join(e.value for e in tlive)
+    assert got9 == instr_a + "\n" + instr_b + "\n" + knowl, \
+        f"⑨ Task 名单内的三段（含嵌套一层里的 instruction）没照发或发多了：{got9[:70]!r}"
+    for banned9 in ("src/constants/explanation.js", pkg_line, "T1", "T2"):
+        assert banned9 not in got9, f"⑨ 标识符漏进 Task 块的流：{banned9!r}"
+
+    # 阳性对照一：同一 payload、块声明了但**没带名单** ⇒ 退回按长度挑，标识符该回来（与参照实现逐字一致）
+    tmp6, store6, bus6, runner6, s6 = await _make_runner()
+    runner6.costs[s6.id] = CostManager()
+    runner6._make_sink(s6.id)({"block": "Task", "uuid": "task-2", "name": "meta",
+                               "value": {"type": "tasks"}, "role": "PMManager"})
+    for i in range(0, len(ttxt), 11):
+        runner6._translate(s6.id, {"event": "on_chat_model_stream", "run_id": "k2",
+                                   "metadata": {"langgraph_node": "PMManager"},
+                                   "data": {"chunk": AIMessage(content=ttxt[i:i + 11])}})
+    got6 = "".join(e.value for e in bus6.history(s6.id) if e.name == "live")
+    assert got6 == ref(ttxt), f"⑨ 无名单时该与按长度挑那一版逐字一致：{got6[:70]!r}"
+    assert pkg_line in got6, "⑨ 阳性对照没复现「标识符够长就上屏」（参照实现没覆盖到它？）"
+
+    # 阳性对照二＝**改前的形状**：块开着但一个 meta 都没发 ⇒ 落点表无从登记，逐片只能落兜底行，
+    # 那块零 live（这一格钉的就是第七件要修的那件事本身：少那条 meta，逐片进不去那块）
+    tmp7, store7, bus7, runner7, s7 = await _make_runner()
+    runner7.costs[s7.id] = CostManager()
+    for i in range(0, len(ttxt), 13):
+        runner7._translate(s7.id, {"event": "on_chat_model_stream", "run_id": "k3",
+                                   "metadata": {"langgraph_node": "PMManager"},
+                                   "data": {"chunk": AIMessage(content=ttxt[i:i + 13])}})
+    assert not [e for e in bus7.history(s7.id) if e.name == "live" and e.block == "Task"], \
+        "⑨ 没发 meta 却把逐片投进了那块（落点登记凭空多了一条路＝两处写、必漂移）"
+    assert [e for e in bus7.history(s7.id) if e.name == "live" and e.uuid == "stream-PMManager"], \
+        "⑨ 改前形状下逐片该落兜底行——现在不落说明这条对照没照住老形状"
+    runner5._forget(s5.id, terminal=True)
+    runner6._forget(s6.id, terminal=True)
+    runner7._forget(s7.id, terminal=True)
+
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
                "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
                "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}；"
                "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）；"
                "块声明 `prose_fields` 时按**键名**门控（mermaid 源码、键名本身、commands 的 args 正文都不上屏，"
-               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出）")
+               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出；Task 块靠开块那条 `meta` 进落点表（没它就只落兜底行，做了阳性对照）")
 
 
 def t13_assembly_ledger_identity_recall():

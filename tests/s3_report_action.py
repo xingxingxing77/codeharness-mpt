@@ -413,19 +413,47 @@ def t15_block_markdown_not_schema_dump():
         "阳性对照失守：design.json 的落盘格式被动了"
 
 
+def t16_task_block_opens_with_meta():
+    """第七件：`task_block` 开块必须发一条 `meta`，那是它进落点表的**唯一入口**。
+
+    `LIVE_BLOCKS` 里一直有 `Task`，可从前 `task_block` 只建 reporter 就 yield——报道槽那条通道上
+    一个事件都不经过，于是里面那一笔 structured 调用的逐片只能落兜底行 `stream-{node}`，
+    既不与清单同块、schema 的正字段名单也永远挂不上（翻译层拿不到那块是谁）。
+    """
+    from codeharness.actions.project_management import TaskList
+    from codeharness.report import BlockType, task_block
+
+    ev = _collect()
+
+    async def _a():
+        async with task_block(role="PM", prose=TaskList) as rep:
+            await rep.content("清单正文")
+        async with task_block(role="PM") as rep:          # 阳性对照：没声明名单的块照旧发 meta，但不带名单
+            await rep.content("另一份")
+
+    asyncio.run(_a())
+    names = [e["name"] for e in ev]
+    assert names == ["meta", "content", "end_marker"] * 2, f"Task 块的事件序列变了：{names}"
+    assert {e["block"] for e in ev} == {BlockType.TASK.value}, f"发错块类型：{[e['block'] for e in ev]}"
+    m0, m1 = ev[0]["value"], ev[3]["value"]
+    assert m0["type"] == "tasks" and m0["prose_fields"] == list(TaskList.prose_fields), \
+        f"名单没进开块那条 meta（翻译层就永远登不上这块）：{m0}"
+    assert "prose_fields" not in m1, f"没声明名单却凭空多出名单：{m1}"
+
+
 def main():
     checks = [t1_class_surface, t2_blocktype_vocabulary, t3_payload_shape, t4_path_absolute,
               t5_context_manager_and_hooks, t6_llm_stream_bridge,
               t7_retry_targets_only_missing, t8_no_retry_when_complete, t9_empty_semantics,
               t10_merge_never_clobbers, t11_partial_schema_keys, t12_plain_text_path_untouched,
               t13_artifact_filename_gate, t14_tool_call_report,
-              t15_block_markdown_not_schema_dump]
+              t15_block_markdown_not_schema_dump, t16_task_block_opens_with_meta]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")
     print(f"\nS3(a) 门禁通过：{len(checks)} 组 —— R6 Reporter 类族 6 组（类名/词汇表/载荷/绝对路径/"
           f"上下文管理器与钩子/LLM 流桥接）+ R2 字段级定向重试 6 组（只补缺口/齐全不重发/空值语义/"
-          f"合并不覆盖/部分模型键/纯文本退化）+ 产物仓文件名闸口与任务契约 1 组")
+          f"合并不覆盖/部分模型键/纯文本退化）+ 产物仓文件名闸口与任务契约 1 组 + Task 块开块那条 meta 1 组")
     print("注意：S3 的 R3/R4a/R5（编排、checkpointer、interrupt）尚未做，勿据此认为 S3 已完成。")
 
 

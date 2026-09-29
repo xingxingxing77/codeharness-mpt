@@ -3,6 +3,8 @@
 - `_update_requirements`（源 :154）照搬：Required packages 聚合进会话根 requirements.txt——
   这是 QA RunCode 前的依赖声明真源，此前本仓完全没有这一件；
 - 源的多设计文件循环/changed_files 记账属 ProjectRepo 制不搬；`_execute_api` 判 `推迟`（同 PRD）。"""
+from typing import ClassVar
+
 from pydantic import BaseModel, Field, field_validator
 
 from codeharness.base.action import BaseAction
@@ -74,6 +76,12 @@ class TaskItem(BaseModel):
 class TaskList(BaseModel):
     """= project_management_an.py TASK_LIST（task_list + Required packages + Shared Knowledge）"""
 
+    # 打字机只放行说理的两段。`instruction` 在 task_list 每一项里（键名按**当前层**认，嵌套照认）；
+    # `filename`/`task_id`/`dependent_task_ids`/`required_packages` 都是标识符，留在定稿里一次性出现。
+    # 「标识符够长就会上屏」是同场 Design `file_list` 现证的（28 字的 src/constants/explanation.js 做过未门控那跑
+    # 的 live 第一片）；Task 这一路本身没走到过活体（09-29 两场经典线都在 Design 就收了）。
+    prose_fields: ClassVar[tuple] = ("instruction", "shared_knowledge")
+
     task_list: list[TaskItem] = Field(default_factory=list)
     required_packages: list[str] = Field(default_factory=list)
     shared_knowledge: str = ""
@@ -96,7 +104,7 @@ class WriteTasks(BaseAction):
         else:
             prompt, system = context, TASKS_SYSTEM_PROMPT
 
-        async with task_block(role="PMManager") as rep:
+        async with task_block(role="PMManager", prose=TaskList) as rep:
             tasks: TaskList = await self._structured(
                 f"{self.prefix}\n{prompt}", schema=TaskList, system=system)
             await rep.content(block_markdown(tasks))   # Task 行的正文：人读渲染，不是 schema dump

@@ -432,9 +432,17 @@ async def tool_call_report(name: str, args: dict | None, out, ok: bool = True, r
 
 
 @asynccontextmanager
-async def task_block(role: str = ""):
-    """Task 块：计划更新用（object 事件携带 plan dict）"""
+async def task_block(role: str = "", prose=None):
+    """Task 块：计划更新用（object 事件携带 plan dict）。
+
+    开块就发一条 `meta`：`LIVE_BLOCKS` 里本来就有 `Task`，而落点表只在报道槽转发处登记——改前这一条通道上
+    一个事件都没有（`task_block` 只建 `BlockReporter` 就 yield，第一下事件是调用结束后的 `content`），
+    所以那一笔调用的逐片只能落兜底行 `stream-{node}`，既不与清单同块、名单也挂不上。
+    这是照源码推出的形状，活体没走到过 WriteTasks（09-29 两场经典线都在 Design 就收了），
+    改后的读数在 `tests/manual_stream_landing.py` ⑦ 与 `tests/s8_runner_meter.py` t12⑨。
+    """
     rep = BlockReporter(BlockType.TASK.value, role)
+    await rep.meta(_meta_with_prose({"type": "tasks"}, prose) or {})
     try:
         yield rep
     finally:

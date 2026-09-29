@@ -26,6 +26,13 @@ PROSE = "以极简静态网页为载体，用一段通俗准确的表述向读�
 GOALS = [PROSE, PROSE + "，第二条同样足够长以便越过 24 字的门槛"]
 SCHEMA_OUT = {
     "ZeroThought": {"thought": PROSE, "commands": [{"command_name": "end", "args": {}}]},
+    "TaskList": {"task_list": [
+        {"filename": "src/index.html", "task_id": "T1",
+         "instruction": "在首页文件里写这段解释：先讲清比较的对象是什么，再讲每一步为什么能砍掉一半候选。"},
+        {"filename": "src/constants/explanation.js", "task_id": "T2",
+         "instruction": "样式与脚本都内联在这一个文件里，不引入任何外部字体、图标、框架运行时或构建步骤。"}],
+        "required_packages": ["本任务不需要任何第三方依赖，标准库与浏览器原生能力即可覆盖全部需求。"],
+        "shared_knowledge": "产物必须是纯静态文件：浏览器直接打开即用，不依赖后端服务、打包器或第三方脚本。"},
     "PRDOutput": {"language": "en", "programming_language": "Vite, React, MUI, Tailwind CSS",
                   "original_requirements": ECHO, "project_name": "binary_page", "product_goals": GOALS,
                   "user_stories": [], "competitive_analysis": [], "competitive_quadrant_chart": "quadrantChart",
@@ -71,7 +78,7 @@ class Stub(BaseHTTPRequestHandler):
         pass
 
 
-async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=None):
+async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=None, block="Docs"):
     """跑一笔真 structured 调用，把事件灌进真 `SessionRunner._translate`，返回总线上的块序列。"""
     from langchain_openai import ChatOpenAI
     from codeharness.provider.cost import CostManager
@@ -88,11 +95,11 @@ async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=No
     store.update(s.id, status=SessionStatus.running)
     runner.costs[s.id] = CostManager()      # 本工装不判账，只判流；给一份账免得 _sync_cost 走空路
 
-    if open_block_uuid:            # 模拟内核 `async with docs_block(...)`：先开一块
-        val = {"type": "prd"}
+    if open_block_uuid:            # 模拟内核 `async with docs_block(...)` / `task_block(...)`：先开一块
+        val = {"type": "prd"} if block == "Docs" else {"type": "tasks"}
         if prose_fields:           # 真开块时这一格由 `report._meta_with_prose` 填（schema 的 ClassVar）
             val["prose_fields"] = list(prose_fields)
-        runner._make_sink(s.id)({"block": "Docs", "uuid": open_block_uuid, "name": "meta",
+        runner._make_sink(s.id)({"block": block, "uuid": open_block_uuid, "name": "meta",
                                  "value": val, "role": "PM"})
 
     m = ChatOpenAI(model="step-3.5-flash", api_key="stub", base_url=BASE_URL, streaming=True)
@@ -105,7 +112,7 @@ async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=No
             shapes.append(type(inp).__name__)
         runner._translate(s.id, ev)
     if open_block_uuid:
-        runner._make_sink(s.id)({"block": "Docs", "uuid": open_block_uuid, "name": "end_marker",
+        runner._make_sink(s.id)({"block": block, "uuid": open_block_uuid, "name": "end_marker",
                                  "value": None, "role": "PM"})
     seq = [(e.name, str(e.uuid)[:8], len(str(e.value or ""))) for e in bus.history(s.id)
            if e.kind == "report"]
@@ -179,7 +186,22 @@ async def main():
     if not any(n == "live" and u == "doc-9" for n, u, _ in seqg):
         fails.append("⑥ 门控过的逐片没落进声明名单的那块")
 
-    print("\n" + ("\n".join(f"❌ {f}" for f in fails) if fails else "✅ 六条全过（零花费）"))
+    # ⑦ Task 块（第七件）：内核 `task_block` 现在开块发 meta，名单是 TaskList 那份 ClassVar。
+    #     这里照那份名单开一块，走真 `astream_events` + 真 `_translate`：清单里每条的 `instruction` 与
+    #     `shared_knowledge` 该进流，而 `filename`/`task_id`/`required_packages` 该一个字都不进。
+    from codeharness.actions.project_management import TaskList
+    tlive, tseq, _ = await run_case("Task 块（名单来自 TaskList.prose_fields）", TaskList,
+                                    [SystemMessage(content="按 schema 输出任务清单"),
+                                     HumanMessage(content="把那个静态页面的需求拆成两个文件级任务。")],
+                                    open_block_uuid="task-1", prose_fields=TaskList.prose_fields, block="Task")
+    if "src/constants/explanation.js" in tlive or "第三方依赖" in tlive:
+        fails.append("⑦ Task 块里混进了标识符（filename / required_packages）")
+    if "砍掉一半候选" not in tlive or "纯静态文件" not in tlive:
+        fails.append("⑦ Task 名单内的 instruction（嵌套那一层）或 shared_knowledge 没进流")
+    if not any(n == "live" and u == "task-1" for n, u, _ in tseq):
+        fails.append("⑦ 逐片没落进开着的 Task 块（那条开块 meta 没把块登记进落点表）")
+
+    print("\n" + ("\n".join(f"❌ {f}" for f in fails) if fails else "✅ 七条全过（零花费）"))
     return 1 if fails else 0
 
 
