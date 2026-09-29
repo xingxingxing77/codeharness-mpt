@@ -1235,21 +1235,22 @@ def t53_editor_generic_except_never_overwrites_source():
     而**同库同法**的对照能数到成功回执 44 次 / 工具名 941 次 ⇒ 有牙的干净阴性，不是无样本。
     所以这一支按「修形状」记账，不是救火。
 
-    本轮探针另外量到两条，都不在本格的断言里，账写在 `plan/team-runtime.md`：
+    本轮探针另外量到两条，第一条已在本轮改掉（① 能跑到断言就是它的读数），第二条由 ⑤ 钉住：
       · 泛捕获自己会先炸：`_get_indentation_info(content, start or len(lines))` 拿**原文件**的行号去索引
         **待写入**的 `content`（append 时后者只有 1 行）⇒ `IndexError`，真错被换成一句假错。已夹住
         ——① 能跑到断言就是这条的读数（夹之前它连回执都发不出去）。
-      · `enable_auto_lint=True` 那半支在本机走不到回滚：`_print_window(Path(temp_backup_file.name))`
+      · `enable_auto_lint=True` 那半支在本机**原本**走不到回滚：`_print_window(Path(temp_backup_file.name))`
         去读一个仍开着的临时文件 ⇒ `PermissionError`（动作序列现证在台账），被 `except IOError` 接走，
-        于是编辑留在盘上、回执只说「文件处理出错」。Linux 容器里那步是通的 ⇒ 那处 move 不许删（④ 钉着）。
+        于是编辑留在盘上、回执只说「文件处理出错」。同一段工装还量到：Windows 上 move 那个句柄是**通的**、只有按路径读它不通 ⇒ 本轮改成「先回滚，再从已回滚的源文件打『编辑前』窗口」。
 
-    四格：
+    五格：
       ① 主刀：异常发生在原子替换**之前** ⇒ 源文件逐字不变 + 回执说清「未应用」，并且不冒充
          lint 支那句「你的编辑引入了语法错误」。修前这里该是 0 字节。
       ② `applied` 那半：替换**之后**才炸 ⇒ 文件保留编辑后内容 + 回执如实说「已应用、本方法不留原文」。
       ③ 阳性对照：lint 关的正常 append 仍成功（好路没被修坏，也保证 ①② 不是恒真）。
       ④ AST 双向：泛捕获支里 `move(备份→源)` = 0 处，`enable_auto_lint` 那半支里 = 1 处
          （一个恒假的判定函数会被后半条抓住，所以这格自带仪器对照）。
+      ⑤ 回滚走通：lint 开且出现**新**错 ⇒ 函数正常返回、源文件被还原成原文逐字、回执同时含「编辑后」与「编辑前」两个窗口的内容。
     """
     import ast
     import shutil
@@ -1330,6 +1331,31 @@ def t53_editor_generic_except_never_overwrites_source():
         now = (d / "t.py").read_bytes()
         assert kind == "returned" and now == ORIG + ADDED, \
             f"③正常 append 被修坏了（结局 {kind}、字节 {len(now)}）：{msg[:160]!r}"
+
+        # ---- ⑤ lint 那半支的「按设计回滚」在本机走得到（09-30 现证它原本走不到） ----
+        class _LintFails(Editor):
+            n: ClassVar[int] = 0
+
+            def _lint_file(self, file_path):
+                _LintFails.n += 1
+                return ("E0 broke\nE1 NEW broke", 2) if _LintFails.n > 1 else ("E0 broke", 1)
+
+        d = _fresh()
+        dirs.append(d)
+        _LintFails.n = 0
+        ed = _LintFails(working_dir=str(d), enable_auto_lint=True)
+        ed.open_file("t.py")
+        try:
+            kind, msg = "returned", ed.append_file("t.py", "追加的一行\n")
+        except Exception as e:
+            kind, msg = "raised", f"{type(e).__name__}: {e}"
+        now = (d / "t.py").read_bytes()
+        assert kind == "returned", \
+            f"⑤回滚那一步没走通、异常冒出来了（修前就是这句 PermissionError 读仍开着的备份）：{msg[:200]!r}"
+        assert now == ORIG, f"⑤lint 报错后源文件该被回滚成**原文**，实得 {len(now)} 字节 {now[:60]!r}"
+        assert "Correct your edit code" in msg, f"⑤没走 lint 支的回执（这一支的话术该是它独有的）：{msg[:200]!r}"
+        assert "追加的一行" in msg and "001|第一行" in msg, \
+            f"⑤两个窗口该各是「编辑后」与「编辑前」的内容，实得：{msg[:260]!r}"
 
         # ---- ④ AST 双向（泛捕获 0 处 / lint 支 1 处） ----
         src = (Path(__file__).resolve().parents[1] / "codeharness" / "tools" / "libs" / "editor.py"

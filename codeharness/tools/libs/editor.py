@@ -651,17 +651,18 @@ class Editor(BaseModel):
                         "You either need to 1) Specify the correct start/end line arguments or 2) Correct your edit code.\n"
                         "DO NOT re-run the same failed edit command. Running it again will lead to the same error."
                     )
+                    # 「编辑后」窗口要趁文件还是编辑态时打；然后**先回滚再打「编辑前」窗口**。
+                    # 不能按路径去读那个备份：它的句柄还开着，Windows 上读它会 `PermissionError`
+                    # （move 它反倒没问题——本机现证，两条都在 plan/team-runtime.md 的 C97 块里）。
+                    window_after = self._print_window(file_name, show_line, n_added_lines + 20)
+                    shutil.move(temp_backup_file.name, src_abs_path)          # recover the original file
+                    window_before = self._print_window(file_name, show_line, n_added_lines + 20)
                     lint_error_info = ERROR_GUIDANCE.format(
                         linter_error_msg=LINTER_ERROR_MSG + lint_error,
-                        window_after_applied=self._print_window(file_name, show_line, n_added_lines + 20),
-                        window_before_applied=self._print_window(
-                            Path(temp_backup_file.name), show_line, n_added_lines + 20
-                        ),
+                        window_after_applied=window_after,
+                        window_before_applied=window_before,
                         guidance_message=guidance_message,
                     ).strip()
-
-                    # recover the original file
-                    shutil.move(temp_backup_file.name, src_abs_path)
                     return lint_error_info
 
         except FileNotFoundError as e:
