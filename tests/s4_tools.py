@@ -774,14 +774,14 @@ def t44_hybrid_coverage_when_embedding_live():
     四件不参与裁剪），本格断言随之从 13/13 改钉 14/14。**这条 docstring 当时只改了半截**（断言改了、
     正文没改），09-22 描述规范化那轮一起补上。
     """
-    import httpx
-
     from codeharness.configs.settings import settings as S
-    try:
-        up = httpx.get(f"{S.embedding.base_url}/models", timeout=3).status_code < 400
-    except Exception:
-        up = False
-    if not up or not _c6_dense_alive():
+    # 探活只用 `_c6_dense_alive()`（判据是「dense 排得出名次」）。**别再拿裸 GET `/models` 当第一道门**：
+    # 09-29 现证 `httpx.get(f"{base_url}/models")` **不带 Authorization**，百炼那台直接回 401
+    # （`{"error":{"message":"You didn't provide an API key…"}}`），于是 `up` 恒 False、这格从加守卫起
+    # **一次都没真跑过**——而同一次运行里 `_c6_dense_alive()` 连测三次全 True、`t47` 正常出 22/22。
+    # 「401」不是「腿没活着」的证据，它只是「我没带钥匙」（与 §6 那条「`GET /models` 200 不证档位」互为反面）。
+    # 前端那侧的目录口（`server/api/models.py:31`）是发了 Bearer 的，只有这里漏了。
+    if not _c6_dense_alive():
         print(f"     skip t44（语义腿没活着：{S.embedding.base_url}）——融合读数不拿词法腿的数冒充")
         return
     CASES = [("把这段内容写入 note.txt", {"write_file"}), ("append 一行日志到 app.log", {"append_file"}),
@@ -807,7 +807,10 @@ def t44_hybrid_coverage_when_embedding_live():
         else:
             missed.append((q[:20], sorted(want - set(got))))
     assert (full, trimmed) == (14, 14), f"融合+常驻集现值漂了：应 14/14，实际 覆盖 {full}、真裁小 {trimmed}，miss={missed}"
-    print(f"     融合读数（bge-m3 在线）：覆盖 {full}/14、真裁小 {trimmed}/14、miss={missed}")
+    # 打印必须点名是哪台模型（§6 第 28 条）：这行原本写死「bge-m3 在线」，而 09-24 之后生产端点是
+    # 百炼 `qwen3.7-text-embedding`——名字错了的读数行，比没有读数更难查。
+    print(f"     融合读数（语义腿活着，模型 = {S.embedding.model}）："
+          f"覆盖 {full}/14、真裁小 {trimmed}/14、miss={missed}")
 
 
 def t45_semantic_leg_offline_degrades_to_lexical():
