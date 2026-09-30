@@ -667,6 +667,112 @@ def t17_react_think_survives_a_broken_structured_reply():
     print("  ok  t17 C76：坏回包 ⇒ 不抛且按 END 收口 + 留 [agent-structured-fallback] 警告；正常回包不走兜底")
 
 
+def t18_log_file_sink_is_bounded():
+    """C106（09-30 审查文档 §3 P1 第四件）：`logs.py` 导入期那颗文件 sink 必须有上界，且文件那本真在写。
+
+    现证（09-30 本机，全部指回输出）：`logs/` 共 55 MB，`20260919.txt` 46,679,698 B / 208,573 行，
+    而原形状 `_logger.add(METAGPT_ROOT / f"logs/{log_name}.txt", level=logfile_level)` **既无
+    `rotation=` 也无 `retention=`** ⇒ 单本体积无上限。
+
+    两处把审查文档的归因**修正**了（数字对、因果不对）：
+    ① 09-19 那 46.7 MB 里 31.5 MB 出自**一个**调用点 `brain_memory:_get_summary:162`——99,934 行、
+       **最长行只 315 B**、去重后**唯一内容 6 条**（「六轮压缩成一句」「短摘要」「sss…」＝FakeLLM 剧本串），
+       峰值 **1,014 行/秒**、只落在 132 个不同秒里，同窗口另有 `Redis GET s5gate:<hex>` 这种**门禁专用键**
+       ⇒ 那是**门禁跑批**打的，不是「每个角色的每轮」的业务量。上界照样要加，但受益方是长跑的机器。
+    ② loguru 的 `retention` 管不到跨日文件（两次实测）：`retention=3` ⇒ 只留**本 sink 同名族**的
+       3 份轮转 + 本体（同目录另一颗 sink 的 `day2.txt` 族一个不动）；`retention='7 days'` ⇒
+       连 mtime 8 天前的 `20260922.txt` 都不删。⇒ 按天命名 + 这两个参数封的是**单日本体的顶**，
+       不是目录总量。这条界写进 `logs.py` 的 ponytail 注释里，不当「已解决」收。
+
+    顺带排除一条看着像缺陷的：文件 sink 没写 `encoding=`，但干净子进程实测
+    （`locale.getpreferredencoding()=='cp936'`、`sys.flags.utf8_mode==0`）loguru 落的仍是 utf-8
+    ⇒ 不是缺陷，不补参数（补了是噪声）。
+
+    三格：
+      ① AST 结构判：那颗**指向 `METAGPT_ROOT`** 的 `_logger.add` 必须带 `rotation=` 与 `retention=`
+         （且 `level=` 不许顺手丢）；
+      ② ①的仪器对照：同一判定喂「无参／只有 rotation／只有 stderr」三种形状，读数必须分别是
+         「缺两参／缺 retention／认不出文件 sink」——否则 ① 是恒绿摆设；
+      ③ 运行时判（不碰 loguru 私有属性）：把 `METAGPT_ROOT` 指向临时目录后调 `define_log_level()`，
+         断言真落了一本、探针行写得进去、且那本**能按 utf-8 读回**（中文行不被写成 GBK）。
+         ⚠ `define_log_level` 里那句 `_logger.remove()` 是**全局**动作 ⇒ 本格在 finally 里把
+         `METAGPT_ROOT` 复位并重新 `define_log_level()`，把进程日志面还原回导入时的形状。
+    """
+    import ast
+    import shutil
+
+    import codeharness
+    from codeharness import logs as L
+
+    # 用 `codeharness.__file__` 定位源码，不用 `__file__` 的相对层数（本面 t15 同款取法，:572）：
+    # 后者把判据钉死在 tests/ 目录里，工装单独跑一次就指到别处去（本轮实测 FileNotFoundError）。
+    src = (Path(codeharness.__file__).parent / "logs.py").read_text(encoding="utf-8")
+
+    def file_sink(text):
+        """取「第一个实参指向 `METAGPT_ROOT`」的那颗 `_logger.add`，返回 (行号, 关键字集合)；没有就 None。
+
+        ⚠ 匹配对象是**第一个实参**不是接收者：`_logger.add` 的接收者 unparse 出来是 `_logger.add`，
+        拿它去找 `METAGPT_ROOT` 会永远找不到——本轮工装单验就是这么炸出这个洞的（判据恒红，
+        比恒绿幸运，但同样是没牙的形状）。
+        """
+        found = []
+        for n in ast.walk(ast.parse(text)):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "add"):
+                continue
+            if not (n.args and "METAGPT_ROOT" in ast.unparse(n.args[0])):
+                continue
+            found.append((n.lineno, frozenset(k.arg for k in n.keywords)))
+        assert len(found) <= 1, f"锚点不唯一（文件 sink 长出了第二颗？）：{found}"
+        return found[0] if found else None
+
+    # ---- ① 结构判 ----
+    got = file_sink(src)
+    assert got, "①靶子没了：`logs.py` 里找不到指向 `METAGPT_ROOT` 的 `_logger.add`"
+    lineno, kw = got
+    assert "rotation" in kw and "retention" in kw, \
+        f"①文件 sink（:{lineno}）没有上界参数，实有关键字 {sorted(kw)}（单日可达几十 MB 的那道闸就在这）"
+    assert "level" in kw, f"①连 `level=` 都丢了（那本日志的等级被改走样）：{sorted(kw)}"
+
+    # ---- ② 仪器对照 ----
+    shapes = {
+        "无参": ('def define_log_level():\n    _logger.add(METAGPT_ROOT / "logs/a.txt", level="DEBUG")\n'),
+        "只有rotation": ('def f():\n    _logger.add(METAGPT_ROOT / "x", level="DEBUG", rotation="10 MB")\n'),
+        "只有stderr": 'def f():\n    _logger.add(sys.stderr, level="INFO")\n',
+    }
+    r_none = file_sink(shapes["无参"])
+    assert r_none and not ({"rotation", "retention"} <= r_none[1]), \
+        f"②仪器坏了：改前形状被判成「有上界」（①会恒绿），实得 {r_none}"
+    r_half = file_sink(shapes["只有rotation"])
+    assert r_half and "retention" not in r_half[1], \
+        f"②仪器只盯 rotation：`retention` 丢了没人喊（半截闸），实得 {r_half}"
+    assert file_sink(shapes["只有stderr"]) is None, \
+        "②仪器把 stderr sink 当成文件 sink（靶子会漂，将来加第三颗 sink 就假绿）"
+
+    # ---- ③ 运行时：临时根目录里真落一本、写得进、读回是 utf-8 ----
+    tmp = Path(tempfile.mkdtemp(prefix="s3b_t18_"))
+    keep_root = L.METAGPT_ROOT
+    marker = "C106 探针：中文行 中文字"
+    try:
+        L.METAGPT_ROOT = tmp
+        L.define_log_level(print_level="ERROR", logfile_level="DEBUG", name="t18probe")
+        L.logger.debug(marker)
+        # 路径里带一层 `logs/`（`METAGPT_ROOT / f"logs/{log_name}.txt"`），所以递归找而不是只看根目录
+        # ——本轮工装单验第一次就因这个 glob 少一层而假报「没落本子」。
+        books = sorted(tmp.rglob("*.txt"))
+        assert books, f"③文件 sink 没落任何本子（临时根里有：{[p.name for p in tmp.iterdir()]}）"
+        body = books[0].read_text(encoding="utf-8")   # 按 utf-8 读不动就炸——那正是这一格要量的
+        assert marker in body, f"③落了本子却没有探针行：{body[:150]!r}"
+        n_files = len(books)
+    finally:
+        L.METAGPT_ROOT = keep_root
+        L.define_log_level()                          # `_logger.remove()` 是全局动作，必须复位
+        shutil.rmtree(tmp, ignore_errors=True)
+    assert not tmp.exists(), f"③清场没做成，{tmp} 还在"
+
+    print(f"  ok  t18 C106：文件 sink（:{lineno}）带 rotation+retention，②的三种形状读数各对，"
+          f"③临时根里落了 {n_files} 本且中文行按 utf-8 读回原样")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -676,7 +782,8 @@ def main():
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
               t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
               t15_no_dead_state_channels, t16_run_code_named_delivery,
-              t17_react_think_survives_a_broken_structured_reply]
+              t17_react_think_survives_a_broken_structured_reply,
+              t18_log_file_sink_is_bounded]
     try:
         for c in checks:
             c()
@@ -696,7 +803,7 @@ def main():
           f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
           f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组 + "
           f"写→评审→摘要生产装配 1 组 + C2 假通道不复燃守卫 1 组（TeamState 无 docs 键 + 三处初值源码无写入）+ "
-          f"生产级具名投递两分支 1 组 + REACT 档坏回包兜底 1 组（C76）")
+          f"生产级具名投递两分支 1 组 + REACT 档坏回包兜底 1 组（C76）+ C106 日志上界 1 组（t18：`logs.py` 那颗文件 sink 必须带 rotation/retention，三种形状对照各对，临时根里真落一本且中文行按 utf-8 读回）")
 
 
 if __name__ == "__main__":

@@ -49,7 +49,14 @@ def define_log_level(print_level="INFO", logfile_level="DEBUG", name: str = None
 
     _logger.remove()
     _logger.add(sys.stderr, level=print_level)
-    _logger.add(METAGPT_ROOT / f"logs/{log_name}.txt", level=logfile_level)
+    # C106：文件那本必须有界（改前无 rotation/retention，实测单日可达 46.7 MB）。
+    # ponytail: 界在「loguru 的 retention 只清**本 sink 同名族**的轮转副本」——09-30 实测
+    # `retention=3` 留 3 份轮转 + 本体，而同目录里另一颗 sink 的 `day2.txt` 族一个都不动，
+    # `retention='7 days'` 连 mtime 8 天前的别日子名也不删 ⇒ 按天命名之下这两参封的是
+    # **单日本体的顶**，旧日文件仍随天数累积。要封目录总量得改成固定 sink 名，而那连带
+    # `.gitignore`（本机现在只靠私有 `.git/info/exclude` 挡 `logs/*.txt`），不是一行能收的。
+    _logger.add(METAGPT_ROOT / f"logs/{log_name}.txt", level=logfile_level,
+                rotation="10 MB", retention=7)
     return _logger
 
 
