@@ -107,9 +107,10 @@ class RoleZero:
         # 会把整场已烧的用量陪葬——模型写错名字是常态，不是编程错误）。
         self.teammates: dict[str, str] = {}
         # C69：_outbox/_report_to 已搬进激活级 state（RoleZeroState.outbox/report_to）——
-        # 实例字段并发激活会互偷/互清。self.memory 维持实例级（口径 b：跨激活有意共享，
-        # 并发穿插只乱序不丢失——memory 是只增列表；plan 那种状态机语义才需要激活级隔离，
-        # 已随 C71 搬进子图 state + 外层 TeamState.plans）。
+        # 实例字段并发激活会互偷/互清。self.memory 仍是实例级**工作窗口**（口径 b：并发穿插只乱序
+        # 不丢失），但它的内容从此由外层 `TeamState.memories` 兜住跨进程那一半（C99 补形：
+        # 当年只论证了并发穿插，没论证 resume 换 worker 后实例重建会整段归零；plan 那半已随 C71 走，
+        # 同一套「按名播种 + 收口按名写回」的形状，见 as_node._run）。
 
     PLAN_COMMANDS = {   # 源 :121-124 的 Plan 命令面
         "Plan.append_task": "append_task", "Plan.reset_task": "reset_task",
@@ -538,6 +539,15 @@ class RoleZero:
             # 委派出去的载荷不带这个标记（_wire_delegation 只留 content/sent_from），仍按新任务走。
             is_report = incoming is not None and incoming.instruct_schema == "TeamReport"
             task = incoming.content if incoming else "continue"
+            # C99（P0-2）：记忆是**实例态**（`:91`），而 resume/换 worker 会重建角色 ⇒ 轮次级 `results`
+            # 整段归零，「失忆重规划」能把已经执行过的 `write_file`/终端命令再发一遍（C59 的病换了触发条件）。
+            # 照 C71 的形状走外层通道，不新造机制也不往实例槽塞：键用现成的 `TeamState.memories`
+            # （`merge_memories`，经典线 `agent.py:320/323` 在用、动态线此前从没写过它），按名播种、收口按名写回。
+            # 两条边界：① **只在新建实例（storage 为空）时播** ⇒ 同进程热路径逐字不变，零回归面；
+            # ② 只取尾部 `memory_k` 条 —— journal 是并集只增、`_compress` 裁掉的那些也留在里面，
+            # 整份灌回来会让 `_compress` 把同一批消息二次溢写给 brain/ltm。
+            if not self.memory.storage:
+                self.memory.storage = list((state.get("memories") or {}).get(name) or [])[-self.memory_k:]
             # C71（口径 a）：计划状态机住外层 TeamState 键 `plans`（每角色一份、按名覆盖）。
             # 每个激活算出自己的**种子**随子图 state 走（RoleZeroState.plan）：续跑/回报按名
             # 播种外层旧计划（回报清了队长就没法 finish_current_task），新任务不播种（作废，
@@ -615,6 +625,11 @@ class RoleZero:
             return {"messages": msgs,
                     # C71：计划状态机按名写回（子图终态的 plan）。None=作废（新任务且子图里没立过
                     # 新计划）；续跑/回报分支写回的是「播种的计划 + 本激活 Plan.* 命令的结果」。
-                    "plans": {name: sub.get("plan")}}
+                    "plans": {name: sub.get("plan")},
+                    # C99（P0-2）：本激活的工作记忆按名写回外层（与 plans 同一个提交口——
+                    # `team_graph.py:290` 写明「节点返回值才是状态提交口」）。交的是**当前 storage**
+                    # 而非全量：`_compress` 裁过的那些已进 brain/ltm，不该再回到窗口里，
+                    # 但 journal 侧靠 `merge_memories` 的并集只增保住它们（同经典线的语义，一字不改）。
+                    "memories": {name: self.memory.storage}}
 
         return name, _run

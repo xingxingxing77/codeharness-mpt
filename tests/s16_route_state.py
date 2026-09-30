@@ -766,6 +766,150 @@ def t12_team_state_finished_dead_key_removed():
         assert '"finished"' not in src and "finished: bool" not in src,             f"t12③ {f} 又写/又读 finished 了（C77 的死键复燃）"
 
 
+def t13_memories_survive_process_restart():
+    """C99（P0-2）：动态线的工作记忆（含**轮次级 results**）跨进程不再归零。
+
+    改前的形状：`role_zero.py:91` 是 `self.memory = memory if memory is not None else Memory()`（实例态），
+    而 resume/换 worker 会重建角色（`runner.py:422-448` → `_prepare:481-550`，`dynamic_assembly` 与
+    `build_hired_role` 两处 `RoleZero(...)` 都不传 `memory=`）⇒ 整段归零。后果不是「少点上下文」而是
+    **失忆重规划**：`_observe`（`:171-181`）靠 `memory.try_remember(text)` 判「这条命令结果我记过了」，
+    窗口空就判不出来 ⇒ 已经执行过的 `write_file`/终端命令可以再来一遍（C59 的病换了触发条件）。
+    修法照 C71 现成的形状，不新造机制：外层键用**已有**的 `TeamState.memories`（reducer `merge_memories`，
+    经典线 `agent.py:320/323` 在用、动态线此前从没写过它），`as_node._run` 按名播种、收口按名写回。
+
+    两条边界是量出来的（探针 `E:/tmp/p02/probe_mem2.py`；v1 那版剧本第一轮就 end，`_observe` 从没跑到、
+    journal 只有 2 条 ⇒ `_observe` 读的是**上一轮**的 results，剧本必须「先跑命令、下一轮才收口」）：
+      · 只在新建实例（storage 为空）时播 ⇒ 同进程热路径逐字不变（⑥）；
+      · 只取尾部 `memory_k` 条 ⇒ journal 是并集只增、`_compress` 裁掉的那些也留在里面，
+        整份灌回会让 `_compress` 把同一批消息二次溢写给 brain/ltm（④）。
+
+    六格：
+      ① 第一程 journal 里**有那条命令结果**（`Plan.append_task: ...`）——P0-2 的载荷真进了外层通道；
+      ② 第二程（重开 saver + 全新实例）storage 里含那条结果 ⇒ 只能来自 checkpointer 播种；
+      ③ **重放同一条命令不二次入库**：第二程 journal 里那条结果文本仍只 1 份（改前窗口空 ⇒ 会变 2 份）；
+      ④ 取尾不取全：`memory_k=1` 时第二程只播回 journal 的最后 1 条，最老那条不进窗口；
+      ⑤ 结构守卫：写回键在、`_run` 里对 `self.memory.storage` 的赋值**恰好 1 处**、那处就在
+         `if not self.memory.storage:` 块里、且带尾部界 `[-self.memory_k:]`（防下一棒改成无条件覆盖）；
+      ⑥ 阳性对照（同进程热路径）：同一实例连跑两个激活，先塞一条哨兵进 storage ⇒ 哨兵必须还在。
+    """
+    import ast
+    import json
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from codeharness.environment import checkpoint as ck
+    from codeharness.environment.checkpoint import async_sqlite_saver
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+
+    END_CMD = {"command_name": "end", "args": {}}
+
+    def _think(thought, commands):
+        return json.dumps({"thought": thought, "commands": commands}, ensure_ascii=False)
+
+    def _append(tid, instr):
+        return {"command_name": "Plan.append_task",
+                "args": {"task_id": tid, "dependent_task_ids": [], "instruction": instr, "assignee": "Mem"}}
+
+    def _member(script, memory_k=0):
+        return RoleZero({"name": "Mem", "profile": "p", "goal": "g"}, [], FakeLLM(script), memory_k=memory_k)
+
+    # 第一轮只发命令、第二轮才收口：`_observe` 在第二轮 _think 开头才把上一轮的 results 收进记忆
+    SCRIPT_1 = [_think("先记一条任务", [_append("t1", "写出周报")]), _think("收口", [END_CMD])]
+    RESULT_LINE = "Plan.append_task: [plan] 共 1 任务, 当前 → t1: 写出周报"
+
+    async def _two_processes(memory_k2, replay_script, thread="s16-t13"):
+        """两「进程」＝两次独立 saver 实例（`close_all()` 清工厂缓存后重开同一 db 文件）+ 全新 RoleZero。"""
+        cfg = {"configurable": {"thread_id": thread}}
+        tmp = Path(tempfile.mkdtemp())
+        db = tmp / "checkpoints.db"
+        try:
+            saver1 = await async_sqlite_saver(db)
+            r1 = _member(SCRIPT_1)
+            out1 = await build_team({"Mem": r1}, sop={}, checkpointer=saver1).ainvoke(
+                {"messages": [Message(content="任务甲", role="user",
+                                      cause_by=RequirementTag.USER_REQUIREMENT,
+                                      sent_from="user", send_to={"Mem"})],
+                 "memories": {}, "debug_rounds": 0, "team_rounds": 0}, cfg)
+            j1 = out1["memories"].get("Mem") or []
+            assert RESULT_LINE in [m.content for m in j1], \
+                f"① 轮次级 results 没进外层通道（第一程 journal={[m.content[:22] for m in j1]}）"
+
+            await ck.close_all()
+            saver2 = await async_sqlite_saver(db)
+            assert saver2 is not saver1, "量法失效：工厂缓存没清，第二程拿的还是同一实例"
+            r2 = _member(replay_script, memory_k=memory_k2)
+            assert not r2.memory.storage, "量法失效：第二程实例的 storage 不是空的"
+            out2 = await build_team({"Mem": r2}, sop={}, checkpointer=saver2).ainvoke(
+                {"messages": [Message(content="continue", role="assistant",
+                                      cause_by=RequirementTag.RUN_COMMAND,
+                                      sent_from="Boss", send_to={"Mem"})]}, cfg)
+            return j1, out2["memories"].get("Mem") or [], r2
+        finally:
+            await ck.close_all()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- ②③ 默认窗口：结果播种回来，且重放不二次入库 ----
+    j1, j2, r2 = asyncio.run(_two_processes(
+        0, [_think("重放同一条命令", [_append("t1", "写出周报")]), _think("收口", [END_CMD])]))
+    assert RESULT_LINE in [m.content for m in r2.memory.storage], \
+        f"② 第二程实例的 storage 里没有第一程那条结果（播种失效＝P0-2 没修好）：" \
+        f"{[m.content[:22] for m in r2.memory.storage]}"
+    n_res = [m.content for m in j2].count(RESULT_LINE)
+    assert n_res == 1, \
+        f"③ 重放同一条命令把同一份结果记了 {n_res} 遍（改前正是这形状：窗口空 ⇒ `try_remember` 判不出）：" \
+        f"journal={[m.content[:22] for m in j2]}"
+
+    # ---- ④ 取尾不取全 ----
+    j1b, _j2b, r2b = asyncio.run(_two_processes(
+        1, [_think("推进", [_append("t2", "画出图表")]), _think("收口", [END_CMD])]))
+    seeded_n = sum(1 for m in r2b.memory.storage if m in j1b)
+    assert seeded_n == 1, \
+        f"④ memory_k=1 时只该播回 journal 的最后 1 条，实得 {seeded_n} 条" \
+        f"（整份灌回会让 `_compress` 把同一批消息二次溢写）：{[m.content[:22] for m in r2b.memory.storage]}"
+    assert j1b[0].content not in [m.content for m in r2b.memory.storage], \
+        f"④ journal 最老那条（{j1b[0].content[:20]!r}）被灌回窗口了"
+
+    # ---- ⑤ 结构守卫 ----
+    src = (Path(__file__).resolve().parents[1] / "codeharness" / "roles" / "role_zero.py").read_text(encoding="utf-8")
+    assert '"memories": {name: self.memory.storage}' in src, "⑤ C99 的 memories 写回键不见了"
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_run")
+    sets = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Attribute) and t.attr == "storage"
+                    and ast.unparse(t.value) == "self.memory" for t in n.targets)]
+    assert len(sets) == 1, f"⑤ `_run` 里对 `self.memory.storage` 的赋值该恰好 1 处，实得 {len(sets)} 处：{[s.lineno for s in sets]}"
+    guarded = [n for n in ast.walk(fn) if isinstance(n, ast.If)
+               and ast.unparse(n.test) == "not self.memory.storage" and sets[0] in list(ast.walk(n))]
+    assert guarded, "⑤ 那处赋值不在 `if not self.memory.storage:` 块里 ⇒「同进程热路径逐字不变」这条边界没了"
+    assert "[-self.memory_k:]" in ast.unparse(sets[0]), f"⑤ 播种没取尾：{ast.unparse(sets[0])}"
+
+    # ---- ⑥ 阳性对照：同进程连跑两激活，哨兵不许被播种盖掉 ----
+    async def _hot_path():
+        cfg = {"configurable": {"thread_id": "s16-t13-hot"}}
+        r = _member([_think("先记一条任务", [_append("t1", "写出周报")]), _think("收口", [END_CMD]),
+                     _think("第二激活里再发一条", [_append("t2", "画出图表")]), _think("收口", [END_CMD])])
+        g = build_team({"Mem": r}, sop={}, checkpointer=InMemorySaver())
+        await g.ainvoke({"messages": [Message(content="任务甲", role="user",
+                                             cause_by=RequirementTag.USER_REQUIREMENT,
+                                             sent_from="user", send_to={"Mem"})],
+                         "memories": {}, "debug_rounds": 0, "team_rounds": 0}, cfg)
+        sentinel = Message(content="哨兵：同进程热路径的证据", role="user",
+                           cause_by=RequirementTag.USER_REQUIREMENT, sent_from="user")
+        r.memory.storage.append(sentinel)
+        out = await g.ainvoke({"messages": [Message(content="continue", role="assistant",
+                                                   cause_by=RequirementTag.RUN_COMMAND,
+                                                   sent_from="Boss", send_to={"Mem"})]}, cfg)
+        return sentinel, out["memories"]["Mem"]
+    sentinel, j3 = asyncio.run(_hot_path())
+    assert any(m.content == sentinel.content for m in j3), \
+        f"⑥ 同进程的哨兵没被写回外层（若播种改成无条件覆盖，storage 会被 journal 尾部顶掉，这格先红）：" \
+        f"{[m.content[:22] for m in j3]}"
+    print("  ok  t13 C99：results 跨进程播种回来、重放同一命令不二次入库、memory_k=1 只播回尾部 1 条、"
+          "同进程热路径哨兵仍在（结构守卫 3 样齐：写回键/唯一赋值带 if-not-storage 守卫/取尾）")
+
+
 def main():
     checks = [t1_conditional_edge_write_is_dropped, t2_self_loop_brake_fires,
               t3_debug_error_broadcast_brake, t4_action_error_reactivates_role,
@@ -775,7 +919,8 @@ def main():
               t9_send_input_carries_state,
               t10_plan_lives_in_outer_state,
               t11_plans_survive_process_restart,
-              t12_team_state_finished_dead_key_removed]
+              t12_team_state_finished_dead_key_removed,
+              t13_memories_survive_process_restart]
     for c in checks:
         c()
         if c is not t7_superstep_batch_all_delivered:      # t7 自己打了带读数的 ok
