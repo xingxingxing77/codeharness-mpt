@@ -6,17 +6,15 @@
 @File    : file.py
 @Describe : General file operations.
 """
-import base64
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import aiofiles
 from fsspec.implementations.memory import MemoryFileSystem as _MemoryFileSystem
 
-from codeharness.utils._config_compat import config
 from codeharness.logs import logger
-from codeharness.utils import read_docx
-from codeharness.utils.common import aread, aread_bin, awrite_bin, check_http_endpoint
+from codeharness.utils.read_docx import read_docx
+from codeharness.utils.common import aread
 from codeharness.utils.exceptions import handle_exception
 from codeharness.utils.repo_to_markdown import is_text_file
 
@@ -129,70 +127,35 @@ class File:
 
     @staticmethod
     async def _read_pdf(path: Union[str, Path]) -> str:
-        result = await File._omniparse_read_file(path)
-        if result:
-            return result
+        """pdf 走**知识库摄取那一条读取路**（口径同 C26：`document.py` 的 `OPTIONAL_READERS` 声明的是
+        `pypdf`，缺件时由 `read_data` 里的 `_require_reader` 抛 `ReaderUnavailable` 那句人话，
+        而不是 Python 原文）。
 
-        from llama_index.readers.file import PDFReader
+        改前的形状（09-30 审查文档 §3 P1）：第一跳是 `_omniparse_read_file`，而它 import 的
+        `codeharness.utils.omniparse_client` **不在这个仓里**（`_config_compat.omniparse=None` 写着
+        「按排除清单不搬」）⇒ 任何一份 pdf 一进这支就 `ModuleNotFoundError`，后面那个 `llama_index`
+        兜底**从来没被走到过**（本机也没装 `llama_index`，而且它不是本仓声明的那把尺）。
+        """
+        from codeharness.document import read_data
 
-        reader = PDFReader()
-        lines = reader.load_data(file=Path(path))
-        return "\n".join([i.text for i in lines])
+        # 缺件闸不重复写：`read_data` 的 pdf 分支自己就调 `_require_reader`（刀 b 试过在这里再调一次，
+        # 摘掉后 t54② 的读数一字不变 ⇒ 那行是冗余，删）。
+        return "\n".join(d.page_content for d in read_data(Path(path)))
 
     @staticmethod
     async def _read_docx(path: Union[str, Path]) -> str:
-        result = await File._omniparse_read_file(path)
-        if result:
-            return result
-        return "\n".join(read_docx(str(path)))
+        """docx 走 `read_docx`（python-docx）——那件本来就自带人话报错（`read_docx.py:9`）。
 
-    @staticmethod
-    async def _omniparse_read_file(path: Union[str, Path], auto_save_image: bool = False) -> Optional[str]:
-        from codeharness.utils._config_compat import get_env_default
-        from codeharness.utils.omniparse_client import OmniParseClient
-
-        env_base_url = await get_env_default(key="base_url", app_name="OmniParse", default_value="")
-        env_timeout = await get_env_default(key="timeout", app_name="OmniParse", default_value="")
-        conf_base_url, conf_timeout = await File._read_omniparse_config()
-
-        base_url = env_base_url or conf_base_url
-        if not base_url:
-            return None
-        api_key = await get_env_default(key="api_key", app_name="OmniParse", default_value="")
-        timeout = env_timeout or conf_timeout or 600
-        try:
-            timeout = int(timeout)
-        except ValueError:
-            timeout = 600
-
-        try:
-            if not await check_http_endpoint(url=base_url):
-                logger.warning(f"{base_url}: NOT AVAILABLE")
-                return None
-            client = OmniParseClient(api_key=api_key, base_url=base_url, max_timeout=timeout)
-            file_data = await aread_bin(filename=path)
-            ret = await client.parse_document(file_input=file_data, bytes_filename=str(path))
-        except (ValueError, Exception) as e:
-            logger.exception(f"{path}: {e}")
-            return None
-        if not ret.images or not auto_save_image:
-            return ret.text
-
-        result = [ret.text]
-        img_dir = Path(path).parent / (Path(path).name.replace(".", "_") + "_images")
-        img_dir.mkdir(parents=True, exist_ok=True)
-        for i in ret.images:
-            byte_data = base64.b64decode(i.image)
-            filename = img_dir / i.image_name
-            await awrite_bin(filename=filename, data=byte_data)
-            result.append(f"![{i.image_name}]({str(filename)})")
-        return "\n".join(result)
-
-    @staticmethod
-    async def _read_omniparse_config() -> Tuple[str, int]:
-        if config.omniparse and config.omniparse.base_url:
-            return config.omniparse.base_url, config.omniparse.timeout
-        return "", 0
+        这一支原本叠了**三个**缺陷，前两个把第三个盖得死死的（本轮探针才量齐）：
+        ① 第一跳是不存在的 `omniparse_client` ⇒ 走到即 `ModuleNotFoundError`，下面那行从没执行过；
+        ② 旧写法 `from codeharness.utils import read_docx` 拿到的是**子模块**（`utils/__init__.py` 是空的，
+           没有再导出）⇒ 真让它执行，是 `TypeError: 'module' object is not callable`；
+        ③ 旧那句 `"\n".join(read_docx(...))` 是**把字符串按字符拼行**（`read_docx` 返回的已经是
+           `"\n".join(段落)` 的整体 str）⇒ 就算前两条都不拦，读出来的 docx 也会变成「一个字一行」。
+        ⚠ 不改成知识库那支的 `docx2txt`：那是**摄取**侧 `OPTIONAL_READERS` 的声明，本机装的是 python-docx，
+        换过去等于把一条现在真读得动的路改坏（C26 治的是「declare 与读得动混成一份」，不是要统一成同一个库）。
+        """
+        return read_docx(str(path))
 
 
 class MemoryFileSystem(_MemoryFileSystem):

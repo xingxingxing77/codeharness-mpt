@@ -1379,6 +1379,143 @@ def t53_editor_generic_except_never_overwrites_source():
           f"并如实说『已应用』、③正常 append 仍成功、④AST 泛捕获 0 处 / lint 支 {got_lint} 处）")
 
 
+def t54_pdf_docx_read_path_no_dead_island():
+    """P1（09-30 审查文档 §3）：`utils/file.py` 的 pdf/docx 读取链——岛删掉，两态必居其一。
+
+    改前那一支叠了**三个**缺陷，前两个把第三个盖得死死的（本轮探针 `E:/tmp/p1a/probe_read.py` 才量齐）：
+      ① 第一跳 `_omniparse_read_file` import 的 `codeharness.utils.omniparse_client` **不在仓里**
+         （`_config_compat.py:6` 写着 `omniparse=None`，源那份按排除清单没搬）⇒ 真递一份 pdf/docx 进来就是
+         `ModuleNotFoundError`，后面那个 `llama_index` 兜底**从来没走到过**（本机也没装 `llama_index`）；
+      ② `from codeharness.utils import read_docx` 拿到的是**子模块**（`utils/__init__.py` 是空的、没再导出）
+         ⇒ 就算过了 ①，也是 `TypeError: 'module' object is not callable`（这条是本轮量出来的新读数）；
+      ③ 旧那句 `"\n".join(read_docx(...))` 是**把字符串按字符拼行**（`read_docx` 返回的已是整体 str）
+         ⇒ 过了 ①②，读出来的 docx 也会变成「一个字一行」。
+    修法：岛整块删（47 行，只被它自己用的卫星 import 一并走）；pdf **复用知识库摄取那条路**
+    （`document.py` 的 `_require_reader` + `read_data`，`OPTIONAL_READERS` 声明的是 `pypdf`，
+    缺件抛人话 `ReaderUnavailable`）；docx 保持 python-docx 那件（本机装得动、且它自带人话 ImportError）——
+    **不**统一到 docx2txt：那是摄取侧的声明，换过去等于把一条现在真读得动的路改坏。
+
+    五格：
+      ① docx 在本机是**读出**态 ⇒ 逐字两段、`splitlines()` 恰好 2 行（对着 ②③ 那两个缺陷）；
+      ② pdf **两态必居其一**（结构不变量，同 C26① 的判法）：装了 `pypdf` 就要读出那行 ASCII，
+         没装就必须抛 `ReaderUnavailable` 且消息点名 `pypdf`——**不许**第三种（Python 原文、静默回空都算坏）；
+      ③ 常驻守卫：`codeharness/utils/*.py` 里的 import（AST 走全树，**函数体内的惰性 import 也算**）
+         不许指向仓里不存在的模块（岛不许从 vendor 拷回来）；
+         判定函数自带阳性对照（喂一个故意写错的假名必须被抓到，否则这格恒绿）；
+      ④ `file.py` 里那个 `read_docx` 名字必须是**函数**不是模块（把 ② 那个缺陷常驻钉住）；
+      ⑤ 阳性对照：`.md`/`.txt` 那支不受本次改动影响。
+    """
+    import ast
+    import importlib.util
+    import tempfile
+    from types import ModuleType
+
+    from codeharness.document import ReaderUnavailable, reader_available
+    from codeharness.utils import file as filemod
+    from codeharness.utils.file import File
+
+    tmp = Path(tempfile.mkdtemp(prefix="s4_t54_"))
+    try:
+        # ---- ① 真 .docx：两段正文，不许一字一行 ----
+        import docx
+        d = docx.Document()
+        d.add_paragraph("第一段：周报正文")
+        d.add_paragraph("第二段：图表说明")
+        p_docx = tmp / "probe.docx"
+        d.save(str(p_docx))
+        try:
+            got = asyncio.run(File.read_text_file(p_docx))
+        except Exception as e:            # ②③那族缺陷的现形方式就是「在这里抛」，要红在这句上而不是裸 traceback
+            raise AssertionError(f"① docx 读取抛了：{type(e).__name__}: {str(e)[:120]}") from e
+        assert got == "第一段：周报正文\n第二段：图表说明", \
+            f"① docx 读出的内容不对（本机装了 python-docx，这一格该走「读出」态）：{got!r}"
+        assert len(got.splitlines()) == 2, \
+            f"① docx 被拆成 {len(got.splitlines())} 行（旧那句 `\"\\n\".join(str)` 就是一字一行）：{got[:40]!r}"
+
+        # ---- ② 真 .pdf：两态必居其一 ----
+        stream = b"BT /F1 11 Tf 1 0 0 1 60 760 Tm (PDF probe line one) Tj ET"
+        objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R"
+                b" /Resources << /Font << /F1 5 0 R >> >> >>",
+                ("<< /Length " + str(len(stream)) + " >>\nstream\n").encode() + stream + b"\nendstream",
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+        out = bytearray(b"%PDF-1.4\n")
+        offs = []
+        for n, body in enumerate(objs, 1):
+            offs.append(len(out))
+            out += f"{n} 0 obj\n".encode() + body + b"\nendobj\n"
+        xref = len(out)
+        out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for o in offs:
+            out += f"{o:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").encode()
+        p_pdf = tmp / "probe.pdf"
+        p_pdf.write_bytes(bytes(out))
+        have = reader_available(".pdf")
+        if have:
+            txt = asyncio.run(File.read_text_file(p_pdf))
+            assert txt and "PDF probe line one" in txt, \
+                f"② 这台机器装了 pypdf，却读不出那行 ASCII（白名单反过来说谎了）：{txt!r}"
+        else:
+            try:
+                asyncio.run(File.read_text_file(p_pdf))
+                raise AssertionError("② 缺组件的机器上 pdf 竟然安静地返回了——C26 禁的第三种")
+            except AssertionError:
+                raise
+            except ReaderUnavailable as e:
+                msg = str(e)
+                assert "pypdf" in msg, f"② 拒收那句没点名缺哪个组件：{msg!r}"
+                for bad in ("ModuleNotFoundError", "omniparse_client", "llama_index", "Traceback"):
+                    assert bad not in msg, f"② 拒收那句里混进了 Python 原文（{bad}）：{msg!r}"
+            except Exception as e:                    # 第三种「换了个报错」也算坏（变异刀的落点要能指名）
+                raise AssertionError(
+                    f"② 缺组件时该抛 ReaderUnavailable（人话），实得 {type(e).__name__}: {str(e)[:120]}") from e
+
+        # ---- ③ 模块级 import 不许指向仓里不存在的模块 ----
+        def dead_repo_imports(src: str) -> list:
+            dead = []
+            for n in ast.walk(ast.parse(src)):
+                if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("codeharness."):
+                    if importlib.util.find_spec(n.module) is None:
+                        dead.append((n.lineno, n.module))
+                elif isinstance(n, ast.Import):
+                    for al in n.names:
+                        if al.name.startswith("codeharness.") and importlib.util.find_spec(al.name) is None:
+                            dead.append((n.lineno, al.name))
+            return dead
+
+        probe = dead_repo_imports("from codeharness.utils.definitely_not_here import x\n")
+        assert probe == [(1, "codeharness.utils.definitely_not_here")], \
+            f"③仪器坏了：假模块名没被抓出来（这格会恒绿），实得 {probe}"
+        root = Path(__file__).resolve().parents[1] / "codeharness" / "utils"
+        offenders = {p.name: dead_repo_imports(p.read_text(encoding="utf-8"))
+                     for p in sorted(root.glob("*.py"))}
+        offenders = {k: v for k, v in offenders.items() if v}
+        assert not offenders, f"③ 这些 import（含函数体内的惰性 import）指向仓里不存在的东西：{offenders}"
+
+        # ---- ④ read_docx 是函数，不是子模块 ----
+        rd = getattr(filemod, "read_docx", None)
+        assert rd is not None and not isinstance(rd, ModuleType) and callable(rd), \
+            f"④ `file.py` 里的 read_docx 不是函数（旧写法拿到的是子模块 ⇒ 调用即 TypeError）：{rd!r}"
+
+        # ---- ⑤ 阳性对照：文本那支没被动过 ----
+        p_md = tmp / "note.md"
+        p_md.write_text("# 标题\n正文一行\n", encoding="utf-8")
+        got5 = asyncio.run(File.read_text_file(p_md))
+        assert got5 == "# 标题\n正文一行\n", f"⑤ .md 读路径被改坏了：{got5!r}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        for _ in range(10):
+            if not tmp.exists():
+                break
+            time.sleep(0.2)
+        assert not tmp.exists(), f"④t54 清场没做成，{tmp} 还在"
+
+    print(f"  ok  t54 P1：pdf/docx 读链的死岛删净（docx 读出两段不多不少一字一行=否、"
+          f"pdf 本机走「缺组件人话」那态={not have}、utils 模块级 import 零死引用、read_docx 是函数、.md 支不受影响")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1423,7 +1560,8 @@ def main():
               t50_tool_state_is_keyed_by_session_not_project_name,
               t51_write_path_pins_encoding_and_newline,
               t52_action_tree_is_importable_and_tier_names_have_a_home,
-              t53_editor_generic_except_never_overwrites_source]
+              t53_editor_generic_except_never_overwrites_source,
+              t54_pdf_docx_read_path_no_dead_island]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -1447,7 +1585,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 
