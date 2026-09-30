@@ -1297,6 +1297,111 @@ def t13_as_node_replay_does_not_reseed():
           f"（修复前各 3）；停一次/不停两种形状各 1（阳性对照）")
 
 
+def t14_spawn_drops_quietly_when_the_row_vanished():
+    """`_spawn` 咽喉：会话行在**起跑与落态之间**没了 ⇒ 不抛穿、不留死槽、可 grep、散会走到底。
+
+    触发前提先判过（不给不存在的形状发明修法）：唯一的删行出口 `DELETE /{sid}` 只挡
+    running/stopping/awaiting_human（`server/api/sessions.py:235`），所以「一场**没在跑**的会话被回了
+    审批卡、随后删掉」这条路是通的；而 `_run` 那侧的窗口更宽——`start` 之后到落 running 之间隔着
+    `_prepare`（C43 实测重建图 p50≈1633ms，这期间状态还停在 start 前那一档）。
+    09-29 的 s8 门禁就在 t8 上把它现证过一次：28/28 全绿**之后**吊出
+    `Task exception was never retrieved: KeyError`，栈停在 `_resume` 落 running 那一句（1/4 时序命中）。
+    改前三处坏：① 异常没人 retrieve＝日志里零痕迹；② `_resume` 的 `tasks.pop` 写在 try 的 finally 里、
+    而抛穿发生在 try **之前** ⇒ 死任务永久占住 `tasks[sid]`（:559 那两条注释讲的正是抢槽的代价）；
+    ③ 散会没走 ⇒ 图/账/常驻 shell 全留在进程里。"""
+    import io
+    from types import SimpleNamespace as NS
+    from loguru import logger
+
+    class _Vanish:
+        """替身图：`aget_state` 被到的那一刻把会话行删掉（真图这一步本来就排在 await 之后）。"""
+
+        def __init__(self, store, sid):
+            self.store, self.sid, self.gone = store, sid, False
+
+        async def aget_state(self, _config):
+            if not self.gone:
+                self.store.delete(self.sid)
+                self.gone = True
+            return NS(next=("gate",), tasks=[NS(interrupts=[NS(id="i1", value={"q": 1})])])
+
+        async def astream_events(self, *_a, **_k):
+            raise AssertionError("会话行已没了还去跑图——收口点应落在落 running 之前")
+            yield
+
+    def _drive(resume_fn):
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="WARNING")     # 与 s3b/s4/s17 同款抓法
+        try:
+            err = resume_fn(buf)
+        finally:
+            logger.remove(hid)
+        return err, buf.getvalue()
+
+    # ① `_resume` 那条路：起跑后落 running 撞空会话
+    store, runner, s = _make_runner()
+    runner.graphs[s.id] = (_Vanish(store, s.id), {"configurable": {"thread_id": s.project_name}})
+    store.update(s.id, status=SessionStatus.awaiting_human)
+
+    async def resume_case():
+        assert runner.answer_human(s.id, "批准") is True, "前提：这条回答该被接走（会话还在、没在跑）"
+        t = runner.tasks[s.id]
+        try:
+            await t
+            return None
+        except KeyError as e:
+            return e
+
+    err, log = _drive(lambda _b: asyncio.run(resume_case()))
+    assert err is None, f"① 落态撞空会话时 KeyError 抛穿了（没人 retrieve＝静默死）：{err!r}"
+    assert "[runner-dropped]" in log, f"② 这条作废没有可 grep 的痕迹：{log[:200]!r}"
+    assert s.id not in runner.tasks, "② 死任务还占着 tasks 槽（改前形状：pop 在 try 里、抛穿在 try 之前）"
+    assert runner.graphs.get(s.id) is None and runner.chats.get(s.id) is None, \
+        "③ 散会没走：图或插话队列还留在进程里（`_forget` 才是这条路的收尾）"
+
+    # ④ 同族另一条路：`start` 与落 running 之间隔着 `_prepare`（真窗口），撞空时也要安静
+    store2, runner2, s2 = _make_runner()
+
+    async def prepare_then_delete(session, proj, cost_manager, persist_roles=True):
+        store2.delete(session.id)           # ← C43 量过的那 1.6s 里，另一条 API 把行删了
+        return _Team(events=[]), {"configurable": {"thread_id": proj}}, {"messages": []}
+
+    runner2._prepare = prepare_then_delete
+
+    async def run_case():
+        runner2.start(s2)
+        t = runner2.tasks[s2.id]
+        try:
+            await t
+            return None
+        except KeyError as e:
+            return e
+
+    err2, log2 = _drive(lambda _b: asyncio.run(run_case()))
+    assert err2 is None, f"④ `_run` 同族那一路还在抛穿：{err2!r}"
+    assert "[runner-dropped]" in log2, "④ `_run` 撞空会话时没走同一个咽喉（两处各写一遍必漂）"
+    assert s2.id not in runner2.tasks, "④ `_run` 这条路的槽没摘干净"
+
+    # ⑤ 阳性对照：会话行**还在**时，这条守卫不许咽掉正常路径（落 running→跑完→按断点驻留）
+    store3, runner3, s3 = _make_runner()
+    team3 = _Team(events=[], interrupts=PARKED)
+    runner3.graphs[s3.id] = (team3, {"configurable": {"thread_id": s3.project_name}})
+    store3.update(s3.id, status=SessionStatus.awaiting_human)
+
+    async def alive_case():
+        assert runner3.answer_human(s3.id, "选方案二") is True
+        await runner3.tasks[s3.id]
+        return store3.get(s3.id).status.value
+
+    status_after, log3 = _drive(lambda _b: asyncio.run(alive_case()))
+    assert "[runner-dropped]" not in log3, "⑤ 会话健在也走了 dropped 分支——守卫写宽了，真故障会被一起咽掉"
+    assert status_after == SessionStatus.awaiting_human.value, \
+        f"⑤ 正常恢复路被这条守卫改坏了（应照旧停在待人工）：status={status_after}"
+    assert s3.id not in runner3.tasks, "⑤ 正常收口后槽没摘"
+    print("  ok  t14 起跑咽喉：会话行在起跑与落态之间没了 ⇒ `_resume`/`_run` 两路都不抛穿、"
+          "槽按任务对象摘、`[runner-dropped]` 可 grep、散会走到底；会话健在时正常恢复路一字未变")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1305,7 +1410,8 @@ def main():
               t10_unknown_command_is_countable,
               t11_ask_human_does_not_replay_side_effects,
               t12_approval_and_ask_alternate,
-              t13_as_node_replay_does_not_reseed]
+              t13_as_node_replay_does_not_reseed,
+              t14_spawn_drops_quietly_when_the_row_vanished]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1314,7 +1420,8 @@ def main():
           f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组 + "
           f"未知命令可数 1 组 + ask_human 不重放副作用 1 组（C59）+ "
           f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）** + "
-          f"**外层节点重放不重复播种 1 组（C72）**")
+          f"**外层节点重放不重复播种 1 组（C72）** + "
+          f"**起跑咽喉撞空会话不抛穿/不留死槽 1 组（t8 现证的那条竞态）**")
 
 
 if __name__ == "__main__":

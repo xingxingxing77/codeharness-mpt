@@ -302,10 +302,33 @@ class SessionRunner:
         self._live_blk: dict[str, tuple] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
+    def _spawn(self, sid: str, coro):
+        """两条 fire-and-forget 起跑（`start` 与 `answer_human`）的**唯一咽喉**。
+
+        为什么要有这一处：跑图的协程在收口时都要往 store 落一次态，而**会话行可以在起跑之后消失**——
+        `DELETE /{sid}` 的 409 只挡 running/stopping/awaiting_human，所以「给一场没在跑的会话回一张
+        审批卡、再把它删掉」正好撞在起跑与落态之间（s8 门禁的 t8 现证过这个形状：28/28 全绿之后吊出
+        `Task exception was never retrieved: KeyError`，栈停在 `_resume` 落 running 那一句）。
+        `store.update` 对不存在的 sid 抛 KeyError（`platforms/session_store.py:116`），而这任务从没被人
+        await ⇒ 异常无人 retrieve＝日志里零痕迹；`_resume` 那条还多一坏：`tasks.pop` 写在 try 的
+        `finally` 里，而抛穿发生在 try **之前** ⇒ 死任务永久占住 `tasks[sid]`（:559 那两条注释讲的
+        正是抢槽的代价）。现在两处一起收在这一个咽喉：认「会话已不在」⇒ 可 grep 的 warning + 散会；
+        槽按**任务对象自己**摘，不盲摘 sid（免得替别人清了槽）。"""
+        async def guarded():
+            try:
+                await coro
+            except KeyError as e:
+                logger.warning(f"[runner-dropped] sid={sid} 落态时会话行已不在（{e}），本场按散会收")
+                self._forget(sid, terminal=True)
+            finally:
+                if self.tasks.get(sid) is asyncio.current_task():
+                    self.tasks.pop(sid, None)
+        self.tasks[sid] = asyncio.create_task(guarded())
+
     def start(self, session: Session):
         if self.is_running(session.id):
             raise RuntimeError(f"session {session.id} already running")
-        self.tasks[session.id] = asyncio.create_task(self._run(session))
+        self._spawn(session.id, self._run(session))
 
     def is_running(self, sid: str) -> bool:
         t = self.tasks.get(sid)
@@ -561,7 +584,7 @@ class SessionRunner:
             # 判据用活任务视角而不是 store.status：实测 interrupt 收尾时 _run 会把
             # awaiting_human 覆写成 finished（tests/s17::t1 读数），状态在这儿不可信。
             return False
-        self.tasks[sid] = asyncio.create_task(self._resume(sid, content))
+        self._spawn(sid, self._resume(sid, content))
         return True
 
     @staticmethod
