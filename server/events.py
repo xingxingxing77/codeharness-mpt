@@ -6,7 +6,19 @@ from collections import deque
 from typing import Any, Optional, Union
 from pydantic import BaseModel, field_validator
 
+from codeharness.logs import logger
+
 MAX_EVENTS_PER_SESSION = 5000
+
+# C90/C103：每条 SSE 连接的订阅队列上界，**两条 bus 共用这一个数**。原先只定义在
+# `platforms/event_store.py:33`（Redis 那台用），进程内那台一直是无界 `asyncio.Queue()`——
+# 而**无 Redis 才是默认档**（`PLATFORM__USE_REDIS=0` 时 `create_app` 就用它），C90 的判据
+# `s7 t21` 又只测 Redis bus ⇒ 盲区。挪到这里是因为依赖方向是 `event_store -> server.events`
+# （它 import 本文件的 Event/MAX_EVENTS_PER_SESSION/norm_cursor），反向 import 会成环。
+# 满档语义：丢**最旧**（游标语义下旧事件重连走 `/events/history` 补），每丢满 500 条留一行
+# 可 grep 的 `[sse-drop]`。要「一条不丢」得上 Redis 消费组（XREADGROUP + PEL），SSE 不值得。
+MAX_SSE_QUEUE = 4096
+_DROP_LOG_EVERY = 500
 
 
 def cursor_of(seq: int) -> str:
@@ -61,6 +73,9 @@ class SessionEventBus:
         # （event_store.py:66 注释原话「loguru sink 线程与 loop 线程都会 publish」），
         # 进程内版（Redis 不可达时的默认落点）此前没有。
         self._lock = threading.Lock()
+        # C103：队列 → 该连接已丢条数。键是 Queue 对象本身（与 `_subscribers` 同一把锁保护），
+        # `unsubscribe` 时一起摘，别让断开的连接一直占着计数。
+        self._dropped: dict = {}
 
     def _ensure(self, sid: str):
         if sid not in self._events:
@@ -83,13 +98,42 @@ class SessionEventBus:
             targets = list(subs.items())
         for q, loop in targets:
             if loop is cur:
-                q.put_nowait(ev)                          # 同 loop 快路：立刻可见（既有语义不变）
+                self._offer(sid, q, ev)                   # 同 loop 快路：立刻可见（既有语义不变）
             else:
                 try:
-                    loop.call_soon_threadsafe(q.put_nowait, ev)
+                    loop.call_soon_threadsafe(self._offer, sid, q, ev)
                 except RuntimeError:
                     pass                                  # 订阅者的 loop 已关：随进程收场，丢这条
         return ev
+
+    def _offer(self, sid: str, q: asyncio.Queue, ev):
+        """C103：有界投递——满了丢**最旧**，并按连接计数留一行可 grep 的 `[sse-drop]`。
+
+        与 Redis 版 `_reader`（`platforms/event_store.py` 的 C90 那段）同形状、同前缀、同计数节奏，
+        两条 bus 从此共用 `MAX_SSE_QUEUE` 这一个数。丢最旧的依据是游标语义：旧事件重连时由
+        `/events/history` 补回来，而 SSE 的实时面只关心最新的——要「一条不丢」得上消费组，不值得。
+        ⚠ 只准在队列自己的 loop 线程上跑（`asyncio.Queue` 非线程安全）：上面同 loop 直调、
+        线程侧经 `call_soon_threadsafe` 转投，正是 C63 定的那条形状，别改回跨线程直接 `put_nowait`。
+        """
+        try:
+            q.put_nowait(ev)
+            return
+        except asyncio.QueueFull:
+            pass
+        try:                                            # 丢最旧：腾一个位置出来
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        with self._lock:                                # 计数与 `_subscribers` 同一条锁
+            n = self._dropped.get(q, 0) + 1
+            self._dropped[q] = n
+        if n % _DROP_LOG_EVERY == 1:                    # 每 500 条喊一次，静默丢不许
+            logger.warning(f"[sse-drop] {sid} 进程内订阅队列消费端太慢，已丢最旧 {n} 条"
+                           f"（队列上界 {MAX_SSE_QUEUE}，重连走 /events/history 补）")
+        try:
+            q.put_nowait(ev)
+        except asyncio.QueueFull:                       # 别的连接在同一 loop 上抢了刚腾的位置
+            pass
 
     def history(self, sid: str, after: Union[str, int] = "", before: Union[str, int] = "",
                 limit: int = 0) -> list:
@@ -108,12 +152,16 @@ class SessionEventBus:
         """C90：改 async 与 Redis 版 `RedisEventBus.subscribe` **同形**——调用方（/events 路由）
         服务两种 bus，接口必须一致。本实现无 I/O，async 只是形状。"""
         _, subs = self._ensure(sid)
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue = asyncio.Queue(maxsize=MAX_SSE_QUEUE)
         subs[q] = asyncio.get_running_loop()
+        with self._lock:
+            self._dropped[q] = 0
         return q
 
     def unsubscribe(self, sid: str, q: asyncio.Queue):
         self._subscribers.get(sid, {}).pop(q, None)
+        with self._lock:            # C103：连接走了就把丢包计数一起带走，别留在字典里
+            self._dropped.pop(q, None)
 
     def broadcast_log(self, message: str, active_sessions: list):
         for sid in active_sessions:

@@ -21,16 +21,17 @@ import redis.asyncio as aioredis
 
 from codeharness.configs.settings import RedisConfig, settings
 from codeharness.logs import logger
-from server.events import Event, MAX_EVENTS_PER_SESSION, norm_cursor
+from server.events import (MAX_EVENTS_PER_SESSION, MAX_SSE_QUEUE, Event, norm_cursor,
+                           _DROP_LOG_EVERY as _DROP_EVERY)   # C103：两条 bus 共用同一个数与同一个计数节奏
 
 STREAM = "ch:ev:{}"
 
-# C90（09-28 审查批）：每条 SSE 连接的订阅队列上界。原先 `asyncio.Queue()` 无界——一条慢消费
-# （后台标签页、断了没关的连接）把内存拖到 O(未消费事件数)，而事件里 token delta 占大头、
-# 一场跑下来成千上万条。满了好：丢**最旧**（游标语义下旧事件重连走 `/events/history` 补得回来），
-# 丢满 500 条留一行可 grep 的 warning。要「一条不丢」得上 Redis 消费组（XREADGROUP + PEL），
-# SSE 场景不值得——见 subscribe 里的 ponytail。
-MAX_SSE_QUEUE = 4096
+# C90（09-28 审查批）→ C103（09-30 移交件）：`MAX_SSE_QUEUE` 的定义**挪进了 `server/events.py`**，
+# 因为进程内那台 bus（`PLATFORM__USE_REDIS=0` 才是默认档）原先拿着无界 `asyncio.Queue()`，
+# 而 C90 只补了这台 Redis 版 ⇒ 两条 bus 得共用同一个数，而依赖方向是 `event_store -> server.events`
+# （本文件下一行就 import 它的 Event/MAX_EVENTS_PER_SESSION/norm_cursor），反向 import 会成环。
+# 满档语义两边一致：丢**最旧**（游标语义下旧事件重连走 `/events/history` 补），每丢满 500 条
+# 留一行可 grep 的 `[sse-drop]`。要「一条不丢」得上 Redis 消费组（XREADGROUP + PEL），SSE 不值得。
 _RING_MAX = 20000
 
 
@@ -220,7 +221,7 @@ class RedisEventBus:
                             except asyncio.QueueEmpty:
                                 pass
                             dropped["n"] += 1
-                            if dropped["n"] % 500 == 1:
+                            if dropped["n"] % _DROP_EVERY == 1:
                                 logger.warning(f"[sse-drop] {key} 消费端太慢，已丢最旧 "
                                                f"{dropped['n']} 条（重连走 /events/history 补）")
                             q.put_nowait(ev)

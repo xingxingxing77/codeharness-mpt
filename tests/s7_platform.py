@@ -969,6 +969,111 @@ async def t21_sse_queue_bounded_and_offloop():
         await bus.aclose()
 
 
+async def t22_inproc_sse_queue_bounded_like_redis():
+    """C103（P0-3）：**进程内那台 bus 的订阅队列也要有界**——与 t21 成对，同判同形状。
+
+    为什么必须有这支：C90 只补了 Redis 版（`platforms/event_store.py` 的 `subscribe`），而
+    `PLATFORM__USE_REDIS=0` 才是默认档（Redis 不可达时 `create_app` 退回 `SessionEventBus`），
+    进程内那台的 `asyncio.Queue()` 一直无界；`t21` 又只构造 `RedisEventBus` ⇒ **默认档零判据**。
+    五格：
+      ① 两台 bus 的**运行时队列** `maxsize` 都等于同一个 `MAX_SSE_QUEUE`（拿真队列问，不是读常量——
+         读常量只会证明"代码里写了个数"，两态同判这条也正是 (d) 要求不许省的）；
+      ② 进程内灌 `MAX+51` 条不消费 ⇒ 队列恰好 `MAX`、队首是 `c51`（丢的是最旧 51 条）、哨兵在队尾；
+      ③ 留可 grep 的 `[sse-drop]`（静默丢不许）；
+      ④ 阳性对照：正常消费速率下一条不丢、计数为 0、也不喊（否则③是恒绿的空警告）；
+      ⑤ 字面守卫：`publish` 体内不许再出现裸 `q.put_nowait` / `call_soon_threadsafe(q.put_nowait, …)`
+         ——两个投递点必须都走 `_offer`，以后谁加第三个投递点绕开有界路径就地红（C63 同族的病）。
+    """
+    import inspect
+    import io
+    from codeharness.logs import logger
+    from server.events import MAX_SSE_QUEUE, SessionEventBus
+
+    # ⑤ 先钉形状：两处投递都收进 _offer
+    src = inspect.getsource(SessionEventBus.publish)
+    assert "q.put_nowait(ev)" not in src, \
+        "t22⑤ publish 里又出现裸 put_nowait——这条连接绕开了有界投递（满队列会无声撑内存）"
+    assert "call_soon_threadsafe(q.put_nowait" not in src, \
+        "t22⑤ 线程侧转投没走 _offer（同上一条：有界与丢最旧只在一个地方生效才有意义）"
+    assert "self._offer(" in src and "self._offer, sid" in src, \
+        "t22⑤ publish 不再调用 _offer ⇒ 有界逻辑整条被绕过，①②③ 全是空判"
+
+    ib = SessionEventBus()
+    pair = {}
+
+    async def _shape_only():
+        from platforms.event_store import RedisEventBus
+        rb = RedisEventBus(TEST_DB)
+        rb.start()
+        try:
+            q = await rb.subscribe("t22shape")
+            pair["rb"] = rb
+            pair["redis_max"] = q.maxsize
+            ib_q = await ib.subscribe("t22shape")
+            pair["inproc_max"] = ib_q.maxsize
+            rb.unsubscribe("t22shape", q)                  # 同步口（只有 subscribe/aclose 是 async）
+            ib.unsubscribe("t22shape", ib_q)
+        finally:
+            await rb.aclose()
+    if REDIS_UP:
+        await _shape_only()
+        assert pair["redis_max"] == MAX_SSE_QUEUE and pair["inproc_max"] == MAX_SSE_QUEUE, \
+            (f"t22① 两台 bus 的运行时队列上界不是同一个数：Redis={pair['redis_max']} "
+             f"进程内={pair['inproc_max']} 常量={MAX_SSE_QUEUE}（两条 bus 共用一个数是 C103 的原命题）")
+    else:
+        q0 = await ib.subscribe("t22shape")
+        assert q0.maxsize == MAX_SSE_QUEUE, f"t22① 进程内队列 maxsize={q0.maxsize}（该 {MAX_SSE_QUEUE}）"
+        ib.unsubscribe("t22shape", q0)
+        print("  ⚠ t22① Redis 那台未测（REDIS_UP=False），这一轮『两态同判』只算了进程内那一半")
+
+    # ②③ 满档：灌 MAX+51 不消费
+    sid = "t22over"
+    q = await ib.subscribe(sid)
+    buf = io.StringIO()
+    hid = logger.add(buf, format="{message}", level="WARNING")
+    try:
+        # 与 t21 同数量：`MAX+50` 条 c 事件 + 1 条哨兵 = 共灌 `MAX+51` 条 ⇒ 溢出正好 51 条、队首 c51。
+        # （本格第一版写成 `MAX+51` 条 c 事件，实测队首是 c52——门禁把我的 off-by-one 抓出来了，
+        #   改期望对齐 t21，而不是把断言顺手改成 c52。）
+        for i in range(MAX_SSE_QUEUE + 50):
+            ib.publish(sid, kind="report", block="Thought", value=f"c{i}")
+        ib.publish(sid, kind="report", block="Thought", value="SENTINEL")
+        got = []
+        while not q.empty():
+            got.append(q.get_nowait())
+        assert len(got) == MAX_SSE_QUEUE, \
+            f"t22② 队列里 {len(got)} 条（无界队列会是 {MAX_SSE_QUEUE + 51} ⇒ 慢消费者把内存撑开就是这条格要拦的）"
+        assert got[-1].value == "SENTINEL", f"t22② 丢的必须是最旧：队尾现在是 {got[-1].value!r}"
+        assert got[0].value == "c51", f"t22② 队首 {got[0].value!r}（该是 c51：丢了最旧 51 条）"
+        assert "[sse-drop]" in buf.getvalue(), \
+            f"t22③ 丢了 51 条却没留可 grep 的 warning：{buf.getvalue()[:160]!r}"
+    finally:
+        logger.remove(hid)
+        ib.unsubscribe(sid, q)
+
+    # ④ 阳性对照：正常消费 ⇒ 一条不丢、也不喊
+    sid2 = "t22ok"
+    q2 = await ib.subscribe(sid2)
+    buf2 = io.StringIO()
+    hid2 = logger.add(buf2, format="{message}", level="WARNING")
+    try:
+        for i in range(60):
+            ib.publish(sid2, kind="report", block="Thought", value=f"d{i}")
+            while not q2.empty():                 # 每发一条就抽干＝正常消费速率
+                q2.get_nowait()
+        left = q2.qsize()
+        assert left == 0 and ib._dropped.get(q2, 0) == 0, \
+            f"t22④ 正常消费也被丢了？队列剩 {left}、该连接计数 {ib._dropped.get(q2)}"
+        assert "[sse-drop]" not in buf2.getvalue(), "t22④ 没丢事件却喊了 [sse-drop]（那③就成恒绿噪音）"
+    finally:
+        logger.remove(hid2)
+        ib.unsubscribe(sid2, q2)
+    assert q2 not in ib._dropped, "t22⑤ unsubscribe 没带走该连接的丢包计数（断开的连接一直占着字典）"
+    _ok("t22", f"进程内 SSE 订阅队列有界（与 t21 成对）：两台 bus 运行时 maxsize 同为 {MAX_SSE_QUEUE}、"
+               f"灌 {MAX_SSE_QUEUE + 51} 条 ⇒ 恰好 {MAX_SSE_QUEUE}、丢最旧 51、[sse-drop] 有留、"
+               "正常消费一条不丢且不喊、publish 里两处投递都走 _offer")
+
+
 async def _redis_suite():
     _flush_test_db()
     for fn in (t2_dual_worker_replay, t3_cross_worker_stop, t4_cross_worker_chat,
@@ -1161,13 +1266,14 @@ def main():
     t20_approval_ledger_dual_impl_and_two_readers()
     global REDIS_UP
     REDIS_UP = _redis_up()
+    asyncio.run(t22_inproc_sse_queue_bounded_like_redis())   # C103：进程内那台，两条路都跑
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 9/9 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20），redis 路待环境")
+        print("\ns7_platform: 10/10 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 21/21 全绿（双配置）")
+    print("\ns7_platform: 22/22 全绿（双配置）")
 
 
 if __name__ == "__main__":
