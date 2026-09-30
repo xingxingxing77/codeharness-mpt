@@ -1661,6 +1661,97 @@ def t55_bugfix_ticket_survives_model_failure():
           f"AST 顺序 unlink@{u} > aask@{a}（仪器对照会翻红）、无工单路不喊冤")
 
 
+def t56_model_supplied_path_keys_are_gated():
+    """C105（09-30 审查文档 §3）：模型可控的**路径键**必须进审批判据——`_PATH_KEYS` 漏一个键＝免审开一道口子。
+
+    现场坐实（本轮 19:0x 直调真函数，零门禁零 db15）：
+        writes_inside_workspace({'readme_path': 'C:/Windows/win.ini', ...}) -> True
+    ⇒ `_approval.py:89`「`workspace_write` 且路径越界才升级到 full 审批」那句**永不触发**。
+    三处同形（都挂在 `workspace_write` 档）：`edge_actions.py:24`（`readme_path` 真 `read_text` 任意文件）、
+    `rebuild_class_view.py:31`（`repo_path` 真当 `RepoParser` 的 `base_directory` 扫任意目录）、
+    `invoice_ocr.py:24`（`image_path` 只交给 `ocr_provider`，本机未注入 ⇒ 当下不可利用，仍按同族登记）；
+    另有第四处 `import_repo.py:54` 的 `repo_path`，但 ImportRepo 在 `full_access` 档（本来就要审批）⇒ 一并登记只为「键表完整」。
+    形状扫描实测：**改前 4 处调用点／3 个键名**，补齐之后**零漏网**（探测器与数字同一份源码，不凭记忆）。
+    ⚠ 探测器第一版有洞：`(msg.instruct_content or {}).get("image_path")` 这种「BoolOp 套 get」它认不出接收者，
+    当场漏掉 `invoice_ocr`/`rebuild_class_view` 两处 ⇒ 判据会假绿。现在先 `while isinstance(node, ast.BoolOp)`
+    剥壳再取 `Attribute.attr`/`Name.id`，并把这三种接收者形态（裸名 / 属性 / BoolOp）都写进仪器对照。
+
+    根因不是「少列了一个名字」，是 `writes_inside_workspace` 的**默认放行**：认不出的键一律按
+    「不带路径的写类件」放过（那句 `return True`）。所以两处都要动：① 把三个键补进表；
+    ② 判据按形状扫，下一棒再加新键名而忘了登记就当场红。
+
+    三格：
+      ① 判定函数三档都要对：越界路径键 ⇒ False（要升级）；会话根内的路径 ⇒ True；
+         **完全不带路径键 ⇒ True**（这条是阳性对照——一刀切成「一律升级」会把 WritePRD 那类全打掉）；
+      ② 形状扫描：`actions/*.py` 里凡是 `fic.get("<键>")` / `(msg.instruct_content or {}).get("<键>")`
+         且键名以 `_path` 结尾的，必须出现在 `_PATH_KEYS` 里；
+      ③ ②的仪器对照：同样判定喂一段含未登记键的假源码必须**抓到**（否则 ② 是恒绿摆设）。
+    """
+    import ast
+
+    from codeharness.runtime import CURRENT_PROJECT, CURRENT_SESSION
+    from codeharness.tools._approval import ACTION_TIER, _PATH_KEYS, writes_inside_workspace as wiw
+
+    # ---- ① 三档 ----
+    tp = CURRENT_PROJECT.set("s56_proj")
+    ts = CURRENT_SESSION.set("s56sid")
+    try:
+        assert wiw({"readme_path": "C:/Windows/win.ini"}) is False, \
+            "①`readme_path` 指到系统文件还判「在工作区内」——那 `:89` 的升级永不发生"
+        assert wiw({"repo_path": "a/b"}) is True, "①会话根内的相对路径被误判越界（会把正常动作全送去审批）"
+        assert wiw({}) is True, "①不带路径键的写类件该按表里定的档走（阳性对照，别一刀切）"
+        assert wiw({"path": "../outside.py"}) is False, "①既有键 `path` 的越界判定被改坏了（t2/t3 同族）"
+        for name in ("ExtractReadMe", "RebuildClassView", "InvoiceOCR"):
+            assert ACTION_TIER[name] == "workspace_write", \
+                f"①这三件的档位不是 workspace_write（那这条判据的靶子变了）：{name}={ACTION_TIER[name]}"
+    finally:
+        CURRENT_SESSION.reset(ts)
+        CURRENT_PROJECT.reset(tp)
+
+    # ---- ②③ 形状扫描 + 仪器对照 ----
+    def receiver_name(node):
+        """把 `fic` / `msg.instruct_content` / `(msg.instruct_content or {})` 三种接收者归约成一个名字。
+
+        ⚠ 不剥 BoolOp 就认不出 `(x or {}).get("image_path")` 这一形——探测器第一版正是这样漏掉
+        `invoice_ocr`/`rebuild_class_view` 两处，让 ② 变成假绿的。
+        """
+        while isinstance(node, ast.BoolOp):
+            node = node.values[0]
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        if isinstance(node, ast.Name):
+            return node.id
+        return None
+
+    def unregistered_path_keys(src: str) -> list:
+        """取 `fic.get("x_path")` / `(msg.instruct_content or {}).get("x_path")` / `params.get(...)` 这类模型可控键。"""
+        out = []
+        for n in ast.walk(ast.parse(src)):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get"):
+                continue
+            if not (n.args and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)):
+                continue
+            base = receiver_name(n.func.value)
+            key = n.args[0].value
+            if base in ("fic", "instruct_content", "params") and key.endswith("_path") and key not in _PATH_KEYS:
+                out.append((n.lineno, key))
+        return out
+
+    ctl = [unregistered_path_keys('fic = {}\nx = fic.get("evil_path")\n'),
+           unregistered_path_keys('msg = 1\nx = (msg.instruct_content or {}).get("deep_path")\n'),
+           unregistered_path_keys('params = {}\nx = params.get("wide_path")\n')]
+    assert [c[0][1] for c in ctl] == ["evil_path", "deep_path", "wide_path"], \
+        f"③仪器坏了：三种接收者形态没被全抓出来（②会恒绿），实得 {ctl}"
+    assert unregistered_path_keys('fic = {}\nx = fic.get("readme_path")\n') == [], \
+        "③仪器反了：已登记的键也被判成漏网（②会恒红）"
+    root = Path(__file__).resolve().parents[1] / "codeharness" / "actions"
+    gaps = {p.name: unregistered_path_keys(p.read_text(encoding="utf-8")) for p in sorted(root.glob("*.py"))}
+    gaps = {k: v for k, v in gaps.items() if v}
+    assert not gaps, f"②这些模型可控的路径键没进 `_PATH_KEYS`（＝免审越界读/扫）：{gaps}"
+    print("  ok  t56 C105：readme_path/repo_path/image_path 已纳进审批判据（越界→升级、根内→放行、"
+          "无路径键→按档走三档各对），形状扫描抓到器内假键、放过已登记键，全 actions/ 零漏网")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1707,7 +1798,8 @@ def main():
               t52_action_tree_is_importable_and_tier_names_have_a_home,
               t53_editor_generic_except_never_overwrites_source,
               t54_pdf_docx_read_path_no_dead_island,
-              t55_bugfix_ticket_survives_model_failure]
+              t55_bugfix_ticket_survives_model_failure,
+              t56_model_supplied_path_keys_are_gated]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -1731,7 +1823,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 
