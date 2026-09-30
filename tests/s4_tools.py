@@ -1752,6 +1752,153 @@ def t56_model_supplied_path_keys_are_gated():
           "无路径键→按档走三档各对），形状扫描抓到器内假键、放过已登记键，全 actions/ 零漏网")
 
 
+def t57_no_action_deletes_evidence_before_the_model():
+    """C108（09-30 §5 本线自欠第一件）：把「删除证据不许排在模型调用之前」从一颗文件扩到整棵 actions/。
+
+    为什么这不是重复造：**t55③ 已经有同形状的 AST 顺序守卫**，但它钉的是 `write_code.py` 那一颗文件，
+    且锚点要求「恰好一颗 unlink、一颗 `_aask`」（`len(u) == 1 and len(a) == 1`）。⇒ 下一棒新写一个 action、
+    在调模型之前 `unlink` 掉它要读的输入，t55 一个字都不会喊。C102 那次是「按被报出的那处改」，
+    本件补的是「按形状找齐」那半边。
+
+    口径（探测器与判据同一份源码，不凭记忆）：
+      删除类 = 被调名字的**精确集合** {unlink, remove, rmtree, delete, delete_scope, drop, delete_document}
+               （`ast.Attribute.attr` 或 `ast.Name.id`；⚠ **不做子串匹配**——见 ①）；
+      模型类 = 精确集合 {_aask, aask, aask_code, ainvoke, achat, structured}；
+      候选 = 同一个函数体内两类都有，且删除的最小行号 < 模型的最小行号。
+
+    现测（09-30 22:0x 本机；**两个口径的数都记在这里，别混**）：
+      · 子串口径（仓外探针 `E:/tmp/review-logs/probe_precall2.py`，删除类按 `in` 匹配）：扫 32 个 action 文件
+        ⇒ 两类同现 **2 个**函数、候选 **0 个**；那 2 个里有 1 个是 `write_framework.py:93` 的
+        `removeprefix`/`removesuffix` 被误认成删除（见下面「假红比没牙更糟」）。
+      · 本判据的**精确口径**（按名字全等取集合）：两类同现 **1 个**函数（`write_code.py::run`）、候选 **0 个**
+        ——单验读数 `E:/tmp/review-logs/t57_alone.out` 末行逐字如此。
+      · 阳性对照：把 `write_code.py` 的 `unlink` 按 C102 改前的形状挪回 `_aask` 之前（临时目录里的副本），
+        同一份探测器**当场报红**（`('write_code.py', 'run', 119, 120)`）⇒ 那个 0 是有牙的阴性，不是空表。
+
+    顺带量到一条**必须写进排除项**的形状：`requirement_analysis/framework/write_framework.py:93` 的
+    `removeprefix`/`removesuffix` 是**字符串方法**，名字里带 `remove`——子串口径会把它们算成删除。
+    它们恰好排在 `_aask`（:86）之后才没假报；将来谁在那句之前做一次 `removeprefix`，扫描就会指着
+    一行无辜代码喊「证据先没了」。**假红比没牙更糟**：它的下场是被加豁免，而豁免一进去这台仪器就废了。
+
+    三格：
+      ① 排除对照：同一份探测器喂「`x.removeprefix('a')` 排在 `_aask` 之前」必须**不报**，
+         喂「`p.unlink()` 排在前面」必须报——两种形状各钉一次，防止有人日后改成子串口径；
+      ② 全域扫描：现网 `actions/` 里候选必须为 0；同时把「两类同现的函数」计数一并断言（>=1），
+         否则「表里没东西」会被当成「扫过了」；
+      ③ 仪器对照：仓外临时目录里造三份源码——改前形状（必须红）、现网形状（必须不红）、
+         三种接收者形态（`Path(...).unlink()` / `os.remove(str(p))` / `await store.delete(...)`）都要认得出。
+    """
+    import ast
+
+    import codeharness
+
+    DELETE_VERBS = frozenset({"unlink", "remove", "rmtree", "delete", "delete_scope",
+                              "drop", "delete_document"})
+    MODEL_CALLS = frozenset({"_aask", "aask", "aask_code", "ainvoke", "achat", "structured"})
+
+    def call_name(node):
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        if isinstance(node, ast.Name):
+            return node.id
+        return ""
+
+    def find_pre_model_deletes(text, rel=""):
+        """返回该源码里所有「删除排在模型调用之前」的函数。缺一类调用就不算候选（两类的**最小行号**相比）。"""
+        out = []
+        for fn in ast.walk(ast.parse(text)):
+            if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                continue
+            dels, models = [], []
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Call):
+                    nm = call_name(n.func)
+                    if nm in DELETE_VERBS:
+                        dels.append((n.lineno, nm))
+                    if nm in MODEL_CALLS:
+                        models.append((n.lineno, nm))
+            if dels and models and min(d for d, _ in dels) < min(m for m, _ in models):
+                out.append((rel, fn.name, min(d for d, _ in dels),
+                            min(m for m, _ in models), sorted(set(dels))))
+        return out
+
+    actions = Path(codeharness.__file__).parent / "actions"
+    sources = sorted(p for p in actions.rglob("*.py") if p.name != "__init__.py")
+    assert len(sources) >= 20, f"②扫描面缩水了：actions/ 只找到 {len(sources)} 个文件（挪目录了还是 glob 写坏了？）"
+
+    # ---- ① 排除对照：字符串方法不是删除 ----
+    ctrl_str = ('async def f(self):\n'
+                '    x.removeprefix("docs/")\n'
+                '    return await self._aask("p")\n')
+    assert find_pre_model_deletes(ctrl_str, "ctrl_str") == [], \
+        "①排除失效：`removeprefix` 被当成删除了（子串口径会让扫描天天假红，最后被加豁免废掉）"
+    ctrl_real = ('async def f(self):\n'
+                 '    p.unlink(missing_ok=True)\n'
+                 '    return await self._aask("p")\n')
+    assert find_pre_model_deletes(ctrl_real, "ctrl_real"), \
+        "①排除做过头：真的 `unlink` 排在前也不报了（那 ② 就是恒绿摆设）"
+
+    # ---- ② 全域扫描 ----
+    tree_pairs = 0
+    candidates = []
+    for p in sources:
+        text = p.read_text(encoding="utf-8")
+        rel = p.relative_to(actions.parent).as_posix()
+        has_del = has_model = False
+        for fn in ast.walk(ast.parse(text)):
+            if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                continue
+            names = {call_name(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+            dels = names & DELETE_VERBS
+            models = names & MODEL_CALLS
+            if dels and models:
+                tree_pairs += 1
+                has_del = has_model = True
+        candidates += find_pre_model_deletes(text, rel)
+    assert tree_pairs >= 1, "②仪器没对接上：整棵 actions/ 里没有一个函数同时含删除与模型调用（那这格在数什么？）"
+    assert not candidates, \
+        f"②找到 {len(candidates)} 处「删除证据排在模型调用之前」（共 {tree_pairs} 个函数两类同现）：" + \
+        "; ".join(f"{c[0]}::{c[1]} 删@{c[2]} < 模型@{c[3]} 命中 {c[4]}" for c in candidates)
+
+    # ---- ③ 仪器对照：改前形状必须红、现网形状必须不红、三种接收者形态都认 ----
+    tmp = Path(tempfile.mkdtemp(prefix="s4_t57_"))
+    try:
+        shapes = {
+            "改前形状_该红": ('async def run(self):\n'
+                              '    (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)\n'
+                              '    rsp = await self._aask(prompt)\n'
+                              '    return rsp\n'),
+            "现网形状_不该红": ('async def run(self):\n'
+                                '    rsp = await self._aask(prompt)\n'
+                                '    code = _parse_code(rsp)\n'
+                                '    await store.save(RepoName.SRC, code)\n'
+                                '    (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)\n'
+                                '    return rsp\n'),
+            "三种接收者形态_各该红": ('async def run(self):\n'
+                                      '    Path("a.md").unlink()\n'
+                                      '    os.remove("b.md")\n'
+                                      '    await store.delete(RepoName.DOCS, "c.md")\n'
+                                      '    return await self._aask(prompt)\n'),
+        }
+        for label, src in shapes.items():
+            (tmp / f"{label}.py").write_text(src, encoding="utf-8")
+        red = find_pre_model_deletes(shapes["改前形状_该红"], "改前形状")
+        assert red and red[0][1] == "run", f"③仪器坏了：C102 改前的形状不报红（那 ② 的 0 不算数），实得 {red}"
+        green = find_pre_model_deletes(shapes["现网形状_不该红"], "现网形状")
+        assert not green, f"③仪器过凶：改后的正确形状也报红（扫描会天天喊，等于没有）：{green}"
+        three = find_pre_model_deletes(shapes["三种接收者形态_各该红"], "三种接收者")
+        assert three, "③只认 `.unlink()`：`os.remove(...)` 与 `store.delete(...)` 都不算删除？"
+        hit_verbs = {v for _, _, _, _, ds in three for _, v in ds}
+        assert {"unlink", "remove", "delete"} <= hit_verbs, f"三种接收者形态只认到 {sorted(hit_verbs)}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    assert not tmp.exists(), f"③清场没做成，{tmp} 还在"
+
+    print(f"  ok  t57 C108：扫 {len(sources)} 个 action 文件，两类同现 {tree_pairs} 个函数、"
+          f"候选 0 处；①把 removeprefix 排除在外而 unlink 照报，③改前形状红/现网形状不红/"
+          f"三种接收者形态（unlink+os.remove+store.delete）全认得")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1799,7 +1946,8 @@ def main():
               t53_editor_generic_except_never_overwrites_source,
               t54_pdf_docx_read_path_no_dead_island,
               t55_bugfix_ticket_survives_model_failure,
-              t56_model_supplied_path_keys_are_gated]
+              t56_model_supplied_path_keys_are_gated,
+              t57_no_action_deletes_evidence_before_the_model]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -1823,7 +1971,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器） + C108 顺序契约扩面 1 组（t57：整棵 `actions/` 里「删除证据排在模型调用之前」必须 0 处，`removeprefix` 这类字符串方法不算删除而真 `unlink` 照报，改前形状红／现网形状不红／三种接收者形态全认得）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 
