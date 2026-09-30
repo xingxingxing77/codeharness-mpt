@@ -1516,6 +1516,151 @@ def t54_pdf_docx_read_path_no_dead_island():
           f"pdf 本机走「缺组件人话」那态={not have}、utils 模块级 import 零死引用、read_docx 是函数、.md 支不受影响")
 
 
+def t55_bugfix_ticket_survives_model_failure():
+    """C102（09-30 审查文档 §3）：BUGFIX 工单不许在模型调用**之前**被删——同 C97 那一族。
+
+    现证（改前两处锚点本轮 18:5x 逐字回读）：`actions/write_code.py:93` 读到工单、`:96` 当场
+    `unlink(missing_ok=True)`（注释写着源 :163「防止冲突」），而模型调用是 `:114` 那句
+    `rsp = await self._aask(prompt)`（`:110-113` 是 prompt 的 format 实参行；审查文档的 `:96`/`:114`
+    两处都对得上；我草稿里先前写 `:113` 是自己少数一行，已按现值改回）
+    ⇒ `_aask` 一失败（超时/端点挂/落盘 raise）那份工单就永久没了：下次重试没有工单，
+    `write_code_plan_and_change.py:146` 的 `issue_doc` 也读不到。「防止冲突」（源 :163）要的是
+    **本次消费掉**，不是**本次机会烧掉**。
+
+    修法：删除挪到「产物已落盘」之后（`s6_sop.py:338` 那句 `assert not ...exists()` 仍是正向断言，
+    语义一字不改），失败那支加一句可 grep 的 warning 点名「工单未消费、仍留在 DOCS」，异常照抛不吞。
+
+    四格：
+      ① 失败路 ⇒ 工单**还在** + 异常照抛 + warning 那句有；
+      ② 成功路 ⇒ 产物落盘、工单被消费掉、且 prompt 里**带过**工单文本（防「删了但从没用过」这种假消费）；
+      ③ AST 顺序守卫：钉的是**两次调用的先后**——`run` 里 `unlink(BUGFIX…)` 那次 Call 的行号必须大于
+         `await self._aask(...)` 那次 Await 的行号（不钉具体某一行，否则仪器刀会因为选点而假绿）；
+         且判定函数自带阳性对照（把 unlink 人为挪回 `_aask` 之前，判定必须翻红，否则这格是恒绿摆设）；
+      ④ 无工单的成功路（阳性对照）⇒ 不炸、产物照样落盘、且不产生那句 warning。
+    """
+    import ast
+    import io
+    import tempfile
+
+    from codeharness.actions.write_code import WriteCode
+    from codeharness.configs.settings import settings
+    from codeharness.const import BUGFIX_FILENAME, DocName, RepoName
+    from codeharness.document_store.artifact_store import ArtifactStore
+    from codeharness.logs import logger as _real_logger
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.runtime import CURRENT_PROJECT
+    from codeharness.schema import Document, Message
+    import codeharness.actions.write_code as wc
+
+    class _Boom(WriteCode):
+        """模型那一发失败：`_aask` 是 BaseAction 的方法，子类覆盖最省事（不碰真实网关）。"""
+
+        async def _aask(self, prompt, stream=True, **kw):
+            raise RuntimeError("t55 注入：模型端点挂了")
+
+    class _Rec:
+        def __init__(self):
+            self.warnings = []
+
+        def warning(self, m):
+            self.warnings.append(str(m))
+
+        def __getattr__(self, name):
+            fn = getattr(_real_logger, name)
+
+            def wrap(*a, **k):
+                return fn(*a, **k)
+            return wrap
+
+    base = Path(tempfile.mkdtemp(prefix="s4_t55_"))
+    keep_ws, keep_proj = settings.workspace_root, CURRENT_PROJECT.get()
+    settings.workspace_root = str(base)
+    CURRENT_PROJECT.set("t55_proj")
+    saved_logger, wc.logger = wc.logger, _Rec()
+
+    def _trigger():
+        return Message(content="写 main.py", role="user",
+                       instruct_content={"filename": "main.py"}, instruct_schema="CodingContext")
+
+    try:
+        store = ArtifactStore.active()
+
+        # ---- ① 失败路：工单必须还在 ----
+        asyncio.run(store.save(RepoName.DOCS, Document(filename=BUGFIX_FILENAME, content="程序启动就崩")))
+        ticket = store.root / RepoName.DOCS / BUGFIX_FILENAME
+        assert ticket.exists(), "①夹具坏了：工单没写进去（这一格会恒真）"
+        try:
+            asyncio.run(_Boom(llm=FakeLLM(["不该被调用"])).run(_trigger()))
+            raise AssertionError("①模型失败被吞掉了（那就不叫失败路）")
+        except AssertionError:
+            raise
+        except RuntimeError as e:
+            assert "t55 注入" in str(e), f"①抛的不是注入的那发：{e}"
+        assert ticket.exists(), \
+            "①失效：模型失败之后工单没了——下次重试没有工单，PlanAndChange 也读不到 issue_doc"
+        assert any("BUGFIX" in w and "未消费" in w for w in wc.logger.warnings), \
+            f"①失败没留可 grep 的一声（C97 同族要求）：{wc.logger.warnings}"
+
+        # ---- ② 成功路：消费掉，且真的用过 ----
+        wc.logger.warnings.clear()
+        asyncio.run(store.save(RepoName.DOCS, Document(filename=BUGFIX_FILENAME, content="崩溃在 main 的 --version")))
+        llm = FakeLLM(["```python\nprint('v2')\n```"])
+        out = asyncio.run(WriteCode(llm=llm).run(_trigger()))
+        assert "已写 main.py" in out.content, f"②产物没落盘：{out.content[:80]}"
+        assert (store.root / RepoName.SRC / "main.py").exists(), "②src 里找不到 main.py"
+        assert not (store.root / RepoName.DOCS / BUGFIX_FILENAME).exists(), \
+            "②成功之后工单还留着——「防止冲突」那半语义丢了（`s6_sop.py:338` 同一条）"
+        assert "崩溃在 main 的 --version" in str(llm.calls[0]), \
+            "②工单从没进过 prompt，那删除就是「销毁证据」而不是「消费」"
+
+        # ---- ③ AST 顺序守卫 + 自带阳性对照 ----
+        src = (Path(__file__).resolve().parents[1] / "codeharness" / "actions" / "write_code.py"
+               ).read_text(encoding="utf-8")
+
+        def ticket_order(text):
+            """返回 (工单 unlink 行号, _aask 行号)；缺一处就报错，不返回「看起来没问题」。"""
+            u = [n.lineno for n in ast.walk(ast.parse(text))
+                 if isinstance(n, ast.Call) and "BUGFIX_FILENAME" in ast.unparse(n) and "unlink" in ast.unparse(n.func)]
+            a = [n.lineno for n in ast.walk(ast.parse(text))
+                 if isinstance(n, ast.Await) and "_aask" in ast.unparse(n.value.func)]
+            assert len(u) == 1 and len(a) == 1, f"锚点行不唯一：unlink@{u} aask@{a}"
+            return u[0], a[0]
+
+        u, a = ticket_order(src)
+        assert u > a, f"③工单的 unlink@{u} 排在模型调用 aask@{a} 之前＝证据先没，判据该红"
+        # 阳性对照：同一判定喂「先删后调」的形状，必须翻红（否则上面那条 u>a 是恒绿的摆设）。
+        # 这里**不**对真源码做文字搬移——刀切出来的形状若非合法 Python，红在 IndentationError
+        # 只说明刀坏了，说明不了判定有牙。合成源只要能让 ticket_order 数出两个行号就够。
+        synthetic = (
+            "async def run(self):\n"
+            "    (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)\n"
+            "    rsp = await self._aask(prompt)\n"
+        )
+        su, sa = ticket_order(synthetic)
+        assert su < sa, f"③仪器坏了：『先删后调』这一形状没被同一判定抓出（{su} vs {sa}）"
+
+        # ---- ④ 无工单的成功路 ----
+        wc.logger.warnings.clear()
+        llm4 = FakeLLM(["```python\nprint('no-ticket')\n```"])
+        out4 = asyncio.run(WriteCode(llm=llm4).run(_trigger()))
+        assert "已写 main.py" in out4.content, f"④没有工单时写码路被改坏：{out4.content[:80]}"
+        assert not any("未消费" in w for w in wc.logger.warnings), \
+            f"④没有工单也去喊那一声（warning 该只在真放弃工单时出现）：{wc.logger.warnings}"
+    finally:
+        wc.logger = saved_logger
+        settings.workspace_root = keep_ws
+        CURRENT_PROJECT.set(keep_proj)
+        shutil.rmtree(base, ignore_errors=True)
+        for _ in range(10):
+            if not base.exists():
+                break
+            time.sleep(0.2)
+        assert not base.exists(), f"t55 清场没做成，{base} 还在"
+
+    print(f"  ok  t55 C102：失败路工单仍在 DOCS 且留了 warning、成功路消费掉且 prompt 里用过它、"
+          f"AST 顺序 unlink@{u} > aask@{a}（仪器对照会翻红）、无工单路不喊冤")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1561,7 +1706,8 @@ def main():
               t51_write_path_pins_encoding_and_newline,
               t52_action_tree_is_importable_and_tier_names_have_a_home,
               t53_editor_generic_except_never_overwrites_source,
-              t54_pdf_docx_read_path_no_dead_island]
+              t54_pdf_docx_read_path_no_dead_island,
+              t55_bugfix_ticket_survives_model_failure]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -1585,7 +1731,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 

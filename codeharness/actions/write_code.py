@@ -93,7 +93,11 @@ class WriteCode(BaseAction):
         bugfix = await store.get(RepoName.DOCS, BUGFIX_FILENAME)
         if bugfix:
             feedback = bugfix.content
-            (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)  # 源 :163「防止冲突」
+            # C102：这里**不删**。删除是「这份工单本次已消费」的记号，只能打在产物落盘之后——
+            # 原先读到就删，而模型调用是下面那句 `rsp = await self._aask(prompt)`，那一发一失败
+            # （超时／端点挂／落盘 raise）工单就永久没了：下次重试没有工单，
+            # `write_code_plan_and_change.py:146` 的 issue_doc 也跟着读不到。
+            # 与 C97 同族——别拿已被删的证据去兜底，失败要留一声可 grep 的。
         pac = ctx.code_plan_and_change_doc
         refined = bool(pac and pac.content.strip())          # 本仓的源 config.inc 等价信号（见文件头）
         # 源 :119-126：增量计划在场或带工单 → use_inc 上下文（目标旧码置顶）；新建只带其他文件
@@ -111,9 +115,18 @@ class WriteCode(BaseAction):
                                             logs=logs, summary_log=summary_doc.content if summary_doc else "",
                                             feedback=feedback,
                                             filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
-        rsp = await self._aask(prompt)
-        code = _parse_code(rsp)                                  # 见文末工具函数
-        code_doc = await store.save(RepoName.SRC, Document(filename=ctx.filename, content=code))
+        try:
+            rsp = await self._aask(prompt)
+            code = _parse_code(rsp)                              # 见文末工具函数
+            code_doc = await store.save(RepoName.SRC, Document(filename=ctx.filename, content=code))
+        except Exception as e:
+            if bugfix:      # 工单还在 DOCS：留一声可 grep 的，别让人以为「重跑一次也没有了」
+                logger.warning(f"{ctx.filename} 写码失败，BUGFIX 工单未消费、仍留在 DOCS 供重试："
+                               f"{type(e).__name__}: {str(e)[:160]}")
+            raise           # 只加这一声：不吞异常、不改控制流（Action 异常回喂自愈那套语义照旧）
+        if bugfix:
+            # 源 :163「防止冲突」的语义在**成功之后**才落地：产物已落盘，这份工单才算真被消费掉。
+            (store.root / RepoName.DOCS / BUGFIX_FILENAME).unlink(missing_ok=True)
         return Message(content=f"已写 {ctx.filename}（{len(code)} 字符）", role="assistant",
                        cause_by=self.name, sent_from="Engineer",
                        instruct_content={"filename": ctx.filename}, instruct_schema="WriteCodeOutput")
