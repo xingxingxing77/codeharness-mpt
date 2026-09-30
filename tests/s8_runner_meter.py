@@ -963,13 +963,75 @@ async def t12_prose_from_structured_stream():
         f"⑪ 阳性对照失守：only=None 时整套键名跟踪不启动，那个 {_KEY_CAP + 1} 字的键名自己长过门槛、" \
         f"该整条上屏（第六件治的那个原始病形）：现发 {len(r_none)} 字"
 
+    # ⑫（C104）落点表的**准入**：只有开块那条 meta、或已登记那块自己的后继事件才配占落点。
+    #    病形一＝`Plan._report_plan` 那颗随机 uuid 的 Task object（真实发射器每推进一次换新 uuid，
+    #    这里用两颗不同的十六进制串代表两次推进）；病形二＝交错块的定稿把落点从当前开着的块抢回去。
+    #    顺带证 uid 收敛后同角色的计划事件只聚出一颗卡。
+    tmp8, store8, bus8, runner8, s8i = await _make_runner()
+    runner8.costs[s8i.id] = CostManager()
+    sink8 = runner8._make_sink(s8i.id)
+    sink8({"block": "Task", "uuid": "task-8", "name": "meta", "role": "PMManager",
+           "value": {"type": "tasks", "prose_fields": ["instruction", "shared_knowledge"]}})
+    plan_a = {"block": "Task", "uuid": "a" * 32, "name": "object", "role": "PMManager",
+              "value": {"tasks": [{"task_id": "T1", "is_finished": False}], "current_task_id": "T1"}}
+    sink8(dict(plan_a))
+    assert runner8._live_blk[s8i.id][:2] == ("task-8", "Task"), \
+        f"⑫ 计划卡的 object 抢走了逐片落点（改前形状）：现登记 {runner8._live_blk[s8i.id]!r}"
+    # 同族第二形（这才是有牙的那格，n1 那刀就红在这里）：交错块里**上一块的定稿**不许把落点
+    # 从当前开着的块抢回去——光比字典不够，要看这一笔的逐片到底投进了哪块。
+    sink8({"block": "Docs", "uuid": "doc-9", "name": "meta", "role": "Architect",
+           "value": {"type": "design", "prose_fields": ["anything_unclear"]}})
+    sink8({"block": "Task", "uuid": "task-8", "name": "content", "value": "上一块的定稿", "role": "PMManager"})
+    assert runner8._live_blk[s8i.id] == ("doc-9", "Docs", ["anything_unclear"]), \
+        f"⑫ 交错块：上一块的定稿把落点从当前开着的 Docs 块抢回去了：{runner8._live_blk[s8i.id]!r}"
+    dsnug = json.dumps({"anything_unclear": "这里是要上屏的一句人话说明，长度要过散文门槛所以再补几句凑够字。"},
+                       ensure_ascii=False)
+    for i in range(0, len(dsnug), 7):
+        runner8._translate(s8i.id, {"event": "on_chat_model_stream", "run_id": "m0",
+                                    "metadata": {"langgraph_node": "Arch"},
+                                    "data": {"chunk": AIMessage(content=dsnug[i:i + 7])}})
+    live8b = [e.uuid for e in bus8.history(s8i.id) if e.name == "live"]
+    assert live8b and set(live8b) == {"doc-9"}, \
+        f"⑫ 这一笔的逐片没全部投进当前开着的 Docs 块（落点被抢＝前端看不见）：{live8b}"
+
+    # uid 收敛：同角色两次推进 ⇒ 转发出去同一颗 uuid；换个角色仍是另一颗卡
+    sink8(dict(plan_a))
+    sink8({**plan_a, "uuid": "b" * 32, "role": "Engineer"})
+    objs = [e for e in bus8.history(s8i.id) if e.name == "object"]
+    # 这条通道一共喂了三颗 object（抢落点那一格先发了一条），三条都得照发——守卫只管落点，不许吞事件
+    assert len(objs) == 3, f"⑫ object 没全发出去（守卫把事件本身吞了＝改坏投递）：{len(objs)} 条"
+    assert objs[0].uuid == objs[1].uuid == "plan-PMManager", \
+        f"⑫ 同角色的计划卡没收敛：{[e.uuid for e in objs][:2]}"
+    assert objs[-1].uuid == "plan-Engineer", f"⑫ 换角色也并进同一颗卡（该各一张）：{objs[-1].uuid}"
+    assert {e.uuid for e in objs} == {"plan-PMManager", "plan-Engineer"}, \
+        f"⑫ 计划卡的频道数不是「每角色一颗」：{sorted({e.uuid for e in objs})}"
+
+    # 阳性对照＝改前的病能复现：没有开块 meta 时，object 之后那一笔的逐片该落兜底行、按长度挑
+    # （改前它被 object 抢住 ⇒ 既没兜底行也没名单，正是第六件的病复发）
+    tmp9, store9, bus9, runner9, s9i = await _make_runner()
+    runner9.costs[s9i.id] = CostManager()
+    runner9._make_sink(s9i.id)(dict(plan_a))
+    assert not runner9._live_blk.get(s9i.id), "⑫ 孤身一颗 object 仍被登记成落点（守卫没生效＝下面两格白测）"
+    runner9._translate(s9i.id, {"event": "on_chat_model_start", "run_id": "m1",
+                                "metadata": {"langgraph_node": "PMManager"}})
+    assert [e for e in bus9.history(s9i.id) if e.name == "meta" and e.uuid == "stream-PMManager"], \
+        "⑫ 计划卡抑制了静默期兜底行（改前形状：那块本来就在，只是落点被抢）"
+    for i in range(0, len(ttxt), 13):
+        runner9._translate(s9i.id, {"event": "on_chat_model_stream", "run_id": "m1",
+                                    "metadata": {"langgraph_node": "PMManager"},
+                                    "data": {"chunk": AIMessage(content=ttxt[i:i + 13])}})
+    got12 = "".join(e.value for e in bus9.history(s9i.id) if e.name == "live")
+    assert got12 == ref(ttxt), f"⑫ 兜底行的逐片该退回按长度挑（与参照实现逐字一致）：{got12[:60]!r}"
+    runner8._forget(s8i.id, terminal=True)
+    runner9._forget(s9i.id, terminal=True)
+
     _ok("t12", "structured 的逐片 JSON 抽成散文才上屏（走 live 通道）：start 建块不占 fts、"
                "逐片与参照实现逐字一致、收口清状态机、同节点第二笔重抽；裸文本原样透传、"
                "短字段与内容块零发布；**落点**是开着的那块（Docs 逐片进 Docs 块），块收口后释放回 stream-{node}；"
                "抄用户原话的回显成员不发（未存 prompt 时两个成员都发，做阳性对照）；"
        "键名长过 `_KEY_CAP` 那界时整段按名单外处理（测的是**相邻两档** 128/129，不是 127/130——后者挡不住 off-by-one）；"
                "块声明 `prose_fields` 时按**键名**门控（mermaid 源码、键名本身、commands 的 args 正文都不上屏，"
-               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出；Task 块靠开块那条 `meta` 进落点表（没它就只落兜底行，做了阳性对照）；ActionChoice 挂名单今天零差别、而顶到界那档（36 字动作名）只有挂名单的不发")
+               "没声明名单时与按长度挑那一版逐字一致；名单内字段是多项列表时**每一项**都要出；Task 块靠开块那条 `meta` 进落点表（没它就只落兜底行，做了阳性对照）；ActionChoice 挂名单今天零差别、而顶到界那档（36 字动作名）只有挂名单的不发；**落点表只认开块 meta 与已登记块自己的后继事件**（计划卡那颗随机 uuid 的 object 不配占落点，同角色的计划事件收敛成一颗 uuid）")
 
 
 def t13_assembly_ledger_identity_recall():

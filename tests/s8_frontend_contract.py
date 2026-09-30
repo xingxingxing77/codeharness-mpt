@@ -1999,8 +1999,9 @@ def t28_stream_ux_batch():
     assert "value=chunk.content" not in runner, "t28① 又拿 chunk.content 原样发布了"
     assert runner.count('name="live"') == 2,         f"t28① 逐片通道该在两个落点各一条（内核块 / stream- 兜底），现命中 {runner.count('name=\"live\"')} 条"
     assert 'LIVE_BLOCKS = ("Thought", "Docs", "Task")' in runner, "t28① 可承载逐片的块类型被改"
-    assert 'self._live_blk[sid] = (uid, event.get("block"), fields)' in runner, \
-        "t28① 落点不再由报道槽登记（逐片会全部掉进 stream-{node}，文档块又不流了）"
+    assert 'self._live_blk[sid] = (uid, event.get("block"),' in runner, \
+        "t28① 落点不再由报道槽登记（逐片会全部掉进 stream-{node}，文档块又不流了）" \
+        "——C104 后这行换行写了，锚点取它的主干（登记仍在 sink 内这一条不变）"
     # 上一版靠字符串比对丢掉整段重发；这一版由通道分开（live=逐片、content=定稿）——旧 machinery 不许复活
     for dead in ("_already_streamed", "_prose_out", "PROSE_DEDUPE_CAP"):
         assert dead not in runner, f"t28① 字符串比对式去重复活了：{dead}"

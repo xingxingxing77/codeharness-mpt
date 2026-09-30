@@ -672,19 +672,28 @@ class SessionRunner:
             # （比一下内核定稿是不是已逐片发过的那句话、是就丢掉）到此作废——逐片走 `live`
             # 通道、定稿走 `content`，两份内容在结构上就不会同屏，不必再靠字符串比对去猜。
             uid, nm = event.get("uuid"), event.get("name")
+            # C104 之一（计划卡的频道身份）：`Plan._report_plan` 每推进一次就发一颗**全新 uuid** 的 Task
+            # `object`，而载荷本来就是整份计划 ⇒ 前端按 uuid 聚块，一场跑下来攒出 N 张几乎一样的计划卡。
+            # 这一路的身份按 (块, 角色) 收敛成一颗：后一次覆盖前一次，角色之间仍各一张卡。
+            if nm == "object" and event.get("block") == "Task":
+                event["uuid"] = uid = "plan-" + (event.get("role") or "")
             if uid:
                 if nm == "end_marker":
                     if self._live_blk.get(sid, (None,))[0] == uid:
                         self._live_blk.pop(sid, None)
-                elif event.get("block") in LIVE_BLOCKS:
+                elif event.get("block") in LIVE_BLOCKS and nm == "meta":
                     # 第三格是这块声明的正文字段名单（来自开块那条 meta）：逐片抽散文时按它门控。
-                    # 非 meta 事件不带名单，沿用同 uid 已登记的那份；换了块则不继承（各块各的 schema）。
                     v = event.get("value")
-                    fields = v.get("prose_fields") if nm == "meta" and isinstance(v, dict) else None
-                    prev = self._live_blk.get(sid)
-                    if fields is None and prev and prev[0] == uid:
-                        fields = prev[2]
-                    self._live_blk[sid] = (uid, event.get("block"), fields)
+                    # C104 之二（守卫）：落点表的**准入**只认开块那条 meta。改前任何 `block ∈ LIVE_BLOCKS` 的事件
+                    # 都登记，于是两条真形状一起出事：
+                    #   a) 计划卡那颗随机 uuid 的 object 把落点抢走 ⇒ 逐片投进一块渲染不出 live 的容器、
+                    #      静默期兜底行被 `if not self._live_blk` 抑制（本文件 :962 那格）、**名单也丢**
+                    #      （退回按长度挑＝第六件治过的「键名上屏 + mermaid 源码上屏」复发）；
+                    #   b) 交错块里上一块的定稿（同块名、不同 uid）把落点从当前开着的块抢回去。
+                    # 「已登记那块自己的后继事件也重新登记」那一支删掉了：它写回的就是字典里已有的那个三元组，
+                    # 观察上恒等——变异刀 n2（只认 meta）存活就是这条等价性的证明。等价就删，别留第二段看似有条件的代码。
+                    self._live_blk[sid] = (uid, event.get("block"),
+                                           v.get("prose_fields") if isinstance(v, dict) else None)
             bus.publish(sid, kind="report", **event)
 
         return sink
