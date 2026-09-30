@@ -1254,6 +1254,64 @@ def t20_approval_ledger_dual_impl_and_two_readers():
                "HTTP 列卡与回执端到端真通")
 
 
+def t23_chunked_body_must_carry_content_length():
+    """C109：`Content-Length` 缺失时，JSON 腿原先**整段读进内存**才由 pydantic 拒。
+
+    `server/app.py` 那道 `guard_body_size` 只判 `length.isdigit()`——缺该头（chunked）时整支闸不参与，
+    而 `Request.json()` 会把流读完再解析，字段上限发生在缓冲**之后**。探针现证（10-01 00:1x，裸 socket
+    对隔离实例 8799 发 chunked）：8MB 的 chunked JSON 回的是 **422 `string_too_long`**、不是 413。
+    修法取「非 multipart 且缺长度 ⇒ **一个字节都不读**、直接 411」——试过的「带界预读 + 重建 receive」
+    被实测否掉（Starlette 1.6 的 `BaseHTTPMiddleware` 把内层 app 接到它自己的 `wrapped_receive`，
+    中间件改 `request._receive` 传不下去，症状是合法 chunked 请求变 422、会话压根没建出来）。
+
+    五格：
+      ① chunked 的合法小体 ⇒ **411**（改前是 200——体被读完、路由正常受理，那才是漏的那一面）；
+      ② **同一具请求**改成带 `Content-Length` ⇒ 200（阳性对照：闸没把好请求一起挡掉，也不改字段口径）；
+      ③ 被 411 拒掉的那几发**零副作用**（会话数一格没涨）；
+      ④ multipart 且缺长度 ⇒ **不许**是 411/413（上传那一支仍由 `workspace.py` 门口的逐条判据管，
+         本件不顺手改它；路由那边解析失败是另一回事，只判状态码不是这两个）；
+      ⑤ 字面守卫：`server/app.py` 里不许再出现 `request._receive =`（本仓实测否掉的流手术，别被
+         「看起来更周到」的版本写回来）。
+    """
+    import json
+    import server.sessions as ss
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    try:
+        from fastapi.testclient import TestClient
+        import server.app as sa
+
+        def chunks(payload, size=4096):
+            for i in range(0, len(payload), size):
+                yield payload[i:i + size]
+
+        body = json.dumps({"idea": "chunked 探针", "project_name": "s7chunk"}).encode()
+        with TestClient(sa.create_app()) as c:
+            before = len(c.get("/api/sessions").json())
+
+            r1 = c.post("/api/sessions", content=chunks(body),
+                        headers={"content-type": "application/json"})
+            assert r1.status_code == 411, f"① 缺 Content-Length 的 JSON 应 411（一个字节都不该读），实际 {r1.status_code}: {r1.text[:120]}"
+
+            r2 = c.post("/api/sessions", content=body, headers={"content-type": "application/json"})
+            assert r2.status_code == 200, f"② 同一具请求带上 Content-Length 必须照常 200（闸不许误伤）：{r2.text[:120]}"
+
+            assert len(c.get("/api/sessions").json()) == before + 1, \
+                f"③ 被 411 拒掉的那一发居然建出了会话（或②那发没建）：应 {before + 1}，现 {len(c.get('/api/sessions').json())}"
+
+            rm = c.post("/api/sessions", content=chunks(b"--x\r\n\r\n"),
+                        headers={"content-type": "multipart/form-data; boundary=x"})
+            assert rm.status_code not in (411, 413), \
+                f"④ multipart 缺长度被这道闸一起挡了（本件只动 JSON 腿）：{rm.status_code}"
+    finally:
+        ss.SESSIONS_FILE = keep
+
+    src = (Path(__file__).resolve().parents[1] / "server" / "app.py").read_text(encoding="utf-8")
+    assert "request._receive =" not in src, \
+        "⑤ `request._receive` 那套流手术又回来了——Starlette 1.6 的 BaseHTTPMiddleware 不把它传给内层 app，实测会把合法请求打成空体"
+    _ok("t23", "chunked 无长度的 JSON 请求 ⇒ 411 且**一个字节都不读**；同体带上 Content-Length ⇒ 200（阳性对照）；"
+               "411 零副作用；multipart 缺长度不被这道闸顺手挡掉；字面守卫钉住不许再用 `request._receive` 流手术")
+
+
 def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
@@ -1264,16 +1322,17 @@ def main():
     t18_shutdown_flush_is_bounded()
     t19_entry_body_limits_and_deploy_coherence()
     t20_approval_ledger_dual_impl_and_two_readers()
+    t23_chunked_body_must_carry_content_length()
     global REDIS_UP
     REDIS_UP = _redis_up()
     asyncio.run(t22_inproc_sse_queue_bounded_like_redis())   # C103：进程内那台，两条路都跑
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 10/10 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22），redis 路待环境")
+        print("\ns7_platform: 11/11 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 22/22 全绿（双配置）")
+    print("\ns7_platform: 23/23 全绿（双配置）")
 
 
 if __name__ == "__main__":

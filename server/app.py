@@ -126,19 +126,34 @@ def create_app() -> FastAPI:
     # 上传口时不会静默失效；两档正好对应「JSON 端点只收人话级的体」与「知识库上传是唯一合法的大
     # body（20 文件 × 20MB，那组数住在 `workspace.py` 的门口判据里，不在这里重抄）」。字段级上限
     # 另有 pydantic 那一层（`services/api/sessions.py` 的 MAX_*_CHARS），这里是**读进内存之前**的闸。
-    # `Content-Length` 缺失（chunked）时放行：Starlette 解析 multipart 另有上限，JSON 端点还有
-    # pydantic 兜着——两档都不至于无界。
+    # C109（10-01）改掉的是那句旧话「`Content-Length` 缺失（chunked）时放行……两档都不至于无界」——它对
+    # **JSON 腿不成立**：缺该头时这道闸整个不参与，Starlette 把体**整段**读进内存，pydantic 的字段上限发生在
+    # 缓冲**之后**（探针现证：chunked 发 8MB JSON 回的是 422 `string_too_long`，不是 413）。
+    # 试过「带界预读 + 重建 receive」那一支，**实测否掉**：Starlette 1.6 的 `BaseHTTPMiddleware.__call__` 把内层
+    # app 接到的是它自己的 `wrapped_receive`（源码那句 `await response(scope, wrapped_receive, send)`），中间件里
+    # 改 `request._receive` 传不下去——改完探针里 ②③ 两条合法 chunked 请求全变 422、④ 的会话根本没建出来，
+    # 那正是「路由收到空体」的形状。所以这里取**不碰流手术**的那一支：非 multipart 而缺 `Content-Length` 的请求
+    # **一个字节都不读**、直接 411 要求带长度（防护反而更硬：连缓冲都没发生，也不给「读到一半再拒」留窗口）。
+    # multipart 不动——`UploadFile` 是落盘那一支、不进内存，大档由 `workspace.py` 门口的逐条判据管。
+    # 契约随之改一行：JSON 端点要求 `Content-Length`。我们自己的前端发的是 `JSON.stringify` 出来的字符串体，
+    # 本来就带该头 ⇒ 界面零变化；只有「拿 ReadableStream 当 body」这类流式客户端会撞到 411。
     @app.middleware("http")
     async def guard_body_size(request, call_next):
         length = request.headers.get("content-length", "")
+        ctype = request.headers.get("content-type", "")
+        cap = _body_cap_for(ctype)
         if length.isdigit():
-            cap = _body_cap_for(request.headers.get("content-type", ""))
             if int(length) > cap:
                 extra = ("（JSON 端点只收人话级的体；上传请走 multipart/form-data）"
                          if cap == _MAX_JSON_BODY_BYTES else "")
                 return JSONResponse(status_code=413, content={
                     "detail": f"请求体 {int(length) // 1048576}MB 超过 {cap // 1048576}MB 上限{extra}"})
-        return await call_next(request)
+            return await call_next(request)
+        if ctype.lower().startswith("multipart/form-data") or request.method not in ("POST", "PUT", "PATCH"):
+            return await call_next(request)
+        return JSONResponse(status_code=411, content={
+            "detail": f"缺 Content-Length 的 {request.method} 不予接收：JSON 端点要求带请求体长度"
+                      f"（上限 {cap // 1024}KB，chunked 无法在读之前就判档）"})
 
     @app.middleware("http")
     async def guard_workspace(request, call_next):
