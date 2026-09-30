@@ -108,6 +108,11 @@ class WriteTasks(BaseAction):
             tasks: TaskList = await self._structured(
                 f"{self.prefix}\n{prompt}", schema=TaskList, system=system)
             await rep.content(block_markdown(tasks))   # Task 行的正文：人读渲染，不是 schema dump
+            # C107：清单的**结构化载荷**也要上流。`ToolCard.vue:127` 的 `tasks` 只认 `b.obj`，而这一路
+            # 改前只有 `meta`+`content` ⇒ `tasks` 恒空 ⇒ 那张卡永远走 `:41` 的灰字分支，「清单 + 当前项
+            # 高亮」这个控件一次都没画出过行（09-29 19:0x 像素现证 `taskRows=0`）。顺序钉在正文之后：
+            # 逐片阶段仍按第七件的口径显示 `tokens + live`，定稿到了才换成行。
+            await rep.object(tasks.model_dump())
 
         if not tasks.task_list:
             # 空清单会生成零条 Send：路由不报错，会话以 finished 收场却一行代码都没写（真模型实测）

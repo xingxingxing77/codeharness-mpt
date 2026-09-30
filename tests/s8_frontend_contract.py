@@ -1982,6 +1982,43 @@ def t27_recall_visibility():
     print("  ok  t27 召回可用性三格：读的是 cost 快照真键、整格有 v-if、动态线在 Thought 块里发一行事实")
 
 
+def t29_task_rows_c107():
+    """C107：经典线那张 Task 卡要能画出**任务行**，不是一坨灰字。
+
+    `ToolCard.vue` 的 `tasks` 只从 `b.obj` 取（:127），而经典线 `WriteTasks` 改前只发 `meta`+`content`
+    ⇒ `tasks` 恒空 ⇒ `:41` 那条 `v-if="!tasks.length"` 的 `dim` 永远接管。这里钉三件事，全是源码级守卫：
+    真渲染的读数在 `frontend`/无头 Chrome 那侧取（台账「第十三件」），不在这里复刻表达式——复刻量不到渲染。
+    """
+    import ast as _ast
+    pm_src = (ROOT / "codeharness" / "actions" / "project_management.py").read_text(encoding="utf-8")
+    tree = _ast.parse(pm_src)
+    fn = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.AsyncFunctionDef) and "task_block(" in _ast.unparse(node):
+            fn = node
+            break
+    assert fn is not None, "t29 找不到含 `task_block(` 的那个异步函数（发射处换了归属？先看清再去改锚点）"
+    calls = [(n.lineno, getattr(n.func, "attr", "")) for n in _ast.walk(fn)
+             if isinstance(n, _ast.Call) and getattr(n.func, "value", None) is not None
+             and isinstance(n.func.value, _ast.Name) and n.func.value.id == "rep"]
+    lines = {a: b for a, b in calls}
+    obj_at = [a for a, b in calls if b == "object"]
+    con_at = [a for a, b in calls if b == "content"]
+    assert obj_at, "t29 `WriteTasks` 没发 `rep.object(...)` ⇒ 那张卡又只剩灰字（C107 的病复发）"
+    assert con_at, "t29 `rep.content(...)` 被删了：正文那条通道也没了（本件只加不断）"
+    # 顺序断言两侧都取「最远的那一行」：`min(object)` 必须晚于 `max(content)`。
+    # 只钉第一处会造出恒真格——本仓 09-30 现证过同族：源码行序断言只钉「动作开始」那行，
+    # 于是「把后半段挪到边界之后」那把刀存活（`feedback-order-contract-probe-anchor`）。
+    assert min(obj_at) > max(con_at), (
+        f"t29 顺序不成立：最早的清单载荷（:{min(obj_at)}）没晚于最晚的正文（:{max(con_at)}）"
+        f" ⇒ 逐片阶段可能就没东西可显示，或正文那条通道被挤到定稿之后")
+
+    tc = (ROOT / "frontend" / "src" / "components" / "conversation" / "ToolCard.vue").read_text(encoding="utf-8")
+    assert "const tasks = computed<any[]>(() => b.value.obj?.tasks || b.value.obj?.task_list || [])" in tc, \
+        "t29 `tasks` 的取值口被改了：行渲染不再认后端那份结构化清单（要改先连本格与第十三件的读数一起改）"
+    assert 'v-if="!tasks.length"' in tc, "t29 `:41` 那条 `dim` 互斥被改掉：行与灰字会同时出现（布局变了）"
+
+
 def t28_stream_ux_batch():
     """流式 UX 批（09-28 用户报「前端不是流式输出、输出会带一大块文本出现」）的文本级守卫。
 
@@ -2127,7 +2164,7 @@ def main():
               t23_run_after_fork, t24_checkpoint_to_chat_jump,
               t25_frontend_one_liners_c92_c96,
               t26_ui_bugfix_batch, t27_recall_visibility,
-              t28_stream_ux_batch)
+              t28_stream_ux_batch, t29_task_rows_c107)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")
