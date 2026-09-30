@@ -306,7 +306,8 @@ class LLMGateway:
         为什么必然漏：流式路的 `resp` 是 `_collect()` 里的局部量，`wait_for` 一取消就没人把它
         返回出来 ⇒ 下面那句 `add_usage` 永不执行；而非流式在重试耗尽后直接抛上去，同样不进账。
         厂商侧按 ADR-06 自己的口径是「超时＝大概率已受理已计费」，于是这一发成了账上唯一看不见的支出。
-        同族另两条腿都补过（structured 的 except 支路、非流式的截断计数），只有这两支没补。
+        同族另两条腿都补过（structured 的 except 支路补的是**记账** `_account`，非流式的截断计数同理），
+        而「超时那一声响」原先只有流式与非流式两条腿有——structured 这条腿 09-30 才补齐（C98）。
         `cost.py` 那条「零用量必须可见」够不到这里——**它是被调了才会喊**，而这一发根本没人调它。
         不在这里编造 token：没有回执就没有数，能做的只有让它可 grep（本仓对漏账一贯的形状）。"""
         logger.warning(f"{kind}调用超时（deadline={deadline}s）被取消：厂商侧大概率已受理已计费，"
@@ -431,6 +432,10 @@ class LLMGateway:
                 try:
                     out = await _acall(runnable.ainvoke, prompt, timeout=deadline, **kw)
                 except Exception as exc:
+                    if _is_timeout(exc):
+                        # B6 那族的第三条腿。超时的 `exc` 既不挂 `output` 也不挂 `completion`
+                        # ⇒ 下一句 `_account(None)` 直接返回，这一发**零账也零响**；而它是动态线每轮思考的主路径。
+                        self.outer._timeout_lost("structured", deadline, tag)
                     self._account(getattr(exc, "output", None) or getattr(exc, "completion", None), tag)
                     fixed = self._repair(self._partial_text(exc))
                     if fixed is None:

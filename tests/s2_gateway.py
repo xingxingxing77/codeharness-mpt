@@ -693,6 +693,43 @@ def t15_stream_deadline():
         _gwmod.logger = saved2
     if not any("超时" in w and "不进账" in w for w in rec2.warnings):
         _fail(f"15⑥. SDK 层超时（APITimeoutError）没留下可 grep 的账差：{rec2.warnings}")
+    # ⑦ structured 腿（动态线每轮思考的主路径）超时也要留**同一声响**（09-30 审查批 C98）。
+    #    改前的形状：这条腿的 except 只调 `_account(getattr(exc, "output", None) or getattr(exc, "completion", None))`，
+    #    而超时那一发既不挂 output 也不挂 completion ⇒ `_account(None)` 直接返回 ⇒ **零账也零响**。
+    #    ⑤⑥ 各判了流式与非流式，这条腿从没有格（修前 `grep -rn timeout_lost tests/` = 0 命中）。
+    class _Shot(BaseModel):
+        answer: str = ""
+
+    rec3, saved3 = _Rec(), _gwmod.logger
+    _gwmod.logger = rec3
+    try:
+        g7 = _gw(structured_error=APITimeoutError(request=None))
+        try:
+            asyncio.run(_quiet(lambda: g7.structured(_Shot).ainvoke("q", timeout=1)))
+            _fail("15⑦. structured 腿的超时没抛出来（桩没生效，这一格是空转）")
+        except APITimeoutError:
+            pass
+    finally:
+        _gwmod.logger = saved3
+    if not any("超时" in w and "不进账" in w and "structured" in w for w in rec3.warnings):
+        _fail(f"15⑦. structured 腿超时没留下可 grep 的账差，或者留的是别条腿的声音：{rec3.warnings}")
+    if g7.cost_manager.records:
+        _fail(f"15⑦. 超时那一发没有回执，不许凭空落一笔账（能编出数就等于编出成功）：{g7.cost_manager.records}")
+
+    # ⑧ 反向对照：**非超时**的结构化失败不许喊那一声。没有这格，⑦ 会被「except 里无条件都喊」糊过去。
+    rec4, saved4 = _Rec(), _gwmod.logger
+    _gwmod.logger = rec4
+    try:
+        g8 = _gw(structured_error=ValueError("模型回了散文，不是 JSON"))
+        try:
+            asyncio.run(_quiet(lambda: g8.structured(_Shot).ainvoke("q", timeout=1)))
+            _fail("15⑧. 非超时的失败没抛出来（repair 档把它兜住了？这一格的形状与判据不符）")
+        except ValueError:
+            pass
+    finally:
+        _gwmod.logger = saved4
+    if any("超时" in w and "不进账" in w for w in rec4.warnings):
+        _fail(f"15⑧. 不超时也去记账差 ⇒ ⑦ 从此恒绿：{rec4.warnings}")
 
 
 # ---------- 16. 坏结构化产出也要落账（C17：漏账 = 截断提示没东西可发） ----------
@@ -1230,7 +1267,8 @@ def main():
           f"计数单点 / FakeLLM 记账 / 源 repair 14 符号 / 组合修复档 / 两档重试环 / extract 系列 / "
           f"配置字段照源与 env 注入 / 只读计量与预算不回潮 / structured 回落与 aask_code / "
           f"真模型 usage 字段形状与 structured+流式记账 / _acall 重试判据与继承链坑 / "
-          f"流式分支按 deadline 失败（内置 TimeoutError 与 SDK 的 APITimeoutError 两条腿各留一声账差） / "
+          f"流式分支按 deadline 失败，超时**三条腿**各留一声账差（⑤ 流式内置 TimeoutError、"
+          f"⑥ 非流式 SDK 的 APITimeoutError、⑦ structured 腿；⑧ 是「非超时不许喊」的反向对照） / "
           f"坏结构化产出真 HTTP 落账与截断计数 / 429 有界退避与重试归属单点 / "
           f"embedding 两档显式界 / **压缩门两路同源（C65）**）")
 
