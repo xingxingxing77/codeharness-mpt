@@ -19,6 +19,9 @@ const HISTORY_PAGE = 400
 const PAGE_REPLAY_OPAQUE = new Set(['status', 'ask_human', 'approval', 'queue', 'feedback', 'goal'])
 let replayingPage = false
 
+/** C110：`connect()` 里那条 `visibilitychange` 监听只挂一次（挂多次 ⇒ 回一次前台重开 N 条流）。 */
+let foregroundHooked = false
+
 function newBlock(ev: WEvent): Block {
   return {
     key: ev.uuid || `e${ev.cursor || ev.seq}`,
@@ -352,6 +355,17 @@ export const useSessionStore = defineStore('sessions', {
     },
 
     connect() {
+      // C110：后台标签页被浏览器冻结时，服务端那条订阅队列按有界设计「丢最旧」（C90/C103），
+      // 而这条 EventSource **连接没断** ⇒ 浏览器不会自动重连 ⇒ 回到前台后对话中间留一个洞，
+      // 直到用户手动刷新。补法不新造机制：`/events` 路由本来就是「先按 `after` 回放历史、
+      // 再跟活流」（`server/api/sessions.py:591-596`），而 `after` 取的就是已应用的游标 ⇒
+      // **回到前台这一刻重开一次流**，被丢掉的那段自己从历史补回来（重复的由 `applyEvent` 按 cursor 去重）。
+      if (!foregroundHooked && typeof document !== 'undefined') {
+        foregroundHooked = true
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible' && this.currentId) this.connect()
+        })
+      }
       this.evtSource?.close()
       if (!this.currentId) return
       const sid = this.currentId

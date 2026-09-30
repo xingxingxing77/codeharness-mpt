@@ -2152,6 +2152,31 @@ def t28_stream_ux_batch():
           "白名单四段接线在位，且名单里的名字真是那个 schema 的字段、名单外的字符串字段逐个登记过")
 
 
+def t30_foreground_resync_c110():
+    """C110 的**在册守卫**：回前台补流这条触发点不许被人顺手删掉。
+
+    行为级读数在 `frontend/scripts/check_foreground_resync.mjs`（真 store + 替身 EventSource/document），
+    这里只钉源码形状——三格都在防「以后有人重构 store 时把它删了且没人察觉」，那种删法不会让
+    任何一支门禁变红：① 监听在 `connect()` 里且只在 visible 时重开；② 一次性守卫在（挂多次=回一次前台重开 N 条流）；
+    ③ 路由那句「先按 after 回放历史、再跟活流」还在（触发点成立的前提，被改成就等于白补）。
+    """
+    root = Path(__file__).resolve().parents[1]
+    ts = (root / "frontend" / "src" / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    assert "document.addEventListener('visibilitychange'" in ts, \
+        "t30① `visibilitychange` 监听没了 ⇒ 后台被冻结丢的事件没人去补（C110 的洞复发）"
+    assert "document.visibilityState === 'visible' && this.currentId" in ts, \
+        "t30① 回调不再判 visible/当前场次 ⇒ 会变成「 hidden 时也在反复断流重连」"
+    assert "if (!foregroundHooked && typeof document !== 'undefined')" in ts,         "t30② 一次性守卫不再**被查**（名字还在、条件被摘）⇒ 每开一次流就多挂一个监听，回一次前台重开 N 条流"
+    route = (root / "server" / "api" / "sessions.py").read_text(encoding="utf-8")
+    assert "bus.history, sid, after" in route, \
+        "t30③ `/events` 不再先回放历史 ⇒ 重开流补不回被丢的那段，①②成了空操作"
+    probe = root / "frontend" / "scripts" / "check_foreground_resync.mjs"
+    assert probe.exists() and "after=" in probe.read_text(encoding="utf-8"), \
+        "t30③ 行为级探针被删了（C110 只剩源码守卫，量不到真派发）"
+    _ok("t30", "C110 三处都在册：store 里的 visibilitychange 触发点 + 一次性守卫 + 路由「先回放后跟流」"
+               "与行为级探针文件（缺一不可，删任何一个都只会静默变红不了）")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -2164,7 +2189,7 @@ def main():
               t23_run_after_fork, t24_checkpoint_to_chat_jump,
               t25_frontend_one_liners_c92_c96,
               t26_ui_bugfix_batch, t27_recall_visibility,
-              t28_stream_ux_batch, t29_task_rows_c107)
+              t28_stream_ux_batch, t29_task_rows_c107, t30_foreground_resync_c110)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

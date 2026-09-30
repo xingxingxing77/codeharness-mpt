@@ -1312,6 +1312,68 @@ def t23_chunked_body_must_carry_content_length():
                "411 零副作用；multipart 缺长度不被这道闸顺手挡掉；字面守卫钉住不许再用 `request._receive` 流手术")
 
 
+async def t24_dropped_prefix_comes_back_from_history():
+    """C110：C90/C103 都写着「丢了最旧没关系，重连走 history 补得回来」——**这句话得有读数**。
+
+    补的是**数据面**：客户端在丢包之后拿它已应用的游标来要历史，被订阅队列丢掉的那段必须
+    一条不少地带回来（不重不漏）。触发面（回前台重开流）另在 `frontend/scripts/check_foreground_resync.mjs`
+    与 `s8` 的 t30 里钉——**两边都成立，那句话才成立**；只有数据面成立而没人去要，就是 C110 修的那个洞。
+
+    四格（两台 bus 各判一次，与 t21/t22 成对）：
+      ① 进程内：灌 `MAX+51` 条不消费（队列必然丢最旧 51 条）⇒ 以「客户端只剩第 51 条之前的
+         游标」去 `history(after=…)` ⇒ 从 `c51` 起**全部**带回、条数与序号都连续；
+      ② Redis 那台同判（同一个形状、同一个断言）；
+      ③ 不重：`after` 换成队列里**现存**第一条的游标 ⇒ 第一条不许再出现；
+      ④ 成对守卫：`MAX_SSE_QUEUE < MAX_EVENTS_PER_SESSION`——队列要是比保留窗口还大，
+         「补得回来」就成了空话（丢掉的那些早就掉出 ring 了）。
+    """
+    from server.events import MAX_EVENTS_PER_SESSION, MAX_SSE_QUEUE, SessionEventBus, cursor_of
+
+    assert MAX_SSE_QUEUE < MAX_EVENTS_PER_SESSION, \
+        f"t24④ 队列上界 {MAX_SSE_QUEUE} 不小于保留窗口 {MAX_EVENTS_PER_SESSION} ⇒ 丢掉的必然补不回"
+
+    async def _probe(bus, tag):
+        sid = "t24-" + tag
+        q = await bus.subscribe(sid)
+        try:
+            for i in range(MAX_SSE_QUEUE + 51):
+                bus.publish(sid, kind="report", block="Thought", name="content", value="c%d" % i)
+            await asyncio.sleep(0)
+            assert q.maxsize == MAX_SSE_QUEUE, f"t24 {tag}① 队列没上界（{q.maxsize}）"
+            held = []
+            while True:
+                try:
+                    held.append(q.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            assert len(held) == MAX_SSE_QUEUE and held[0].value == "c51", \
+                f"t24 {tag}① 队列形状不对（{len(held)} 条，首条 {held[0].value if held else None}）"
+            # value "c{i}" 的 seq 是 i+1 ⇒ 客户端最后一条是 c50（seq 51），c51 起那 51 条是它没见到的
+            client_cursor = cursor_of(51)
+            back = bus.history(sid, after=client_cursor)
+            vals = [e.value for e in back]
+            assert vals[:3] == ["c51", "c52", "c53"], f"t24 {tag}① 被丢的前缀没补回（开头 {vals[:3]}）"
+            assert vals == ["c%d" % i for i in range(51, MAX_SSE_QUEUE + 51)], \
+                f"t24 {tag}① 补回不连续：{len(vals)} 条，首 {vals[:1]} 末 {vals[-1:]}"
+            again = [e.value for e in bus.history(sid, after=cursor_of(52))]
+            assert again[0] == "c52", f"t24 {tag}③ 开区间上界不严 ⇒ 第一条被重复带回（{again[0]}）"
+        finally:
+            bus.unsubscribe(sid, q)
+
+    ib = SessionEventBus()
+    await _probe(ib, "进程内")
+    if REDIS_UP:
+        from platforms.event_store import RedisEventBus
+        rb = RedisEventBus(TEST_DB)
+        rb.start()
+        try:
+            await _probe(rb, "Redis")
+        finally:
+            await rb.aclose()
+    _ok("t24", "丢了最旧再按游标要历史 ⇒ c51 起一条不少地带回（进程内与 Redis 各判一次）；"
+               "换游标不重带；成对守卫 MAX_SSE_QUEUE < 保留窗口")
+
+
 def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
@@ -1323,16 +1385,17 @@ def main():
     t19_entry_body_limits_and_deploy_coherence()
     t20_approval_ledger_dual_impl_and_two_readers()
     t23_chunked_body_must_carry_content_length()
+    asyncio.run(t24_dropped_prefix_comes_back_from_history())
     global REDIS_UP
     REDIS_UP = _redis_up()
     asyncio.run(t22_inproc_sse_queue_bounded_like_redis())   # C103：进程内那台，两条路都跑
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 11/11 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23），redis 路待环境")
+        print("\ns7_platform: 12/12 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23+t24），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 23/23 全绿（双配置）")
+    print("\ns7_platform: 24/24 全绿（双配置）")
 
 
 if __name__ == "__main__":
