@@ -30,3 +30,15 @@ frontend/shots/
 vendor/
 log问题/
 .zcode/
+# 运行时日志账本（`codeharness/logs.py` 那颗文件 sink 每天一本 `logs/YYYYMMDD.txt`）
+# C111（10-01）：这四条原先只住在本机私有的 `.git/info/exclude`（09-21 工作树整理时加的，
+# 那几行注释自己写着「不碰别人在途的 .gitignore diff；他们那笔落地后同样的行可以并进 .gitignore」）。
+# ⇒ 换一台机器 / 新克隆一个工作树就没人挡，一次 `git add -A` 会把当天那本（含工具回执与会话文本）带进版本库。
+# ⚠ 故意**不**写成 `logs/`（整目录）：`logs/sitecustomize.py` 是用户 09-22 明令「留在工作区但不入库」的
+#   **单颗文件**，整目录一挡会把将来真要入库的读数/脚本静默吃掉；也不写成全局 `*.txt`（误伤 docs）。
+#   判据 `tests/s4_tools.py` 新组 t58 三格钉这三条：来源必须是本文件、`logs/*.md` 与 `docs/*.txt` 不许被挡、
+#   库里那两颗历史日志（20260913/20260914）的跟踪态没被本件改动（撤不撤仍在用户手上，见 plan §6）。
+logs/*.txt
+logs/*.out
+logs/*.err
+logs/*.json

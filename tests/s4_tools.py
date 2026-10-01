@@ -1899,6 +1899,81 @@ def t57_no_action_deletes_evidence_before_the_model():
           f"三种接收者形态（unlink+os.remove+store.delete）全认得")
 
 
+def t58_gitignore_blocks_runtime_logs():
+    """C111（09-30 §5 本线自欠第二件，也是本串最后一件）：`logs/` 的运行时日志必须由**共享 `.gitignore`** 挡住。
+
+    病（本轮现测，全部指回输出）：共享 `.gitignore` 全文**没有任何 `logs` 条目**（`cat .gitignore` 现读），
+    当天那本 `logs/20261001.txt`（26,508 B）之所以没出现在 `git status` 里，**完全部靠本机私有的
+    `.git/info/exclude`** 那四行（`logs/*.txt`／`logs/*.out`／`logs/*.err`／`logs/*.json`，09-21 工作树整理时加的，
+    注释里自己写着「不碰别人在途的 .gitignore diff；他们那笔落地后同样的行可以并进 .gitignore」）。
+    ⇒ 渠道对**别人**是开着的：换一台机器、新克隆一个工作树、或任何没配私有 exclude 的检出，
+    一次 `git add -A` 就会把当天那本（含工具回执与会话文本）带进版本库。本件把这条渠道在**共享件**里关掉。
+
+    三格：
+      ① `git check-ignore -v logs/<探针名>.txt` 的**来源必须是 `.gitignore`**——不是 `.git/info/exclude`。
+         `.gitignore` 的优先级高于 `info/exclude`，所以两边都有同一条规则时来源会变；
+         **改前现证**是 `git info/exclude line:logs/*.txt`（那一格因此是红的，这正是它的对照）。
+      ② 双向对照，两个方向各钉一次：
+         · `logs/<探针名>.md` **必须没挡** ——「整目录一挡了之」那种改法会把将来真要入库的读数/脚本
+           静默吃掉（`logs/sitecustomize.py` 是用户 09-22 明令「留在工作区但不入库」的**单颗文件**，
+           不是「整个 logs/ 都不许进」——本仓把后者写成规则就会连坐）；
+         · `docs/<探针名>.txt` **必须没挡** —— 规则要是写成全局 `*.txt` 就是误伤，这格当场红。
+      ③ 现库事实钉住，防一个常见误解：`git ls-files logs/` 仍列着 `20260913.txt`、`20260914.txt`
+         两颗**已跟踪**的历史日志——ignore 规则**不改跟踪状态**，所以本件只关掉「新日志会被 `git add` 带走」
+         这条渠道，**没有**处理「旧日志已在库里」那半边（那要 `git rm --cached` 另加一段历史处置，仍在用户手上，
+         见 `plan/PLAN.md` §6）。将来谁真把它们撤下来，这格会红 ⇒ 红话指回那条待拍，别当 bug 修。
+    """
+    import subprocess
+
+    import codeharness
+
+    ROOT = Path(codeharness.__file__).resolve().parents[1]
+
+    def check_ignore(rel_path):
+        r = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-v", "--no-index", rel_path],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        first = r.stdout.strip().splitlines()
+        return r.returncode, (first[0].split("\t")[0] if first else "")
+
+    # 探针名固定（不用 hash 现算）：读数要能在台账里逐字复现，而且这些路径本就不必存在——
+    # `check-ignore --no-index` 判的是**规则**，不是文件在不在。
+    probe_txt = "logs/c111_probe.txt"
+    probe_md = probe_txt.replace(".txt", ".md")
+    probe_docs = probe_txt.replace("logs/", "docs/")
+
+    # ---- ① 共享件必须在挡 ----
+    rc, src = check_ignore(probe_txt)
+    assert rc == 0, f"①探针 {probe_txt} 根本没被任何规则挡住（`.gitignore` 那行没落地？），来源读数={src!r}"
+    assert src.startswith(".gitignore"), \
+        f"①挡住 {probe_txt} 的是 {src!r}，不是共享 `.gitignore`——本机看着干净是因为私有 exclude 在替整个仓挡，" \
+        "换一台检出（或新克隆的工作树）一次 `git add -A` 就会把当天那本日志带进版本库"
+
+    # ---- ② 双向对照 ----
+    rc_md, src_md = check_ignore(probe_md)
+    assert rc_md != 0, f"②过宽：`logs/*.md` 也被挡了（来源 {src_md!r}）——整目录一挡会把将来真要入库的读数静默吃掉"
+    rc_docs, src_docs = check_ignore(probe_docs)
+    assert rc_docs != 0, f"②误伤：`docs/` 下的 .txt 被挡了（来源 {src_docs!r}）——规则写成全局 `*.txt` 就是这个下场"
+    # 阳性对照（防「②两条 assert 都靠 rc!=0 恒过」）：同一条规则必须能挡住 .txt 那支，①已经钉过；
+    # 这里再钉「四类运行时产物都在共享件里」，因为私有 exclude 是四行，只并一行等于漏三种。
+    for suffix in (".out", ".err", ".json"):
+        p2 = probe_txt.replace(".txt", suffix)
+        rc2, src2 = check_ignore(p2)
+        assert rc2 == 0 and src2.startswith(".gitignore"), \
+            f"②运行时产物 `*{suffix}` 没被共享件挡住（rc={rc2}，来源 {src2!r}）"
+
+    # ---- ③ 现库那两颗历史日志：仍在库里，本件没动它们 ----
+    tracked = sorted(p for p in subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "logs/"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace").stdout.splitlines())
+    assert tracked == ["logs/20260913.txt", "logs/20260914.txt"], (
+        f"③现库事实变了：`git ls-files logs/` 现在列出 {tracked}。"
+        "如果不是用户拍了『把旧日志撤出仓库』（plan §6 那条待拍），就是有人动了不该动的东西；"
+        "如果用户真拍了，请把本格的期望改成撤除后的名单并在台账里指回那条")
+
+    print(f"  ok  t58 C111：`{probe_txt}` 由共享 `.gitignore` 挡住（来源 {src}），四类产物 txt/out/err/json 都在；"
+          f"`logs/*.md` 与 `docs/*.txt` 都没被误挡；库里那两颗历史日志 {tracked} 照旧（本件只关渠道、没动跟踪态）")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -1947,7 +2022,8 @@ def main():
               t54_pdf_docx_read_path_no_dead_island,
               t55_bugfix_ticket_survives_model_failure,
               t56_model_supplied_path_keys_are_gated,
-              t57_no_action_deletes_evidence_before_the_model]
+              t57_no_action_deletes_evidence_before_the_model,
+              t58_gitignore_blocks_runtime_logs]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -1971,7 +2047,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器） + C108 顺序契约扩面 1 组（t57：整棵 `actions/` 里「删除证据排在模型调用之前」必须 0 处，`removeprefix` 这类字符串方法不算删除而真 `unlink` 照报，改前形状红／现网形状不红／三种接收者形态全认得）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器） + C108 顺序契约扩面 1 组（t57：整棵 `actions/` 里「删除证据排在模型调用之前」必须 0 处，`removeprefix` 这类字符串方法不算删除而真 `unlink` 照报，改前形状红／现网形状不红／三种接收者形态全认得） + C111 日志入库渠道 1 组（t58：`logs/` 四类运行时产物必须由**共享** `.gitignore` 挡住而不是只靠本机私有 exclude，`logs/*.md` 与 `docs/*.txt` 不许被误挡，库里那两颗历史日志的跟踪态照旧）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 
