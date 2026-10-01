@@ -1,7 +1,7 @@
 """C113 = C110 未验① 的端到端补完：**真丢包 → 断连 → 重连按游标补回，不重不漏**。
 
 §1.8 已在活体服务上证过「溢出丢最旧」（15,000 条、队列钉 4096、丢 9,636），缺的是**补回那半**
-（§1.7 未验① 的 a/c 两条边界）。本工装跑三臂，前两臂**同形状、只差最后一步**——缺任何一臂，
+（§1.7 未验① 的 a/c 两条边界）。本工装跑四臂，A/B **同形状、只差最后一步**——缺任何一臂，
 另一臂都是假绿：
 
 - A `hole`：一条真 SSE 连接消费到第 `PREFIX` 条后**一个字节不再读** ⇒ 真 TCP 背压把服务端该连接的
@@ -12,13 +12,20 @@
 - C `overlap`：溢出**正在发生**时就断开重连，且发布端还在跑 ⇒ `/events` 那条「先 subscribe、
   再回放历史、再跟活流」的接缝上，历史与活流必然重叠。断言按产品同款游标规则应用后仍逐字覆盖
   1..TOTAL；重叠条数只报数、不判红（它是设计内的，靠去重挡）。
+- D `window-edge`：**故意超出保留窗口**（发 `EDGE_TOTAL`，默认 16,001 > `MAX_EVENTS_PER_SESSION=15000`），
+  把 §1.7 未验③ 那句「被挤出窗口那一截仍缺一截」从**语义推论**变成读数。断言三件：① ring 恰好留尾 15,000；
+  ② 重连补回的那一段**连续且逐字等于窗口内段**（补回逻辑没错，只是没东西可补）；
+  ③ 缺的那一截 = `被挤掉的 seq` 减去 `已应用前缀`，条数恰为 `(总条数-窗口)-已应用`。
+  ⇒ 这条就是「补回深度的天花板是窗口不是队列」的实数，也是 C115（给 finished 会话卸 ring）的代价口径。
 
 隔离实例：`PLATFORM__USE_REDIS=0`（进程内 bus）+ 会话表/workspace 指仓外 tmp + 端口 8824，
 不连 Redis、不碰 db0/db15/8718/`.env`，**零模型调用（零花费）**。发布走 `app.state.bus.publish`——
 就是产品 `_emit` 落到的那一个接缝，探针只是替 runner 按按钮。
 
 用法：PYTHONIOENCODING=utf-8 F:/anaconda/python.exe -B tests/manual_sse_drop_resync_live.py
-     可调：PREFIX=200 TOTAL=6000 PORT=8824（TOTAL 必须 > MAX_SSE_QUEUE 且 <= MAX_EVENTS_PER_SESSION）
+     可调：PREFIX=200 TOTAL=6000 OVER_TOTAL=9000 EDGE_TOTAL=16001 PORT=8824
+     （A/B/C 三臂的发数必须 > MAX_SSE_QUEUE 且 <= MAX_EVENTS_PER_SESSION；D 臂**故意超窗口**，
+      但必须超到「挤掉的头盖过已应用前缀」，否则量不出缺口——脚本开头两条断言各钉一边。）
 """
 import json
 import os
@@ -54,6 +61,7 @@ PORT = int(os.environ.get("PORT", "8824"))
 PREFIX = int(os.environ.get("PREFIX", "200"))       # 失速前客户端真应用掉的条数（= 浏览器的 lastCursor）
 TOTAL = int(os.environ.get("TOTAL", "6000"))        # > 队列上界 ⇒ 必溢出；<= ring 上界 ⇒ 全兜得住
 OVER_TOTAL = int(os.environ.get("OVER_TOTAL", "9000"))   # overlap 臂多发+慢发，才保证重连时发布端还在跑
+EDGE_TOTAL = int(os.environ.get("EDGE_TOTAL", "16001"))  # window-edge 臂：**故意超过真窗口 15000**
 
 _opener = None
 
@@ -184,7 +192,9 @@ def stall_until_dropped(sid):
 def main():
     assert MAX_SSE_QUEUE < MAX_EVENTS_PER_SESSION, "队列上界不小于 ring ⇒ 丢了补不回，前提破了"
     assert MAX_SSE_QUEUE < min(TOTAL, OVER_TOTAL) <= MAX_EVENTS_PER_SESSION, \
-        "发数得落在「必溢出」且「ring 全兜得住」那一档"
+        "hole/resync/overlap 三臂的发数得落在「必溢出」且「ring 全兜得住」那一档"
+    assert EDGE_TOTAL + 1 > MAX_EVENTS_PER_SESSION + PREFIX, \
+        "window-edge 臂要**故意超出窗口**，且挤掉的那一截必须盖过已应用前缀，否则量不出缺口"
     cfg = uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning")
     server = uvicorn.Server(cfg)
     threading.Thread(target=server.run, daemon=True).start()
@@ -194,11 +204,12 @@ def main():
             raise SystemExit("服务 60 秒没起——不硬等，退出")
         time.sleep(0.05)
     print("隔离实例端口 %d，use_redis=0｜队列上界 %d，ring 上界 %d｜失速前消费 %d 条；"
-          "hole/resync 发 %d 条，overlap 发 %d 条（慢发）"
-          % (PORT, MAX_SSE_QUEUE, MAX_EVENTS_PER_SESSION, PREFIX, TOTAL, OVER_TOTAL))
+          "hole/resync 发 %d 条，overlap 发 %d 条（慢发），window-edge 发 %d 条（**故意超窗口**）"
+          % (PORT, MAX_SSE_QUEUE, MAX_EVENTS_PER_SESSION, PREFIX, TOTAL, OVER_TOTAL, EDGE_TOTAL))
     ok = True
     try:
-        for arm, n in (("hole", TOTAL), ("resync", TOTAL), ("overlap", OVER_TOTAL)):
+        for arm, n in (("hole", TOTAL), ("resync", TOTAL), ("overlap", OVER_TOTAL),
+                       ("window-edge", EDGE_TOTAL)):
             # seq=1 是 `POST /api/sessions` 自己发的那条 status（现证，不认它就对不齐总数）
             exp = set(range(1, n + 2))
             sid = http("POST", "/api/sessions",
@@ -233,10 +244,11 @@ def main():
                 print("  [%s] ✗ 队列没溢出＝这根本没在验丢包，后面的判据恒真" % arm)
                 ok = False
             # ring 那条硬账只能在**发布收完**之后核：overlap 臂此刻还在发（本轮现证 sampled 5401/9001），
-            # 拿它当「底账缺不缺」会假红。
-            if arm != "overlap" and ring_n != n + 1:
-                print("  [%s] ✗ ring 条数 != 应有的 %d 条，补回的底账本身就缺（实 %d）"
-                      % (arm, n + 1, ring_n))
+            # 拿它当「底账缺不缺」会假红。window-edge 臂**故意超窗口** ⇒ 应到的是 min(总条数, 窗口)。
+            exp_ring = min(n + 1, MAX_EVENTS_PER_SESSION)
+            if arm != "overlap" and ring_n != exp_ring:
+                print("  [%s] ✗ ring 条数 != 应有的 %d 条（总 %d 与窗口 %d 取小），底账不对（实 %d）"
+                      % (arm, exp_ring, n + 1, MAX_EVENTS_PER_SESSION, ring_n))
                 ok = False
             # 结构性判据：游标之后那一截客户端一条也没拿到——这才叫「洞真存在」。
             # 不写成「已消费恰好等于 1..PREFIX」：溢出可能在前缀内就发生，那条数值判据会假红。
@@ -245,6 +257,7 @@ def main():
                 print("  [%s] ✗ 已消费集里混进了游标之后的 seq ⇒ 游标不是单调尾，前段读数不可信" % arm)
                 ok = False
             still_live = th.is_alive()
+            prefix = set(st["seqs"])              # 重连前客户端真应用掉的那一截（= 浏览器 lastCursor 之前）
             c.close()
 
             if arm == "hole":               # 不发重连：洞就该原样留在那儿
@@ -268,6 +281,27 @@ def main():
             cur.close()
             missing = sorted(exp - st["seqs"])
             extra = sorted(st["seqs"] - exp)
+            if n + 1 > MAX_EVENTS_PER_SESSION:     # window-edge：窗口外那一截缺是**窗口口径**，不是补回逻辑的回归
+                evicted = set(range(1, n + 2 - MAX_EVENTS_PER_SESSION))   # 被挤掉的头：seq 1..(总-窗口)
+                expect = (exp - evicted) | prefix                        # 应到＝窗口内全段 + 已应用前缀
+                off = sorted(st["seqs"] ^ expect)
+                hole = sorted(evicted - prefix)
+                tail_ok = sorted(st["seqs"] - prefix) == list(range(n + 2 - MAX_EVENTS_PER_SESSION, n + 2))
+                want_hole = n + 1 - MAX_EVENTS_PER_SESSION - len(prefix)
+                print("  [%s] ring 留尾 %d 条（上界 %d）｜补回后已消费集 %d 条｜窗口外永久缺 %d 条"
+                      "（首缺 seq=%s 末缺 seq=%s；应等于 (总%d-窗口%d)-已应用%d=%d）"
+                      % (arm, ring_n, MAX_EVENTS_PER_SESSION, len(st["seqs"]), len(hole),
+                         hole[0] if hole else "-", hole[-1] if hole else "-",
+                         n + 1, MAX_EVENTS_PER_SESSION, len(prefix), want_hole))
+                print("  [%s] 补回段连续=%s｜已消费集与预期逐字相等=%s（差集 %d 条：%s）"
+                      % (arm, tail_ok, not off, len(off), off[:5]))
+                if off or not tail_ok:
+                    print("  [%s] ✗ 补回的形状和窗口口径对不上——这不是「缺一截」，是补错了" % arm)
+                    ok = False
+                if len(hole) != want_hole:
+                    print("  [%s] ✗ 缺口条数与 (总-窗口-已应用) 不等（实 %d 应 %d）" % (arm, len(hole), want_hole))
+                    ok = False
+                missing = extra = []
             print("  [%s] 重连线上收到 %d 条、游标规则挡下重叠 %d 条｜已消费集 %d 条｜缺 %d 越界 %d"
                   % (arm, w1 + w2, d1 + d2, len(st["seqs"]), len(missing), len(extra)))
             if missing or extra:
@@ -285,7 +319,8 @@ def main():
         import shutil
         shutil.rmtree("E:/tmp/streamx-c113", ignore_errors=True)
         print("收口：服务已令退出、tmp 目录已删（存在=%s）" % STORE.parent.exists())
-    print("\nC113 端到端 %s" % ("✅ 三臂齐过：洞真存在 / 按游标补回逐字不重不漏 / 重叠竞态下仍完整"
+    print("\nC113 端到端 %s" % ("✅ 四臂齐过：洞真存在 / 按游标补回逐字不重不漏 / 重叠竞态下仍完整 / "
+                                "超窗口那截缺得可算（=总条数-窗口-已应用）"
                                 if ok else "✗ 有臂不过——别记成闭合"))
     sys.exit(0 if ok else 1)
 
