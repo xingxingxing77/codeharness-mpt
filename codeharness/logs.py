@@ -29,6 +29,10 @@ LLM_STREAM_QUEUE: ContextVar[asyncio.Queue] = ContextVar("llm-stream")
 # 这条腿就在内存里无界堆正文。**不能照 SSE 那套丢最旧**：token 流没有可回放的真源，丢中间＝正文断字。
 # 所以走**整段降级**：队列满 ⇒ 当段起后续逐片不再逐条入队，改攒进 `_spill`，段尾由 Reporter 合成
 # **一条** content 事件补完 ⇒ 粒度退化（少掉打字机效果），正文一字不少。界取 4096（与 SSE 订阅队列同数）。
+# ⚠ 可达性（18:0x 复查更正，别把这条当现网流式的护身符）：这座 `enable_llm_stream=True` 的桥**生产从没接**——
+#   全仓只有 `tests/s3_report_action.py` 设真，块管理器走的是 `BlockReporter`→`_emit`（不经此队列），
+#   现网打字机是 `runner._make_sink`/`_ProseStream` 发的 `live` 事件、其界在 SSE 订阅队列那一层（C90/C103）。
+#   所以 C112 = 对休眠路径的廉价防御（有人重接这座桥时不无界），**不是修了现网内存病**；账见 platform-infra §1.11。
 MAX_LLM_STREAM_QUEUE = 4096
 
 
