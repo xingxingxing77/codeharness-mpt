@@ -890,15 +890,45 @@ class SessionRunner:
             self._trunc_reported[sid] = n
             self.bus.publish(sid, kind="turn", name="end", value={"reason": {"kind": "max-tokens"}})
 
+    @staticmethod
+    def _fail_kind(exc: Exception) -> tuple[str, str]:
+        """C116：把「一场为什么死」分成两族——`blocked`（供应侧把内容拦了）与 `crash`（我们自己的错）。
+
+        为什么值得分（现场现证，10-01 22:46）：StepFun 对某一发回 `451 censorship_blocked` 时，`_fail` 走的
+        是与编排崩溃**完全同一条路**——状态 `failed`、`error` 是异常 repr、日志只有 `[session-failed]`。
+        于是运维 grep 不出「外部拦停」与「代码炸了」，用户看到的是一句
+        `APIStatusError: Error code: 451 - {'error': {'message': 'The content you provided...'}}`，
+        不知道该改提示词还是该报 bug。
+
+        **只做分类，不做续跑**：被拦那一发没有可用产出，要让图继续就得先定「节点无输出怎么路由」，
+        那是另一件设计件（见 `platform-infra.md` §1.13 的档位 ②）。
+        这里也**不碰重试判据**（那是 `codeharness/provider/gateway.py::_retryable` 的事，且在审查线地界，
+        不跨面、不把两处口径合并成一颗共享函数）。
+        """
+        code = getattr(exc, "status_code", None)
+        body = f"{getattr(exc, 'body', '') or ''}{exc}"
+        blocked = (code == 451 or "censorship_blocked" in body or "content_blocked" in body
+                   or "content policy" in body.lower())
+        if not blocked:
+            return "crash", ""
+        return "blocked", ("内容被供应侧拦停（HTTP 451 一类）：这一发没有可用产出，本场就此停在这一点；"
+                           "此前已产出的文件与会话记录都保留。要接着做，请改写触发拦停的那段内容后重开一场。")
+
     def _fail(self, sid: str, exc: Exception):
         message = f"{type(exc).__name__}: {exc}"
+        kind, human = self._fail_kind(exc)
         # 可 grep 的告警（C18②）：这是会话被打成 failed 的唯一出口。事件流是喂界面的，日志才是运维
         # grep 的对象——缺这一行时「点了允许然后整场死了」在日志里零痕迹（告警与重试是两回事：
         # 连接类失败本就由 `_retryable` 重发过，重发用尽之后必须留下响）。
-        logger.error(f"[session-failed] sid={sid} {message}")
-        session = self.store.update(sid, status=SessionStatus.failed, error=message, finished_at=_now())
-        self.bus.publish(sid, kind="error", value=traceback.format_exc(limit=6))
-        self._publish_status(session, message)
+        # ⚠ 前缀 `[session-failed]` 一字不改（s17 t9 的判据就钉着它），C116 只在**行尾加一个 kind 字段**：
+        #   把别人的判据放宽不是修分类，是把分类藏回看不见。
+        logger.error(f"[session-failed] sid={sid} kind={kind} {message}")
+        session = self.store.update(sid, status=SessionStatus.failed,
+                                    error=f"{human}（{message}）" if human else message,
+                                    finished_at=_now())
+        detail = traceback.format_exc(limit=6)
+        self.bus.publish(sid, kind="error", value=f"{human}\n{detail}" if human else detail)
+        self._publish_status(session, session.error if human else message)
         self._forget(sid, terminal=True)
 
     # ---- 主流程 -------------------------------------------------------------

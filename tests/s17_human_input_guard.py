@@ -713,7 +713,10 @@ def t9_failure_is_loud():
     `tests/s2_gateway.py::t14`）；真正缺的是重发用尽之后的那声响。所以这一格只判 `_fail`：
       ① `_run` 那一发失败 → 状态 `failed` + 日志有 `[session-failed] sid=…` + 事件流有 `kind=error`；
       ② **阳性对照**：正常收口的会话不许出现那行告警（否则它恒亮，grep 等于没有）；
-      ③ `_resume`（批准后那一发）单独判一次——它是被看见的那条路，与 `_run` 共用 `_fail` 但入口不同。
+      ③ `_resume`（批准后那一发）单独判一次——它是被看见的那条路，与 `_run` 共用 `_fail` 但入口不同；
+      ④ C116：供应侧拦停（真 `openai.APIStatusError` 451/`censorship_blocked`）⇒ 日志同一行里带
+         `kind=blocked`、会话 `error` 既有人话也保留原始原因，而 `[session-failed]` 前缀一字不改；
+      ⑤ C116 反向对照：普通崩溃 ⇒ `kind=crash`，且 `error` 文案与改前**逐字相同**（分类器不许见谁都甩锅外部）。
     异常用真的 `openai.APIConnectionError`：缺陷台账里那行的 `error=APIConnectionError` 就是这么来的。
     """
     import io
@@ -785,8 +788,34 @@ def t9_failure_is_loud():
     assert "[session-failed]" in log3, \
         f"t9③ 失效：批准后那一发死了，日志里没有那行告警（C18② 原症状）：{log3[-200:]!r}"
     assert any(k == "error" for k, _n in kinds3), f"t9③ 失效：活流里没有 error 事件：{kinds3}"
+    # ④⑤ C116：供应侧拦停（451 那一形）与编排崩溃**必须分得开**，而分的方式不许动 C18② 那行前缀。
+    #    现证过的形状取自 10-01 22:46 那场真 StepFun 的日志原文（`APIStatusError: Error code: 451 -
+    #    {'error': {'message': 'The content you provided or machine outputted is blocked.',
+    #    'type': 'censorship_blocked'}}`）——用真异常类，不拿自造的 duck-type 糊。
+    from openai import APIStatusError
+    resp451 = httpx.Response(451, request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+    blocked = APIStatusError(
+        "Error code: 451 - {'error': {'message': 'The content you provided or machine outputted is blocked.',"
+        " 'type': 'censorship_blocked'}}",
+        response=resp451,
+        body={"error": {"message": "The content you provided or machine outputted is blocked.",
+                        "type": "censorship_blocked"}})
+
+    log_b, (st_b, err_b, kinds_b) = capture(lambda: one(boom_exc=blocked))
+    assert st_b == "failed", f"t9④ 前提失配：拦停场状态是 {st_b!r}（本件不改状态枚举）"
+    assert "[session-failed]" in log_b, "t9④ 把 C18② 那行前缀改掉了（运维 grep 不到＝分类反把告警弄丢）"
+    assert "kind=blocked" in log_b, f"t9④ 拦停没被分出来：{log_b[-220:]!r}"
+    assert "供应侧拦停" in (err_b or ""), f"t9④ 用户那半没成人话（还是裸 repr？）：{err_b!r}"
+    assert "censorship_blocked" in (err_b or ""), f"t9④ 分类把原始原因丢了（诊断价值没了）：{err_b!r}"
+    assert any(k == "error" for k, _n in kinds_b), f"t9④ 拦停场活流里没有 error 事件：{kinds_b}"
+
+    # ⑤ 反向对照：普通崩溃**不许**被糊成拦停——这一格防的就是「分类器见谁都说是外部问题」
+    assert "kind=crash" in log_failed, f"t9⑤ 崩溃被误分类（日志行尾字段不是 crash）：{log_failed[-220:]!r}"
+    assert "供应侧拦停" not in (err or ""), f"t9⑤ 崩溃的 error 被人话污染：{err!r}"
+    assert err == f"APIConnectionError: {boom}", f"t9⑤ 崩溃文案被改了（应与改前逐字相同）：{err!r}"
+
     print(f"  ok  t9（失败留 [session-failed] 告警 + error 事件、正常收口不打；"
-          f"批准后那一发同判：{after}）")
+          f"批准后那一发同判：{after}；C116 分类：拦停→kind=blocked+人话、崩溃→kind=crash 且文案一字未改）")
 
 
 def t10_unknown_command_is_countable():
