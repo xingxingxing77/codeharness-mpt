@@ -707,7 +707,7 @@ def events_history(sid: str, request: Request, after: str = "", before: str = ""
 
     翻页（B2）：`after`=往前追增量、`before`=往回翻（「加载更早」，**开区间**上界）、
     `limit`=一屏条数（0=不限，即老调用方语义），**始终取窗口尾部** N 条——不给 before
-    就是「最新一屏」，首屏因此不必吞下保留窗口里那 5000 条。响应带 `has_more`：
+    就是「最新一屏」，首屏因此不必吞下保留窗口里那 `MAX_EVENTS_PER_SESSION` 条。响应带 `has_more`：
     给了 limit 就多取一条用它判「前面还有没有」，省掉前端为胶囊显隐再打一次请求。
     返回**始终升序**，下一页的 before 用本页首条的 cursor。"""
     bus = _get(request, "bus")

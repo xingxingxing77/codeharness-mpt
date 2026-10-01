@@ -8,7 +8,11 @@ from pydantic import BaseModel, field_validator
 
 from codeharness.logs import logger
 
-MAX_EVENTS_PER_SESSION = 5000
+# 每会话保留窗口。5000 是拍的；15000 有数：只读 db0 的 `XINFO STREAM.entries-added`（含被
+# `XADD MAXLEN` 裁掉那截）量到真实发数 max=12346、被 5000 窗口裁掉全局 35%（那 5 场丢 23%~59%）。
+# 取 15000 = 覆盖到真实 max 且留一倍余量，仍守 `MAX_SSE_QUEUE < 本值`（否则丢的最旧补不回，
+# t24④ 钉这条）。代价：进程内档每场顶格 ≈15000×1475B≈21MB、Redis 档 ≈3.6MB/场（全账 `plan/platform-infra.md` §1.10）。
+MAX_EVENTS_PER_SESSION = 15000
 
 # C90/C103：每条 SSE 连接的订阅队列上界，**两条 bus 共用这一个数**。原先只定义在
 # `platforms/event_store.py:33`（Redis 那台用），进程内那台一直是无界 `asyncio.Queue()`——
@@ -139,7 +143,7 @@ class SessionEventBus:
                 limit: int = 0) -> list:
         """游标窗口回放。after=下界（不含）、before=**开区间上界**（「加载更早」往回翻用），
         两者都不给就是全量；limit>0 取**窗口尾部** limit 条——不给 before 时上界即流尾，
-        也就是「最新一屏」（首屏只吞一屏而不是保留窗口里那 5000 条）。limit=0 不限＝老语义。
+        也就是「最新一屏」（首屏只吞一屏而不是保留窗口里那 `MAX_EVENTS_PER_SESSION` 条）。limit=0 不限＝老语义。
         返回始终升序：下一页的 before 用本页首条 cursor，取到空页即到头。"""
         with self._lock:
             events, _ = self._ensure(sid)

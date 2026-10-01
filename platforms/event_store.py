@@ -1,6 +1,6 @@
 """事件流 Redis 化（施工4 目标结构第 2 行 + 本步唯一硬工程点：sync→async 桥）。
 
-- 通道：`XADD ch:ev:{sid} MAXLEN ~5000`；补历史 `XRANGE (seq`，续推 `XREAD BLOCK`。
+- 通道：`XADD ch:ev:{sid} MAXLEN ~<MAX_EVENTS_PER_SESSION>`（现 15000）；补历史 `XRANGE (seq`，续推 `XREAD BLOCK`。
   **不用 Pub/Sub**：无持久化、慢消费者丢事件，`after=seq` 兑现不了（施工4 原话）。
 - 内核报道槽是**普通函数**（桥接铁律，report.py:67），Redis 写入是异步——不能改成
   `await XADD`（那会迫使内核全链路 async 化，污染 report.py 与所有 Action）。
