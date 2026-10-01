@@ -740,6 +740,41 @@ class SessionRunner:
                 for var, tok in reversed(pairs):
                     var.reset(tok)
 
+    def _retire_ring(self, sid: str):
+        """C115：散会（terminal）才把这场的进程内 ring 落冷档、卸出内存。
+
+        为什么挂在这一个出口：五处终态（`_settle` 的正常收口、`_fail`、两处取消、两条 stop 路）
+        本来就全收进 `_forget(terminal=True)`——按形状找齐比逐处补更短，也不会漏第五处。
+        停在待人工处（`terminal=False`）走不到这里；真走到了也不会误卸，守卫在 `bus.retire()` 里。
+
+        这是**旁路，不许打断主流程**（同「副作用失败只记日志+空操作」那条口径）：Redis 版 bus 没有
+        `retire`（它那本账在 Redis，不是这里的病）⇒ `getattr` 拿到 None 就什么也不做；落盘失败也只记
+        一行 warning，**ring 原样留着**——宁可占着内存，不丢历史（无 Redis 档 ring 是唯一历史源，
+        见 `platform-infra.md` §1.12 的 D 臂读数）。写盘排进 `to_thread`：满窗口 15000 条 ≈ 3 MB，
+        别让它卡住事件循环上别人的流。
+        """
+        retire = getattr(self.bus, "retire", None)
+        if retire is None:
+            return
+
+        async def _run():
+            try:
+                await asyncio.to_thread(retire, sid)
+            except Exception as exc:
+                logger.warning(f"[ring-retire] {sid} 落冷档失败，ring 原样留着：{type(exc).__name__}: {exc}")
+
+        try:
+            # 任务句柄存进 `_closers`（现成的「在途收尾任务别被 GC 收走」登记处）：asyncio 的
+            # fire-and-forget 任务如果没人持引用，可能在跑之前就随协程被回收——那这场的 ring 就白留了。
+            task = asyncio.get_running_loop().create_task(_run())
+            self._closers.add(task)
+            task.add_done_callback(self._closers.discard)
+        except RuntimeError:                              # 线程侧收口（没有 running loop）：就地写
+            try:
+                retire(sid)
+            except Exception as exc:
+                logger.warning(f"[ring-retire] {sid} 落冷档失败，ring 原样留着：{type(exc).__name__}: {exc}")
+
     def _forget(self, sid: str, terminal: bool):
         """散会（`terminal=True`）才清图与整场的进程态；**停在待人工处（`terminal=False`）只扫在途表**。
 
@@ -760,6 +795,7 @@ class SessionRunner:
             self.costs.pop(sid, None)
             self._last_span.pop(sid, None)
             self._trunc_reported.pop(sid, None)
+            self._retire_ring(sid)
         # 中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净，否则永久留着
         for k in [k for k in self._call_t0 if k[0] == sid]:
             self._call_t0.pop(k, None)

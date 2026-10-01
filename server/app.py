@@ -72,7 +72,11 @@ def create_app() -> FastAPI:
                 from codeharness.logs import logger
                 logger.warning("PLATFORM__USE_REDIS 已置位但 Redis 不可达——退回进程内实现")
         if store is None:
-            bus = SessionEventBus()
+            # C115：终态会话的 ring 溢出到**会话表同侧**的冷档目录。这里读的是 `server.sessions`
+            # 的模块属性而不是 settings 的常量，理由与 :61 那句一样——自测把这份表指到 tmp，
+            # 冷档就必须跟着走，不许往仓库里写。
+            import server.sessions as _ss
+            bus = SessionEventBus(spill_dir=Path(_ss.SESSIONS_FILE).parent / "event_history")
             store = SessionStore()
             runner_extra = (None, False)
         log_bridge = LogBridge(bus)

@@ -1374,6 +1374,140 @@ async def t24_dropped_prefix_comes_back_from_history():
                "换游标不重带；成对守卫 MAX_SSE_QUEUE < 保留窗口")
 
 
+async def t25_terminal_ring_offloads_to_cold_storage():
+    """C115：终态会话的 ring 必须**卸得掉、且不丢一条历史**。
+
+    §1.8 现证 `_events[sid]` 全仓没有 per-session 驱逐 ⇒ 常驻只增不减（8 场 56.7 MB，那 8 场早已
+    finished）；§1.12 的 D 臂又现证**无 Redis 档里 ring 就是唯一的历史源** ⇒ 裸卸等于把那场的
+    补回窗口压成 0。所以判据的主形不是「卸了没」，而是「卸完之后历史逐字还在」。
+
+    七格：
+      ① retire 前后 `history()` 的 cursor 序列**逐字相等**，ring 从内存走、冷档在盘上（行数也对）；
+      ② **有订阅者就不许卸**（有人正看着这条流）⇒ retire 回 False、ring 还在、不生成冷档；
+      ③ 没有 `spill_dir` ⇒ 整个不卸（宁可留内存也不丢历史）；
+      ④ retire 后再发（会话被重开那一形）⇒ seq 从冷档尾继续、游标不断档（计数器播种那条），
+         且历史＝冷档全部 + 新发，一条不重；
+      ⑤ `discard` ⇒ ring 与冷档都不留（不留孤儿文件）；
+      ⑥ **接线（bus 侧）**：走真 `create_app()` 的那台进程内 bus 必须带着冷档目录、且真卸得动——
+         上面五格都只在 bus 自己身上，产品接没接它是另一件事；
+      ⑦ **接线（runner 侧）**：`_forget(terminal=True)` 必须调到 `retire`，`terminal=False`
+         （停在待人工处）不许调——断点那场还要接着看历史。
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from server.events import SessionEventBus
+
+    tmp = Path(tempfile.mkdtemp(prefix="s7t25-"))
+    try:
+        sid = "t25-a"
+        bus = SessionEventBus(max_events=100, spill_dir=tmp)
+        for i in range(7):
+            bus.publish(sid, kind="report", block="Thought", name="content", value="v%d" % i)
+        before = [e.cursor for e in bus.history(sid)]
+        assert len(before) == 7, f"t25① 前置就没攒够 7 条（{len(before)}）"
+        assert bus.retire(sid) is True, "t25① 无订阅者的终态会话应当卸掉"
+        assert sid not in bus._events, "t25① ring 没从内存卸出去"
+        spill = tmp / f"{sid}.jsonl"
+        assert spill.exists(), "t25① 冷档没落盘（卸了内存却没落档＝历史没了）"
+        lines = [ln for ln in spill.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        after = [e.cursor for e in bus.history(sid)]
+        assert after == before, f"t25① 卸完之后历史变了（前 {len(before)} 后 {len(after)}）"
+        assert len(lines) == 7, f"t25① 冷档行数 {len(lines)} != ring 里的 7 条"
+
+        # ② 有订阅者不许卸
+        sid2 = "t25-b"
+        q = await bus.subscribe(sid2)
+        try:
+            bus.publish(sid2, kind="report", block="Thought", name="content", value="watching")
+            assert bus.retire(sid2) is False, "t25② 有人订阅也照卸＝把正看着的那屏抽掉"
+            assert sid2 in bus._events, "t25② ring 被卸走了（有订阅者时不许）"
+            assert not (tmp / f"{sid2}.jsonl").exists(), "t25② 不许卸却生成了冷档"
+        finally:
+            bus.unsubscribe(sid2, q)
+
+        # ③ 没有冷档目录 ⇒ 不卸
+        nospill = SessionEventBus(max_events=50)
+        nospill.publish("t25-c", kind="report", block="Thought", name="content", value="x")
+        assert nospill.retire("t25-c") is False, "t25③ 无 spill_dir 竟卸了＝裸卸，历史唯一源没了"
+        assert "t25-c" in nospill._events, "t25③ ring 被裸卸"
+
+        # ④ 重开：seq 必须从冷档尾继续，历史＝冷档 + 新发，不重不断
+        bus.publish(sid, kind="report", block="Thought", name="content", value="reopened")
+        new = bus.history(sid)
+        seqs = [e.seq for e in new]
+        assert seqs[-1] == 8, f"t25④ 重开后 seq 从 {seqs[-1]} 起（没从冷档尾播种＝新事件会被前端游标去重整段吞掉）"
+        assert seqs == list(range(1, 9)), f"t25④ 游标不连续：{seqs}"
+        assert [e.cursor for e in new[:7]] == before, "t25④ 冷档那 7 条读回来不是原样"
+        assert new[-1].value == "reopened", "t25④ 新发那条没接在历史尾部"
+
+        # ⑤ 删除会话：ring 与冷档一起走
+        bus.discard(sid)
+        assert sid not in bus._events and not spill.exists(), \
+            f"t25⑤ discard 后仍有残留（ring={sid in bus._events} 冷档={spill.exists()}）"
+        assert bus.history(sid) == [], "t25⑤ 删掉的会话还能翻出历史"
+
+        # ⑥⑦ 接线（「套件全绿≠代码被接上」那条：上面五格都只在 bus 自己身上，产品到底用没用它是另一件事）
+        from codeharness.configs.settings import settings as core_settings
+        from fastapi.testclient import TestClient
+        import server.app as sa
+        import server.sessions as _ss
+        keep = (core_settings.platform.use_redis, _ss.SESSIONS_FILE)
+        core_settings.platform.use_redis = False           # 这条判据验的就是进程内那台的接线
+        _ss.SESSIONS_FILE = tmp / "gate-sessions.json"
+        try:
+            with TestClient(sa.create_app()) as app_c:
+                wired = app_c.app.state.bus
+                assert isinstance(wired, SessionEventBus) and wired.spill_dir == tmp / "event_history", \
+                    f"t25⑥ 产线 bus 没接冷档目录（spill_dir={getattr(wired, 'spill_dir', None)}）⇒ retire 会永远不卸"
+                w = "t25-wired"
+                for i in range(3):
+                    wired.publish(w, kind="report", block="Thought", name="content", value="w%d" % i)
+                before_w = [e.cursor for e in wired.history(w)]
+                assert wired.retire(w) is True and w not in wired._events, "t25⑥ 产线那台卸不动（接线/目录不对）"
+                assert [e.cursor for e in wired.history(w)] == before_w, "t25⑥ 产线那台卸完历史变了"
+        finally:
+            core_settings.platform.use_redis, _ss.SESSIONS_FILE = keep
+
+        from server.runner import SessionRunner
+        rec = []
+
+        class _StubBus:
+            def retire(self, s):
+                rec.append(s)
+                return True
+
+        r = SessionRunner.__new__(SessionRunner)          # 只测这条接缝，不拖进真依赖
+        r.bus = _StubBus()
+        # `_forget` 扫的登记表（逐个列出来是有意的：判据要跟着这条出口一起改，
+        # 用 `vars(run)` 那种自动播种会被「新增一张表但没在这里登记」的形态糊过去）
+        for attr in ("chats", "costs", "_last_span", "_trunc_reported", "_call_t0", "_prose",
+                     "_prompts", "_used_kernel_block", "_live_blk", "graphs", "projects"):
+            setattr(r, attr, {})
+        r._closers = set()                                # 这张是 set（add/discard），别给成 dict
+
+        async def _check_terminal():
+            # retire 走 `to_thread` 的任务（不卡事件循环），所以断言前必须先把在途任务收完——
+            # 上一版在这里假红过一次（任务还没跑就断言 `rec==[…]` 空，读起来像产品没接上）。
+            async def _drain():
+                for t in list(r._closers):
+                    await t
+            r._forget("t25-terminal", terminal=False)
+            await _drain()
+            assert rec == [], f"t25⑦ 停在待人工处就去卸 ring（{rec}）——断点那场还要接着看历史"
+            r._forget("t25-terminal", terminal=True)
+            await _drain()
+            assert rec == ["t25-terminal"], f"t25⑦ 终态没接上 retire（{rec}）⇒ ring 永远留在内存，C115 等于没修"
+        await _check_terminal()
+
+        _ok("t25", "终态会话的 ring 落冷档再卸、history 逐字不减；有订阅者不卸；无 spill_dir 不裸卸；"
+                   "重开从冷档尾接 seq（不重不断）；discard 连冷档一起清；"
+                   "⑥ 产线 create_app 那台真带冷档目录且卸得动、⑦ runner 的 terminal 出口真调 retire"
+                   "（terminal=False 不许调）")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
@@ -1386,16 +1520,17 @@ def main():
     t20_approval_ledger_dual_impl_and_two_readers()
     t23_chunked_body_must_carry_content_length()
     asyncio.run(t24_dropped_prefix_comes_back_from_history())
+    asyncio.run(t25_terminal_ring_offloads_to_cold_storage())   # C115：终态 ring 卸得掉、历史一条不减
     global REDIS_UP
     REDIS_UP = _redis_up()
     asyncio.run(t22_inproc_sse_queue_bounded_like_redis())   # C103：进程内那台，两条路都跑
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 12/12 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23+t24），redis 路待环境")
+        print("\ns7_platform: 13/13 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23+t24+t25），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 24/24 全绿（双配置）")
+    print("\ns7_platform: 25/25 全绿（双配置；t25 是本轮 C115 新加的那组）")
 
 
 if __name__ == "__main__":

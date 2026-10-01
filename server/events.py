@@ -1,8 +1,10 @@
 """每会话事件流：有界历史 + 活跃订阅者队列，SSE 消费。"""
 import asyncio
+import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Optional, Union
 from pydantic import BaseModel, field_validator
 
@@ -63,8 +65,13 @@ class Event(BaseModel):
 
 
 class SessionEventBus:
-    def __init__(self, max_events: int = MAX_EVENTS_PER_SESSION):
+    def __init__(self, max_events: int = MAX_EVENTS_PER_SESSION, spill_dir=None):
         self.max_events = max_events
+        # C115：终态会话的 ring 溢出到这下面的 `{sid}.jsonl` 冷档，然后从内存卸掉。
+        # 为什么必须先有冷档才许卸：§1.12 的 D 臂现证**这条路上 ring 就是唯一的历史源**
+        # （无 Redis 档没有第二本账），裸卸等于把那场的补回窗口压成 0。所以 `spill_dir=None`
+        # 时 `retire()` 什么都不做——宁可留内存，不丢历史。
+        self.spill_dir = Path(spill_dir) if spill_dir else None
         self._events: dict[str, deque] = {}
         self._counters: dict[str, int] = {}
         # 订阅者：q → 建它时的事件循环。asyncio.Queue **非线程安全**，队列只准在它的
@@ -86,7 +93,80 @@ class SessionEventBus:
             self._events[sid] = deque(maxlen=self.max_events)
             self._counters[sid] = 0
             self._subscribers[sid] = {}
+            self._load_spill(sid, self._events[sid])     # C115：ring 是冷档的缓存，不是第二本账
         return self._events[sid], self._subscribers[sid]
+
+    def _spill_path(self, sid: str):
+        return self.spill_dir / f"{sid}.jsonl" if self.spill_dir else None
+
+    def _load_spill(self, sid: str, into: deque):
+        """把冷档读回 ring，并把 seq 计数器播到尾——**少了这一步，重开的会话会从 seq 1 重新发**，
+        前端按 `cursor <= lastCursor` 去重就会把新一场整段吞掉（与「SSE seq 精度丢事件」同族：
+        游标必须是同一本账上的连续尾）。"""
+        p = self._spill_path(sid)
+        if p is None or not p.exists():
+            return
+        last = 0
+        with p.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = Event.model_validate_json(line)
+                except Exception:                         # 半截/坏行：跳过这一行，别让一场历史拖死服务
+                    logger.warning(f"[ring-spill] {sid} 冷档有一行读不动，跳过")
+                    continue
+                into.append(ev)
+                last = max(last, ev.seq)
+        self._counters[sid] = max(self._counters.get(sid, 0), last)
+
+    def retire(self, sid: str) -> bool:
+        """C115：一场跑到终态后把它的 ring 落冷档、再从内存卸掉。返回**是否真卸了**。
+
+        为什么要这件（§1.8 现证）：`_events[sid]` 从前全仓没有任何 per-session 驱逐 ⇒ 进程活得越久、
+        开过的场越多，常驻只增不减（8 场 56.7 MB，那 8 场早已 finished）。
+        三条不许破的边界，全部有判据钉着（`tests/s7_platform.py` t25）：
+          ① 有订阅者就**不卸**——有人正在看这条流，卸了下一屏就缺；
+          ② 卸之前必须先写成冷档，写失败就原样留着（历史比内存值钱）；
+          ③ 没有 `spill_dir` 就整个不卸（无 Redis 档 ring 是唯一历史源，§1.12 D 臂那条）。
+        ponytail: 冷档只留 `max_events` 条（ring 本身就是上界），一场 ≈15000 行、约 3 MB；
+        按会话数线性占**磁盘**，升级路径是按 user/project 分目录 + 保留期清理，不在本件。
+        """
+        if self.spill_dir is None:
+            return False
+        with self._lock:                                  # 写盘排在锁里：publish 用的是同一把锁，
+            if self._subscribers.get(sid):                # 于是「边写边被 append」不会发生
+                return False
+            events = self._events.get(sid)
+            if not events:
+                return False
+            n = len(events)
+            p = self._spill_path(sid)
+            self.spill_dir.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".jsonl.tmp")             # 先写临时再原子替换：别让半截文件当成历史
+            with tmp.open("w", encoding="utf-8") as f:
+                for ev in events:
+                    f.write(ev.model_dump_json() + "\n")
+            os.replace(tmp, p)
+            self._events.pop(sid, None)
+            self._counters.pop(sid, None)
+            self._subscribers.pop(sid, None)
+        logger.info(f"[ring-retire] {sid} 的 {n} 条事件已落冷档并卸出内存")
+        return True
+
+    def discard(self, sid: str):
+        """会话被删：ring 与冷档一起走，不留孤儿文件。"""
+        with self._lock:
+            self._events.pop(sid, None)
+            self._counters.pop(sid, None)
+            self._subscribers.pop(sid, None)
+        p = self._spill_path(sid)
+        if p is not None:
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
 
     def publish(self, sid: str, kind: str = "report", **fields) -> Event:
         try:

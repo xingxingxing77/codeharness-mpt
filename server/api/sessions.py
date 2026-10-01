@@ -236,6 +236,11 @@ def delete_session(sid: str, request: Request, user: str = Depends(current_user)
         # runner 还在往这条记录合流 cost/status，删了会留下往空会话写事件的怪状态
         raise HTTPException(409, "会话进行中，请先停止再删除")
     _get(request, "store").delete(s.id)
+    # C115：ring 与它的冷档一起走，别在盘上留一份没人认领的历史（Redis 版 bus 没有 `discard`
+    # ——那本账在 Redis，由它自己的键生命周期管，所以这里 getattr 兜一层，不新造接口）。
+    discard = getattr(_get(request, "bus"), "discard", None)
+    if discard is not None:
+        discard(s.id)
     return {"ok": True, "deleted": s.id}
 
 
