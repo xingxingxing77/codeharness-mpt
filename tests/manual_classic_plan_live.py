@@ -1,7 +1,7 @@
 """③ C104 未验②：经典线多角色「同场各一张计划卡」在**真模型真会话**里的有界活体。
 
 判据原话（`plan/frontend.md` §1.1「第十三件」未验②）：「多角色同场各一张卡只由合成事件证」。
-本工装补的就是这一格：起 **`paradigm=classic`** 那条腿（`codeharness/team.classic_team` → 一串 RoleZero 角色，
+本工装补的就是这一格：起 **`paradigm=classic`** 那条腿（**C114 起 `PARADIGM=dynamic` 也走这颗工装，三件闸与判据一字不改**）（`codeharness/team.classic_team` → 一串 RoleZero 角色，
 `_report_plan` 经 `set_role` 注 role → runner `_make_sink` 把 Task-object 卡 uuid 收敛成 `plan-{role}`，`runner.py:678`）。
 
 **结构性断言（不拿模型脾气判 pass/fail）**：
@@ -43,7 +43,10 @@ SEND_GATE = int(os.environ.get("CLASSIC_SEND_GATE", "16"))
 MAX_CNY = float(os.environ.get("CLASSIC_MAX_CNY", "0.60"))
 CAP_SEC = float(os.environ.get("CLASSIC_CAP_SEC", "280"))
 MAX_TOKENS = int(os.environ.get("CLASSIC_MAX_TOKENS", "1200"))
-PROJECT = "classic_plan_live"
+# 文件名里的 classic 是它的出身（16:1x 那一棒只跑经典线）。C114 复用同一套闸与同一套判据跑 dynamic，
+# 所以范式做成参数：**默认仍是 classic，不带环境变量时行为逐字不变**。闸门三件一个没动。
+PARADIGM = os.environ.get("PARADIGM", "classic")
+PROJECT = f"{PARADIGM}_plan_live"
 _sent = 0
 _watch = {}
 
@@ -176,7 +179,7 @@ def main() -> int:
                 "idea": "两个角色各自先立自己的小计划再动手：架构师负责把『摄氏转华氏』拆成 2-3 步计划，"
                         "工程师负责把『结果写成一行的落盘』拆成 2-3 步计划。不要直接写代码，先各自给出任务清单",
                 "project_name": PROJECT,
-                "paradigm": "classic",          # ← 经典线多角色那张队形
+                "paradigm": PARADIGM,             # ← classic=上一棒那两条腿；dynamic=C114（hire 出来的角色各立计划）
                 "permission": "workspace_write",  # ← 见文件头：readonly 会把 PM 的 PrepareDocuments（写动作）
                                                   #   挡在审批闸、早于任何 think ⇒ 永远 0 发；workspace_write
                                                   #   让写进本会话工作区免审，图才走得动。花费仍靠三件闸封顶。
@@ -209,6 +212,9 @@ def main() -> int:
                     break
                 time.sleep(1.5)
             _watch["cost"] = c.get(f"/api/sessions/{sid}").json().get("cost") or {}
+            # 花费读数只能在 app 还活着的时候取：`_spent()` 读的是 runner 那份内存账本，
+            # `with TestClient(...)` 一关就成 ¥0.000000（三场连现证：④ 有数、finally 那句全是 0）。
+            _watch["spent"] = _spent()
             c.post(f"/api/sessions/{sid}/stop")
             time.sleep(1.0)
             cost = c.get(f"/api/sessions/{sid}").json().get("cost") or {}
@@ -227,6 +233,19 @@ def main() -> int:
         print(f"② 每个 plan-* uuid 上收了几条 Task-object（>1＝同角色重复推进，前端按 uuid 认一张＝收敛正常，不是裂卡）：{ {u: n for u, n in plans.items()} }")
         print(f"③ 未收敛成 plan- 前缀的 Task-object 卡（应为空＝`runner.py:678` 的改写每条都命中）：{nonplan}")
         print(f"   Task-object 事件合计 {total_cards} 条，全落在 {len(replay_cards)} 个 uuid 上")
+        # 归因读数：0 张卡有两张完全不同的脸——「场上根本没第二个角色」与「有角色但不立计划」。
+        # 不印这个就没法把「没验成」写成结论（三场都栽过这一刀，22:4x~23:0x 现证）。
+        roles = {}
+        for e in hist:
+            r = e.get("role") or "(无 role)"
+            roles[r] = roles.get(r, 0) + 1
+        hirey = [e for e in hist if "hire" in f"{e.get('name')}{e.get('value')}{e.get('block')}".lower()
+                 or "publish" in f"{e.get('name')}{e.get('value')}{e.get('block')}".lower()
+                 or "send_to" in f"{e.get('value')}".lower()]
+        print(f"⑤ 场上出现过的 role（按事件数）：{roles}")
+        print(f"⑥ 带 hire/publish/send_to 字样的事件 {len(hirey)} 条；"
+              f"去重角色数 {len([r for r in roles if r != '(无 role)'])} ⇒ "
+              f"{'0 个第二角色：这场「>=2 张卡」结构性不可达，别记成「有角色不立计划」' if len([r for r in roles if r != '(无 role)']) < 2 else '有多个角色在场：此时的 0 张才是「自发没用到」的读数'}")
         print(f"④ 产品那本账：{cost}")
         if _watch.get("gate") and not ready:
             print("\n⚠ 撞闸退出、**未跑完**：" + _watch["gate"] + "｜上面是中间产物，不是闭合读数")
@@ -250,17 +269,20 @@ def main() -> int:
         # 形状到了：>=2 个不同 plan-* uuid，且没有一条 Task-object 漏在随机 uuid 外＝改写每条命中（同角色多条共享一个 uuid 是正常更新，不算裂卡）
         assert not nonplan, \
             f"有 Task-object 没被收敛成 plan-{{role}}（{sorted(nonplan)}）⇒ C104 改写没覆盖全部真发射"
-        print("\n✅ ③ C104 未验② 闭合：真模型真经典线上，>=2 个角色各出一张 `plan-{{role}}` 计划卡"
+        print(f"\n✅ C104 未验② 闭合分支：真模型真 {PARADIGM} 线上，>=2 个角色各出一张 `plan-{{role}}` 计划卡"
               f"（{sorted(plans)}），且**每一条 Task-object 真发射都被改写**（0 条漏在随机 uuid）——"
               "同角色多次推进共享同一个 uuid（前端认一张），正是收敛的预期形状。")
         return 0
     finally:
+        # 花费读数要**在 app 还活着时取**（`_watch["spent"]`，见上面那行）：`_spent()` 读的是 runner
+        # 那份内存账本，`with TestClient(...)` 一关、或 tmp 一删，就变 ¥0.000000（四场连现证）。
+        spent = _watch.get("spent", _spent())
         settings.enable_rag, settings.platform.auth_enabled, settings.platform.use_redis, \
             ss.SESSIONS_FILE, settings.workspace_root = keep
         import shutil as sh
         sh.rmtree(tmp, ignore_errors=True)
         print(f"清场：临时工作区存在={(tmp / 'ws').exists()}｜临时 sessions 存在={(tmp / 'sessions.json').exists()}"
-              f"｜出网合计 {_sent} 发｜账上 ¥{_spent():.6f}")
+              f"｜出网合计 {_sent} 发｜**清场前**账上 ¥{spent:.6f}｜范式={PARADIGM}")
 
 
 if __name__ == "__main__":
