@@ -441,13 +441,68 @@ def t16_task_block_opens_with_meta():
     assert "prose_fields" not in m1, f"没声明名单却凭空多出名单：{m1}"
 
 
+def t17_llm_stream_degrade_zero_loss():
+    """C112（④）：LLM token 流队列有界 + 满档整段降级——**降级退化的是粒度不是正文**。
+    判据承重句是「收到的 content 逐字拼回全部输入」：这条红了就是「把无界内存病换成了数据丢失病」。"""
+    from codeharness.logs import (get_llm_stream_queue, log_llm_stream, MAX_LLM_STREAM_QUEUE,
+                                  set_llm_stream_logfunc)
+    orig_logfunc = _set_noop_stream_log()
+    try:
+        ev = _collect()
+        box = {}
+
+        async def _degrade():
+            async with RP.ThoughtReporter(enable_llm_stream=True):
+                q = get_llm_stream_queue()
+                box["q"] = q
+                assert q.maxsize == MAX_LLM_STREAM_QUEUE, \
+                    f"C112 ① 队列没上界（maxsize={q.maxsize}）——无界就是这条件的病根"
+                assert q._degraded is False and q._spill == [], "C112 建队时降级位/缓冲初值不对"
+                # 同步 for 里没有 await ⇒ 消费者任务在这一段抢不到 CPU，前 cap 条 put 成功后必满、必降级
+                for i in range(MAX_LLM_STREAM_QUEUE + 50):
+                    log_llm_stream("p%05d" % i)
+        asyncio.run(_degrade())                     # __aexit__ 把 _spill 合成一条排在 None 之前
+        q = box["q"]
+        assert q._degraded, "C112 ② 灌了 cap+50 片却没置降级位（说明没走真生产者或没界）"
+        got = "".join(e["value"] for e in ev if e["name"] == "content")
+        want = "".join("p%05d" % i for i in range(MAX_LLM_STREAM_QUEUE + 50))
+        assert got == want, \
+            f"C112 整段降级丢了字：期望 {len(want)} 字、收到 {len(got)} 字 ⇒ 正文断字（数据丢失），不是粒度退化"
+        assert ev and ev[-1]["name"] == "end_marker", "C112 降级后没收尾 end_marker"
+
+        # 阳性对照：远小于 cap 的逐片**不该**降级，且一条一片原样到齐（否则上面那条红可能只是恒真）
+        ev2 = _collect()
+        box2 = {}
+
+        async def _normal():
+            async with RP.ThoughtReporter(enable_llm_stream=True):
+                box2["q"] = get_llm_stream_queue()
+                for p in ("甲", "乙", "丙"):
+                    log_llm_stream(p)
+        asyncio.run(_normal())
+        assert not box2["q"]._degraded, "C112 阳性对照破：3 片（远小于 cap）就误判降级"
+        got2 = [e["value"] for e in ev2 if e["name"] == "content"]
+        assert got2 == ["甲", "乙", "丙"], f"C112 cap 内逐片序列/粒度变了：{got2}"
+    finally:
+        set_llm_stream_logfunc(orig_logfunc)
+
+
+def _set_noop_stream_log():
+    """临时把 `_llm_stream_log` 静音（真生产者的旁路打印，与本判据无关），返回原函数以便复原。"""
+    from codeharness.logs import set_llm_stream_logfunc, _llm_stream_log
+    orig = _llm_stream_log
+    set_llm_stream_logfunc(lambda *a, **k: None)
+    return orig
+
+
 def main():
     checks = [t1_class_surface, t2_blocktype_vocabulary, t3_payload_shape, t4_path_absolute,
               t5_context_manager_and_hooks, t6_llm_stream_bridge,
               t7_retry_targets_only_missing, t8_no_retry_when_complete, t9_empty_semantics,
               t10_merge_never_clobbers, t11_partial_schema_keys, t12_plain_text_path_untouched,
               t13_artifact_filename_gate, t14_tool_call_report,
-              t15_block_markdown_not_schema_dump, t16_task_block_opens_with_meta]
+              t15_block_markdown_not_schema_dump, t16_task_block_opens_with_meta,
+              t17_llm_stream_degrade_zero_loss]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

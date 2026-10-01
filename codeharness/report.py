@@ -157,7 +157,14 @@ class ResourceReporter(BaseModel):
         """Exit the asynchronous streaming callback context."""
         if self.enable_llm_stream and exc_type != asyncio.CancelledError:
             from codeharness.logs import get_llm_stream_queue
-            await get_llm_stream_queue().put(None)
+            q = get_llm_stream_queue()
+            if q is not None and getattr(q, "_spill", None):
+                # C112 整段降级的补完腿：满档后攒下的逐片合成**一条** content 排在 None 之前入队，
+                # 消费者照常逐条 async_report ⇒ 多出的这一条就是整段尾巴，正文一字不少（await 会等
+                # 消费者腾出位置，降级只发生在消费者慢的那一段，正常场恒空、行为逐字不变）。
+                await q.put("".join(q._spill))
+                q._spill = []
+            await q.put(None)
             if self._llm_task:
                 await self._llm_task
             self._llm_task = None

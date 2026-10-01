@@ -24,6 +24,13 @@ METAGPT_ROOT = Path(__file__).parent.parent   # = E:\Codeharness
 
 LLM_STREAM_QUEUE: ContextVar[asyncio.Queue] = ContextVar("llm-stream")
 
+# C112（④，10-01 用户授权跨面修 codeharness/**）：LLM token 流队列的界。原先 `asyncio.Queue()` 无界，
+# `log_llm_stream` 每片 `put_nowait`——消费端（Reporter._llm_stream_report → SSE）一旦比模型出片慢，
+# 这条腿就在内存里无界堆正文。**不能照 SSE 那套丢最旧**：token 流没有可回放的真源，丢中间＝正文断字。
+# 所以走**整段降级**：队列满 ⇒ 当段起后续逐片不再逐条入队，改攒进 `_spill`，段尾由 Reporter 合成
+# **一条** content 事件补完 ⇒ 粒度退化（少掉打字机效果），正文一字不少。界取 4096（与 SSE 订阅队列同数）。
+MAX_LLM_STREAM_QUEUE = 4096
+
 
 class ToolLogItem(BaseModel):
     type_: str = Field(alias="type", default="str", description="Data type of `value` field.")
@@ -77,7 +84,17 @@ def log_llm_stream(msg):
 
     queue = get_llm_stream_queue()
     if queue:
-        queue.put_nowait(msg)
+        if getattr(queue, "_degraded", False):
+            queue._spill.append(msg)          # 本段已整段降级：逐片先攒着，段尾一次补
+        else:
+            try:
+                queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                queue._degraded = True         # C112：满档即整段降级，此后不再逐条入队（保序）
+                queue._spill.append(msg)
+                logger.warning(
+                    f"[llm-stream-degrade] 逐片队列满 {MAX_LLM_STREAM_QUEUE} 条，"
+                    f"本段剩余片段改由段尾合成一条 content 上报（正文不丢，只退打字机粒度）")
     _llm_stream_log(msg)
 
 
@@ -138,8 +155,14 @@ def create_llm_stream_queue():
 
     Returns:
         The newly created asyncio.Queue instance.
+
+    C112：队列有界（`maxsize=MAX_LLM_STREAM_QUEUE`），并挂两个降级用的属性——`_degraded`（满后置真）、
+    `_spill`（满之后攒的逐片，段尾由 Reporter 合成一条 content 补回）。缺这两个属性时 Reporter 侧按
+    「没降级」处理，所以老代码路径零行为变化。
     """
-    queue = asyncio.Queue()
+    queue = asyncio.Queue(maxsize=MAX_LLM_STREAM_QUEUE)
+    queue._degraded = False
+    queue._spill = []
     LLM_STREAM_QUEUE.set(queue)
     return queue
 
