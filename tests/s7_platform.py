@@ -1500,10 +1500,25 @@ async def t25_terminal_ring_offloads_to_cold_storage():
             assert rec == ["t25-terminal"], f"t25⑦ 终态没接上 retire（{rec}）⇒ ring 永远留在内存，C115 等于没修"
         await _check_terminal()
 
+        # ⑧ 同一个冷档目录里**两条 bus**（≈两个 worker 各揣一份 ring）都 retire 同一 sid：
+        #    写盘是 `.tmp` + `os.replace`，所以后写者整份胜出——读回来必须是**完整可读的一档**，
+        #    不许两次写交错成半截（这条钉的就是 §1.14 里「多 worker + 无 Redis 以最后写的那台为准」那句边界）。
+        from server.events import Event
+        sid8, other = "t25-two", SessionEventBus(max_events=50, spill_dir=tmp)
+        for i in range(4):
+            bus.publish(sid8, kind="report", block="Thought", name="delta", value="A%d" % i)
+            other.publish(sid8, kind="report", block="Thought", name="delta", value="B%d" % i)
+        assert bus.retire(sid8) is True and other.retire(sid8) is True, "t25⑧ 两台都没卸成（前置失配）"
+        raw = [ln for ln in (tmp / "t25-two.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert len(raw) == 4, f"t25⑧ 两档写成交错/半截：读到 {len(raw)} 行"
+        vals = [Event.model_validate_json(ln).value for ln in raw]
+        assert vals in (["A0", "A1", "A2", "A3"], ["B0", "B1", "B2", "B3"]), \
+            f"t25⑧ 读回来的不是任何一整档（混了 ⇒ 原子替换没生效）：{vals}"
+
         _ok("t25", "终态会话的 ring 落冷档再卸、history 逐字不减；有订阅者不卸；无 spill_dir 不裸卸；"
                    "重开从冷档尾接 seq（不重不断）；discard 连冷档一起清；"
                    "⑥ 产线 create_app 那台真带冷档目录且卸得动、⑦ runner 的 terminal 出口真调 retire"
-                   "（terminal=False 不许调）")
+                   "（terminal=False 不许调）；⑧ 同目录两台 bus 竞写同一 sid ⇒ 读回来必是完整一档，不许交错")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
