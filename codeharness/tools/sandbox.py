@@ -2,6 +2,7 @@
 共享件 `run_proc` / `kill_tree`：工具层与 Terminal 都用它们，别再各写一份超时收尸。"""
 import asyncio
 import os
+import signal
 import sys
 import uuid
 from pathlib import Path
@@ -27,8 +28,13 @@ async def kill_tree(proc) -> None:
             "taskkill", "/F", "/T", "/PID", str(proc.pid), stdout=DEVNULL, stderr=DEVNULL)
         await tk.wait()
     else:
-        # ponytail: POSIX 未做 setpgid/killpg，孙进程会漏杀。升级路径：起进程时 start_new_session=True + os.killpg
-        proc.kill()
+        # C120：spawn 侧（run_proc / terminal._start_process）已让子进程自成一个进程组，
+        # 这里整组带走——原来 `proc.kill()` 只杀直接子进程，孙进程活着且攥住继承的管道
+        # （Windows 那条是 t32 实测过的同族病）。原 ponytail 注记的升级路径至此兑现。
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()          # 组已散/不给杀：退回单体击杀，收尸本身不许炸
 
 
 async def _reap(proc, pumps) -> None:
@@ -63,6 +69,10 @@ async def run_proc(argv, cwd: Path | None = None, timeout: int = 60, shell: bool
                   # 子进程 python 对管道是块缓冲：不强制无缓冲，超时前 print 的东西全留在它自己的缓冲区里
                   env={**(env or os.environ), "PYTHONUNBUFFERED": "1"},
                   stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    # C120：POSIX 上让子进程自成一个进程组，`kill_tree` 的 killpg 才整组够得着；
+    # Windows 走 taskkill /T 不需要（t32 实证）
+    if not sys.platform.startswith("win"):
+        kwargs["start_new_session"] = True
     # create_subprocess_exec 是 *args 签名：Windows 上传单个 list 不会被摊平，得自己摊
     proc = await (asyncio.create_subprocess_shell(argv, **kwargs) if shell
                   else asyncio.create_subprocess_exec(*argv, **kwargs))

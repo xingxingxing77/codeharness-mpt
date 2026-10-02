@@ -1974,6 +1974,27 @@ def t58_gitignore_blocks_runtime_logs():
           f"`logs/*.md` 与 `docs/*.txt` 都没被误挡；库里那两颗历史日志 {tracked} 照旧（本件只关渠道、没动跟踪态）")
 
 
+def t59_posix_spawn_is_session_leader_and_killpg():
+    """C120：POSIX 起进程带 `start_new_session`（自成进程组）、`kill_tree` POSIX 分支走整组击杀。
+
+    本机 Windows 钉不了真杀树行为（`os.killpg` 是 POSIX-only）——按 §4 第 9 条记「已修未实测」，
+    真行为由 Docker/Linux 部署面自证；这里钉三处形状 + Windows taskkill 分支逐字不动（t32 回归
+    在同一套件里跑）。原 `kill_tree` 的 ponytail 注记（POSIX 孙进程漏杀）至此兑现删除。"""
+    import inspect
+    from codeharness.tools import sandbox
+    from codeharness.tools.libs import terminal as term_mod
+
+    kill_src = inspect.getsource(sandbox.kill_tree)
+    assert "start_new_session" in inspect.getsource(sandbox.run_proc), \
+        "t59 run_proc 没带 start_new_session——POSIX 孙进程照旧漏杀"
+    assert "killpg" in kill_src and "SIGKILL" in kill_src, "t59 kill_tree POSIX 分支没走整组击杀"
+    assert "taskkill" in kill_src, "t59 Windows 分支被动了——t32 实证过的 taskkill 形状不许动"
+    assert "start_new_session" in inspect.getsource(term_mod.Terminal._start_process), \
+        "t59 terminal spawn 没进进程组——散会 _kill 的 killpg 够不着它的孙进程"
+    print("  ok  t59 POSIX spawn 自成进程组（run_proc + terminal 两处）+ kill_tree 整组击杀"
+          "（形状守卫；真杀树行为 Linux/Docker 部署面自证，Windows taskkill 分支未动）")
+
+
 def main():
     checks = [t1_registry_items_are_langchain_tools, t2_sibling_prefix_escape,
               t3_parent_and_absolute_escape, t4_write_read_roundtrip_creates_dirs,
@@ -2023,7 +2044,8 @@ def main():
               t55_bugfix_ticket_survives_model_failure,
               t56_model_supplied_path_keys_are_gated,
               t57_no_action_deletes_evidence_before_the_model,
-              t58_gitignore_blocks_runtime_logs]
+              t58_gitignore_blocks_runtime_logs,
+              t59_posix_spawn_is_session_leader_and_killpg]
     from _gatecov import run_all, verdict
     skipped, silent = run_all(checks, ok_line=True)
     for _ in range(20):
@@ -2047,7 +2069,7 @@ def main():
           f"（t39 默认档不裁/t40 两条兜底各留告警/t41 精排不抛/t42 词法腿现值/t43 名册不涨/"
           f"t44 融合+常驻现值（离线显式跳过）/t45 死端口退词法并留话/t46 旧 held-out（09-22 起降级为已用集）/"
           f"t47 新 held-out）**各格现值只印在自己的输出行里，这里不复述**——这行手抄过两次数、漂了两次）"
-          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器） + C108 顺序契约扩面 1 组（t57：整棵 `actions/` 里「删除证据排在模型调用之前」必须 0 处，`removeprefix` 这类字符串方法不算删除而真 `unlink` 照报，改前形状红／现网形状不红／三种接收者形态全认得） + C111 日志入库渠道 1 组（t58：`logs/` 四类运行时产物必须由**共享** `.gitignore` 挡住而不是只靠本机私有 exclude，`logs/*.md` 与 `docs/*.txt` 不许被误挡，库里那两颗历史日志的跟踪态照旧）")
+          f" + C73/C74 写路径 3 组（t51：编辑一行不许改整份文件行尾/PYTHONUTF8=0 子进程写出仍 utf-8+LF/两类文件的文本写调用都带 encoding+newline） + P0-1 编辑器异常恢复 1 组（t53：泛捕获不许拿恒空备份盖回源文件/applied 两半各说实话/AST 双向钉住 lint 支那处唯一合法回滚还在） + P1 读链死岛 1 组（t54：pdf/docx 不再先跳不存在的 omniparse_client、缺组件走人话那态、utils 模块级 import 零死引用、read_docx 是函数不是模块） + P1 工单先删后调 1 组（t55：模型失败路工单必须还在且留 warning、成功路才消费、AST 顺序 unlink 排在 aask 之后并自带翻红对照） + C105 审批路径键 1 组（t56：模型可控的 `readme_path`/`repo_path`/`image_path` 必须纳进 `_PATH_KEYS`，越界→升级、根内→放行、无路径键→按档三档各对，形状扫描按三种接收者形态自证仪器） + C108 顺序契约扩面 1 组（t57：整棵 `actions/` 里「删除证据排在模型调用之前」必须 0 处，`removeprefix` 这类字符串方法不算删除而真 `unlink` 照报，改前形状红／现网形状不红／三种接收者形态全认得） + C111 日志入库渠道 1 组（t58：`logs/` 四类运行时产物必须由**共享** `.gitignore` 挡住而不是只靠本机私有 exclude，`logs/*.md` 与 `docs/*.txt` 不许被误挡，库里那两颗历史日志的跟踪态照旧） + C120 POSIX 进程组 1 组（t59：`run_proc` 与 `terminal._start_process` 两处 spawn 在 POSIX 带 `start_new_session`、`kill_tree` POSIX 分支走 killpg 整组击杀且 Windows taskkill 分支未动——形状守卫，真杀树 Linux/Docker 自证）")
     print(f"S4 覆盖率：{len(checks)} 组里真判 {len(checks) - len(skipped) - len(silent)} 组"
           + verdict(skipped, silent))
 

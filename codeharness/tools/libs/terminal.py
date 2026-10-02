@@ -74,13 +74,15 @@ class Terminal:
         }
 
     async def _start_process(self):
-        self.process = await asyncio.create_subprocess_exec(
-            *self.shell_command,
-            stdin=PIPE, stdout=PIPE, stderr=STDOUT,
-            executable=self.executable,
-            env=os.environ.copy(),
-            cwd=str(session_root()),
-        )
+        spawn_kw = dict(stdin=PIPE, stdout=PIPE, stderr=STDOUT,
+                        executable=self.executable,
+                        env=os.environ.copy(),
+                        cwd=str(session_root()))
+        # C120：POSIX 上自成一个进程组——散会 `_kill` 走共享 `kill_tree` 时 killpg 才够得着
+        # 孙进程；Windows 走 taskkill /T 不需要（t32 实证）
+        if not sys.platform.startswith("win"):
+            spawn_kw["start_new_session"] = True
+        self.process = await asyncio.create_subprocess_exec(*self.shell_command, **spawn_kw)
         await self._check_state()
 
     async def _check_state(self):
