@@ -48,6 +48,10 @@ export interface ApprovalItem {
   node: string
   ts: number
   outcome?: string
+  /** C119/C144：谁批的、何时批的（回执 {outcome,by,ts} 的后两笔）。C119 前的旧格式回执
+   *  （30 天 TTL 自然淘汰）没有这两笔——展示层必须容空，不许把「—」编成一个名字。 */
+  decided_by?: string
+  decided_at?: number
 }
 
 export interface WEvent {

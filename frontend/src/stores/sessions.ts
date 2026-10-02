@@ -57,6 +57,9 @@ export const useSessionStore = defineStore('sessions', {
     /** 当前会话的待批项（批次36）。SSE `approval` 事件驱动，切会话时 GET 补一次——
      *  刷新页面不该把已经挂着的审批弄没。 */
     approvals: [] as ApprovalItem[],
+    /** C144：已决议的审批（谁批的、何时批的，C119 回执带 decided_by/decided_at）。
+     *  同一个 GET /approvals 的 `decided` 口，与 pending 一起载入；resolved 事件到达时重拉一次。 */
+    decidedApprovals: [] as ApprovalItem[],
     /** B6：排着还没被 route 取走的插话。唯一真值仍是服务端队列，这里只是投影
      *  （开/切会话从 GET /queue 取一次，之后靠 kind=queue 事件跟着走）。 */
     queue: [] as QueueItem[],
@@ -320,6 +323,8 @@ export const useSessionStore = defineStore('sessions', {
       try {
         const r = await api.approvals(sid)
         this.approvals = sid === this.currentId ? r.pending || [] : this.approvals
+        // C144：同一口带出的已决议列表——批完的卡不该从界面上消失得无影无踪。
+        this.decidedApprovals = sid === this.currentId ? r.decided || [] : this.decidedApprovals
       } catch {
         /* 后端未升级或越权：保持现状，不弹错 */
       }
@@ -345,6 +350,7 @@ export const useSessionStore = defineStore('sessions', {
       this.spans = []
       this.humanQuestion = null
       this.approvals = []
+      this.decidedApprovals = []
       this.lastSeq = 0
       this.lastCursor = ''
       this.earliestCursor = ''
@@ -512,8 +518,13 @@ export const useSessionStore = defineStore('sessions', {
         // requested 按 id 去重入队（重放/双开标签页不该冒出两张一样的卡）；
         // resolved 只出队——之后会话回到什么状态由紧随其后的 status 事件说，这里不猜。
         const item = (ev.value || {}) as ApprovalItem
-        if (ev.name === 'resolved') this.approvals = this.approvals.filter((a) => a.id !== item.id)
-        else if (item.id && !this.approvals.some((a) => a.id === item.id)) {
+        if (ev.name === 'resolved') {
+          this.approvals = this.approvals.filter((a) => a.id !== item.id)
+          // C144：resolved 的载荷只有 {id,outcome}，不带 who/when——重拉一次拿权威回执，
+          // 让「谁批的」对所有看着这场的人（含决策者自己）都落进审批记录。
+          // 回放期不会到这儿：approval 在 PAGE_REPLAY_OPAQUE 里，上面已经 return。
+          void this.loadApprovals(this.currentId)
+        } else if (item.id && !this.approvals.some((a) => a.id === item.id)) {
           this.approvals.push(item)
           if (this.current) this.mergeSessionLocal(this.current.id, { status: 'awaiting_human' })
           this.status = 'awaiting_human'

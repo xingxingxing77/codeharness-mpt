@@ -1932,6 +1932,21 @@ def t26_ui_bugfix_batch():
     assert ':aria-label="`为 ${proj.name} 添加环境变量`"' in ep, "t26⑥ 加号钮无可访问名"
     assert "eorg" not in ep and "geekan" not in ep, "t26⑥ 假归属 org 又渲染回来了"
 
+    # ⑦ C144：审批记录——后端 `GET /approvals` 的 `decided` 口（C119 带 decided_by/decided_at）
+    #    前端必须消费：批完的卡不许从界面上消失得无影无踪，「谁批的」只在后端可见等于没有审计面。
+    ts_ = rd("types.ts")
+    assert "decided_by?: string" in ts_ and "decided_at?: number" in ts_, \
+        "t26⑦ C144：ApprovalItem 缺审批人/时刻字段（后端回执的两笔没接线）"
+    assert "decidedApprovals: [] as ApprovalItem[]" in ss, "t26⑦ C144：store 没有已决议列表"
+    assert "r.decided || []" in ss, "t26⑦ C144：loadApprovals 没接 decided 口"
+    assert ss.count("void this.loadApprovals(this.currentId)") == 2, \
+        "t26⑦ C144：resolved 重拉丢了（或 respond 失败回滚那条丢了）——两处各司其职"
+    assert "decidedApprovals = []" in ss, "t26⑦ C144：切会话没清已决议列表（旧会的记录会串到新会话）"
+    assert "审批记录" in cr and "decided_by" in cr and "已允许" in cr and "已拒绝" in cr, \
+        "t26⑦ C144：审批记录区没接（或结果人话丢了）"
+    assert "a.decided_by" in cr and "a.decided_at" in cr, \
+        "t26⑦ C144：记录行的 who/when 不是从回执字段读的（编数据 = C96 假读数族）"
+
 
 def t27_recall_visibility():
     """R3（09-28 普查批第 3 批）：召回「挂了」与「库里没东西」在界面上必须长得不一样。

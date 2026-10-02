@@ -74,6 +74,19 @@
 
       <TrajectoryTable v-if="ui.centerView === 'trajectory'" :rows="trajRows" @jump="jumpToBlock" />
 
+      <!-- C144：审批记录——批完的卡不该消失得无影无踪。挂在内容流尾、随正文滚走，
+           只在有已决议项时出现；C119 前的旧回执没有 who/when，只显示结果不编造。 -->
+      <div v-if="ui.centerView === 'chat' && store.decidedApprovals.length"
+           class="approvalLog" role="log" aria-label="审批记录">
+        <div v-for="a in store.decidedApprovals" :key="a.id" class="alRow">
+          <span class="alOutcome" :class="a.outcome === 'allowed-once' ? 'ok' : 'no'">
+            {{ a.outcome === 'allowed-once' ? '已允许' : '已拒绝' }}
+          </span>
+          <span class="alTool">{{ a.tool }}</span>
+          <span class="alMeta">{{ alMeta(a) }}</span>
+        </div>
+      </div>
+
       <div v-if="ui.centerView === 'chat'" class="toBottomSlot">
         <button v-if="!follow.atBottom.value" class="toBottom" aria-label="回到底部" @click="follow.scrollToBottom(true)">
           <DsIcon name="chevron-down" :size="14" />
@@ -112,9 +125,20 @@ import { useUiStore } from '../../stores/ui'
 import { useFollowScroll } from '../../composables/useFollowScroll'
 import { buildRows } from '../../utils/turns'
 import { buildTrajectory } from '../../utils/trajectory'
+import type { ApprovalItem } from '../../types'
 
 const store = useSessionStore()
 const ui = useUiStore()
+
+/** C144：审批记录行的人话尾巴——「谁 · 何时」。旧格式回执两笔都缺，返回空串
+ *  （显示层只少一截，不编「未知用户」这种假话）；decided_at 是秒级 Unix 时间。 */
+const alMeta = (a: ApprovalItem): string => {
+  const when = a.decided_at
+    ? new Date(a.decided_at * 1000).toLocaleString('zh-CN',
+        { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : ''
+  return [a.decided_by, when].filter(Boolean).join(' · ')
+}
 
 /** 页签条：参考项目由 conversation.view 的贡献数决定（>1 才显示），我们固定两个视图。 */
 const VIEWS = [
@@ -557,5 +581,50 @@ onBeforeUnmount(() => clearInterval(tick))
     background: none;
     -webkit-text-fill-color: currentColor;
   }
+}
+
+/* C144 审批记录：安静的元数据行，不与对话内容抢注意力。
+   动画决策（emil 框架）：低频更新的状态文本，不配动画——出现即事实。 */
+.approvalLog {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: calc(var(--dsh-chat-content-width, 748px) + 32px);
+  margin: 4px auto 0;
+  padding: 0 8px;
+}
+
+.alRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 22px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.alOutcome {
+  flex: none;
+  min-width: 44px;
+  font-weight: 500;
+}
+
+.alOutcome.ok {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.alOutcome.no {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.alTool {
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
+.alMeta {
+  margin-left: auto;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
 }
 </style>
