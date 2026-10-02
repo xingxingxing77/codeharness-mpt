@@ -1387,6 +1387,11 @@ def t14_spawn_drops_quietly_when_the_row_vanished():
     assert s.id not in runner.tasks, "② 死任务还占着 tasks 槽（改前形状：pop 在 try 里、抛穿在 try 之前）"
     assert runner.graphs.get(s.id) is None and runner.chats.get(s.id) is None, \
         "③ 散会没走：图或插话队列还留在进程里（`_forget` 才是这条路的收尾）"
+    # ⑥ C117：这场没「跑失败」，是行没了 ⇒ 不许再打运维按数的那一行。
+    #    现证（改前，`E:/tmp/ch_c116_s17.out:447`）：`[session-failed] sid=… KeyError: '<sid>'` 在前、
+    #    `[runner-dropped] sid=…` 紧跟，同一个 sid 两条互相矛盾的告警。
+    assert "[session-failed]" not in log, \
+        f"⑥ C117 假告警：撞空会话被记成『跑失败了』（运维按 [session-failed] 计数会凭空多一场）：{log[:280]!r}"
 
     # ④ 同族另一条路：`start` 与落 running 之间隔着 `_prepare`（真窗口），撞空时也要安静
     store2, runner2, s2 = _make_runner()
@@ -1410,6 +1415,8 @@ def t14_spawn_drops_quietly_when_the_row_vanished():
     assert err2 is None, f"④ `_run` 同族那一路还在抛穿：{err2!r}"
     assert "[runner-dropped]" in log2, "④ `_run` 撞空会话时没走同一个咽喉（两处各写一遍必漂）"
     assert s2.id not in runner2.tasks, "④ `_run` 这条路的槽没摘干净"
+    assert "[session-failed]" not in log2, \
+        f"⑥b C117 同族那一路（`_run`）也在打假告警：{log2[:280]!r}"
 
     # ⑤ 阳性对照：会话行**还在**时，这条守卫不许咽掉正常路径（落 running→跑完→按断点驻留）
     store3, runner3, s3 = _make_runner()
@@ -1428,7 +1435,8 @@ def t14_spawn_drops_quietly_when_the_row_vanished():
         f"⑤ 正常恢复路被这条守卫改坏了（应照旧停在待人工）：status={status_after}"
     assert s3.id not in runner3.tasks, "⑤ 正常收口后槽没摘"
     print("  ok  t14 起跑咽喉：会话行在起跑与落态之间没了 ⇒ `_resume`/`_run` 两路都不抛穿、"
-          "槽按任务对象摘、`[runner-dropped]` 可 grep、散会走到底；会话健在时正常恢复路一字未变")
+          "槽按任务对象摘、`[runner-dropped]` 可 grep、散会走到底；会话健在时正常恢复路一字未变；"
+          "⑥ C117 撞空那两路**不打** `[session-failed]`（阳性对照＝t9① 真失败仍要打，两处共用一个咽喉）")
 
 
 def main():

@@ -915,6 +915,19 @@ class SessionRunner:
                            "此前已产出的文件与会话记录都保留。要接着做，请改写触发拦停的那段内容后重开一场。")
 
     def _fail(self, sid: str, exc: Exception):
+        # C117：会话行在起跑之后被人删掉 ⇒ 这场不是「跑失败了」，是「行没了、按散会收」。
+        # 改前这里先打 `[session-failed]`（运维按这一行计数），再自己撞第二次 KeyError 被咽喉
+        # `guarded` 咽掉，于是同一场留两条互相矛盾的告警——现证 `E:/tmp/ch_c116_s17.out:447`：
+        # `session-failed sid=41ecad33 … KeyError: '41ecad33'` 在前、`runner-dropped sid=41ecad33` 紧跟。
+        # 也不发 error 事件、不 `_publish_status`：给一个已删的会话发事件，会把它那支 ring 重新建出来
+        # （正撞 C115 刚收的账——驱逐的前提是没人再往里投）。
+        if self.store.get(sid) is None:
+            # ⚠ 这条文案里**不许出现** `[session-failed]` 字面量：本仓判据就是按那串 grep 的，
+            #   写了就会让「不打假告警」这件事自己造出一条假阳性（10-02 现证：文案一写上去，
+            #   t14 的 ⑥b 立刻红在自己的消息里）。措辞改成「不计入失败告警」。
+            logger.warning(f"[runner-dropped] sid={sid} 落态前会话行已不在，本场按散会收（不计入失败告警）")
+            self._forget(sid, terminal=True)
+            return
         message = f"{type(exc).__name__}: {exc}"
         kind, human = self._fail_kind(exc)
         # 可 grep 的告警（C18②）：这是会话被打成 failed 的唯一出口。事件流是喂界面的，日志才是运维
