@@ -143,12 +143,28 @@ class SessionEventBus:
                 return False
             n = len(events)
             p = self._spill_path(sid)
-            self.spill_dir.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_suffix(".jsonl.tmp")             # 先写临时再原子替换：别让半截文件当成历史
-            with tmp.open("w", encoding="utf-8") as f:
-                for ev in events:
-                    f.write(ev.model_dump_json() + "\n")
-            os.replace(tmp, p)
+            tmp = p.with_suffix(".jsonl.tmp")
+            try:
+                self.spill_dir.mkdir(parents=True, exist_ok=True)
+                with tmp.open("w", encoding="utf-8") as f:
+                    for ev in events:
+                        f.write(ev.model_dump_json() + "\n")
+                os.replace(tmp, p)                        # 原子替换：读者只会看到整档
+            except OSError as exc:
+                # C118（并发探针现证，`spill_concurrent_probe`：NAIVE 对照 1610 次读里 1586 次残缺、
+                # ATOMIC 0 次残缺，但写者 40 轮里多次撞 PermissionError [WinError 5]）：
+                # Windows 上目标档**正被人打开读**时 `os.replace` 会失败。三件事按顺序做完：
+                #   ① 清掉自己刚写的 .tmp——不然每撞一次就在盘上漏一个整档大小的孤儿文件（正对着 C115 想收的账反着漏）；
+                #   ② ring 原样留着——pop 排在 replace 之后，所以抛穿发生在「丢历史」之前，这条顺序是保命的；
+                #   ③ 返回 False 而不抛穿——省内存这件事是旁路，别把散会/落态那条主路掀了
+                #      （runner 那侧的 try/except 仍保留：两处各自独立成立，谁都不假设对方一定吞得下）。
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError as exc2:
+                    logger.warning(f"[ring-retire] {sid} 落档失败、临时档也没删掉（下次同路径会覆盖）：{exc2}")
+                logger.warning(f"[ring-retire] {sid} 落冷档失败，ring 原样留着（历史没丢）："
+                               f"{type(exc).__name__}: {exc}")
+                return False
             self._events.pop(sid, None)
             self._counters.pop(sid, None)
             self._subscribers.pop(sid, None)

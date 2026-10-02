@@ -1515,10 +1515,41 @@ async def t25_terminal_ring_offloads_to_cold_storage():
         assert vals in (["A0", "A1", "A2", "A3"], ["B0", "B1", "B2", "B3"]), \
             f"t25⑧ 读回来的不是任何一整档（混了 ⇒ 原子替换没生效）：{vals}"
 
+        # ⑨ C118：Windows 上目标档正被人读时 `os.replace` 抛 PermissionError（并发探针现证）。
+        #    这件事必须收在共享件里：清自己的 tmp、ring 原样留着、回 False 不抛穿。
+        sid9 = "t25-win"
+        b9 = SessionEventBus(max_events=50, spill_dir=tmp)
+        for i in range(5):
+            b9.publish(sid9, kind="report", block="Thought", name="delta", value="q%d" % i)
+        before9 = [e.cursor for e in b9.history(sid9)]
+        import os as _os
+        real_replace = _os.replace
+
+        def boom(*a, **k):
+            raise PermissionError(13, "Permission denied")        # WinError 5 的形状
+
+        _os.replace = boom
+        raised = None
+        got9 = None
+        try:
+            got9 = b9.retire(sid9)
+        except Exception as e:                              # 改前那条形状：守卫没包到，PermissionError 抛穿
+            raised = e                                      # 转成明写 ⑨ 的 fail-assert，别让它成了无标签的 error
+        finally:
+            _os.replace = real_replace
+        assert raised is None, f"t25⑨ retire 把失败抛穿了（＝改前形状，旁路该吞掉不掀主路）：{raised!r}"
+        assert got9 is False, "t25⑨ replace 失败时 retire 谎称成功"
+        assert sid9 in b9._events, "t25⑨ 落档失败却把 ring 卸了＝历史真丢了"
+        assert not (tmp / "t25-win.jsonl.tmp").exists(), "t25⑨ 留下孤儿 .tmp（每撞一次盘上漏一个整档）"
+        assert [e.cursor for e in b9.history(sid9)] == before9, "t25⑨ 失败之后 history 少条"
+        assert b9.retire(sid9) is True and not (tmp / "t25-win.jsonl.tmp").exists(), \
+            "t25⑨ 阳性对照不成立：正常路径下要么卸不掉、要么仍留 tmp"
+
         _ok("t25", "终态会话的 ring 落冷档再卸、history 逐字不减；有订阅者不卸；无 spill_dir 不裸卸；"
                    "重开从冷档尾接 seq（不重不断）；discard 连冷档一起清；"
                    "⑥ 产线 create_app 那台真带冷档目录且卸得动、⑦ runner 的 terminal 出口真调 retire"
-                   "（terminal=False 不许调）；⑧ 同目录两台 bus 竞写同一 sid ⇒ 读回来必是完整一档，不许交错")
+                   "（terminal=False 不许调）；⑧ 同目录两台 bus 竞写同一 sid ⇒ 读回来必是完整一档，不许交错；"
+                   "⑨ replace 撞 PermissionError ⇒ 回 False、清掉自己的 tmp、ring 原样留着、history 一条不少")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
