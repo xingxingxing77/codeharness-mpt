@@ -40,7 +40,8 @@ async def respond(sid: str, aid: str, req: RespondReq, request: Request,
     st = ledger_for(sid)          # C87：同上
     if st.item(aid) is None:              # 台账里没这条：可能是伪造 id，也可能是被 TTL 清了
         raise HTTPException(404, f"approval {aid} not found")
-    outcome = st.decide(aid, req.outcome)             # 首个回执生效，重复回执返回原结论
+    # C119：回执记审批人——`user` 就是 Depends(current_user) 的那一位；审计答「谁批的」
+    outcome = st.decide(aid, req.outcome, actor=user)   # 首个回执生效，重复回执返回原结论
     _get(request, "bus").publish(sid, kind="approval", name="resolved",
                                  value={"id": aid, "outcome": outcome})
     return {"ok": _get(request, "runner").answer_human(sid, aid), "outcome": outcome}

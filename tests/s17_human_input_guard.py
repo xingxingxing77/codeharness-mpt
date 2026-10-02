@@ -1439,6 +1439,51 @@ def t14_spawn_drops_quietly_when_the_row_vanished():
           "⑥ C117 撞空那两路**不打** `[session-failed]`（阳性对照＝t9① 真失败仍要打，两处共用一个咽喉）")
 
 
+def t15_approval_receipt_records_actor():
+    """C119：回执记审批人与时刻（谁批的、何时批的）。四格：
+    ① `decide(aid, outcome, actor)` 落 JSON 回执，`settled()` 能读出 decided_by/decided_at；
+    ② 首到生效保留——第二个审批人同 id 再 decide，结论与审批人都还是第一位的；
+    ③ 旧格式（升级窗口里 30 天 TTL 内还活着的裸字符串回执）兼容读，不炸 `decision`/`settled`；
+    ④ 进程内档与 Redis 档同形（同一份 `_parse_receipt`），同一组断言双跑。"""
+    import uuid
+    from platforms.approval_store import ApprovalStore, InProcessApprovalStore
+
+    aid_a, aid_b = "a" * 16, "b" * 16
+    st = ApprovalStore(f"s17_t15_{uuid.uuid4().hex[:8]}")
+    try:
+        st.request({"id": aid_a, "tool": "write_file", "args_preview": "t15", "ts": 1.0})
+        first = st.decide(aid_a, "allowed-once", actor="alice")
+        assert first == "allowed-once", f"t15① 首批写不进：{first!r}"
+        again = st.decide(aid_a, "rejected", actor="bob")
+        assert again == "allowed-once", f"t15② 首到生效被破坏：bob 的回执盖掉了 alice 的（{again!r}）"
+        assert st.decision(aid_a) == "allowed-once", "t15② decision 读回的不是生效结论"
+        row = next(r for r in st.settled() if r["id"] == aid_a)
+        assert row["decided_by"] == "alice" and row["decided_at"] > 0, f"t15① 回执没记审批人：{row!r}"
+        assert row["outcome"] == "allowed-once", f"t15① outcome 字段漂了：{row!r}"
+
+        st.request({"id": aid_b, "tool": "write_file", "args_preview": "t15-legacy", "ts": 2.0})
+        st.r.hset(st.dkey, aid_b, "rejected")            # ③ 旧格式直塞（升级前形状）
+        assert st.decision(aid_b) == "rejected", "t15③ 旧格式裸字符串读不出结论"
+        legacy = next(r for r in st.settled() if r["id"] == aid_b)
+        assert legacy["outcome"] == "rejected" and legacy["decided_by"] == "" \
+            and legacy["decided_at"] == 0.0, f"t15③ 旧格式兼容读走样：{legacy!r}"
+    finally:
+        st.r.delete(st.key, st.dkey)                     # 直造的键自己收，别把 db15 留成垃圾场
+
+    mem = InProcessApprovalStore("s17_t15_mem")          # ④ 同形同断言
+    mem.request({"id": aid_a, "tool": "terminal_command", "args_preview": "t15", "ts": 1.0})
+    assert mem.decide(aid_a, "rejected", actor="carol") == "rejected"
+    assert mem.decide(aid_a, "allowed-once", actor="dave") == "rejected", "t15④ 进程内档首到生效被破坏"
+    assert next(r for r in mem.settled() if r["id"] == aid_a)["decided_by"] == "carol"
+    mem.request({"id": aid_b, "tool": "write_file", "args_preview": "t15-legacy", "ts": 2.0})
+    mem._decisions[aid_b] = "allowed-once"               # 旧格式直塞
+    assert mem.decision(aid_b) == "allowed-once"
+    legacy_mem = next(r for r in mem.settled() if r["id"] == aid_b)
+    assert legacy_mem["decided_by"] == "" and legacy_mem["decided_at"] == 0.0, \
+        f"t15④ 进程内档旧格式兼容读走样：{legacy_mem!r}"
+    print("  ok  t15 回执记审批人（who/when）+ 首到生效保留 + 旧格式兼容读 + 两档台账同形（C119）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1448,7 +1493,8 @@ def main():
               t11_ask_human_does_not_replay_side_effects,
               t12_approval_and_ask_alternate,
               t13_as_node_replay_does_not_reseed,
-              t14_spawn_drops_quietly_when_the_row_vanished]
+              t14_spawn_drops_quietly_when_the_row_vanished,
+              t15_approval_receipt_records_actor]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1458,7 +1504,8 @@ def main():
           f"未知命令可数 1 组 + ask_human 不重放副作用 1 组（C59）+ "
           f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）** + "
           f"**外层节点重放不重复播种 1 组（C72）** + "
-          f"**起跑咽喉撞空会话不抛穿/不留死槽 1 组（t8 现证的那条竞态）**")
+          f"**起跑咽喉撞空会话不抛穿/不留死槽 1 组（t8 现证的那条竞态）** + "
+          f"**回执记审批人 who/when、首到生效、旧格式兼容、两档同形 1 组（C119）**")
 
 
 if __name__ == "__main__":
