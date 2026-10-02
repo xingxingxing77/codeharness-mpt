@@ -14,7 +14,7 @@ import tiktoken
 from pydantic import BaseModel, ConfigDict
 
 from codeharness.tools.libs._shims import (DEFAULT_MIN_TOKEN_COUNT, DEFAULT_WORKSPACE_ROOT,
-                                           Linter, register_tool, awrite, File, EditorReporter)
+                                           Linter, awrite, File, EditorReporter)
 
 # This is also used in unit tests!
 LINTER_ERROR_MSG = "[Your proposed edit has introduced new syntax error(s). Please understand the errors and retry your edit command.]\n"
@@ -77,24 +77,11 @@ class LineNumberError(Exception):
     pass
 
 
-@register_tool(
-    include_functions=[
-        "write",
-        "read",
-        "open_file",
-        "goto_line",
-        "scroll_down",
-        "scroll_up",
-        "create_file",
-        "edit_file_by_replace",
-        "insert_content_at_line",
-        "append_file",
-        "search_dir",
-        "search_file",
-        "find_file",
-        "similarity_search",
-    ]
-)
+# C121：原 `@register_tool(include_functions=[...])` 在此——装饰的是类不是 BaseTool，
+# `register_tool` 走 _warn 分支整包吞掉，是颗 no-op 死装饰器（对照3 §结论-3）。
+# 真正的命令面在 `libs/editor_tools.py` 的 11 只 @tool；register_tool 现在收到非 BaseTool
+# 会当场抛 TypeError，这个坑填掉了。
+
 class Editor(BaseModel):
     """
     A tool for reading, understanding, writing, and editing files.

@@ -56,16 +56,19 @@ TOOL_REGISTRY = ToolRegistry()
 def register_tool(tags: list[str] = None, **kwargs):
     """装饰器：签名照源 `register_tool(tags=..., schema_path=..., **kwargs)`。
 
-    必须写在 `@tool` **之上**（后应用），这样收到的是 `@tool` 产出的 BaseTool；
-    写在下面会拿到裸函数而登记失败。
+    必须写在 `@tool` **之上**（后应用），这样收到的是 `@tool` 产出的 BaseTool。
     源版还要 inspect.getfile/getsource 反射出 YAML schema——那件由 LangChain 承担，所以这里只做登记。
+
+    C121：收到非 BaseTool **当场抛 TypeError**——原来的静默 `_warn` 让 `libs/editor.py:80`
+    那颗死装饰器（`include_functions` 整包被吞、装饰的是类不是工具）活了三个月没人察觉
+    （对照3 §结论-3）。这类残留要装订时炸，不许带病入库。
     """
 
     def deco(obj):
-        if isinstance(obj, BaseTool):
-            TOOL_REGISTRY.register(obj, tags=tags)
-        else:
-            _warn(f"{getattr(obj, '__name__', obj)} 不是 LangChain tool（漏写 @tool？），未登记")
+        if not isinstance(obj, BaseTool):
+            raise TypeError(f"{getattr(obj, '__name__', obj)!r} 不是 LangChain tool"
+                            f"（漏写 @tool，或 @register_tool 写在了 @tool 之下？）")
+        TOOL_REGISTRY.register(obj, tags=tags)
         return obj
 
     return deco

@@ -272,15 +272,29 @@ def t17_unknown_key_warns_and_is_skipped():
 
 
 def t18_register_tool_requires_langchain_tool():
-    seen, orig = _capture_warnings()
+    """C121 改判：非 BaseTool **当场抛 TypeError**——原静默 `_warn` 是 editor.py:80 那颗
+    死装饰器活了三个月的温床（对照3 §结论-3）。函数与类（原罪形状）两种都要抛，登记面不膨胀。"""
+    before = len(TOOL_REGISTRY.all())
+
     try:
         @register_tool(tags=["bogus"])
         def not_a_tool(x):
             return x
-    finally:
-        tool_registry._warn = orig
-    assert seen and "不是 LangChain tool" in seen[0], seen
-    assert "bogus" not in TOOL_REGISTRY.tags() and not_a_tool.__name__ not in TOOL_REGISTRY.tools
+        raise AssertionError("t18 非 BaseTool 必须抛——静默放行 = 死装饰器温床")
+    except TypeError:
+        pass
+
+    class NotAToolEither:                    # editor.py:80 的原罪形状：装饰的是类
+        pass
+
+    try:
+        register_tool(include_functions=["write"])(NotAToolEither)
+        raise AssertionError("t18 类形状也必须抛")
+    except TypeError:
+        pass
+
+    assert len(TOOL_REGISTRY.all()) == before, "t18 抛是抛了，但登记面被污染了"
+    assert "bogus" not in TOOL_REGISTRY.tags()
 
 
 def t19_swe_agent_tool_set_comes_from_tags():
@@ -2056,7 +2070,7 @@ def main():
     leftovers = [str(p.relative_to(BASE)) for p in BASE.rglob("*")] if BASE.exists() else []
     assert not BASE.exists(), f"自测留下了句柄或文件: {leftovers[:8]}"
     print(f"\nS4 门禁通过：{len(checks)} 组 —— 注册表 6 组（全名册 EXPECTED_TOOLS 19 只登记/名字与 tag 并集去重/"
-          f"未知 key 告警跳过/漏 @tool 不登记/SweAgent 取法）+ 越界防护 3 组（兄弟会话目录前缀回归/"
+          f"未知 key 告警跳过/漏 @tool 当场抛 TypeError——C121 改判/SweAgent 取法）+ 越界防护 3 组（兄弟会话目录前缀回归/"
           f"父目录与绝对路径/scratch 收口）+ 接缝 3 组（无 sink 不抛 / editor 块达 sink / 工具日志槽）"
           f"+ shell 2 组 + 搜索 3 组（canned HTML 真解析/配 key 走 serper/失败降级，全程零外网）"
           f"+ 沙箱 3 组（退出码/超时/工作目录）+ Terminal 5 组（跨命令保态/挂死超时后 shell 自愈/"
