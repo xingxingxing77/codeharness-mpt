@@ -15,7 +15,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, END
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from codeharness.configs.settings import settings
 from codeharness.const import RequirementTag
 from codeharness.exp_pool import exp_cache
@@ -494,6 +494,13 @@ class RoleZero:
                 except asyncio.TimeoutError:
                     results.append({"name": name, "result": f"[超时] {name}"})
                 except Exception as e:                            # self-heal：错误回喂下一轮（源 :289 error_msg 同语义）
+                    if isinstance(e, ValidationError):
+                        # C122：模型给的 args 没过工具自己的 args_schema（LangChain 在 ainvoke 前校验）。
+                        # 「args spec 进 prompt / 原生 function-calling」立项与否的读数出口（重开条件
+                        # 写死在 PLAN §4 C122 行）；回喂串逐字不变，只多这一个数。
+                        cm = getattr(self.llm, "cost_manager", None)
+                        if cm is not None:
+                            cm.invalid_args_calls += 1
                     results.append({"name": name, "result": f"[错误] {type(e).__name__}: {e}"})
             history = s["history"][:-1] + [{**last, "results": results}]
             # 游标：停在 ask 上就留在那一条（`_ask` 读它、并把游标推到下一条）；跑完就推到列表末尾。

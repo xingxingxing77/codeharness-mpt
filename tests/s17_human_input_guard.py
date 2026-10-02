@@ -1484,6 +1484,50 @@ def t15_approval_receipt_records_actor():
     print("  ok  t15 回执记审批人（who/when）+ 首到生效保留 + 旧格式兼容读 + 两档台账同形（C119）")
 
 
+def t16_invalid_args_is_countable():
+    """C122：模型给的 args 没过工具自己的 args_schema ⇒ ValidationError 照旧回喂，且落账本计数。
+
+    与 t10 同族同形状（直接打 `_act`，不走真图）。`write_file` 只给 path 不给 content——
+    LangChain 在 ainvoke **前**按 args_schema 校验就炸，副作用一次不发生。
+    三格：① 真违例 → `invalid_args_calls` +1、`[错误]` 串照旧回喂（self-heal 链不断）；
+          ② 阳性对照：schema 合法的调用（read_file 对不存在的路径返回人话串——工具内逻辑错，
+            不是校验错）不计数；
+          ③ 快照把第四个无效调用计数带出去。
+    这一格是「args spec 进 prompt / 原生 function-calling」立项与否的读数出口
+    （重开条件写死在 PLAN §4 C122 行：活体持续为 0 ⇒ 两件不立项）。
+    """
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.tools import read_file, write_file
+
+    role = RoleZero({"name": "Alice", "profile": "PM", "goal": "g"},
+                    [write_file, read_file], FakeLLM([""]))   # _act 不调模型，命令由 history 末条给进来
+
+    def act(commands):
+        return asyncio.run(role._act({"task": "写文件", "history":
+                                      [{"thought": "t", "commands": commands}],
+                                      "respond_language": "中文", "finished": False}))
+
+    out = act([{"command_name": "write_file", "args": {"path": "t16_probe.txt"}}])
+    cm = role.llm.cost_manager
+    assert cm.invalid_args_calls == 1, \
+        f"t16① 账本没记 schema 违例：{cm.invalid_args_calls}"
+    res = out["history"][-1]["results"][0]
+    assert res["name"] == "write_file" and "ValidationError" in res["result"], \
+        f"t16① 回喂串变了（模型下一轮要认得出错在 args）：{res}"
+
+    out2 = act([{"command_name": "read_file", "args": {"path": "t16_no_such_file.txt"}}])
+    res2 = out2["history"][-1]["results"][0]
+    assert "文件不存在" in res2["result"], f"t16② 前提失配：read_file 的行为漂了：{res2}"
+    assert cm.invalid_args_calls == 1, \
+        f"t16② 阳性对照失守：非 schema 的工具内错误也被计数（读数会虚高）：{cm.invalid_args_calls}"
+
+    from server.runner import cost_snapshot
+    snap = cost_snapshot(cm)
+    assert snap["invalid_args_calls"] == 1, f"t16③ 快照没带出第四个无效调用计数：{snap}"
+    print("  ok  t16 无效 args：schema 违例落账本 + 回喂串逐字不变 + 工具内错误不虚计 + 快照带出（C122）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1494,7 +1538,8 @@ def main():
               t12_approval_and_ask_alternate,
               t13_as_node_replay_does_not_reseed,
               t14_spawn_drops_quietly_when_the_row_vanished,
-              t15_approval_receipt_records_actor]
+              t15_approval_receipt_records_actor,
+              t16_invalid_args_is_countable]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1505,7 +1550,8 @@ def main():
           f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）** + "
           f"**外层节点重放不重复播种 1 组（C72）** + "
           f"**起跑咽喉撞空会话不抛穿/不留死槽 1 组（t8 现证的那条竞态）** + "
-          f"**回执记审批人 who/when、首到生效、旧格式兼容、两档同形 1 组（C119）**")
+          f"**回执记审批人 who/when、首到生效、旧格式兼容、两档同形 1 组（C119）** + "
+          f"**无效 args 第四计数：schema 违例落账、回喂不变、不虚计、快照带出 1 组（C122）**")
 
 
 if __name__ == "__main__":

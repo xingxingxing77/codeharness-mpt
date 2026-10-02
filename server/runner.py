@@ -225,6 +225,7 @@ def _seeded_ledger(saved: dict):
     `empty_output_calls`）也必须播种——它们在 `cost_snapshot` 里是被持久化、被 `/api/sessions`
     带出去的字段（C19 落下来的「无效调用」观测就靠这三个数），而新账本从 0 起 ⇒ 重启后 resume
     老会话，终态快照会把历史值**静默覆盖成 0**，且 0 是合法读数、看不出是丢的。
+    C122 加到四个：`invalid_args_calls`（args 没过工具 args_schema 的回喂笔数）同规。
     """
     from codeharness.provider.cost import CostManager
     cm = CostManager()
@@ -236,6 +237,8 @@ def _seeded_ledger(saved: dict):
     cm.truncated_calls = int(saved.get("truncated_calls", 0) or 0)
     cm.unknown_command_calls = int(saved.get("unknown_command_calls", 0) or 0)
     cm.empty_output_calls = int(saved.get("empty_output_calls", 0) or 0)
+    # C122：第四个无效调用计数同规播种（args 没过工具 args_schema 的回喂笔数）
+    cm.invalid_args_calls = int(saved.get("invalid_args_calls", 0) or 0)
     # R1：召回链那三个也同规播种——它们一样是被 `/api/sessions` 带出去的字段，
     # 漏一个就等于跨重启把「这场召不回过几次」抹成 0（0 是合法读数，抹掉看不出来）。
     cm.recall_failures = int(saved.get("recall_failures", 0) or 0)
@@ -259,6 +262,7 @@ def cost_snapshot(cm) -> dict:
             "truncated_calls": getattr(cm, "truncated_calls", 0),
             "unknown_command_calls": getattr(cm, "unknown_command_calls", 0),
             "empty_output_calls": getattr(cm, "empty_output_calls", 0),
+            "invalid_args_calls": getattr(cm, "invalid_args_calls", 0),
             # R1：召回链观测（成功率 = returned/(returned+zero_hits)，可用性看 failures）。
             "recall_failures": getattr(cm, "recall_failures", 0),
             "recall_zero_hits": getattr(cm, "recall_zero_hits", 0),

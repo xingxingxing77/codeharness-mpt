@@ -51,6 +51,11 @@ class CostManager(BaseModel):
     # 也没走到命令派发（不进未知命令）。那种"钱花了、产出为零"的形态在账面上原本隐形。
     # ⚠ 只调工具不说话的那一笔**不算**浪费（`tool_calls` 非空即合法），所以判据两边都要有对照。
     empty_output_calls: int = 0
+    # C122：模型给的 args 没过工具自己的 args_schema（LangChain 在 ainvoke 前校验，ValidationError
+    # 走 self-heal 回喂）被回喂了几笔。与上面三笔同族——只是计数，不参与金额口径。为什么要第四笔：
+    # 「args spec 进 prompt」与「原生 function-calling」两件立项与否原来全凭感觉，这个数是它们的
+    # 读数出口——重开条件写死在 PLAN §4 C122 行：活体读数持续为 0 ⇒ 两件都不立项；> 0 ⇒ 拿读数谈。
+    invalid_args_calls: int = 0
     # R1（09-28 普查批）：召回链（读腿）的三个只读计数。与上面三笔同族——只是计数，不参与金额口径。
     # 为什么要装表：普查现证 09-27 全天 kb 腿 1 次成功 / 595 次连接失败，09-28 是 6/299，而失败只有
     # 一行 warning（`logger.warning` 里那句「按无资料继续」），界面上与「知识库里真没资料」同一个长相；
