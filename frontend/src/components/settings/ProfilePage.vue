@@ -10,11 +10,11 @@
     <div class="stat-card">
       <div class="stat-cell">
         <div class="v">{{ fmt(totalTokens) }}</div>
-        <div class="k">累计 Token 数</div>
+        <div class="k">本场 Token 数</div>
       </div>
       <div class="stat-cell">
         <div class="v">{{ fmtCost(costCny) }}</div>
-        <div class="k">累计费用</div>
+        <div class="k">本场费用</div>
       </div>
       <div class="stat-cell">
         <div class="v">{{ fmt(sessionCount) }}</div>
@@ -35,7 +35,7 @@ const auth = useAuthStore()
 const avatar = computed(() => (auth.user || '?').slice(0, 2).toUpperCase())
 const cost = computed(() => store.cost || {})
 const totalTokens = computed(() => (cost.value.total_prompt_tokens ?? 0) + (cost.value.total_completion_tokens ?? 0))
-const costCny = computed(() => cost.value.cny ?? 0)
+const costCny = computed(() => cost.value.cost_cny ?? 0)
 const sessionCount = computed(() => store.sessions.length)
 
 function fmt(n: number): string {

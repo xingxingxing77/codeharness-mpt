@@ -24,7 +24,10 @@ export interface Turn {
 
 export type ChatRow = { kind: 'node'; b: Block } | { kind: 'tail'; turn: Turn }
 
-export const blockText = (b: Block): string => b.tokens.join('')
+// C133：正文口径 = tokens + live（types.ts Block.live 的注释原文）。53badd5 之后兜底 Think 行
+// 的逐片只走 `live`、永远没有 `content`——改前这里只拼 tokens，live-only 块被当成空块：
+// summarize 的 closing 判空 ⇒ TurnTail 整行不渲染（复制/点赞/分叉全没入口），轮数也少计。
+export const blockText = (b: Block): string => b.tokens.join('') + b.live.join('')
 
 function summarize(blocks: Block[], spans: TraceSpan[]): Turn | null {
   const starts = blocks.map((b) => b.ts).filter((n): n is number => typeof n === 'number')

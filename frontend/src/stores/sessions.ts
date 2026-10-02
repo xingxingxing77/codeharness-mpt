@@ -230,7 +230,9 @@ export const useSessionStore = defineStore('sessions', {
       } catch {
         /* 历史拉不到就退回老行为：connect() 里 after='' 会让服务端整段回放 */
       } finally {
-        this.loadingFirst = false
+        // C143：连点两个会话时，早退的旧请求不许替新会话摘「载入中」——
+        // 摘早了，新会话加载期间空态会短暂说成「暂无事件」（C96 同族的瞬态假话）。
+        if (sid === this.currentId) this.loadingFirst = false
       }
       if (sid === this.currentId) this.connect()
     },

@@ -156,17 +156,33 @@ class ResourceReporter(BaseModel):
     async def __aexit__(self, exc_type, exc_value, exc_tb):
         """Exit the asynchronous streaming callback context."""
         if self.enable_llm_stream and exc_type != asyncio.CancelledError:
-            from codeharness.logs import get_llm_stream_queue
+            from codeharness.logs import get_llm_stream_queue, logger
             q = get_llm_stream_queue()
-            if q is not None and getattr(q, "_spill", None):
+            # C138（10-02 复审批）：补完腿全段带界——改前 `await q.put` 与 `await self._llm_task`
+            # 都没有超时，消费任务一旦卡死 + 队列满档，这里**永久挂住**（「永不空的队列」＝挂死
+            # 那一族，休眠桥也不该留着这族隐患）。三步各有界：alive 才投递（任务已死就只清
+            # _spill 收内存）、put 5s 等不到就丢尾、收尾 10s 等不到就取消消费者——宁丢尾不挂死。
+            alive = self._llm_task is not None and not self._llm_task.done()
+            if q is not None and alive and getattr(q, "_spill", None):
                 # C112 整段降级的补完腿：满档后攒下的逐片合成**一条** content 排在 None 之前入队，
                 # 消费者照常逐条 async_report ⇒ 多出的这一条就是整段尾巴，正文一字不少（await 会等
                 # 消费者腾出位置，降级只发生在消费者慢的那一段，正常场恒空、行为逐字不变）。
-                await q.put("".join(q._spill))
+                try:
+                    await asyncio.wait_for(q.put("".join(q._spill)), 5)
+                except asyncio.TimeoutError:
+                    logger.warning("[llm-stream] 补完腿 5s 没等到队列空位（消费者卡死？），丢尾——宁丢尾不挂死")
                 q._spill = []
-            await q.put(None)
+                try:
+                    await asyncio.wait_for(q.put(None), 5)
+                except asyncio.TimeoutError:
+                    logger.warning("[llm-stream] 收尾哨兵 5s 没入队，丢——宁丢尾不挂死")
+            elif q is not None:
+                q._spill = []                     # 消费者已死/本就没有：_spill 是纯内存垃圾，收掉
             if self._llm_task:
-                await self._llm_task
+                try:
+                    await asyncio.wait_for(self._llm_task, 10)
+                except asyncio.TimeoutError:
+                    logger.warning("[llm-stream] 流消费者 10s 没收尾，已取消——宁丢尾不挂死")
             self._llm_task = None
         await self.async_report(None, END_MARKER_NAME)
 

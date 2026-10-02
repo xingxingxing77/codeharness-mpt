@@ -174,8 +174,10 @@ def auth_enabled() -> bool:
 def current_user(request: Request) -> str:
     """FastAPI 依赖：auth 关时恒 "default"（现状行为）；开时校验 Bearer token。
     隔离面用 404 不用 403——不向外部泄露"会话存在但不属于你"。
-    ceiling：EventSource 发不了 header，/events 允许 `access_token` 查询参数等价
-    （token 进 URL 有进日志的风险，仅 SSE 消费；换 cookie 是升级路径）。"""
+    ceiling：有两类消费方发不了 header——EventSource（/events 的 SSE）与 `<img>`（/workspace
+    静态文件，前端拼 `access_token` 查询参数取图）。两者**都**允许查询参数等价；token 进 URL
+    有进 access log 的风险（nginx 无脱敏），收窄到这两类路径或换 cookie 是升级路径。
+    （C141：改前注释自称「仅 SSE 消费」，与 /workspace 那一半对不上——口径先如实。）"""
     if not auth_enabled():
         return "default"
     auth = request.headers.get("Authorization", "")

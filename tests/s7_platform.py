@@ -1338,8 +1338,18 @@ async def t24_dropped_prefix_comes_back_from_history():
         try:
             for i in range(MAX_SSE_QUEUE + 51):
                 bus.publish(sid, kind="report", block="Thought", name="content", value="c%d" % i)
-            await asyncio.sleep(0)
+            # C132（10-02 复审批）：Redis 台的 publish 只进流，订阅队列由 flusher/reader 异步喂——
+            # 改前这里只有一句 `sleep(0)`，就算 REDIS_UP 真为真，一个 tick 后队列还是空的、断言必炸。
+            # 照 t21 的形状：有 flush_now 就打一把，然后轮询等队列灌满（20s 界）。
+            flush = getattr(bus, "flush_now", None)
+            if flush is not None:
+                await flush()
+            _end = asyncio.get_running_loop().time() + 20.0
+            while asyncio.get_running_loop().time() < _end and q.qsize() < MAX_SSE_QUEUE:
+                await asyncio.sleep(0.05)
             assert q.maxsize == MAX_SSE_QUEUE, f"t24 {tag}① 队列没上界（{q.maxsize}）"
+            assert q.qsize() == MAX_SSE_QUEUE, \
+                f"t24 {tag}① 队列没灌满（{q.qsize()}/{MAX_SSE_QUEUE}，20s 超时＝reader 没跑？）"
             held = []
             while True:
                 try:
@@ -1348,14 +1358,17 @@ async def t24_dropped_prefix_comes_back_from_history():
                     break
             assert len(held) == MAX_SSE_QUEUE and held[0].value == "c51", \
                 f"t24 {tag}① 队列形状不对（{len(held)} 条，首条 {held[0].value if held else None}）"
-            # value "c{i}" 的 seq 是 i+1 ⇒ 客户端最后一条是 c50（seq 51），c51 起那 51 条是它没见到的
-            client_cursor = cursor_of(51)
-            back = bus.history(sid, after=client_cursor)
+            # value "c{i}" 的 seq 是 i+1 ⇒ 客户端最后一条是 c50（seq 51），c51 起那 51 条是它没见到的。
+            # C132：after 一律取**事件自己的 cursor**——两台 bus 的游标形状不同（进程内 19 位定宽、
+            # Redis 是流 id），字面量只能喂其中一台；c50 那条已被队列丢掉，从归档里取它的 cursor。
+            all_ev = bus.history(sid)
+            c50 = next(e for e in all_ev if e.value == "c50")
+            back = bus.history(sid, after=c50.cursor)
             vals = [e.value for e in back]
             assert vals[:3] == ["c51", "c52", "c53"], f"t24 {tag}① 被丢的前缀没补回（开头 {vals[:3]}）"
             assert vals == ["c%d" % i for i in range(51, MAX_SSE_QUEUE + 51)], \
                 f"t24 {tag}① 补回不连续：{len(vals)} 条，首 {vals[:1]} 末 {vals[-1:]}"
-            again = [e.value for e in bus.history(sid, after=cursor_of(52))]
+            again = [e.value for e in bus.history(sid, after=back[0].cursor)]
             assert again[0] == "c52", f"t24 {tag}③ 开区间上界不严 ⇒ 第一条被重复带回（{again[0]}）"
         finally:
             bus.unsubscribe(sid, q)
@@ -1482,7 +1495,8 @@ async def t25_terminal_ring_offloads_to_cold_storage():
         # `_forget` 扫的登记表（逐个列出来是有意的：判据要跟着这条出口一起改，
         # 用 `vars(run)` 那种自动播种会被「新增一张表但没在这里登记」的形态糊过去）
         for attr in ("chats", "costs", "_last_span", "_trunc_reported", "_call_t0", "_prose",
-                     "_prompts", "_used_kernel_block", "_live_blk", "graphs", "projects"):
+                     "_prompts", "_used_kernel_block", "_blk_of", "_live_blk", "graphs",
+                     "projects"):
             setattr(r, attr, {})
         r._closers = set()                                # 这张是 set（add/discard），别给成 dict
 
@@ -1554,7 +1568,125 @@ async def t25_terminal_ring_offloads_to_cold_storage():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+async def t26_history_does_not_materialize_and_locks_are_honest():
+    """C126/C127/C136（10-02 复审批）三件一组，都长在 C115 的机制上：
+
+    C126——`_ensure` 会把整档物化回 ring，而 history/subscribe/fork 全走它，retire 一场只走一次
+    ⇒ 翻一次历史就把 ≤21MB 的 ring 永久装回内存（C115 要治的「常驻只增不减」经最常态的路径
+    原样回来，且再无任何触发能把它卸掉）。读是读，不该有常驻副作用。
+    C127——subscribe 的注册必须与 retire/publish 同一把锁：retire 在工作线程里持锁的任何一段中，
+    锁外注册出来的订阅者会被收尾的三连 pop 连 dict 一起丢成孤儿（这条 SSE 从此只收 keepalive）。
+    C136——retire 写盘不持锁：锁内只做「查订阅者 + 快照」，锁外写盘、写完重进锁复查（订阅者
+    仍空、ring 没进新事件）再卸；改前 3MB 的 JSONL 写在锁里，全进程的逐片 token 流跟着停等。
+    """
+    import shutil
+    import tempfile
+    import threading
+    import time as _t
+    from pathlib import Path
+    from server.events import SessionEventBus
+
+    tmp = Path(tempfile.mkdtemp(prefix="s7t26-"))
+    try:
+        sid = "t26-a"
+        bus = SessionEventBus(max_events=100, spill_dir=tmp)
+        for i in range(5):
+            bus.publish(sid, kind="report", block="Thought", name="content", value="v%d" % i)
+        cur_before = [e.cursor for e in bus.history(sid)]
+        assert bus.retire(sid) is True, "① 前置：无订阅者的终态会话该卸掉"
+        assert sid not in bus._events, "① 前置：ring 没卸出去"
+
+        # ① C126：retire 后 history 直接读冷档 ⇒ 数据逐字在、且**不物化** ring
+        back = bus.history(sid)
+        assert [e.cursor for e in back] == cur_before, "① 冷档直读的历史变了"
+        assert sid not in bus._events, \
+            "① C126 自反面：history 把整档物化回内存了（翻一次历史常驻一份，且再没有触发能卸掉）"
+        # ② C126：窗口/游标语义不变（首屏「取尾部 limit 条」的口径照旧）
+        tail = bus.history(sid, limit=2)
+        assert [e.value for e in tail] == ["v3", "v4"], f"② 冷档直读的窗口语义变了：{[e.value for e in tail]}"
+        # ②b C126：subscribe 同样不许物化（重新点开终态会话的活流是常态操作）
+        q0 = await bus.subscribe(sid)
+        assert sid not in bus._events, "②b C126：subscribe 把冷档物化回内存了"
+        bus.unsubscribe(sid, q0)
+
+        # ③ C127：注册必须在锁内。旁线持锁 → 另一个 loop 里 subscribe：守锁的版本在持锁期间
+        # 观察不到注册；改前（锁外注册）此刻 q 已经在 dict 里——retire 收尾的三连 pop 会把它
+        # 连 dict 一起丢成孤儿。持锁段结束后注册必须照常完成。
+        lock_gate, release_gate = threading.Event(), threading.Event()
+        holder_done = threading.Event()
+
+        def _holder():
+            with bus._lock:
+                lock_gate.set()
+                release_gate.wait(2)
+            holder_done.set()
+
+        threading.Thread(target=_holder, daemon=True).start()
+        assert lock_gate.wait(2), "③ 前置：旁线没拿到锁"
+        res = {}
+
+        def _sub_in_foreign_loop():
+            loop = asyncio.new_event_loop()
+            try:
+                res["q"] = loop.run_until_complete(bus.subscribe("t26-lock"))
+            finally:
+                loop.close()
+
+        th = threading.Thread(target=_sub_in_foreign_loop, daemon=True)
+        th.start()
+        _t.sleep(0.15)
+        leaked = dict(bus._subscribers.get("t26-lock") or {})
+        release_gate.set()
+        th.join(2)
+        assert not leaked, \
+            f"③ C127：持锁期间就注册了（锁外注册＝retire 收尾会把它丢成孤儿）：{list(leaked)}"
+        assert holder_done.wait(2) and res.get("q") in bus._subscribers["t26-lock"], \
+            "③ 放锁后注册没完成（守锁把注册弄丢了）"
+        bus.unsubscribe("t26-lock", res["q"])
+
+        # ④ C136：写盘不持锁——慢写期间 loop 线程对**别的会话** publish 不得停等。
+        # 只换 server.events 命名空间里的 os（不动全局 os 模块），慢 0.4s 的 replace 模拟 3MB 冷档。
+        sid_b = "t26-b"
+        for i in range(3):
+            bus.publish(sid_b, kind="report", value="b%d" % i)
+        ev_mod = __import__("server.events", fromlist=["os"])
+        real_os = ev_mod.os
+
+        class _SlowOS:
+            def __getattr__(self, n):
+                return getattr(real_os, n)
+
+            def replace(self, a, b):
+                _t.sleep(0.4)
+                return real_os.replace(a, b)
+
+        ev_mod.os = _SlowOS()
+        try:
+            loop = asyncio.get_running_loop()
+            retire_t = loop.run_in_executor(None, bus.retire, sid_b)
+            await asyncio.sleep(0.05)          # retire 已过快照段、进入慢写
+            t0 = _t.perf_counter()
+            bus.publish("t26-c", kind="report", value="ping")
+            dt = _t.perf_counter() - t0
+            assert dt < 0.25, \
+                f"④ C136：写盘期间 publish 停等了 {dt:.2f}s（JSONL 写在锁里，全进程的流跟着停）"
+            assert await retire_t is True, "④ 慢写那场没卸成（锁外写盘的形状把 retire 弄坏了）"
+            assert sid_b not in bus._events, "④ 慢写场卸完 ring 还在"
+        finally:
+            ev_mod.os = real_os
+        _ok("t26", "C126：retire 后 history/subscribe 直读冷档且不物化 ring（窗口语义不变）；"
+                   "C127：持锁期间观察不到注册、放锁后照常完成（孤儿订阅者那条缝封死）；"
+                   "C136：慢写 0.4s 期间别的会话 publish 不停等（写盘出锁）")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
+    # C132 顺手补的一刀：_flush_test_db 只挂在**成功收尾**——上一轮红在这套件中途时 db15 里
+    # 留着上一场 t24 的流（同 key 不同 ms 段），下一轮 history 的 after 过滤就会撞上跨场残段
+    # （现证：补回断言里多出一整段上一场的条目）。起跑先冲一遍，失败跑不留脏库给下一轮。
+    if _redis_up():
+        _flush_test_db()
     t1_inproc_roundtrip()
     t10_checkpoint_msgpack_whitelist()
     t11_start_409_store_view()
@@ -1565,18 +1697,21 @@ def main():
     t19_entry_body_limits_and_deploy_coherence()
     t20_approval_ledger_dual_impl_and_two_readers()
     t23_chunked_body_must_carry_content_length()
-    asyncio.run(t24_dropped_prefix_comes_back_from_history())
-    asyncio.run(t25_terminal_ring_offloads_to_cold_storage())   # C115：终态 ring 卸得掉、历史一条不减
+    # C132：REDIS_UP 必须在 t24 之前判——改前赋值排在 t24 之后，t24 的 Redis 腿恒跳，
+    # 「丢了最旧能补回」在 Redis 档上零判据；挪上去之后 Redis 腿还得照 t21 的形状喂队列。
     global REDIS_UP
     REDIS_UP = _redis_up()
+    asyncio.run(t24_dropped_prefix_comes_back_from_history())
+    asyncio.run(t25_terminal_ring_offloads_to_cold_storage())   # C115：终态 ring 卸得掉、历史一条不减
+    asyncio.run(t26_history_does_not_materialize_and_locks_are_honest())   # C126/C127/C136
     asyncio.run(t22_inproc_sse_queue_bounded_like_redis())   # C103：进程内那台，两条路都跑
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
-        print("\ns7_platform: 13/13 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23+t24+t25），redis 路待环境")
+        print("\ns7_platform: 14/14 过（进程内路 t1+t10+t11+t15+t16+t17+t18+t19+t20+t22+t23+t24+t25+t26），redis 路待环境")
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 25/25 全绿（双配置；t25 是本轮 C115 新加的那组）")
+    print("\ns7_platform: 26/26 全绿（双配置；t26 是本轮 C126/C127/C136 新加的那组）")
 
 
 if __name__ == "__main__":

@@ -1528,6 +1528,65 @@ def t16_invalid_args_is_countable():
     print("  ok  t16 无效 args：schema 违例落账本 + 回喂串逐字不变 + 工具内错误不虚计 + 快照带出（C122）")
 
 
+def t17_throat_tells_crash_from_dropped():
+    """C125/C131（10-02 复审批）：
+
+    C125——`_resume` 的 `_ensure_graph`（含 `_prepare` 装配：未知 SOP 模板、角色缺 name）在它自己
+    的 try **之外**，那里的 KeyError 到达 `_spawn` 咽喉时会话行**还在**：改前 `except KeyError`
+    一刀切成「行已不在」——打 `[runner-dropped]` 假告警、不发 error 事件、状态钉死
+    awaiting_human，再答一次同样炸。修后：先核 `store.get(sid) is None`，行还在就交回 `_fail`
+    （C116 的 kind 分类、C117 的行没了守卫照常生效）。
+    C131——`answer_human` 的 `is_running` 只看本进程：多 worker 下场跑在别的 worker、回答落到
+    本 worker 时 tasks 空 ⇒ 改前放行，对同一 thread 发起第二个 resume（双跑同一超步＝双倍发费）。
+    修后 status==running 且本 worker 无任务 ⇒ 拒收（照 stop() 转发分支同一条判定）。
+    """
+    import io
+    from loguru import logger
+
+    def _drive(fn):
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="WARNING")
+        try:
+            out = fn()
+        finally:
+            logger.remove(hid)
+        return out, buf.getvalue()
+
+    # ① C125：装配期 KeyError + 行还在 ⇒ 按「真失败」收（[session-failed] kind=crash + 状态 failed）
+    store, runner, s = _make_runner()
+    store.update(s.id, status=SessionStatus.awaiting_human)
+
+    async def ensure_graph_blowup(sid, register=True):
+        raise KeyError("未知 SOP 模板 no-such-template")
+
+    runner._ensure_graph = ensure_graph_blowup
+
+    async def crash_case():
+        assert runner.answer_human(s.id, "批准") is True, "① 前提：回答该被接走（行在、没在跑）"
+        await runner.tasks[s.id]
+        return store.get(s.id).status.value
+
+    status, log = _drive(lambda: asyncio.run(crash_case()))
+    assert status == SessionStatus.failed.value, \
+        f"① C125：装配崩溃被咽成散会，状态没进 failed：{status}"
+    assert "[session-failed]" in log and "kind=crash" in log, \
+        f"① 真失败没打告警（C116 分类在咽喉这一路丢了）：{log[:240]!r}"
+    assert "[runner-dropped]" not in log, \
+        f"① 行还在却打了「行已不在」（C125 的假话）：{log[:240]!r}"
+
+    # ② C131：status=running 且本 worker 无任务 ⇒ 拒收、不起任务、不改状态
+    store2, runner2, s2 = _make_runner()
+    store2.update(s2.id, status=SessionStatus.running)
+    assert runner2.answer_human(s2.id, "批准") is False, \
+        "② C131：多 worker 撞车口没拦——回答落错 worker 会对同一 thread 并发 resume（双跑双费）"
+    assert s2.id not in runner2.tasks, "② 拒收却起了任务"
+    assert store2.get(s2.id).status == SessionStatus.running, "② 拒收不许顺手改状态"
+    # ③ 阳性对照不在此处重复：awaiting_human 且无任务 ⇒ 照旧接走的形状，t14⑤ 已用真图钉过
+    #    （本组只钉「拒收分支的边界」，接走路的回归由 t14⑤ 兜着）。
+    print("  ok  t17 咽喉分得清两种 KeyError：装配崩溃→[session-failed] kind=crash（行还在不许打"
+          "[runner-dropped]）；status=running 且本 worker 无任务→拒收（C131 多 worker 撞车口）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1539,7 +1598,8 @@ def main():
               t13_as_node_replay_does_not_reseed,
               t14_spawn_drops_quietly_when_the_row_vanished,
               t15_approval_receipt_records_actor,
-              t16_invalid_args_is_countable]
+              t16_invalid_args_is_countable,
+              t17_throat_tells_crash_from_dropped]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1551,7 +1611,8 @@ def main():
           f"**外层节点重放不重复播种 1 组（C72）** + "
           f"**起跑咽喉撞空会话不抛穿/不留死槽 1 组（t8 现证的那条竞态）** + "
           f"**回执记审批人 who/when、首到生效、旧格式兼容、两档同形 1 组（C119）** + "
-          f"**无效 args 第四计数：schema 违例落账、回喂不变、不虚计、快照带出 1 组（C122）**")
+          f"**无效 args 第四计数：schema 违例落账、回喂不变、不虚计、快照带出 1 组（C122）** + "
+          f"**咽喉分得清装配崩溃与行已不在 + 多 worker 撞车口拒收 1 组（C125/C131）**")
 
 
 if __name__ == "__main__":

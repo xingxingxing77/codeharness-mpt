@@ -93,6 +93,11 @@ async def search_knowledge_base(query: str) -> str:
     # 真到那一步再给 QdrantStore 加进程级 client 复用，现在不为没出现的调用方造池子。
     from codeharness.memory.longterm import LongTermMemory, format_kb_blocks
     from codeharness.provider.gateway import LLMGateway
+    # C145（10-02 复审批登记）：这条**模型可主动调**的读腿有意不接 meter（工具没有会话上下文，
+    # 拿不到 CostManager）——它的失败/零命中/条数因此不进 R1 三笔计数，用量页看不见这一腿。
+    # 行为本身诚实（挂了回 `[知识库检索暂不可用: …]`），缺的是账面分母。升级路径：经模块级
+    # ContextVar 把当前会话账本递进来（同 CURRENT_USER/CURRENT_PROJECT 的形状），有人要用
+    # 这条腿的读数谈事时再做，不为没有的读者造池子。
     kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb")
     blocks = format_kb_blocks(await kb.recall(query, k=3))
     # R2 之后异常不再飘到这里（catch 收在 `LongTermMemory.recall` 一处），所以「挂了」与「查到了但

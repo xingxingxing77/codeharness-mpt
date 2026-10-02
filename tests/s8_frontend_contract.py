@@ -1919,7 +1919,8 @@ def t26_ui_bugfix_batch():
     pp = rd("components/settings/ProfilePage.vue")
     for bad in ("沙湾 二哥", "@lubiyue931", "1分 11秒", "最长任务时长", "12.9898", "peakTokens"):
         assert bad not in pp, f"t26⑤ 假读数「{bad}」回来了"
-    assert "useAuthStore" in pp and "累计费用" in pp and "store.sessions.length" in pp,         "t26⑤ 阳性对照失守：真数据源也没接"
+    assert "useAuthStore" in pp and "本场费用" in pp and "store.sessions.length" in pp,         "t26⑤ 阳性对照失守：真数据源也没接"
+    assert "cost.value.cost_cny ?? 0" in pp,         "t26⑤ C124：费用格必须读后端真实键 cost_cny（cny 键不存在 ⇒ 恒显假零）"
     bp = rd("components/settings/BrowserPage.vue")
     assert 'v-if="!p.blockedDomains.length"' in bp and 'v-if="!p.allowedDomains.length"' in bp,         "t26⑤ 域名列表没读真 store"
 

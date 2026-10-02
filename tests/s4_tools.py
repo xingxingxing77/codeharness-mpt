@@ -1698,13 +1698,22 @@ def t56_model_supplied_path_keys_are_gated():
       ① 判定函数三档都要对：越界路径键 ⇒ False（要升级）；会话根内的路径 ⇒ True；
          **完全不带路径键 ⇒ True**（这条是阳性对照——一刀切成「一律升级」会把 WritePRD 那类全打掉）；
       ② 形状扫描：`actions/*.py` 里凡是 `fic.get("<键>")` / `(msg.instruct_content or {}).get("<键>")`
-         且键名以 `_path` 结尾的，必须出现在 `_PATH_KEYS` 里；
+         且键名含 path/file/dir 字样的，必须出现在 `_PATH_KEYS` 或豁免名单里（C139 放宽：
+         只认 `_path` 后缀可被 `workdir`/`target_file` 这类键绕过）；
       ③ ②的仪器对照：同样判定喂一段含未登记键的假源码必须**抓到**（否则 ② 是恒绿摆设）。
     """
     import ast
 
     from codeharness.runtime import CURRENT_PROJECT, CURRENT_SESSION
     from codeharness.tools._approval import ACTION_TIER, _PATH_KEYS, writes_inside_workspace as wiw
+
+    # C139：子串启发（path/file/dir）的良性豁免名单——键进不了 `_PATH_KEYS` 又不该过审批的，
+    # 在这里留一行理由；名单外的同形键会被 ② 抓出来当场逼着表态（登记或豁免，不许静默）。
+    _BENIGN_KEYS = frozenset({
+        "files",           # upload_kb：HTTP 上传侧写好的临时件路径列表，不是模型可控的路径标量
+        "include_files",   # import_repo：导入过滤项（相对 glob），越界防护在 os.walk 剪枝（C85）
+        "issue_filename",  # write_code_plan_and_change：ArtifactStore 仓名，_checked 自有越界守卫（绝对路径/..全拒）
+    })
 
     # ---- ① 三档 ----
     tp = CURRENT_PROJECT.set("s56_proj")
@@ -1738,7 +1747,14 @@ def t56_model_supplied_path_keys_are_gated():
         return None
 
     def unregistered_path_keys(src: str) -> list:
-        """取 `fic.get("x_path")` / `(msg.instruct_content or {}).get("x_path")` / `params.get(...)` 这类模型可控键。"""
+        """取 `fic.get("x_path")` / `(msg.instruct_content or {}).get("x_path")` / `params.get(...)` 这类模型可控键。
+
+        C139（10-02 复审批）：键名口径从「以 `_path` 结尾」放宽为**含 path/file/dir 字样**——
+        只认后缀的表述可被 `workdir` / `target_file` 这类键绕过（`writes_inside_workspace` 对
+        认不出的键默认放行，判据也扫不到 ⇒ 免审越界读，与 C105 要堵的洞同形）。
+        子串启发必然带进良性键（`files` 上传件列表、`issue_filename` 产物仓名），它们进
+        `_BENIGN_KEYS` 显式豁免——与 t8 键集守卫同一个「申报口」模式：真路径键要么登记进
+        `_PATH_KEYS`（过审批），要么在豁免名单里留一行理由，不许第三种静默。"""
         out = []
         for n in ast.walk(ast.parse(src)):
             if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get"):
@@ -1747,7 +1763,11 @@ def t56_model_supplied_path_keys_are_gated():
                 continue
             base = receiver_name(n.func.value)
             key = n.args[0].value
-            if base in ("fic", "instruct_content", "params") and key.endswith("_path") and key not in _PATH_KEYS:
+            if base not in ("fic", "instruct_content", "params"):
+                continue
+            if key in _PATH_KEYS or key in _BENIGN_KEYS:
+                continue
+            if any(w in key.lower() for w in ("path", "file", "dir")):
                 out.append((n.lineno, key))
         return out
 
@@ -1758,12 +1778,19 @@ def t56_model_supplied_path_keys_are_gated():
         f"③仪器坏了：三种接收者形态没被全抓出来（②会恒绿），实得 {ctl}"
     assert unregistered_path_keys('fic = {}\nx = fic.get("readme_path")\n') == [], \
         "③仪器反了：已登记的键也被判成漏网（②会恒红）"
+    assert [k for _, k in unregistered_path_keys('params = {}\nx = params.get("workdir")\n'
+                                                 'y = fic.get("target_file")\n')] == ["workdir", "target_file"], \
+        "③仪器漏了 C129…C139 的本命形状：不带 `_path` 后缀的路径键（workdir/target_file）必须也被抓"
+    assert unregistered_path_keys('params = {}\nx = params.get("files")\ny = fic.get("issue_filename")\n'
+                                  'z = params.get("include_files")\n') == [], \
+        "③豁免名单失效：良性键被误抓（②会恒红）"
     root = Path(__file__).resolve().parents[1] / "codeharness" / "actions"
     gaps = {p.name: unregistered_path_keys(p.read_text(encoding="utf-8")) for p in sorted(root.glob("*.py"))}
     gaps = {k: v for k, v in gaps.items() if v}
     assert not gaps, f"②这些模型可控的路径键没进 `_PATH_KEYS`（＝免审越界读/扫）：{gaps}"
-    print("  ok  t56 C105：readme_path/repo_path/image_path 已纳进审批判据（越界→升级、根内→放行、"
-          "无路径键→按档走三档各对），形状扫描抓到器内假键、放过已登记键，全 actions/ 零漏网")
+    print("  ok  t56 C105/C139：readme_path/repo_path/image_path 已纳进审批判据（越界→升级、根内→放行、"
+          "无路径键→按档走三档各对），形状扫描按 path/file/dir 子串抓键（workdir/target_file 同抓）、"
+          "放过已登记键与豁免名单（files/issue_filename/include_files），全 actions/ 零漏网")
 
 
 def t57_no_action_deletes_evidence_before_the_model():

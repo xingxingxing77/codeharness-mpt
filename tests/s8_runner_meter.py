@@ -109,7 +109,16 @@ def t2_seeded_ledger():
     snap4 = cost_snapshot(r4)
     assert (snap4["overflow_failed"], snap4["overflow_written"]) == (3, 48), \
         f"R4 回归：写腿两笔没被快照带出：{snap4}"
-    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 六个观测计数（C78 三笔 + R1 召回三笔），"
+    # C123（10-02 复审批）：C122 的第四笔「无效调用」同规播种与带出。C122 落地时漏了本套件，
+    # 播种那半（runner.py `_seeded_ledger`）至今零判据——删掉那一行，重启 resume 就把
+    # 「args 违例笔数」静默归零，而 0 是合法读数看不出丢，正是 C78 修的那个形状。
+    c122 = _seeded_ledger({"invalid_args_calls": 5})
+    assert c122.invalid_args_calls == 5, \
+        f"C122 回归：invalid_args_calls 没被播种（{c122.invalid_args_calls}）"
+    assert cost_snapshot(c122)["invalid_args_calls"] == 5, "C122 回归：播种完的快照没把这笔带出去"
+    c122_missing = _seeded_ledger({"total_prompt_tokens": 7})
+    assert c122_missing.invalid_args_calls == 0, "C122：老记录没有这个键 ⇒ 退 0，不炸也不编数"
+    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 九个观测计数（C78 三笔 + R1 召回三笔 + R4 写腿两笔 + C122 一笔），"
               "缺项/坏项退 0 不炸，且不回读混币种 total_cost")
 
 
@@ -346,15 +355,17 @@ def t8_two_currency_buckets():
     # 后两个是 T4-③ 的「无效调用」计数：住在 manager 上、随快照持久化、被列表出口带出。
     # 末三个是 R1 的召回链观测（failures/zero_hits/returned）：这一格加宽键集就是这次契约变更的
     # **申报口**——守卫不红才说明有人偷偷加了字段没登记。
+    # C123（10-02 复审批）：C122 的第四笔 invalid_args_calls 恰好绕过了这个申报口——
+    # 加键时没跑本套件，t8 在 HEAD 上红了一拍才补进来。这就是申报口存在的意义。
     assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
                           "truncated_calls", "unknown_command_calls", "empty_output_calls",
                           "recall_failures", "recall_zero_hits", "recall_returned",
-                          "overflow_failed", "overflow_written"}, snap
+                          "overflow_failed", "overflow_written", "invalid_args_calls"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
     assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"],
             snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"],
-            snap["overflow_failed"], snap["overflow_written"]) == (0,) * 8, \
-        f"这一格没制造无效调用、也没走召回与溢出，八个计数却非 0（那就是恒亮的告警）：{snap}"
+            snap["overflow_failed"], snap["overflow_written"], snap["invalid_args_calls"]) == (0,) * 9, \
+        f"这一格没制造无效调用、也没走召回与溢出，九个计数却非 0（那就是恒亮的告警）：{snap}"
 
     # C19：正文空＝这一发花了钱没产出（真云端实测最贵那发 ¥0.914、24.5 万 ct、正文是空串，
     # 而它既不进截断也不进未知命令）。三格一起钉：空的要计上、**只调工具不说话的不算浪费**（阳性对照）、
@@ -805,6 +816,10 @@ async def t12_prose_from_structured_stream():
     sink3({"block": "Docs", "uuid": "doc-2", "name": "path", "value": "design.md", "role": "Architect"})
     assert runner3._live_blk[s3.id][2] is not None, "⑧ 一个非 meta 事件就把登记好的名单冲掉了"
 
+    # C130：start 必须先于首片（生产 astream_events 恒有 start，这里补上对齐真实事件序——
+    # 落点快照就取在 start 那一刻；改前判据只发 stream、靠「首片时读单槽」蒙混过去）。
+    runner3._translate(s3.id, {"event": "on_chat_model_start", "run_id": "g1",
+                               "metadata": {"langgraph_node": "Arch"}})
     for i in range(0, len(design_txt), 6):
         runner3._translate(s3.id, {"event": "on_chat_model_stream", "run_id": "g1",
                                    "metadata": {"langgraph_node": "Arch"},
@@ -815,6 +830,8 @@ async def t12_prose_from_structured_stream():
     got8 = "".join(e.value for e in live8)
     assert got8 == appr + "\n" + goal_a + "\n" + goal_b + "\n" + unclear, \
         f"⑧ 名单内的字段没照发（列表的第二项被丢掉＝键名在值闭合后失焦），或发多了：{got8[:70]!r}"
+    runner3._translate(s3.id, {"event": "on_chat_model_end", "run_id": "g1",
+                               "metadata": {"langgraph_node": "Arch"}})
     for banned in ("classDiagram", "sequenceDiagram", "data_structures_and_interfaces",
                    "src/constants/explanation.js"):
         assert banned not in got8, f"⑧ 名单外的成员漏上屏：{banned!r}"
@@ -846,6 +863,9 @@ async def t12_prose_from_structured_stream():
     sink3({"block": "Thought", "uuid": "doc-2", "name": "end_marker", "value": None, "role": "Architect"})
     sink3({"block": "Thought", "uuid": "zt-1", "name": "meta", "role": "Zero",
            "value": {"type": "react", "prose_fields": ["thought"]}})
+    # C130：start 先于首片（对齐生产事件序，同 ⑧ 的 g1）
+    runner3._translate(s3.id, {"event": "on_chat_model_start", "run_id": "g3",
+                               "metadata": {"langgraph_node": "act"}})
     for i in range(0, len(ztxt), 7):
         runner3._translate(s3.id, {"event": "on_chat_model_stream", "run_id": "g3",
                                    "metadata": {"langgraph_node": "act"},
@@ -986,6 +1006,9 @@ async def t12_prose_from_structured_stream():
         f"⑫ 交错块：上一块的定稿把落点从当前开着的 Docs 块抢回去了：{runner8._live_blk[s8i.id]!r}"
     dsnug = json.dumps({"anything_unclear": "这里是要上屏的一句人话说明，长度要过散文门槛所以再补几句凑够字。"},
                        ensure_ascii=False)
+    # C130：start 先于首片（对齐生产事件序，同 ⑧ 的 g1/g3）
+    runner8._translate(s8i.id, {"event": "on_chat_model_start", "run_id": "m0",
+                                "metadata": {"langgraph_node": "Arch"}})
     for i in range(0, len(dsnug), 7):
         runner8._translate(s8i.id, {"event": "on_chat_model_stream", "run_id": "m0",
                                     "metadata": {"langgraph_node": "Arch"},
@@ -1114,6 +1137,100 @@ def _make_llm_for(cm):
     return LLMGateway(cost_manager=cm)
 
 
+def t14_prose_key_positions_never_leak():
+    """C129（10-02 复审批）：键名字符**永远不上屏**。
+
+    改前「这串是不是键名」要等闭合后见冒号才定，而门控在字符过 `_emit` 的当下就拿
+    `self.key`——那是**上一个成员的键**。白名单成员后跟 ≥MIN_PROSE 的名单外键名时
+    （真 schema 里 PRDOutput 的 `competitive_analysis` → 26 字 `competitive_quadrant_chart`
+    恰是这条相邻关系），键名趁旧键在名单内整条漏上屏；今天不显形全靠 echo 排除兜底。
+    修后串开的一刻按括号栈定键位/值位：键名字符只进 buf 比对。
+    两刀对照钉死边界：① 相邻键名不漏；② m8 那刀不许复活——名单内字段是多项列表时**每一项**
+    照出（数组元素串是值位，不是键位）。
+    """
+    from server.runner import _ProseStream
+
+    long_value = "四象限正文写得足够长，稳稳超过二十四字的门槛线没有悬念"
+    payload = ('{"competitive_analysis": "%s", '
+               '"competitive_quadrant_chart": "quadrantChart 字数也凑够二十四字才好办"}' % long_value)
+    ps = _ProseStream("", frozenset({"competitive_analysis"}))
+    out = ps.feed(payload)
+    assert "competitive_quadrant_chart" not in out, \
+        f"① C129：名单外键名趁旧键整条漏上屏（改前形状）：{out!r}"
+    assert long_value in out, f"① 白名单成员的值不许被误伤：{out!r}"
+
+    payload2 = ('{"product_goals": ["第一个目标也要够长才上屏，二十四字的门槛线必须过掉才行", '
+                '"第二条目标同样要过线才行，也认认真真数够二十四个字再说"]} ')
+    ps2 = _ProseStream("", frozenset({"product_goals"}))
+    out2 = ps2.feed(payload2)
+    assert "第一个目标" in out2 and "第二条目标" in out2, \
+        f"② m8 那刀不许复活：数组每一项都要出（数组元素是值位）：{out2!r}"
+    assert "product_goals" not in out2, "② 键名照旧不上屏"
+
+    # ③ 嵌套对象：内层键名 ≥24 字时，改前趁「上一个键（competitive_analysis）在名单内」整条漏上屏
+    #    ——这正是 C129 的本命形状。修后键位字符一律不漏；内层**值**按既有口径不逐片发
+    #    （它的键是内层键、不在名单——改前改后一致，不是本件改出来的行为）。
+    payload3 = ('{"competitive_analysis": {"tier_one_players_in_the_competitive_landscape": "嵌套值按既有口径不逐片发", '
+                '"tier_two_players_also_with_a_very_long_name_here": "第二个嵌套值同样不发"}}')
+    ps3 = _ProseStream("", frozenset({"competitive_analysis"}))
+    out3 = ps3.feed(payload3)
+    assert "tier_one_players" not in out3 and "tier_two_players" not in out3, \
+        f"③ 嵌套对象的长键名漏上屏（C129 本命形）：{out3!r}"
+    assert out3 == "", f"③ 嵌套对象的值不该逐片发（内层键不在名单，既有口径）：{out3!r}"
+    print("  ok  t14 C129 键位/值位：相邻名单外键名不漏、数组元素照出（m8 反向刀）、嵌套键名不漏")
+
+
+async def t15_parallel_sends_each_keep_their_block():
+    """C130（10-02 复审批）：并行 Send（一条消息路由多个角色）下逐片**各投各的块**。
+
+    改前逐片实时读 `_live_blk[sid]` 这个每会话单槽——两个内核块并发开时，后开的 meta 把登记
+    覆盖掉，前一个角色的散文就投进别人块的 uuid（事件 role 还是自己的节点名，前端拼出串色块）。
+    修后 start 时刻把落点快照进 `(sid, run_id)` 槽，逐片读自己那份；end 收口即弃。
+    """
+    tmp, store, bus, runner, s = await _make_runner()
+    try:
+        sink = runner._make_sink(s.id)
+        # 块 A 开 → runA start → 块 B 开（覆盖单槽，改前形状的覆盖点）→ runB start
+        sink({"uuid": "blk-A", "name": "meta", "block": "Thought",
+              "value": {"prose_fields": ("p",)}, "role": "PM"})
+        runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "rA",
+                                 "metadata": {"langgraph_node": "PM"}})
+        sink({"uuid": "blk-B", "name": "meta", "block": "Thought",
+              "value": {"prose_fields": ("p",)}, "role": "Engineer"})
+        runner._translate(s.id, {"event": "on_chat_model_start", "run_id": "rB",
+                                 "metadata": {"langgraph_node": "Engineer"}})
+        # runA 的首片：散文按名单 `p` 抽出（echo 为空、值 ≥24 字 ⇒ 达标发布）
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "rA",
+                                 "metadata": {"langgraph_node": "PM"},
+                                 "data": {"chunk": type("C", (), {"content": '{"p": "'})()}})
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "rA",
+                                 "metadata": {"langgraph_node": "PM"},
+                                 "data": {"chunk": type("C", (), {
+                                     "content": "A 角色的思考正文，长度足够跨过二十四字的门槛线"})()}})
+        live = [e for e in bus.history(s.id) if e.name == "live"]
+        assert live and all(e.uuid == "blk-A" for e in live), \
+            f"C130：后开的块把 rA 的散文抢走了（改前形状），实投 {[e.uuid for e in live]}"
+        assert all(e.role == "PM" for e in live), "rA 的事件 role 变了（串色的另一半形状）"
+        # runB 的首片照旧落 blk-B（两路同拍）
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "rB",
+                                 "metadata": {"langgraph_node": "Engineer"},
+                                 "data": {"chunk": type("C", (), {"content": '{"p": "'})()}})
+        runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": "rB",
+                                 "metadata": {"langgraph_node": "Engineer"},
+                                 "data": {"chunk": type("C", (), {
+                                     "content": "B 角色的思考正文，长度同样足够跨过门槛线二十四个字"})()}})
+        uuids = {e.uuid for e in bus.history(s.id) if e.name == "live"}
+        assert uuids == {"blk-A", "blk-B"}, f"两路各投各的没成立：{uuids}"
+        # 收口：rA end ⇒ 它的快照槽即弃（不跨笔携带）
+        runner._translate(s.id, {"event": "on_chat_model_end", "run_id": "rA",
+                                 "metadata": {"langgraph_node": "PM"}})
+        assert (s.id, "rA") not in runner._blk_of, "rA 收口后快照槽没清（长跑会攒）"
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  ok  t15 C130 落点快照：并行 Send 下逐片各投各的块、role 不串、收口即弃")
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -1128,7 +1245,9 @@ def main():
     t10_cost_injection_end_to_end()      # C19 未验②：注入链端到端（要起本机桩，放最后）
     asyncio.run(t12_prose_from_structured_stream())   # 流式 UX 批：抽取器与翻译层接线
     t13_assembly_ledger_identity_recall()             # R1 未验①可信部分：装配期的 meter 指认（零花费）
-    print("\ns8_runner_meter: 13/13 全绿")
+    t14_prose_key_positions_never_leak()              # C129：键位/值位区分（括号栈）
+    asyncio.run(t15_parallel_sends_each_keep_their_block())   # C130：并行 Send 落点快照
+    print("\ns8_runner_meter: 15/15 全绿")
 
 
 if __name__ == "__main__":

@@ -57,7 +57,9 @@ ACTION_TIER = {**{n: "readonly" for n in _ACTION_READONLY},
 # 写类工具的路径参数名不统一（Editor 面三件各叫一个），逐个试。
 # C105：这里的**每一个名字都是一道闸**——`writes_inside_workspace` 对「认不出的键」是默认放行
 # （见下面那句 `return True`），所以动作新加一个路径参数却忘了在这里登记，就等于给自己开了免审的
-# 任意路径读/扫。`tests/s4_tools.py` 的 t56② 按形状扫全 `actions/`：键名以 `_path` 结尾的必须在这里。
+# 任意路径读/扫。`tests/s4_tools.py` 的 t56② 按形状扫全 `actions/`：键名含 path/file/dir 字样的
+# 必须在这里，或在判据侧的 `_BENIGN_KEYS` 豁免名单里留一行理由（C139 放宽：只认 `_path` 后缀
+# 的旧表述可被 `workdir`/`target_file` 这类键绕过）。
 _PATH_KEYS = ("path", "filename", "file_name", "file_path", "dir_path",
               "readme_path", "repo_path", "image_path")
 

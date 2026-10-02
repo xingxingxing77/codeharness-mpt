@@ -76,13 +76,17 @@ const vote = computed(() => (props.feedbackKey ? store.feedback[props.feedbackKe
 const casting = ref(false)
 async function cast(v: 'like' | 'dislike') {
   if (casting.value || !store.currentId || !props.feedbackKey) return
+  const sid = store.currentId              // C134：回包是异步的，切会话后 currentId 已换人
   casting.value = true
   try {
     const r = vote.value === v
-      ? await api.deleteFeedback(store.currentId, props.feedbackKey)
-      : await api.putFeedback(store.currentId, props.feedbackKey, v)
+      ? await api.deleteFeedback(sid, props.feedbackKey)
+      : await api.putFeedback(sid, props.feedbackKey, v)
     // PUT/DELETE 回执里的票值可能是新形态 {v,at}，而 `vote`  computed 拿它和 "like" 比
     // ——不归一就会「再点一次取消」失效（对象永远 !== 字符串）。同一个 normalizeVotes，规则只有一份。
+    // C134：回包后核对还停在同一会话——改前无条件整表覆盖，A 的票落在 B 的选择之后，
+    // B 的消息行就亮起别人的票（store 里同族 loader 全有这个守卫，唯独这处漏了）。
+    if (sid !== store.currentId) return
     store.feedback = normalizeVotes(r.feedback || {})
   } catch (e) {
     toast.push((e as Error).message, 'error')   // C93：toast store 没有 fail 方法（旧码在此抛 TypeError，用户零提示）；值域/越权的原文照说，不猜文案

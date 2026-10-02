@@ -46,7 +46,8 @@ function countTurns(blocks: Block[]): number {
     if (b.type === 'User') {
       if (hasOutput) turns += 1
       hasOutput = false
-    } else if (b.type !== 'Thought' || b.tokens.length) {
+    } else if (b.type !== 'Thought' || b.tokens.length || b.live.length) {
+      // C133：live-only 的兜底 Think 行也算输出（与 turns.ts blockText 同一口径）
       hasOutput = true
     }
   }
@@ -148,16 +149,18 @@ export function countVotes(rows: { feedback?: Record<string, VoteEntry> }[]):
  *  空正文是模型自己说完却没吐一个字（真云端实测最贵那一发就是这种）；
  *  混成一个"浪费数"就没人知道该去修哪一个。 */
 export function wasteTotals(rows: { cost?: Record<string, number> }[]):
-  { unknown: number; truncated: number; empty: number } {
+  { unknown: number; truncated: number; empty: number; invalid: number } {
   let unknown = 0
   let truncated = 0
   let empty = 0
+  let invalid = 0
   for (const r of rows) {
     unknown += r.cost?.unknown_command_calls ?? 0
     truncated += r.cost?.truncated_calls ?? 0
     empty += r.cost?.empty_output_calls ?? 0
+    invalid += r.cost?.invalid_args_calls ?? 0   // C135：C122 的第四笔——args 没过工具 args_schema 的回喂
   }
-  return { unknown, truncated, empty }
+  return { unknown, truncated, empty, invalid }
 }
 
 /** R1（09-28 普查批）：召回链的可用性三笔。**单位不同，不许并成一个数**：

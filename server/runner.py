@@ -85,7 +85,8 @@ class _ProseStream:
     """
 
     __slots__ = ("mode", "head", "in_str", "phase", "ubuf", "hi", "decoded", "locked", "emitted",
-                 "echo", "skipping", "echoed", "only", "key", "buf", "pending")
+                 "echo", "skipping", "echoed", "only", "key", "buf", "pending",
+                 "stack", "val_expected", "is_key")
 
     def __init__(self, echo: str = "", only=None):
         # 名单缺失＝不门控。frozenset 而非 list：`in` 的语义是「这个字段名在不在名单里」，不看顺序。
@@ -93,6 +94,14 @@ class _ProseStream:
         self.key = None           # 当前值所属的键名（最近一个后跟冒号的字符串）
         self.buf = ""             # 当前字符串的全长文本，只在判定它是键名时用
         self.pending = False      # 刚闭合一个字符串，还没看见后面第一个非空白字符
+        # C129：键名/值位的区分器。改前「这串是不是键名」要等闭合后见冒号才定，而字符在串**开着**
+        # 的当下就逐个过 _emit——门控拿的是「上一个成员的键」：上一个键在名单内时，紧跟着的
+        # 名单外键名（PRDOutput 的 competitive_analysis → 26 字 competitive_quadrant_chart 恰是
+        # 这条相邻关系）攒满 MIN_PROSE 就整条漏上屏。现在维护一层括号栈 + 「在等值」位，
+        # 串开的一刻就能定它是不是键名：栈顶是对象且没在等值 ⇒ 键名，键名字符只进 buf 比对、不上屏。
+        self.stack = []           # 开着的容器栈（"{" / "["），只在 only 门控启用时维护
+        self.val_expected = False # 刚见过冒号 ⇒ 下一个串是值
+        self.is_key = False       # 当前开着的字符串是键名
         self.echo = echo or ""    # 这笔调用的 prompt 文本：成员前缀命中它 ⇒ 是回显，不是模型的话
         self.skipping = False     # 当前成员已判定为回显，整段丢掉
         self.echoed = 0           # 被判定为回显而丢掉的成员数（判据要数这个，不看日志）
@@ -128,14 +137,31 @@ class _ProseStream:
                     self.in_str = True
                     if self.only is not None:
                         self.buf = ""
-                elif self.pending:
-                    # 字符串后面第一个非空白字符是冒号 ⇒ 刚闭合的那个是**键名**，记下它给后面的值用；
-                    # 是别的（逗号/右括号/数组元素之间的下一个串）⇒ 它是个值，键名沿用上一个。
-                    if ch in " \t\r\n":
-                        continue
-                    if ch == ":":
+                        # C129：这串是键名还是值，在**开**的一刻就定（见 __init__ 的注释）。
+                        self.is_key = bool(self.stack) and self.stack[-1] == "{" and not self.val_expected
+                    continue
+                if ch in " \t\r\n":
+                    continue
+                # 容器与分隔符（C129 新增的栈跟踪；改前只认 `"` 与 pending 后的冒号）。
+                # pending 一并就地清：闭合串后面跟着 `{`/`[`/`}`/`]`/`,` 都等于「它是个值」。
+                if ch == "{":
+                    self.stack.append("{")
+                    self.val_expected = self.pending = False
+                elif ch == "[":
+                    self.stack.append("[")
+                    self.val_expected = self.pending = False
+                elif ch in "}]":
+                    if self.stack:
+                        self.stack.pop()
+                    self.val_expected = self.pending = False
+                elif ch == ":":
+                    if self.pending:
                         self.key = self.buf
-                    self.pending = False
+                    self.val_expected, self.pending = True, False
+                elif ch == ",":
+                    self.val_expected = self.pending = False
+                else:
+                    self.pending = False     # 裸 token（true/1/null…）：维持原有「见非空白即清」的口径
                 continue
             if self.phase == 1:
                 self.phase = 0
@@ -187,6 +213,8 @@ class _ProseStream:
         if self.only is not None:
             if len(self.buf) < _KEY_CAP:
                 self.buf += ch        # 键名要全长才能比对，值也要走这一格（超限只影响键名判定）
+            if self.is_key:
+                return                # C129：键名字符只进 buf，永远不上屏（开串那一刻已定键位/值位）
             if self.key not in self.only:
                 return                # 名单外的字段：一个字都不发，等定稿一次性出现
         if self.locked:
@@ -304,6 +332,13 @@ class SessionRunner:
         # （`Thought`/`Docs`/`Task`，值带它的 block 名），没有就由 `_translate` 落 `stream-{node}` 兜底。
         # 于是文档块自己就在流：逐片进 `live`，内核定稿（`content`）一到前端把 `live` 整段撤掉。
         self._live_blk: dict[str, tuple] = {}
+        # C130：每笔 LLM 调用开跑那一刻的落点快照（(sid, run_id) → `_live_blk[sid]` 当时值）。
+        # 并行 Send（一条消息路由多个角色）下两个内核块并发开：改前逐片投递实时读 `_live_blk[sid]`
+        # 这个**每会话单槽**，后开的块把登记覆盖掉，前一个角色的散文就投进别人块的 uuid（事件
+        # role 还是自己的节点名，前端拼出串色块）。快照把「这一笔属于哪块」定死在 start 时刻——
+        # 「meta 先于这一笔首片到达」的既有前提不变，只是把读取点从「首片」提前到「start」。
+        # `_live_blk` 本身保留「当前开着」语义：end_marker 配对（:703）与 start 的静默期判定（:1071）还靠它。
+        self._blk_of: dict[tuple[str, str], tuple] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def _spawn(self, sid: str, coro):
@@ -322,8 +357,16 @@ class SessionRunner:
             try:
                 await coro
             except KeyError as e:
-                logger.warning(f"[runner-dropped] sid={sid} 落态时会话行已不在（{e}），本场按散会收")
-                self._forget(sid, terminal=True)
+                # C125（10-02 复审批）：KeyError ≠ 「行已不在」。`_resume` 的 `_ensure_graph`（含
+                # `_prepare` 装配：未知 SOP 模板、角色缺 name 都在这抛）在它自己的 try **之外**，
+                # 这里的 KeyError 发生时会话行明明还在——改前被误判成「散会」：打假告警、不发
+                # error 事件、状态钉死 awaiting_human，再答一次同样炸。先核行在不在再选分支；
+                # 行还在就是真崩溃，交回 `_fail`（C117 守卫 + C116 kind 分类照常生效）。
+                if self.store.get(sid) is None:
+                    logger.warning(f"[runner-dropped] sid={sid} 落态时会话行已不在（{e}），本场按散会收")
+                    self._forget(sid, terminal=True)
+                else:
+                    self._fail(sid, e)
             finally:
                 if self.tasks.get(sid) is asyncio.current_task():
                     self.tasks.pop(sid, None)
@@ -580,13 +623,22 @@ class SessionRunner:
                 "next_before": page[-1]["checkpoint_id"] if (page and has_more) else ""}
 
     def answer_human(self, sid: str, content: str) -> bool:
-        if not self.store.get(sid):
+        s = self.store.get(sid)
+        if not s:
             return False
         if self.is_running(sid):
             # _run 与 _resume 共用同一个 tasks[sid] 槽：抢槽会让先结束的一方 pop 掉另一方的
             # 引用（is_running 误报 False、stop() 取消错对象、跨 worker 停止失配）。
             # 判据用活任务视角而不是 store.status：实测 interrupt 收尾时 _run 会把
             # awaiting_human 覆写成 finished（tests/s17::t1 读数），状态在这儿不可信。
+            return False
+        if s.status == SessionStatus.running:
+            # C131（10-02 复审批）：本 worker 没有活任务、store 却说 running ⇒ 场跑在**别的**
+            # worker 上（多 worker 部署）。改前放行 → 落错 worker 的回答会对同一 thread 发起
+            # 第二个 `astream_events(Command(resume))`，与持任务那个 worker 并发写同一 checkpoint
+            # ＝双跑同一超步、双倍发费。照 stop() 的转发分支同一条「running 且本 worker 无任务」
+            # 判定拒收（转发要给 ch:ctl 加 answer 命令，另立不混本件）。单进程不可达：
+            # tasks 有活 ⇒ is_running 已拦；无活 ⇒ 收尾时状态必已离开 running。
             return False
         self._spawn(sid, self._resume(sid, content))
         return True
@@ -809,6 +861,8 @@ class SessionRunner:
             self._prompts.pop(k, None)
         for k in [k for k in self._used_kernel_block if k[0] == sid]:
             self._used_kernel_block.pop(k, None)
+        for k in [k for k in self._blk_of if k[0] == sid]:      # C130：快照表同规扫
+            self._blk_of.pop(k, None)
         self._live_blk.pop(sid, None)
         if terminal:
             self.graphs.pop(sid, None)
@@ -1043,6 +1097,7 @@ class SessionRunner:
             if rid:
                 self._call_t0[(sid, rid)] = [time.time(), None]
                 self._prompts[(sid, rid)] = _prompt_text(ev.get("data") or {})
+                self._blk_of[(sid, rid)] = self._live_blk.get(sid)   # C130：start 时刻的落点快照
             # 静默期要有东西可看：思考型模型在首 token 前实测要等 40~51 秒，而这段时间**没有**
             # 真文本可发——reasoning 增量拿不到（langchain-openai 1.5.1 的 `chat_models/base.py`
             # 模块头「API scope」明文：第三方私有字段如 `reasoning_content` 不被提取；09-28 现证
@@ -1060,6 +1115,7 @@ class SessionRunner:
             if rid:
                 self._prose.pop((sid, rid), None)
                 self._prompts.pop((sid, rid), None)
+                self._blk_of.pop((sid, rid), None)      # C130：快照随笔走，收口即弃
             # 打字机流块（stream-{node}）到此收口，否则跑完了光标还在闪（S8 终验现形）。
             # 但**落进内核块的那一笔不替兜底行收口**：那一行这一笔压根没碰，收它等于替别人关
             # （离线工装现证过这条多余事件；孤立 end_marker 前端虽有守卫，长流里那行若被上一笔开过就会被无端关掉）。
@@ -1079,9 +1135,9 @@ class SessionRunner:
                 return
             ps = self._prose.get((sid, rid))
             if ps is None:
-                # 名单在**建抽取器那一刻**取当前开着的块那份：块的 meta 一定先于这一笔的首片到达
-                # （`async with` 先开块再发调用），所以取到的就是这一块自己的名单。
-                blk = self._live_blk.get(sid)
+                # 名单取 **start 时刻的落点快照**（C130）：块的 meta 一定先于这一笔的 start 到达
+                # （`async with` 先开块再发调用），并行 Send 下别的角色后开的块也抢不走这一笔的名单。
+                blk = self._blk_of.get((sid, rid))
                 ps = self._prose[(sid, rid)] = _ProseStream(self._prompts.get((sid, rid), ""),
                                                             blk[2] if blk else None)
             piece = ps.feed(text)
@@ -1092,10 +1148,12 @@ class SessionRunner:
             # 首 token 只认第一个**有散文**的分片；没采到就是 None，不拿收口时刻凑一个假 TTFT。
             if slot is not None and slot[1] is None:
                 slot[1] = time.time()
-            # 落点 = 这一笔所在的那块（内核开着的），没有才落 `stream-{node}` 兜底；
+            # 落点 = 这一笔 start 时刻所在的块（C130 快照；并行 Send 下各投各的，不实时抢单槽），
+            # 没有才落 `stream-{node}` 兜底（ponytail：兜底 uuid 按节点名，多角色并行且都没进
+            # 内核块时仍会同屏交错——升级路径是按 run_id 派生 uuid，动前端契约，不在本件）；
             # 名字用 `live`：内核定稿是 `content`，两者在前端各占一格（正文 = tokens + live，
             # content 一到就把 live 清空），所以永远不会出现两份同屏。
-            tgt = self._live_blk.get(sid)
+            tgt = self._blk_of.get((sid, rid))
             if tgt:
                 self._used_kernel_block[(sid, rid)] = True
                 uid, btype = tgt[0], tgt[1]

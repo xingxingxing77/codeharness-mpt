@@ -256,6 +256,11 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
         try:
             result = await UploadKB(llm=None)._call({"files": [str(p) for p in written]}) if written else \
                 {"uploaded_count": 0, "chunk_count": 0, "errors": []}
+        except ValueError as exc:
+            # C146：维度不符那族（qdrant_store 的集合维度守卫）不是连接级失败——触发它的是
+            # 上传的用户/运维，得让他看见原因；改前原样上抛 ⇒ 界面只有一句 generic 500。
+            # 400 + 原文（含集合维度与 embedding 维度两个数）一字不改地带出去。
+            raise HTTPException(400, f"知识库写入被拒：{exc}") from exc
         except Exception as exc:
             if not _unreachable(exc):
                 raise                   # 真 bug 一个字都不许吞：翻成「服务不可用」比 500 更糟

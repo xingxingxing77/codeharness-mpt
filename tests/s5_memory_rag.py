@@ -1376,6 +1376,77 @@ def t36_recall_floor_rerank_score():
     print("  ok  t36 C23(b) 精排分下限：路径/鉴权头/精排序/宽候选/挂了只响一声 各钉一处")
 
 
+def t36b_rerank_mode_never_fails_silently():
+    """C128（10-02 复审批）：`RECALL_FLOOR__MODE=rerank` 的**两种静默失效**各钉一格——
+
+      ① 档=rerank 而精排**未配置**（base_url 空）：`rerank_scored` 对空 base_url 干净早退
+         （t32 钉的「零 HTTP 零 warning」只对直接调 `_rerank` 成立），`_recall_inner` 拿到全是
+         None 的分就退回原序——下限整档失效、日志零痕迹、账面照记召回正常。修后必须响一声
+         可 grep 的 warning，行为（粗排原序）不变。
+      ② 精排响应项里**没有 relevance_score**（键名不符的兼容口）：改前 `.get` 静默得 None，
+         走「没精排」那支退原序——违反「解析不到就抛」的承诺。修后必须抛、走同一声已有的
+         降级 warning。两格都免 Qdrant/免 HTTP（替身直给，不受探活跳过影响）。
+    """
+    from types import SimpleNamespace as NS
+    from codeharness.logs import logger as _lg
+    from codeharness.memory import longterm as lt
+    from codeharness.memory.longterm import LongTermMemory
+
+    orig_warn = _lg.warning
+    orig_for_leg = settings.recall_floor
+    orig_client = lt.httpx.AsyncClient
+    orig_url = settings.reranker.base_url
+    warned = []
+    hits = [NS(payload={"text": f"t{i}"}) for i in range(4)]
+
+    class _AsyncOf:
+        def __init__(self, items):
+            self.items = items
+
+        def __await__(self):
+            async def _go():
+                return self.items
+            return _go().__await__()
+
+    ltm = LongTermMemory.__new__(LongTermMemory)      # 免 Qdrant：store/embeddings 全替身
+    ltm.doc_type = "kb"
+    ltm._user, ltm._project = "u_c128", "p_c128"      # 构造器同名参数的私有底座（user_id 是只读属性）
+    ltm.embeddings = NS(aembed_query=lambda q: _AsyncOf([0.1]))
+    ltm.store = NS(search=lambda *a, **k: _AsyncOf(list(hits)))
+    ltm.meter = None
+    ltm.up = True
+
+    try:
+        _lg.warning = lambda *a, **k: warned.append(" ".join(str(x) for x in a))
+        # ① 未配置 + mode=rerank ⇒ warning 一声、粗排原序照回（行为不变，留痕补上）。
+        #   for_leg 是方法、pydantic 不许setattr，整颗换（kb 腿：for_leg("kb") 回的就是这颗）。
+        from codeharness.configs.settings import RecallFloorConfig
+        settings.recall_floor = RecallFloorConfig(mode="rerank", min_score=0.5,
+                                                  oversample=3, max_rank=10)
+        settings.reranker.base_url = ""
+        warned.clear()
+        got = asyncio.run(ltm._recall_inner("q", 3))
+        assert any("精排未配置" in w for w in warned), \
+            f"① 档=rerank 而精排未配置没有响声（下限整档静默失效）：{warned[:2]}"
+        assert len(got) == 3, f"① 行为不许变：退化为粗排原序前 k 条（实得 {len(got)} 条）"
+        # ② 响应项缺 relevance_score ⇒ 抛 → 走已有的降级 warning（不许静默 None）
+        settings.reranker.base_url = "https://rerank.invalid/v1"
+        stub = _StubRerank(results=[{"index": 0}, {"index": 1}])   # 两项都没有 relevance_score
+        lt.httpx.AsyncClient = stub
+        warned.clear()
+        scored = asyncio.run(ltm.rerank_scored("q", hits, 3))
+        assert all(s is None for _, s in scored), f"② 前提：缺键必须全走降级（{scored[:1]}）"
+        assert [h for h, _ in scored] == hits[:3], "② 降级必须退粗排原序前 k 条"
+        assert any("精排不可用" in w and "relevance_score" in w for w in warned), \
+            f"② 缺 relevance_score 静默了（违反「解析不到就抛」）：{warned[:2]}"
+    finally:
+        settings.recall_floor = orig_for_leg
+        settings.reranker.base_url = orig_url
+        lt.httpx.AsyncClient, _lg.warning = orig_client, orig_warn
+    print("  ok  t36b C128：档=rerank 而精排未配置必响一声；响应缺 relevance_score 必抛走降级——"
+          "两种静默失效都堵死（行为面：粗排原序照旧）")
+
+
 def t37_rerank_endpoint_real_answer():
     """**可选真调**（`RERANK_LIVE=1` 才发）：百炼那个口真的答、分真的在 0-1、相关那条真的排第一。
 
@@ -2219,7 +2290,8 @@ def main():
               t31_exp_tenant_isolation, t32_rerank_unset_default_skips_cleanly,
               t33_point_id_carries_tenant_and_doc_type,
               t34_recall_floor_dense_score, t35_recall_floor_dense_rank,
-              t36_recall_floor_rerank_score, t37_rerank_endpoint_real_answer,
+              t36_recall_floor_rerank_score, t36b_rerank_mode_never_fails_silently,
+              t37_rerank_endpoint_real_answer,
               t38_both_recall_legs_clamp_their_query,
               t39_recall_floor_applies_per_leg,
               t40_exp_signature_is_embedded_the_same_on_both_sides,

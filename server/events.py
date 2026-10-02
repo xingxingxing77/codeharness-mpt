@@ -92,34 +92,49 @@ class SessionEventBus:
         if sid not in self._events:
             self._events[sid] = deque(maxlen=self.max_events)
             self._counters[sid] = 0
-            self._subscribers[sid] = {}
+            # C126：subscribe 不再物化 ring（只登记订阅者）——可能有先到者在等，这里必须
+            # setdefault 而不是覆写，否则先到的订阅者会在 ring 真正建起来的那一拍被冲掉。
+            self._subscribers.setdefault(sid, {})
             self._load_spill(sid, self._events[sid])     # C115：ring 是冷档的缓存，不是第二本账
         return self._events[sid], self._subscribers[sid]
 
     def _spill_path(self, sid: str):
         return self.spill_dir / f"{sid}.jsonl" if self.spill_dir else None
 
+    def _read_spill(self, sid: str) -> list:
+        """C126：**只读地**取冷档快照——不建 ring、不播 seq 计数器。
+
+        为什么必须有这一条：`_ensure` 会把整档物化回 ring，而 history/subscribe/fork 全走它，
+        retire 一场只走一次 ⇒ 翻一次历史就把 ≤21MB 的 ring 永久装回内存，之后没有任何触发
+        再把它卸掉（C115 要治的「常驻只增不减」经最常态的路径原样回来）。翻历史是读，读不该
+        有常驻副作用。档不存在/读到一半被 discard 删掉 ⇒ 当没有历史，不抛。"""
+        p = self._spill_path(sid)
+        if p is None or not p.exists():
+            return []
+        out: list = []
+        try:
+            with p.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(Event.model_validate_json(line))
+                    except Exception:                     # 半截/坏行：跳过这一行，别让一场历史拖死服务
+                        logger.warning(f"[ring-spill] {sid} 冷档有一行读不动，跳过")
+        except FileNotFoundError:
+            return []                                     # 读的半路被 discard 删了（C142 同窗）
+        return out
+
     def _load_spill(self, sid: str, into: deque):
         """把冷档读回 ring，并把 seq 计数器播到尾——**少了这一步，重开的会话会从 seq 1 重新发**，
         前端按 `cursor <= lastCursor` 去重就会把新一场整段吞掉（与「SSE seq 精度丢事件」同族：
         游标必须是同一本账上的连续尾）。"""
-        p = self._spill_path(sid)
-        if p is None or not p.exists():
+        evs = self._read_spill(sid)
+        if not evs:
             return
-        last = 0
-        with p.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = Event.model_validate_json(line)
-                except Exception:                         # 半截/坏行：跳过这一行，别让一场历史拖死服务
-                    logger.warning(f"[ring-spill] {sid} 冷档有一行读不动，跳过")
-                    continue
-                into.append(ev)
-                last = max(last, ev.seq)
-        self._counters[sid] = max(self._counters.get(sid, 0), last)
+        into.extend(evs)
+        self._counters[sid] = max(self._counters.get(sid, 0), max(ev.seq for ev in evs))
 
     def retire(self, sid: str) -> bool:
         """C115：一场跑到终态后把它的 ring 落冷档、再从内存卸掉。返回**是否真卸了**。
@@ -130,40 +145,50 @@ class SessionEventBus:
           ① 有订阅者就**不卸**——有人正在看这条流，卸了下一屏就缺；
           ② 卸之前必须先写成冷档，写失败就原样留着（历史比内存值钱）；
           ③ 没有 `spill_dir` 就整个不卸（无 Redis 档 ring 是唯一历史源，§1.12 D 臂那条）。
+        C136（10-02 复审批）：写盘**不持锁**——改前整段 JSONL 写在 `_lock` 里，publish 用的是
+        同一把锁，写盘期间全进程的逐片 token 流在锁上停等（多场同时收口停顿串行叠加），runner 侧
+        「别卡住事件循环上别人的流」的意图被同一把锁打穿。现在的形状：锁内只做「查订阅者 + 快照」，
+        锁外写盘，写完重进锁复查（订阅者仍空、ring 没进新事件）才卸——复查不过就不卸，ring 原样
+        留着当真源（历史一条不丢；磁盘上那档是上一份快照，下一次 retire 会覆盖成整档）。
         ponytail: 冷档只留 `max_events` 条（ring 本身就是上界），一场 ≈15000 行、约 3 MB；
         按会话数线性占**磁盘**，升级路径是按 user/project 分目录 + 保留期清理，不在本件。
         """
         if self.spill_dir is None:
             return False
-        with self._lock:                                  # 写盘排在锁里：publish 用的是同一把锁，
-            if self._subscribers.get(sid):                # 于是「边写边被 append」不会发生
+        with self._lock:
+            if self._subscribers.get(sid):
                 return False
             events = self._events.get(sid)
             if not events:
                 return False
-            n = len(events)
-            p = self._spill_path(sid)
-            tmp = p.with_suffix(".jsonl.tmp")
+            snap = list(events)
+            n = len(snap)
+        p = self._spill_path(sid)
+        tmp = p.with_suffix(".jsonl.tmp")
+        try:
+            self.spill_dir.mkdir(parents=True, exist_ok=True)
+            with tmp.open("w", encoding="utf-8") as f:
+                for ev in snap:
+                    f.write(ev.model_dump_json() + "\n")
+            os.replace(tmp, p)                        # 原子替换：读者只会看到整档
+        except OSError as exc:
+            # C118（并发探针现证，`spill_concurrent_probe`：NAIVE 对照 1610 次读里 1586 次残缺、
+            # ATOMIC 0 次残缺，但写者 40 轮里多次撞 PermissionError [WinError 5]）：
+            # Windows 上目标档**正被人打开读**时 `os.replace` 会失败。两件事按顺序做完：
+            #   ① 清掉自己刚写的 .tmp——不然每撞一次就在盘上漏一个整档大小的孤儿文件（正对着 C115 想收的账反着漏）；
+            #   ② ring 原样留着（pop 在写盘成功之后的复查段里，这里根本没走到）、返回 False 不抛穿
+            #      ——省内存这件事是旁路，别把散会/落态那条主路掀了。
             try:
-                self.spill_dir.mkdir(parents=True, exist_ok=True)
-                with tmp.open("w", encoding="utf-8") as f:
-                    for ev in events:
-                        f.write(ev.model_dump_json() + "\n")
-                os.replace(tmp, p)                        # 原子替换：读者只会看到整档
-            except OSError as exc:
-                # C118（并发探针现证，`spill_concurrent_probe`：NAIVE 对照 1610 次读里 1586 次残缺、
-                # ATOMIC 0 次残缺，但写者 40 轮里多次撞 PermissionError [WinError 5]）：
-                # Windows 上目标档**正被人打开读**时 `os.replace` 会失败。三件事按顺序做完：
-                #   ① 清掉自己刚写的 .tmp——不然每撞一次就在盘上漏一个整档大小的孤儿文件（正对着 C115 想收的账反着漏）；
-                #   ② ring 原样留着——pop 排在 replace 之后，所以抛穿发生在「丢历史」之前，这条顺序是保命的；
-                #   ③ 返回 False 而不抛穿——省内存这件事是旁路，别把散会/落态那条主路掀了
-                #      （runner 那侧的 try/except 仍保留：两处各自独立成立，谁都不假设对方一定吞得下）。
-                try:
-                    tmp.unlink(missing_ok=True)
-                except OSError as exc2:
-                    logger.warning(f"[ring-retire] {sid} 落档失败、临时档也没删掉（下次同路径会覆盖）：{exc2}")
-                logger.warning(f"[ring-retire] {sid} 落冷档失败，ring 原样留着（历史没丢）："
-                               f"{type(exc).__name__}: {exc}")
+                tmp.unlink(missing_ok=True)
+            except OSError as exc2:
+                logger.warning(f"[ring-retire] {sid} 落档失败、临时档也没删掉（下次同路径会覆盖）：{exc2}")
+            logger.warning(f"[ring-retire] {sid} 落冷档失败，ring 原样留着（历史没丢）："
+                           f"{type(exc).__name__}: {exc}")
+            return False
+        with self._lock:
+            # 复查（锁内原子）：写盘期间来了订阅者、或 ring 又进了新事件（len 变了）⇒ 不卸。
+            # ring 此刻仍是真源，磁盘上那份短一截的档无害——下一次 retire 会覆盖成整档。
+            if self._subscribers.get(sid) or len(self._events.get(sid) or ()) != n:
                 return False
             self._events.pop(sid, None)
             self._counters.pop(sid, None)
@@ -183,6 +208,11 @@ class SessionEventBus:
                 p.unlink()
             except FileNotFoundError:
                 pass
+            except PermissionError as exc:
+                # C142：C118 同族缝在删除侧——「翻一个刚 retire 的会话」（_read_spill 正开着
+                # 文件读）撞上删除，Windows 上 unlink 会 WinError 5。改前抛穿 delete_session
+                # ⇒ 500、冷档成无主孤儿（正是这条想防的）。留着 + 一行可 grep 的账。
+                logger.warning(f"[ring-spill] {sid} 冷档删除时正被读取，留下孤儿档（重删即清）：{exc}")
 
     def publish(self, sid: str, kind: str = "report", **fields) -> Event:
         try:
@@ -240,21 +270,32 @@ class SessionEventBus:
         """游标窗口回放。after=下界（不含）、before=**开区间上界**（「加载更早」往回翻用），
         两者都不给就是全量；limit>0 取**窗口尾部** limit 条——不给 before 时上界即流尾，
         也就是「最新一屏」（首屏只吞一屏而不是保留窗口里那 `MAX_EVENTS_PER_SESSION` 条）。limit=0 不限＝老语义。
-        返回始终升序：下一页的 before 用本页首条 cursor，取到空页即到头。"""
+        返回始终升序：下一页的 before 用本页首条 cursor，取到空页即到头。
+        C126：ring 不在（已 retire）就直接读冷档取窗口——**不把整档物化回内存**，翻历史是读，
+        读不该有常驻副作用（retire 一场只走一次，物化回去的东西没有任何触发再卸掉）。"""
         with self._lock:
-            events, _ = self._ensure(sid)
-            snap = list(events)     # 迭代期间线程侧可能 append：deque 边遍历边改会 RuntimeError，先快照
+            ring = self._events.get(sid)
+            snap = list(ring) if ring is not None else None
+        if snap is None:
+            snap = self._read_spill(sid)
         a, b = norm_cursor(after), norm_cursor(before)
         out = [ev for ev in snap if (not a or ev.cursor > a) and (not b or ev.cursor < b)]
         return out[-limit:] if limit and limit > 0 else out
 
     async def subscribe(self, sid: str) -> asyncio.Queue:
         """C90：改 async 与 Redis 版 `RedisEventBus.subscribe` **同形**——调用方（/events 路由）
-        服务两种 bus，接口必须一致。本实现无 I/O，async 只是形状。"""
-        _, subs = self._ensure(sid)
+        服务两种 bus，接口必须一致。本实现无 I/O，async 只是形状。
+        C127：注册全程在 `_lock` 内——retire 的「有订阅者不卸」检查、收尾的三连 pop、publish 的
+        投递枚举都持同一把锁；改前注册在锁外，正好卡进 retire 检查与 pop 之间 ⇒ 订阅者被连 dict
+        一起丢成孤儿（这条 SSE 连接从此只收 keepalive）。
+        C126：只登记订阅者、**不物化 ring**——retire 过的会话被重新订阅时，历史走 `_read_spill`，
+        ring 等真有 publish 时才由 `_ensure` 建（顺带 `_subscribers` 已改成 setdefault，先到的
+        订阅者不会被冲掉）。"""
         q: asyncio.Queue = asyncio.Queue(maxsize=MAX_SSE_QUEUE)
-        subs[q] = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         with self._lock:
+            subs = self._subscribers.setdefault(sid, {})
+            subs[q] = loop
             self._dropped[q] = 0
         return q
 

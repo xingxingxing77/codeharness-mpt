@@ -125,13 +125,14 @@ class InProcessApprovalStore:
 
     def decide(self, aid: str, outcome: str, actor: str = "") -> str:
         """首个回执生效，后来的忽略（两个人同时点也只认第一个）——HSETNX 语义。
-        C119 起存 JSON（与 Redis 档同形同读路，`_parse_receipt` 共用）。"""
+        C119 起存 JSON（与 Redis 档同形同读路，`_parse_receipt` 共用）。
+        C140：原子形状必须保住——C119 一度把它写成 check-then-set，HSETNX 语义从此只在
+        Redis 档成立；setdefault 一步到位，两档重新同构（今天唯一调用方同 loop 串行分不出，
+        任何 off-loop 调用方一来就是分水岭）。"""
         receipt = json.dumps({"outcome": outcome, "by": actor, "ts": time.time()},
                              ensure_ascii=False)
-        if aid not in self._decisions:
-            self._decisions[aid] = receipt
-            return outcome
-        return _parse_receipt(self._decisions[aid])["outcome"]
+        cur = self._decisions.setdefault(aid, receipt)
+        return outcome if cur is receipt else _parse_receipt(cur)["outcome"]
 
     def decision(self, aid: str) -> str | None:
         raw = self._decisions.get(aid)

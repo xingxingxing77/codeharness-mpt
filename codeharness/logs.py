@@ -33,6 +33,9 @@ LLM_STREAM_QUEUE: ContextVar[asyncio.Queue] = ContextVar("llm-stream")
 #   全仓只有 `tests/s3_report_action.py` 设真，块管理器走的是 `BlockReporter`→`_emit`（不经此队列），
 #   现网打字机是 `runner._make_sink`/`_ProseStream` 发的 `live` 事件、其界在 SSE 订阅队列那一层（C90/C103）。
 #   所以 C112 = 对休眠路径的廉价防御（有人重接这座桥时不无界），**不是修了现网内存病**；账见 platform-infra §1.11。
+#   ⚠ C138 口径收窄（10-02 复审批）：「不无界」只对**队列对象**成立——满档后逐片改攒进 `_spill`
+#   （普通 list，无上界），段内峰值内存与改前的无界队列同形，仍随正文长度走；补完腿的挂死面
+#   （`await q.put` / `await task` 无超时）已在 report.py C138 上界（5s/10s 宁丢尾不挂死）。
 MAX_LLM_STREAM_QUEUE = 4096
 
 

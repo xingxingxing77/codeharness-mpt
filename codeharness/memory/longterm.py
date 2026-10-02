@@ -201,8 +201,20 @@ class LongTermMemory:
             # 原先直接 `hits[i["index"]]` ⇒ 字符串下标抛 TypeError，被外层 `except Exception`
             # 吞成「精排不可用，已降级为仅粗排」：整条精排静默跳过，且日志上跟「真没配精排」
             # 长得一模一样（09-26 审查）。两半用同一次转换。
-            return [(hits[int(i["index"])], i.get("relevance_score"))
-                    for i in results if 0 <= int(i["index"]) < len(hits)][:k]
+            # C128（10-02 复审批）：分数键也一样不许静默——响应项里没有 `relevance_score`
+            # （键名不符的兼容口）时 `.get` 静默得 None，`_recall_inner` 那侧「有分才用」的
+            # 过滤把整批当「没精排」退回原序，**下限整档失效且零日志**，违反上面刚写的
+            # 「解析不到就抛」承诺。按同一口径抛，走下面同一声 warning。
+            scored = []
+            for i in results:
+                idx = int(i["index"])
+                if not 0 <= idx < len(hits):
+                    continue
+                s = i.get("relevance_score")
+                if s is None:
+                    raise ValueError(f"精排结果第 {idx} 项没有 relevance_score（键名不符？）：{str(i)[:120]}")
+                scored.append((hits[idx], s))
+            return scored[:k]
         except Exception as e:
             logger.warning(f"精排不可用，已降级为仅粗排（{url}）：{type(e).__name__}: {e}")
             return [(h, None) for h in hits[:k]]
@@ -275,6 +287,13 @@ class LongTermMemory:
             hits = await self.store.search(query, list(dense), k=k, only_ids=keep, **scope)
         else:
             if cfg.mode == "rerank":
+                # C128（10-02 复审批）：档=rerank 而精排**未配置**是第三种静默——`rerank_scored`
+                # 对空 base_url 干净早退（t32 钉的「零 HTTP 零 warning」只对直接调 `_rerank` 成立），
+                # 这里拿到全是 None 的分就退回原序，下限整档失效、日志零痕迹、账面照记召回正常。
+                # 与「配了但离线」的 per-call warning 同口径：响一声，不炸。
+                if not settings.reranker.base_url:
+                    logger.warning(f"{self.doc_type} 召回下限档=rerank 但精排未配置"
+                                   f"（RERANKER__BASE_URL 空），本档退化为粗排原序：下限不生效")
                 # 向精排多要一批候选来打分：`reranker.recall_k` 这个字段从登记起零读者，这是第一次有读者
                 width = max(k, settings.reranker.recall_k)
             hits = await self.store.search(query, list(dense), k=width, **scope)
