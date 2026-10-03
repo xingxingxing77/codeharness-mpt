@@ -516,14 +516,20 @@ def _retryable(exc: BaseException) -> bool:
     **429 是第三档，09-24 量出来才敢加**（C25；读数在 `plan/model-gateway.md` 的 C25 行）：厂商并发上限
     是**在途请求数**（StepFun `limit: 5`），in-flight 6 起 1/6 撞、8 起 3/8 撞，而**退避重发后 6/6 与
     8/8 全过**——被拒的那一发没受理、不产生第二笔钱，所以它既不是「超时（再发可能更糟）」也不是「鉴权错
-    （再发白烧）」，是「等一等就好」。只认 429 这一个状态码，其余 status 错仍回 False。"""
+    （再发白烧）」，是「等一等就好」。只认 429 这一个状态码，其余 status 错仍回 False。
+
+    **5xx 是第四档，C156（10-03）**：服务端错（500/502/503/504/529 一族）与 429 同一条算术——
+    请求**没被受理成一笔完成的生成**，退避重发不产生第二笔完成的账；与「流被掐断」那个基形态同属
+    「服务端侧的坏」，没有理由一个重发一个不重。400/401/403/404/422/451 照旧不重发（我们自己的调用
+    写坏了 / 鉴权错 / 内容拦停，重发只是原样再炸）。退避闸与 429 同一颗（`stop_after_attempt=3`）。
+    ⚠ 真 5xx 活体形状未现证过（没撞过），哪天真撞一种带特殊 body 的，照 C147 的先例补进名单。"""
     from openai import APIError, APIStatusError, APITimeoutError
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, APITimeoutError)):
         return False
     if isinstance(exc, (ConnectionError, OSError)):
         return True
     if isinstance(exc, APIStatusError):
-        return exc.status_code == 429
+        return exc.status_code == 429 or 500 <= exc.status_code <= 599
     return isinstance(exc, APIError)
 
 

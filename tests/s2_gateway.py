@@ -530,6 +530,20 @@ def t14_retry_predicate():
     if _retryable(ValueError("契约错是自己的代码错")):
         _fail("自己的代码错不许重")
 
+    # C156：5xx 并进「没受理」那一档——退避重发不产生第二笔完成的账，与 429 同一颗退避闸；
+    # 400（调用写坏）/451（内容拦停）照旧不重，重发只是原样再炸。
+    from openai import APIStatusError
+
+    def _status(code):
+        return APIStatusError(f"Error code: {code}", response=httpx.Response(code, request=req), body=None)
+
+    for code in (429, 500, 502, 503, 529):
+        if not _retryable(_status(code)):
+            _fail(f"{code} 是服务端没受理（429 并发限流 / 5xx 服务端错），必须可退避重发（C156）")
+    for code in (400, 451):
+        if _retryable(_status(code)):
+            _fail(f"{code} 是调用写坏/内容拦停，重发只是原样再炸（C156 反向对照）")
+
     async def _attempts(boom, limit=6):
         """数「桩真收到几次调用」——判据不看返回值看次数，否则「不重发」与「重发后成功」长得一样。"""
         n = {"c": 0}
@@ -548,6 +562,9 @@ def t14_retry_predicate():
     if (got_timeout, got_connect) != (1, 3):
         _fail(f"重发次数读数失配：超时={got_timeout}（要 1，不重发）、"
               f"连接失败={got_connect}（要 3，保留重发）——停在这里，口径就没落成代码")
+    got_503 = asyncio.run(_attempts(_status(503)))
+    if got_503 != 3:
+        _fail(f"5xx 重发次数读数失配：{got_503}（要 3，与 429 同一颗 stop_after_attempt=3 的退避闸）")
 
     calls = {"n": 0}
 
