@@ -24,13 +24,15 @@
         <b>{{ waste.unknown }} · {{ waste.truncated }} · {{ waste.empty }} · {{ waste.invalid }}</b>
         <span>无效调用（未知命令 · 被截断 · 空正文 · args 不合 schema）</span>
       </div>
-      <!-- R1（09-28 普查批）：召回链的可用性。三笔分开报——「那条腿连不上」「库里没有相关内容」
-           「召回到但被相关性下限砍空」是三件事，并成一句「召回 0 条」就又把故障演成了空态。
-           整格只在这场会话真发生过召回时出现：RAG 关掉的部署里 0 是常态，摆出来就是把没接线说成没命中。
-           前两个数是**条/次混排**（条数 · 次数 · 次数），口径与后端 `provider/cost.py` 同读一处。 -->
-      <div v-if="recall.returned || recall.zero || recall.failures" class="u-cell">
-        <b>{{ recall.returned }} · {{ recall.zero }} · {{ recall.failures }}</b>
-        <span>召回切片（条） · 空返回（次） · 不可用（次）</span>
+      <!-- R1（09-28 普查批）+ R4/C153（10-03 补写腿两笔）：记忆链的可用性与入库健康度。分开报——
+           「那条腿连不上」「库里没有相关内容」「召回到但被相关性下限砍空」是三件事，并成一句
+           「召回 0 条」就又把故障演成了空态。整格只在这场会话真发生过召回或入库时出现：
+           RAG 关掉的部署里 0 是常态，摆出来就是把没接线说成没命中。
+           五个数是**条/次/点混排**（条 · 次 · 次 · 点 · 次）：`written` 是入库成功的**点数**
+           （一条长消息切 N 片就是 N 点），口径与后端 `provider/cost.py` 同读一处。 -->
+      <div v-if="recall.returned || recall.zero || recall.failures || recall.written || recall.overflowFailed" class="u-cell">
+        <b>{{ recall.returned }} · {{ recall.zero }} · {{ recall.failures }} · {{ recall.written }} · {{ recall.overflowFailed }}</b>
+        <span>召回切片（条） · 空返回（次） · 不可用（次） · 入库（点） · 入库失败（次）</span>
       </div>
     </div>
 

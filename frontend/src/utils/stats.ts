@@ -163,22 +163,29 @@ export function wasteTotals(rows: { cost?: Record<string, number> }[]):
   return { unknown, truncated, empty, invalid }
 }
 
-/** R1（09-28 普查批）：召回链的可用性三笔。**单位不同，不许并成一个数**：
- *  `returned` 是召回到手的**切片条数**，`zero`/`failures` 是**次数**（口径写在后端
+/** R1（09-28 普查批）+ R4/C153（10-03 补写腿两笔）：记忆链的可用性五笔。**单位不同，不许并成一个数**：
+ *  `returned` 是召回到手的**切片条数**，`zero`/`failures`/`overflowFailed` 是**次数**，
+ *  `written` 是入库成功的**点数**（一条长消息切 N 片就是 N 点——口径写在后端
  *  `provider/cost.py` 的字段注释里，两处必须同读）。
  *  为什么必须与 `wasteTotals` 分开一格：「那条腿连不上」「库里没有相关内容」「召回到但被相关性下限砍空」
- *  是三件事，并成一句「召回 0 条」就又把故障演成了空态（C96 那一族的原形状）。 */
+ *  是三件事，并成一句「召回 0 条」就又把故障演成了空态（C96 那一族的原形状）。
+ *  写腿两笔为什么进同一格：与读腿同属一条记忆管线，账要对着读——`overflow_written` 是存进去的点数、
+ *  `overflow_failed` 是失败的**次数**，没有前者，后者为零也可能是「压根没写过东西」。 */
 export function recallTotals(rows: { cost?: Record<string, number> }[]):
-  { returned: number; zero: number; failures: number } {
+  { returned: number; zero: number; failures: number; written: number; overflowFailed: number } {
   let returned = 0
   let zero = 0
   let failures = 0
+  let written = 0
+  let overflowFailed = 0
   for (const r of rows) {
     returned += r.cost?.recall_returned ?? 0
     zero += r.cost?.recall_zero_hits ?? 0
     failures += r.cost?.recall_failures ?? 0
+    written += r.cost?.overflow_written ?? 0
+    overflowFailed += r.cost?.overflow_failed ?? 0
   }
-  return { returned, zero, failures }
+  return { returned, zero, failures, written, overflowFailed }
 }
 
 /** 竖线分组（参考项目的 stats strip）：每段内部用「·」，段间用「 | 」，没数据的整段丢掉。 */

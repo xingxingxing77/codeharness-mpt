@@ -1968,21 +1968,28 @@ def t27_recall_visibility():
     root = _p.Path("frontend/src")
     rd = lambda r: (root / r).read_text(encoding="utf-8")
 
-    # ① 取数：三个键必须读的是后端 `cost_snapshot` 那三个真名，且**不与 waste 那三笔混用**
+    # ① 取数：五个键必须读的是后端 `cost_snapshot` 那些真名（R1 三笔 + R4/C153 写腿两笔），
+    #    且**不与 waste 那四笔混用**。断言认**求和行本体**——只查键名会被 docstring 里的字样喂饱
+    #    （变异第一刀实测：删掉求和行、留着注释，门禁照样绿）。
     st = rd("utils/stats.ts")
     assert "export function recallTotals" in st, "t27① 召回求和函数没了（格子会读不到数）"
-    for key in ("recall_returned", "recall_zero_hits", "recall_failures"):
-        assert key in st, f"t27① `recallTotals` 没读 cost 快照里的 {key}（那就是恒 0 的假格子）"
+    for key in ("recall_returned", "recall_zero_hits", "recall_failures",
+                "overflow_written", "overflow_failed"):
+        assert f"r.cost?.{key} ?? 0" in st, \
+            f"t27① `recallTotals` 没把 {key} 加进求和（注释里有≠真读了）"
     assert "unknown_command_calls" in st.split("export function recallTotals")[0], \
         "t27① 阳性对照失守：wasteTotals 没了 ⇒ 「召回」与「无效调用」并成一段就白分开了"
 
-    # ② 渲染：整格只在这场真发生过召回时出现（09-25 的 C95 纪律：没数据源的格子不许摆着）
+    # ② 渲染：整格只在这场真发生过召回或入库时出现（09-25 的 C95 纪律：没数据源的格子不许摆着）
     up = rd("components/settings/UsagePage.vue")
     seg = up.split('recallTotals')[-1]
     assert "recallTotals" in up and "const recall = computed" in up, "t27② computed 没接上"
-    assert 'v-if="recall.returned || recall.zero || recall.failures"' in up, \
-        "t27② 那格丢了 v-if ⇒ RAG 关掉的部署会摆一排 0，把「没接线」显示成「没命中」"
+    assert ('v-if="recall.returned || recall.zero || recall.failures'
+            ' || recall.written || recall.overflowFailed"' in up), \
+        "t27② 那格丢了 v-if ⇒ RAG 关掉的部署会摆一排 0，把「没接线」显示成「没命中」（C153 起含写腿两笔）"
     assert up.count("召回切片") == 1, "t27② 标签复述了（两处文案会漂）"
+    assert "入库（点） · 入库失败（次）" in up, \
+        "t27② C153 写腿两笔没带单位——`written` 是点数不是次数，标签丢了单位就是把两种口径混成一个数"
 
     # ③ 后端发射点：动态线在 Thought 块里发，措辞只有一个来源
     rz = _p.Path("codeharness/roles/role_zero.py").read_text(encoding="utf-8")
