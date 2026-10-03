@@ -62,6 +62,18 @@ class Redis:
             logger.warning(f"Redis SET {key} failed: {type(e).__name__}: {e}")
             return False
 
+    async def expire(self, key: str, timeout_sec: int) -> bool:
+        """给既有 key 续 TTL（C150 滑动续期用）。0/负值不动手——Redis 语义里 expire 0 = 删键，
+        不是本壳想要的。降级语义同 get/set：连不上只 warning 返回 False，绝不抛。"""
+        if not await self._connect() or not key or timeout_sec <= 0:
+            return False
+        try:
+            await self._client.expire(key, timeout_sec)
+            return True
+        except Exception as e:
+            logger.warning(f"Redis EXPIRE {key} failed: {type(e).__name__}: {e}")
+            return False
+
     async def close(self):
         if not self._client:
             return

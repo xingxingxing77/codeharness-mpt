@@ -324,6 +324,12 @@ class Settings(BaseSettings):
 
     workspace_root: str = "./workspace"
     memory_overflow_size: int = 200
+    # C150：BrainMemory（滚动摘要+窗口外历史）落盘的 TTL（秒）。0 = 不过期——记忆随会话存续；
+    # 键按 (user, project, role) 有界、稳态只剩一条摘要串，孤儿键代价有天花板（会话删除暂不回收
+    # brain key，要回收是 delete_scope 同族的一行）。>0 = 滑动 TTL：dumps 写入即刷新、loads 命中即续期。
+    # 旧实现死值 1800 且只在 summarize 那一跳写入——驱逐过的会话闲置 30 分钟，下次 _think 加载到
+    # 空 brain（摘要与窗口外历史全蒸发），这正是 C150 立的因；要旧口径就显式配 1800。
+    brain_ttl_sec: int = 0
     enable_rag: bool = True
     # 源 config2.py:79 CodeValidateConfig.code_validate_k_times——WriteCodeReview 的 评审→重写 轮数，
     # 源默认 2；初版记成"照源默认 1"（实为抄录错），2026-09-16 对账改回 2

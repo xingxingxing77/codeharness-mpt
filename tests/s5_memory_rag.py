@@ -4,7 +4,7 @@
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s5_memory_rag.py
 
 断言打在哪（docs 陷阱 #2 要求自证）：
-  - t1/t3/t5/t9/t10 打真 Redis（127.0.0.1:6379），不是 mock；
+  - t1/t3/t5/t9/t9b/t9c/t10/t10b 打真 Redis（127.0.0.1:6379），不是 mock；
   - t2 把 settings.redis 指向死端口，验的是「连不上不抛」这条降级语义；
   - t7/t8/t11 打在 FakeLLM 收到的 payload 上——要钉的就是「发给模型的消息里有没有上一轮结果」，
     所以记账对象是 messages 列表本身，不是模型返回值。
@@ -224,6 +224,77 @@ def t9_brain_overflow_summarizes_and_restores():
     print("  t9 溢出摘要落 Redis，新 BrainMemory 按 key 恢复")
 
 
+def t9b_brain_persists_on_eviction_even_if_summary_fails():
+    """C150：驱逐一进 brain 就落盘。旧实现只等 summarize 成功那一次写——摘要这一发炸了
+    （ValueError 回滚窗口），Redis 里什么都没有，进程一死窗口外历史全丢。本格钉：
+    摘要失败路径上 key 已在、驱逐原文可按 key 恢复；窗口回滚的既有语义顺带验一笔。"""
+    if not live_redis():
+        print("  t9b 跳过（无 Redis）")
+        return
+    CURRENT_PROJECT.set("s5_mem_session")
+
+    class DeadSummarizer:
+        async def aask(self, msg, system_msgs=None, stream=False, tag="", **kw) -> str:
+            return ""                       # 摘要没产出 ⇒ summarize 抛 ValueError（_summarize 的空返回）
+
+    role = _role(brain=BrainMemory(), memory_k=2)
+    role.llm = DeadSummarizer()
+    evicted = [Message(content=f"c{i}命令结果" + "长" * 100) for i in range(3)]
+    for m in evicted:
+        role.memory.add(m)
+    role.memory.add(Message(content="w3"))
+    role.memory.add(Message(content="w4"))
+    # 阳性对照：本格的 key 是确定性的（t9/t10 同用），先把上一轮的残骸删掉——
+    # 否则旧数据会让「这轮到底写没写」永远验不出来（m1 变异存活就是栽在这）。
+    key = role._brain_key()
+    KEYS.append(key)
+    sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                     db=settings.redis.db).delete(key)
+    asyncio.run(role._compress())           # ValueError 在 _compress 内被吞并回滚，不外抛
+    assert len(role.memory.storage) == 5    # 回滚语义：摘要失败 ⇒ 窗口原样保住
+    raw = sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                           db=settings.redis.db).get(key)
+    assert raw is not None, "驱逐进 brain 后没落盘——C150 立的因就是这行"
+    payload = json.loads(raw)
+    assert [m["content"] for m in payload["history"]] == [m.content for m in evicted]
+    restored = asyncio.run(BrainMemory().loads(role._brain_key()))
+    assert len(restored.history) == 3 and restored.historical_summary == ""
+    print("  t9b 摘要失败也落盘：驱逐原文在 Redis、新实例可恢复（C150 落盘时机）")
+
+
+def t9c_brain_ttl_is_configurable_and_slides():
+    """C150：TTL 走 settings.brain_ttl_sec——0=不过期（默认，随会话存续）；>0=dumps 刷新、
+    loads 命中即滑动续期。旧实现死值 1800 且只挂在 summarize 那一跳，谁也配不了它。"""
+    if not live_redis():
+        print("  t9c 跳过（无 Redis）")
+        return
+    keep = settings.brain_ttl_sec
+    r = sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                         db=settings.redis.db)
+
+    def dump_once(k):
+        b = BrainMemory()
+        b.add_talk(Message(content="第一轮问话"))
+        assert asyncio.run(b.dumps(redis_key=k)) is True
+
+    try:
+        settings.brain_ttl_sec = 0
+        k0 = fresh_key("brain_ttl")
+        dump_once(k0)
+        assert r.ttl(k0) == -1, f"0 应无过期，实测 {r.ttl(k0)}"
+
+        settings.brain_ttl_sec = 1800
+        k1 = fresh_key("brain_ttl")
+        dump_once(k1)
+        assert 0 < r.ttl(k1) <= 1800, f"正 TTL 应生效，实测 {r.ttl(k1)}"
+        r.expire(k1, 5)                     # 人为把 TTL 磨到 5 秒
+        asyncio.run(BrainMemory().loads(redis_key=k1))   # loads 命中即续期
+        assert r.ttl(k1) > 5, f"loads 应滑动续期回 ~1800，实测 {r.ttl(k1)}"
+    finally:
+        settings.brain_ttl_sec = keep
+    print("  t9c TTL 三态：0 不过期 / 正值生效 / loads 滑动续期（C150）")
+
+
 def t10_memory_keys_are_per_role_and_per_session():
     CURRENT_PROJECT.set("s5_mem_session")
     a, b = _role(), _role()
@@ -233,6 +304,23 @@ def t10_memory_keys_are_per_role_and_per_session():
     CURRENT_PROJECT.set("s5_other_session")
     assert "s5_other_session" in a._brain_key()               # 换会话就是换 key，不互串
     print("  t10 记忆 key 按会话+角色分开（CURRENT_PROJECT 同一接缝）")
+
+
+def t10b_brain_key_carries_user_tenant():
+    """C151：租户段不再写死 "default"——CURRENT_USER 在场就进 key，空则回 "default"
+    （auth 关的默认就是 "default"，与改动前的 key 逐字节相同）。"""
+    from codeharness.runtime import CURRENT_USER
+    CURRENT_PROJECT.set("s5_mem_session")
+    role = _role()
+    keep = CURRENT_USER.get()
+    try:
+        CURRENT_USER.set("alice")
+        assert ":alice:" in role._brain_key(), role._brain_key()
+        CURRENT_USER.set("")
+        assert ":default:" in role._brain_key(), role._brain_key()
+    finally:
+        CURRENT_USER.set(keep)
+    print("  t10b brain key 租户段跟 CURRENT_USER，空回 default（C151）")
 
 
 def t11_observe_dedupes_and_survives_partial_results():
@@ -2275,7 +2363,10 @@ def main():
               t6_split_texts_overlaps_and_multiwindow_reduces,
               t7_tool_results_feed_next_round_prompt, t8_no_brain_windows_at_prompt_time,
               t9_brain_overflow_summarizes_and_restores,
+              t9b_brain_persists_on_eviction_even_if_summary_fails,
+              t9c_brain_ttl_is_configurable_and_slides,
               t10_memory_keys_are_per_role_and_per_session,
+              t10b_brain_key_carries_user_tenant,
               t11_observe_dedupes_and_survives_partial_results,
               t12_collection_shape, t13_tenant_and_doctype_isolation,
               t14_sparse_indices_are_process_stable, t15_longterm_overflow_recall_roundtrip,
@@ -2328,8 +2419,9 @@ def main():
           f"think 载荷无损往返与裁剪键/命中计数改变排序/@exp_cache 开关矩阵/"
           f"真 Qdrant+Redis 存取回放/RoleZero 接线命中零模型调用）"
           f"+ S9.2 scorer 2 组（打分模板逐字/FakeLLM 打分路径）"
-          f"+ S5.1 记忆 11 组（Redis 真往返与死端口降级/"
-          f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/RoleZero 结果回喂、"
+          f"+ S5.1 记忆 14 组（Redis 真往返与死端口降级/"
+          f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/驱逐即落盘摘要失败也保原文/"
+          f"TTL 三态与滑动续期/key 带租户段/RoleZero 结果回喂、"
           f"截窗、摘要可恢复、key 按会话+角色隔离、去重容错）"
           f"+ S5.2 R9 检索 7 组（集合形态 named+sparse+INT8+租户索引/单集合双向隔离/"
           f"sparse 下标跨进程稳定/长期记忆入库幂等与召回字段/召回真进 prompt/"

@@ -164,9 +164,12 @@ class RoleZero:
         """一个角色一个 key：目录名走 CURRENT_PROJECT（与 session_root 同一接缝），不另起一套会话对象。"""
         if self.redis_key:
             return self.redis_key
-        from codeharness.runtime import CURRENT_PROJECT
+        from codeharness.runtime import CURRENT_PROJECT, CURRENT_USER
         from codeharness.const import BRAIN_MEMORY
-        return BrainMemory.to_redis_key(BRAIN_MEMORY, "default", f"{CURRENT_PROJECT.get()}/{self.profile['name']}")
+        # C151：租户段不再写死 "default"——与 LongTermMemory.user_id 同一口径（空回 "default"，
+        # auth 关逐字节兼容）。ltm/kb 都带 user_id 边界，唯独对话摘要层多用户同项目同角色串号最疼。
+        return BrainMemory.to_redis_key(BRAIN_MEMORY, CURRENT_USER.get() or "default",
+                                        f"{CURRENT_PROJECT.get()}/{self.profile['name']}")
 
     # ---- 工作记忆（源 roles/di/role_zero.py:241 memory.get(memory_k) + :287-295 回喂） ----
     def _observe(self, s: RoleZeroState):
@@ -210,6 +213,9 @@ class RoleZero:
             return
         for m in evicted:
             self.brain.add_history(m)
+        # C150：驱逐一进 brain 就落盘——旧实现只等 summarize 成功那一次写（还挂 30 分钟死 TTL），
+        # 摘要这一发炸了或进程死在半路，窗口外历史就没影了。摘要失败 ValueError 的回滚语义不动。
+        await self.brain.dumps(redis_key=self._brain_key())
         try:
             await self.brain.summarize(self.llm, redis_key=self._brain_key())
         except ValueError as e:                     # 摘要没产出不能把记忆丢了——退回原样，下轮再试

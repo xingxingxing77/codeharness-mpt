@@ -86,12 +86,20 @@ class BrainMemory(BaseModel):
         if v:
             loaded = BrainMemory.model_validate_json(v)
             loaded.is_dirty = False
+            # C150：滑动续期——命中即把 TTL 拉回满格。brain_ttl_sec=0（默认）时 expire 不动手，
+            # 与「不过期」一致；配了正 TTL 的场，闲置中途回来加载也不至于读到过期前最后一秒。
+            if settings.brain_ttl_sec > 0:
+                await Redis().expire(key=redis_key, timeout_sec=settings.brain_ttl_sec)
             return loaded
         return self
 
-    async def dumps(self, redis_key: str, timeout_sec: int = 30 * 60) -> bool:
+    async def dumps(self, redis_key: str, timeout_sec: Optional[int] = None) -> bool:
+        """is_dirty 才落盘。timeout_sec=None（默认）读 `settings.brain_ttl_sec`（C150）：
+        0 = 不过期；显式传值仍按显式走（t3 的 timeout_sec=30 语义不变）。"""
         if not self.is_dirty or not redis_key:
             return False
+        if timeout_sec is None:
+            timeout_sec = settings.brain_ttl_sec
         if self.cacheable:
             await Redis().set(key=redis_key, data=self.model_dump_json(), timeout_sec=timeout_sec)
         self.is_dirty = False
@@ -109,6 +117,9 @@ class BrainMemory(BaseModel):
             return
         self.historical_summary = history_summary
         self.history = []
+        # C150：状态变了就自己标脏。旧实现靠 add_history 顺手的脏位撑着——_compress 改成驱逐即落盘后，
+        # dumps 会把脏位复位，这里的落盘就被静默跳过（t9 当场抓到：摘要从此写不进 Redis）。
+        self.is_dirty = True
         await self.dumps(redis_key=redis_key)
 
     # ---- 摘要 ----
