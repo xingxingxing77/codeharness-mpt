@@ -1,0 +1,88 @@
+{
+ "k": 3,
+ "window": 10,
+ "pool": 300,
+ "queries": 300,
+ "gold_in_window": 109,
+ "rerank_calls": 300,
+ "gold_rel_pct": {
+  "p05": 0.0,
+  "p10": 0.0001,
+  "p25": 0.0004,
+  "p50": 0.0029
+ },
+ "neg_median": 0.0001,
+ "neg_p95": 0.0164,
+ "gold_vs_neg_median_gap": 0.0028,
+ "sweep": [
+  {
+   "min_score": 0.0,
+   "avg_survivors": 3.0,
+   "gold_lost": 220,
+   "empty": 0
+  },
+  {
+   "min_score": 0.2,
+   "avg_survivors": 0.08,
+   "gold_lost": 294,
+   "empty": 280
+  },
+  {
+   "min_score": 0.3,
+   "avg_survivors": 0.04,
+   "gold_lost": 297,
+   "empty": 291
+  },
+  {
+   "min_score": 0.4,
+   "avg_survivors": 0.02,
+   "gold_lost": 299,
+   "empty": 296
+  },
+  {
+   "min_score": 0.5,
+   "avg_survivors": 0.01,
+   "gold_lost": 300,
+   "empty": 299
+  },
+  {
+   "min_score": 0.6,
+   "avg_survivors": 0.01,
+   "gold_lost": 300,
+   "empty": 299
+  },
+  {
+   "min_score": 0.7,
+   "avg_survivors": 0.01,
+   "gold_lost": 300,
+   "empty": 299
+  },
+  {
+   "min_score": 0.8,
+   "avg_survivors": 0.0,
+   "gold_lost": 300,
+   "empty": 299
+  },
+  {
+   "min_score": 0.85,
+   "avg_survivors": 0.0,
+   "gold_lost": 300,
+   "empty": 300
+  },
+  {
+   "min_score": 0.9,
+   "avg_survivors": 0.0,
+   "gold_lost": 300,
+   "empty": 300
+  }
+ ],
+ "rerank_t0_gold_lost": 220,
+ "dense_off_gold_lost": 245,
+ "verify": {
+  "min_score": 0.0,
+  "gold_lost": 221,
+  "empty": 0,
+  "avg_survivors": 3.0,
+  "offline_parity": true
+ }
+}
