@@ -138,6 +138,13 @@ class RecallFloorConfig(BaseModel):
     # 同窗噪声中位 **0.3988**（差 0.059；kb 那侧的对照是「无关 0.1472 vs 相关 0.6222」，差 0.47）
     # ⇒ 照搬 0.55 的后果是 **240/300 问一条记忆都召不回**，而它想挡的东西一件没挡住。
     # 读数：`plan/rag-knowledge.md` C23 行末块 / `storage/benchmark/memory_floor_curve_*.json`。
+    # C152（10-03 定档，桌面决策）：维持 `off` 是**带证据的决策**不是欠账——同份曲线的全档扫描里
+    # score 档每根线都是灾难档（0.3→0.6 分别丢 239/240/245/257/274/286/291 只 gold，300 问里
+    # gold 本就只有 117 只在候选窗内；0.45 起还成片砍空 92~266 问）；rank 档与 score **同根**——
+    # 都拿 dense 的序/分砍，gold 与噪声的分布重叠成 0.059，换把刀（名次换分数）砍空只会同量级。
+    # 真能分开这两坨的是精排（另一把刻度），而精排未部署。重开条件：精排（qwen3.7-text-rerank）
+    # 部署后给记忆腿试 `rerank` 档——validator 已把守「开 rerank 必须有 RERANKER__BASE_URL」，
+    # 读数出口仍是这份曲线工装。
     memory_mode: Literal["off", "score", "rank", "rerank"] = "off"
     oversample: int = 3        # dense 候选窗 = k × 此数（≥1；rerank 档不用它，它用 reranker.recall_k）
     min_score: float = 0.55    # score 档的余弦下限：新刻度上「代价仍在 1~2/300 里」的最高档（依据见上面常量）
