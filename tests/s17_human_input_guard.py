@@ -21,6 +21,8 @@
      正常收口不打（阳性对照）；批准后那一发 `_resume` 的路径单独判一次。
      C116/C147 的分类判据也长在这一格里（④拦停 ⑤崩溃对照 ⑥超窗 ⑦同码坏请求对照）——三族共用
      同一行 `[session-failed]`，所以只在这一格里加档，不另立组。
+  t18 C148：收口时读图里那本 Plan 状态机，把「还剩几条没做完」发成一条轮尾提示；
+     全勾完 / 无计划 / graphs 已清三种「没账可念」都不发（阳性对照）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -53,8 +55,9 @@ class _Team:
     真图端到端的判据在 t5/t6，不吃这里的替身。
     `boom` = 事件流走到一半时抛出的异常（t9 用它模拟「批准后那一发遇连接失败」）。"""
 
-    def __init__(self, events=(), hold=None, interrupts=(), boom=None):
+    def __init__(self, events=(), hold=None, interrupts=(), boom=None, values=None):
         self.events, self.hold, self.interrupts, self.boom = list(events), hold, list(interrupts), boom
+        self.values = values          # C148：替身也装 `aget_state().values`（真图里那本 plans 状态机就在这）
 
     async def astream_events(self, _input, _config, version=None):
         for ev in self.events:
@@ -67,8 +70,9 @@ class _Team:
     async def aget_state(self, _config):
         from types import SimpleNamespace as NS
         if not self.interrupts:
-            return NS(next=(), tasks=[])
-        return NS(next=("gate",), tasks=[NS(interrupts=[NS(value=v) for v in self.interrupts])])
+            return NS(next=(), tasks=[], values=self.values or {})
+        return NS(next=("gate",), tasks=[NS(interrupts=[NS(value=v) for v in self.interrupts])],
+                  values=self.values or {})
 
 
 INTERRUPT = {"event": "on_interrupt", "data": {"chunk": None},
@@ -1628,6 +1632,68 @@ def t17_throat_tells_crash_from_dropped():
           "[runner-dropped]）；status=running 且本 worker 无任务→拒收（C131 多 worker 撞车口）")
 
 
+def t18_plan_open_at_settle():
+    """C148：收口时把「Plan 还剩几条没做完」发进事件流（纯读图里那本状态机，不新增判据）。
+
+    缺陷形状：`_settle` 落 `finished` 之前只回答过「有没有停在待人工」，从不回答「事办没办完」；
+    而完成度**本来就在账上**（`TeamState.plans` 每角色一份 Plan 状态机，对勾=`Task.is_finished`，
+    `role_zero._plan_status` 早拿它画清单给模型自己看）。
+    四格：① 两角色各一本计划、合计 2 条未完成（共 5 条）⇒ **恰好一条** `turn/end`，
+           `reason={kind:'plan-unfinished', open:2, total:5}` 两个数都对，且排在终态 status 之前
+           （前端按事件顺序建行，跑完了才冒行就是「已完成」旁边挂着一条未完成提示）；
+         ② **阳性对照**：计划全勾完 ⇒ 一条都不发（否则这行恒亮，等于没有）；
+         ③ 从没建过计划（`plans` 空/None）⇒ 也不发——没账可念时不许编一个 0 或空数上去；
+         ④ graphs 已被清（散场、或这落在别的 worker）⇒ 不发，落态照旧 `finished`。
+    这三格判的是「读对账 + 发对形状 + 对照不发」，替身图把 `aget_state().values` 装上就够，
+    真图端到端在 s22/s23 那两支（本件不动内核，只动收口那一眼）。
+    """
+    def plans(*pairs):
+        # pairs: (角色名, [(task_id, is_finished), ...]) —— dump 形状照 `Plan.model_dump()`
+        return {"plans": {name: {"tasks": [{"task_id": t, "is_finished": f} for t, f in ts]}
+                          for name, ts in pairs}}
+
+    def settle(team_values=None, keep_graph=True):
+        store, runner, s = _make_runner()
+        team = _Team(values=team_values)
+        _install(runner, team, s.project_name)
+        cfg = {"configurable": {"thread_id": s.project_name}}
+        if keep_graph:
+            runner.graphs[s.id] = (team, cfg)
+        asyncio.run(runner._settle(s.id))
+        ev = [(e.kind, e.name, e.value) for e in runner.bus.history(s.id)]
+        return store.get(s.id).status.value, ev
+
+    st, ev = settle(plans(("Alice", [("t1", True), ("t2", False), ("t3", False)]),
+                        ("Bob", [("t1", True), ("t2", True)])))
+    turns = [(k, n, v) for k, n, v in ev if k == "turn"]
+    assert st == "finished", f"t18① 前提失配：收口落态是 {st!r}"
+    assert len(turns) == 1, f"t18① 失效：一条收口提示应有且只有一条，实际 {len(turns)} 条：{turns}"
+    kinds = [k for k, _n, _v in ev]
+    r = turns[0][2].get("reason") or {}
+    assert r.get("kind") == "plan-unfinished", f"t18① reason 形状不对：{r!r}"
+    assert (r.get("open"), r.get("total")) == (2, 5), f"t18① 数不对（跨两角色聚合）：{r!r}"
+    assert kinds.index("turn") < kinds.index("status"), \
+        f"t18① 提示排在终态 status 之后（顺序 {kinds}）——界面就成了「已完成」旁边挂着未完成"
+
+    # ② 阳性对照：全勾完不许发（少了这格，① 就等于「收口必发一条」）
+    _st2, ev2 = settle(plans(("Alice", [("t1", True), ("t2", True)])))
+    assert not [x for x in ev2 if x[0] == "turn"], f"t18② 阳性对照不成立：计划做完了还发提示：{ev2}"
+
+    # ③ 没账可念：零条任务 / 槽位是 None ⇒ 都不发（不许把「不知道」念成「还剩 0 条」或空数）
+    _st3, ev3 = settle(plans(("Alice", [])))
+    assert not [x for x in ev3 if x[0] == "turn"], f"t18③ 空计划也发了：{ev3}"
+    _st3b, ev3b = settle({"plans": {"Alice": None}})
+    assert not [x for x in ev3b if x[0] == "turn"], f"t18③ 值为 None 的槽位发了：{ev3b}"
+
+    # ④ graphs 没了：宁可不发，落态照旧
+    st4, ev4 = settle(plans(("Alice", [("t1", False)])), keep_graph=False)
+    assert st4 == "finished", f"t18④ 前提失配：graphs 没了落态变成 {st4!r}"
+    assert not [x for x in ev4 if x[0] == "turn"], f"t18④ graphs 没了却凭空发出：{ev4}"
+
+    print(f"  ok  t18（收口读图里那本 Plan 状态机发未完成数：2/5 一条且排在 status 前；"
+          f"全勾完不发、无计划不发、graphs 已清不发）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1640,7 +1706,8 @@ def main():
               t14_spawn_drops_quietly_when_the_row_vanished,
               t15_approval_receipt_records_actor,
               t16_invalid_args_is_countable,
-              t17_throat_tells_crash_from_dropped]
+              t17_throat_tells_crash_from_dropped,
+              t18_plan_open_at_settle]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1653,7 +1720,8 @@ def main():
           f"**起跑咽喉撞空会话不抛穿/不留死槽 1 组（t8 现证的那条竞态）** + "
           f"**回执记审批人 who/when、首到生效、旧格式兼容、两档同形 1 组（C119）** + "
           f"**无效 args 第四计数：schema 违例落账、回喂不变、不虚计、快照带出 1 组（C122）** + "
-          f"**咽喉分得清装配崩溃与行已不在 + 多 worker 撞车口拒收 1 组（C125/C131）**")
+          f"**咽喉分得清装配崩溃与行已不在 + 多 worker 撞车口拒收 1 组（C125/C131）** + "
+          f"**收口读图里那本 Plan 状态机、未完成数发一条轮尾提示（全勾完/无计划/graphs 已清三种都不发）1 组（C148）**")
 
 
 if __name__ == "__main__":

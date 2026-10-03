@@ -48,6 +48,18 @@
     </div>
   </div>
 
+  <!-- PlanOpen：轮尾黄点行（C148）。后端 `_settle` 读图里那本 Plan 状态机（对勾=`Task.is_finished`）
+       才发 `turn/end` + `reason.kind==='plan-unfinished'`，两个数从 `b.meta` 来。
+       几何刻意与上面 MaxTokens 行同族（同一份 .errRow、同一个 warn 档）——这也不是失败，是「没做完」。 -->
+  <div v-else-if="b.type === 'PlanOpen'" class="errRow" role="status"
+       :data-chat-anchor-key="b.key">
+    <VStateDot state="warning" class="errDot" />
+    <div class="errCopy">
+      <span class="warnTitle">收工时计划还没走完</span>
+      <span class="errMsg">还有 {{ b.meta?.open ?? 0 }} 条未完成（共 {{ b.meta?.total ?? 0 }} 条）。发一句「继续」可以接着做剩下的。</span>
+    </div>
+  </div>
+
   <!-- 其余：24px 折叠行 + 展开卡 -->
   <VDisclosureRow
     v-else

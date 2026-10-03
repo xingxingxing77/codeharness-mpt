@@ -566,6 +566,25 @@ export const useSessionStore = defineStore('sessions', {
             this.blockOrder.push(key)
           }
         }
+        // C148 同族第二格：`plan-unfinished`＝收口时那本 Plan 状态机还有没做完的条目（后端
+        // `_publish_plan_open` 读 `TeamState.plans` 的发数，对勾=`Task.is_finished`）。两个数走事件
+        // value、落进 `b.meta`——不扩 Block 字段，界面那一行才有东西可念。
+        if ((ev.value as any)?.reason?.kind === 'plan-unfinished') {
+          const key = ev.uuid || `e${ev.cursor || ev.seq}`
+          if (!(key in this.blocks)) {
+            const b = newBlock(ev)
+            b.type = 'PlanOpen'
+            b.closed = true
+            const r = (ev.value as any).reason
+            b.meta = { open: Number(r?.open) || 0, total: Number(r?.total) || 0 }
+            if (typeof ev.ts === 'number') {
+              b.ts = ev.ts
+              b.lastTs = ev.ts
+            }
+            this.blocks[key] = b
+            this.blockOrder.push(key)
+          }
+        }
       } else if (ev.kind === 'feedback') {
         // B4：反馈变更。按 key 增删这一份投影（`clear` 的 vote 是空串 ⇒ 删键）
         const v = (ev.value || {}) as { key?: string; vote?: string }

@@ -1109,9 +1109,20 @@ def t16_max_tokens_notice():
     css = cn.split("<style", 1)[-1]
     assert 'state="warning"' in cn and "--dsw-alias-state-warn-primary" in css, \
         "B8 回归：截断行用的是 error 档的红（截断不是失败，参照系给的是 warn 档）"
+    # C148 同族第二格：`plan-unfinished` 也得走完「后端发出去 → 建块 → 轮尾一行」，
+    # 且那两个数是从事件里带出来的（写死在模板里就成了「永远说还剩 0 条」那种假绿）。
+    assert "reason?.kind === 'plan-unfinished'" in ss and "b.type = 'PlanOpen'" in ss, \
+        "C148 回归：turn 分支不接 plan-unfinished（后端说出去了但没人听）"
+    assert "b.meta = { open:" in ss and "total:" in ss, \
+        "C148 回归：open/total 没落进 b.meta（界面念不出还剩几条）"
+    assert 'v-else-if="b.type === \'PlanOpen\'" class="errRow"' in cn, \
+        "C148 回归：PlanOpen 行不复用 .errRow 那一族几何（B1 已钉过源值，别另造一档）"
+    assert "b.meta?.open" in cn and "b.meta?.total" in cn, \
+        "C148 回归：界面把未完成数写成了常量（要读 b.meta 才是真账）"
     _ok("t16", "B8：真 HTTP 流式 length 收尾 → 记账口数到截断（stop 对照零计）→ `_settle` 发一条 "
                "turn/end+reason（重复收口不第二条、发在终态 status 之前）→ applyEvent 建 MaxTokens 块 "
-               "→ ChatNode warn 行与参照系两句文案逐字在位")
+               "→ ChatNode warn 行与参照系两句文案逐字在位；C148：plan-unfinished 同族走完发出去→建块→"
+               "轮尾一行，两个数经 b.meta 上屏（非模板写死）")
 
 
 def t17_goal_surface():

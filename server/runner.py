@@ -925,6 +925,7 @@ class SessionRunner:
             return
         session = self.store.update(sid, status=SessionStatus.finished, finished_at=_now())
         self._publish_max_tokens(sid)
+        await self._publish_plan_open(sid)
         self._publish_status(session, "run completed")
         self._forget(sid, terminal=True)
 
@@ -947,6 +948,37 @@ class SessionRunner:
         if n > self._trunc_reported.get(sid, 0):
             self._trunc_reported[sid] = n
             self.bus.publish(sid, kind="turn", name="end", value={"reason": {"kind": "max-tokens"}})
+
+    async def _publish_plan_open(self, sid: str):
+        """C148：收口时把「Plan 还剩几条没做完」发进事件流。
+
+        为什么值得发：`_settle` 落 `finished` 之前只回答过一件事——「有没有停在待人工」。它不回答
+        「事办没办完」，而**完成度本来就在账上**（`TeamState.plans` 每角色一份 Plan 状态机，对勾=
+        `Task.is_finished`，`role_zero._plan_status` 早就拿它画清单给模型自己看）。所以这一件**纯读这本账**，
+        不新增判据、不据此再跑一轮（那属循环语义，要另拍）。
+
+        形状端到端照隔壁 `_publish_max_tokens`：事件 `turn/end` + `reason.kind`，锚在轮尾。
+        计数走事件 value（前端放进 `Block.meta`，不扩 Block 字段）。
+        graphs 已被清掉（散场、或这落在别的 worker）就当不知道——**宁可不发，不编一个 0 上去**。
+        """
+        packed = self.graphs.get(sid)
+        if not packed:
+            return
+        graph, config = packed
+        try:
+            state = await graph.aget_state(config)
+        except Exception:
+            return
+        open_n = total = 0
+        for dump in ((getattr(state, "values", None) or {}).get("plans") or {}).values():
+            for t in (dump or {}).get("tasks") or []:
+                total += 1
+                if not t.get("is_finished"):
+                    open_n += 1
+        if open_n:
+            self.bus.publish(sid, kind="turn", name="end",
+                             value={"reason": {"kind": "plan-unfinished",
+                                               "open": open_n, "total": total}})
 
     @staticmethod
     def _fail_kind(exc: Exception) -> tuple[str, str]:
