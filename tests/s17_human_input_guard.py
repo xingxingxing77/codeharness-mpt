@@ -19,6 +19,8 @@
      （t4–t7 全在一个进程里，`heal_running()` 这条启动路径一次都没被问过）。
   t9 C18②：会话被打成 `failed` 那一刻留可 grep 的告警（`[session-failed]`）+ 事件流可见，
      正常收口不打（阳性对照）；批准后那一发 `_resume` 的路径单独判一次。
+     C116/C147 的分类判据也长在这一格里（④拦停 ⑤崩溃对照 ⑥超窗 ⑦同码坏请求对照）——三族共用
+     同一行 `[session-failed]`，所以只在这一格里加档，不另立组。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -716,7 +718,11 @@ def t9_failure_is_loud():
       ③ `_resume`（批准后那一发）单独判一次——它是被看见的那条路，与 `_run` 共用 `_fail` 但入口不同；
       ④ C116：供应侧拦停（真 `openai.APIStatusError` 451/`censorship_blocked`）⇒ 日志同一行里带
          `kind=blocked`、会话 `error` 既有人话也保留原始原因，而 `[session-failed]` 前缀一字不改；
-      ⑤ C116 反向对照：普通崩溃 ⇒ `kind=crash`，且 `error` 文案与改前**逐字相同**（分类器不许见谁都甩锅外部）。
+      ⑤ C116 反向对照：普通崩溃 ⇒ `kind=crash`，且 `error` 文案与改前**逐字相同**（分类器不许见谁都甩锅外部）；
+      ⑥ C147：超窗（真 `APIStatusError` 400/`context_length_exceeded` + `maximum context length`）⇒
+         `kind=context_overflow`、`error` 既有人话也保留原始原因，`[session-failed]` 前缀照旧一字不改；
+      ⑦ C147 反向对照：**同码 400** 但不含 context 字样（`invalid_request_error` 那种我们自己的调用写坏了）
+         ⇒ 仍 `kind=crash` 且文案逐字相同——这一格防的是「见 400 就甩锅窗口」，是 ⑥ 的牙。
     异常用真的 `openai.APIConnectionError`：缺陷台账里那行的 `error=APIConnectionError` 就是这么来的。
     """
     import io
@@ -814,8 +820,43 @@ def t9_failure_is_loud():
     assert "供应侧拦停" not in (err or ""), f"t9⑤ 崩溃的 error 被人话污染：{err!r}"
     assert err == f"APIConnectionError: {boom}", f"t9⑤ 崩溃文案被改了（应与改前逐字相同）：{err!r}"
 
+    # ⑥⑦ C147：超窗单列一族，但**只有带窗口字样的 400** 才算，同码的其它 400 仍旧是我们的崩溃。
+    #    ⚠ ⑥ 的形状取自 OpenAI 兼容口的公开口径，**没在真端点上现证过**——本仓在这台模型上从没真撞过窗
+    #    （现取到的最大单发是 09-25 那笔 pt=25,216，`logs/20260925.txt:4363`）。真撞窗那一发原文一到就换掉它。
+    resp400 = httpx.Response(400, request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+    overflow = APIStatusError(
+        "Error code: 400 - {'error': {'message': \"This model's maximum context length is 128000 tokens. "
+        "However, your messages resulted in 145000 tokens\", 'type': 'context_length_exceeded'}}",
+        response=resp400,
+        body={"error": {"message": "This model's maximum context length is 128000 tokens. "
+                                   "However, your messages resulted in 145000 tokens",
+                        "type": "context_length_exceeded"}})
+    badreq = APIStatusError(
+        "Error code: 400 - {'error': {'message': 'messages[0].content: expected string, got list', "
+        "'type': 'invalid_request_error'}}",
+        response=resp400,
+        body={"error": {"message": "messages[0].content: expected string, got list",
+                        "type": "invalid_request_error"}})
+
+    log_o, (st_o, err_o, kinds_o) = capture(lambda: one(boom_exc=overflow))
+    assert st_o == "failed", f"t9⑥ 前提失配：超窗场状态是 {st_o!r}（本件不改状态枚举）"
+    assert "[session-failed]" in log_o, "t9⑥ 把 C18② 那行前缀改掉了（运维 grep 不到＝分类反把告警弄丢）"
+    assert "kind=context_overflow" in log_o, f"t9⑥ 超窗没被分出来：{log_o[-220:]!r}"
+    assert "上下文超出" in (err_o or ""), f"t9⑥ 用户那半没成人话（还是裸 repr？）：{err_o!r}"
+    assert "maximum context length" in (err_o or ""), f"t9⑥ 分类把原始原因丢了（诊断价值没了）：{err_o!r}"
+    assert any(k == "error" for k, _n in kinds_o), f"t9⑥ 超窗场活流里没有 error 事件：{kinds_o}"
+
+    # ⑦ 是 ⑥ 的牙：同码 400、不含窗口字样 ⇒ 必须仍 `kind=crash` 且文案逐字不动（少了这格，⑥ 就等于
+    #    「凡是 400 都甩锅窗口」——而我们自己的调用写坏了恰恰也是 400）。
+    log_x, (st_x, err_x, _kx) = capture(lambda: one(boom_exc=badreq))
+    assert st_x == "failed", f"t9⑦ 前提失配：坏请求场状态是 {st_x!r}"
+    assert "kind=crash" in log_x, f"t9⑦ 普通的 400 被误分成超窗（该记我们的崩溃）：{log_x[-220:]!r}"
+    assert "上下文超出" not in (err_x or ""), f"t9⑦ 400 崩溃的 error 被人话污染：{err_x!r}"
+    assert err_x == f"APIStatusError: {badreq}", f"t9⑦ 400 崩溃文案被改了（应与改前逐字相同）：{err_x!r}"
+
     print(f"  ok  t9（失败留 [session-failed] 告警 + error 事件、正常收口不打；"
-          f"批准后那一发同判：{after}；C116 分类：拦停→kind=blocked+人话、崩溃→kind=crash 且文案一字未改）")
+          f"批准后那一发同判：{after}；C116 分类：拦停→kind=blocked+人话、崩溃→kind=crash 且文案一字未改；"
+          f"C147 分类：超窗→kind=context_overflow+人话、同码坏请求→kind=crash 且文案一字未改）")
 
 
 def t10_unknown_command_is_countable():

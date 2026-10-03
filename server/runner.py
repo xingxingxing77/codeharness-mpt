@@ -950,7 +950,8 @@ class SessionRunner:
 
     @staticmethod
     def _fail_kind(exc: Exception) -> tuple[str, str]:
-        """C116：把「一场为什么死」分成两族——`blocked`（供应侧把内容拦了）与 `crash`（我们自己的错）。
+        """C116：把「一场为什么死」分成三族——`blocked`（供应侧把内容拦了）、`context_overflow`（我们把
+        上下文撑爆了）、`crash`（我们自己的错）。C147 补的是第三族那格。
 
         为什么值得分（现场现证，10-01 22:46）：StepFun 对某一发回 `451 censorship_blocked` 时，`_fail` 走的
         是与编排崩溃**完全同一条路**——状态 `failed`、`error` 是异常 repr、日志只有 `[session-failed]`。
@@ -967,10 +968,22 @@ class SessionRunner:
         body = f"{getattr(exc, 'body', '') or ''}{exc}"
         blocked = (code == 451 or "censorship_blocked" in body or "content_blocked" in body
                    or "content policy" in body.lower())
-        if not blocked:
-            return "crash", ""
-        return "blocked", ("内容被供应侧拦停（HTTP 451 一类）：这一发没有可用产出，本场就此停在这一点；"
-                           "此前已产出的文件与会话记录都保留。要接着做，请改写触发拦停的那段内容后重开一场。")
+        if blocked:
+            return "blocked", ("内容被供应侧拦停（HTTP 451 一类）：这一发没有可用产出，本场就此停在这一点；"
+                               "此前已产出的文件与会话记录都保留。要接着做，请改写触发拦停的那段内容后重开一场。")
+        # C147：超窗单列一族。它和编排崩溃在改前是同一条路（`_retryable` 按 `gateway.py:494` 的口径
+        # 故意不重发 400 ⇒ 直冒到这里记 `kind=crash`），后果是运维 grep 不出「我们把话撑爆了」与
+        # 「代码炸了」，用户拿到一句裸 repr，不知道该切文件还是该报 bug。
+        # ⚠ 这四条形状**没在真端点上现证过**（要撞一次窗才拿得到，本仓在这台模型上没撞过）：前两条是
+        #   OpenAI 兼容口的口径，第三条是 DashScope 系（`Range of input length should be [1, N]`），
+        #   第四条兜「context window」这种改写。真撞窗的那发原文一到，按 C116 的做法把它补进名单。
+        low = body.lower()
+        if code == 400 and ("maximum context length" in low or "context_length_exceeded" in low
+                            or "range of input length" in low or "context window" in low):
+            return "context_overflow", ("上下文超出了模型窗口（HTTP 400 一类）：这一发没被受理，"
+                                        "此前已产出的文件与会话记录都保留。要接着做，把长输入分段（一次少读几个文件、"
+                                        "或让工具少带回些正文），或在 `.env` 开 `LLM__CONTEXT_LENGTH` 让网关按预算裁。")
+        return "crash", ""
 
     def _fail(self, sid: str, exc: Exception):
         # C117：会话行在起跑之后被人删掉 ⇒ 这场不是「跑失败了」，是「行没了、按散会收」。
