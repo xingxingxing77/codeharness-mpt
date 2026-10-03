@@ -104,6 +104,21 @@ eq('非回放的 feedback 照旧改票', s.feedback, { 'later:key': 'dislike' })
 s.applyEvent(live('goal', { value: { objective: 'G-old' } }))
 eq('非回放的 goal 照旧落库', s.sessions[0].goal, 'G-old')
 
+/* ④ C148：`turn` 那支的两类 reason 都得在 store 里建成块——s8 t16 钉的是「源码里有这个分支」，
+ *   这一格钉的是**真 store 真建出块、数从事件里带出来**（最后一米断在 store 的话界面照样空白）。
+ *   max-tokens 同批对照：加了新分支不许把兄弟分支顶掉。 */
+s.applyEvent(live('turn', { uuid: 'po-1', name: 'end',
+  value: { reason: { kind: 'plan-unfinished', open: 2, total: 5 } } }))
+eq('plan-unfinished 建成 PlanOpen 块', s.blocks['po-1']?.type, 'PlanOpen')
+eq('两个数是从事件里来的（不是模板写死）', s.blocks['po-1']?.meta, { open: 2, total: 5 })
+const orderBefore = s.blockOrder.length
+s.applyEvent(live('turn', { uuid: 'po-1', name: 'end',
+  value: { reason: { kind: 'plan-unfinished', open: 2, total: 5 } } }))
+eq('同 key 再喂不建第二块', s.blockOrder.length, orderBefore)
+s.applyEvent(live('turn', { uuid: 'mt-1', name: 'end', value: { reason: { kind: 'max-tokens' } } }))
+eq('max-tokens 照旧建 MaxTokens 块（新分支没顶掉兄弟）', s.blocks['mt-1']?.type, 'MaxTokens')
+eq('截断行不带 meta（它没有数要念）', s.blocks['mt-1']?.meta, null)
+
 rmSync(dir, { recursive: true, force: true })
 console.log(failed ? `\n${failed} 条失败` : '\n全过')
 process.exit(failed ? 1 : 0)
