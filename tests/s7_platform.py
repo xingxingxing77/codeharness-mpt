@@ -1681,6 +1681,71 @@ async def t26_history_does_not_materialize_and_locks_are_honest():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+async def t27_session_state_evicted_at_terminal():
+    """C155：待拍行①「事件流 per-session 无驱逐＝进程内常驻只增不减」复核为**过期**——
+    `_forget(terminal=True)` 已把全部按 sid 索引的进程态收净（chats/costs/graphs/projects/
+    在途四表/_blk_of/_live_blk/_last_span/_trunc_reported/ring，C115/C130/C136 各收了自家那块）。
+    本格把「散会即收干净」钉成**常驻守卫**：一条 FakeLLM 线跑到 finished，runner 上所有 per-sid
+    容器必须回到空——将来谁往 runner 上加新表、忘了在 _forget 收，这格当场红。"""
+    import shutil as _sh
+    import codeharness.team as team
+    from server.settings import WORKSPACE_ROOT
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.actions.prepare_documents import PrepareDocuments
+    from codeharness.actions.write_prd import WritePRD
+    from codeharness.const import RequirementTag
+    from codeharness.schema import Message
+    from codeharness.environment.team_graph import build_team
+    from platforms.session_store import RedisSessionStore
+    from platforms.event_store import RedisEventBus
+    from server.runner import SessionRunner
+    import server.sessions as ss
+    _sh.rmtree(WORKSPACE_ROOT / "s7evict", ignore_errors=True)
+    keep, ss.SESSIONS_FILE = ss.SESSIONS_FILE, Path(tempfile.mkdtemp()) / "sessions.json"
+    bus = RedisEventBus(TEST_DB)
+    bus.start()
+    try:
+        runner = SessionRunner(RedisSessionStore(TEST_DB), bus)
+        s = runner.store.create("驱逐复核线", project_name="s7evict", permission="full_access")
+
+        def fake_prepare(idea, project, agents=None, checkpointer=None, cost_manager=None, sop=None):
+            def mk(script):
+                f = FakeLLM(script)
+                f.cost_manager = cost_manager
+                return f
+            pm = Agent({"name": "PM", "profile": "Product Manager", "goal": "PRD"},
+                       [PrepareDocuments(llm=mk([])), WritePRD(llm=mk([json.dumps(PRD)]))],
+                       mk([]), react_mode="BY_ORDER", max_loops=3, watch={"UserRequirement"})
+            g = build_team({"PM": pm}, checkpointer=checkpointer,
+                           sop={RequirementTag.USER_REQUIREMENT: ["PM"]})
+            return g, {"configurable": {"thread_id": project}}, {
+                "messages": [Message(content=idea, cause_by=RequirementTag.USER_REQUIREMENT)],
+                "memories": {}, "debug_rounds": 0, "finished": False}
+
+        saved = team.prepare_project
+        team.prepare_project = fake_prepare
+        try:
+            await runner._run(s)
+        finally:
+            team.prepare_project = saved
+        assert runner.store.get(s.id).status.value == "finished", runner.store.get(s.id).status
+        containers = {name: getattr(runner, name) for name in
+                      ("chats", "costs", "graphs", "projects", "_last_span", "_trunc_reported",
+                       "_call_t0", "_prose", "_prompts", "_used_kernel_block", "_blk_of",
+                       "_live_blk")}
+        leftovers = {k: len(v) for k, v in containers.items() if v}
+        assert not leftovers, f"散会后仍有 per-sid 进程态残留：{leftovers}"
+        assert not runner.tasks, "tasks 表没清"
+        _ok("t27", "C155：散会即收干净——12 张 per-sid 表全部回零（「进程内常驻只增不减」的旧前提"
+                  "判伪，本格是防退化常驻守卫）")
+    finally:
+        await bus.aclose()
+        from codeharness.environment.checkpoint import close_all
+        await close_all()       # aiosqlite 线程不关会吊住退出（t13 同款教训）
+        ss.SESSIONS_FILE = keep
+
+
 def main():
     # C132 顺手补的一刀：_flush_test_db 只挂在**成功收尾**——上一轮红在这套件中途时 db15 里
     # 留着上一场 t24 的流（同 key 不同 ms 段），下一轮 history 的 after 过滤就会撞上跨场残段
@@ -1704,6 +1769,7 @@ def main():
     asyncio.run(t24_dropped_prefix_comes_back_from_history())
     asyncio.run(t25_terminal_ring_offloads_to_cold_storage())   # C115：终态 ring 卸得掉、历史一条不减
     asyncio.run(t26_history_does_not_materialize_and_locks_are_honest())   # C126/C127/C136
+    asyncio.run(t27_session_state_evicted_at_terminal())   # C155：散会即收干净（防退化常驻守卫）
     asyncio.run(t22_inproc_sse_queue_bounded_like_redis())   # C103：进程内那台，两条路都跑
     if not REDIS_UP:
         print("⏭  redis 未起（127.0.0.1:6379 不通）——t2–t9/t12/t13 跳过；起容器/`docker compose up -d` 后复跑")
@@ -1711,7 +1777,7 @@ def main():
         return
     asyncio.run(_redis_suite())
     _flush_test_db()
-    print("\ns7_platform: 26/26 全绿（双配置；t26 是本轮 C126/C127/C136 新加的那组）")
+    print("\ns7_platform: 27/27 全绿（双配置；t27 是本轮 C155 新加的那组）")
 
 
 if __name__ == "__main__":
