@@ -18,6 +18,9 @@
   t7 委派↔回报死循环的刹车：队长无视回报反复重派 → `team_rounds` 到档干净散会，不烧到 recursion_limit
      把整场打成 failed。**对照组是判据的一部分**：同剧本把 `recursion_limit` 压到 12 必须真抛
      `GraphRecursionError`，否则「它停下来了」可能只是因为剧本根本不循环（本仓反复踩过的空转判据）。
+  t8 C148 真图档：`_publish_plan_open` 读**真 build_team 落下的 `plans` dump** 数得对（2 条任务勾掉 1 条
+     ⇒ `open=1/total=2`）。s17 t18 吃的是替身图的 values，而本仓因这颗函数的形状假设真炸过一次
+     （遍历 dict 拿到键 ⇒ `AttributeError` 冒到 `_fail`、红在无关的 t7），所以形状必须由真图复核。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -286,6 +289,61 @@ async def t6_report_path():
           f"三次激各活 1 个节点、Bob 零调用（stats={stats}）")
 
 
+async def t8_plan_open_reads_real_dump():
+    """C148 真图档：`_publish_plan_open` 读的是**真状态机**，不是替身图的 values。
+
+    为什么必须有这一格：s17 的 t18 吃替身图，而本会话刚因 `state.values["plans"]` 的形状假设真炸过一次
+    ——第一版写 `for dump in ….get("plans") or {}`，遍历 dict 拿到的是**键**（角色名），
+    `AttributeError: 'str' object has no attribute 'get'` 冒到 `_fail`，红出来却在无关的 t7。
+    所以「dump 形状对不对」不能靠我自己造的字典证，得用真 `build_team` + 真剧本跑完一场再数。
+    剧本：队长立两条任务（t1、t2）→ 派活 → Alice 回报 → 队长 `finish_current_task`（只勾得上 t1）
+    ⇒ 真图里 `plans[队长]["tasks"]` 是 2 条、1 条完成；交给真 runner 应当数出 `open=1/total=2`。"""
+    import tempfile
+    from pathlib import Path
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from server.events import SessionEventBus
+    from server.runner import SessionRunner
+    from server.sessions import SessionStore
+
+    plan2 = {"command_name": "Plan.append_task",
+             "args": {"task_id": "t2", "dependent_task_ids": ["t1"], "instruction": "补上测试", "assignee": "Alice"}}
+    agents, sop, _llms = _team(
+        [_think("立两条任务再派活", [PLAN_CMD, plan2, PUBLISH]),
+         _think("等回报", [END]),
+         _think("第一条做完了，收口这一步", [FINISH, END])],
+        [_think("写完了", [REPLY]), _think("收工", [END])],
+        [_think("不该轮到我", [END])])
+    stats = []
+    # checkpointer 显式给：生产由 runner 注入 AsyncSqliteSaver，这里要的是「aget_state 读得到」这同一件事
+    graph = build_team(agents, checkpointer=InMemorySaver(), sop=sop, stats=stats)
+    cfg = {"configurable": {"thread_id": "s22t8"}}
+    out = await graph.ainvoke(
+        {"messages": [Message(content="做一个命令行待办工具", role="user",
+                              cause_by=RequirementTag.USER_REQUIREMENT)],
+         "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}, cfg)
+
+    dump = (out.get("plans") or {}).get(TEAMLEADER_NAME)
+    assert dump and len(dump.get("tasks") or []) == 2, f"前置失配：真图里队长计划不是两条任务：{dump}"
+    done = [t["task_id"] for t in dump["tasks"] if t["is_finished"]]
+    assert done == ["t1"], f"前置失配：勾掉的不是 t1（剧本没跑对，后面数的就不是真账）：{dump['tasks']}"
+
+    store = SessionStore(path=Path(tempfile.mkdtemp()) / "sessions.json")
+    s = store.create("C148 真图档", project_name="s22t8")
+    bus = SessionEventBus()
+    runner = SessionRunner(store, bus)
+    runner.graphs[s.id] = (graph, cfg)
+    await runner._publish_plan_open(s.id)
+    ev = [e for e in bus.history(s.id) if e.kind == "turn"]
+    assert len(ev) == 1, f"真图收口该发且只发一条未完成提示，实际 {len(ev)} 条：{ev}"
+    r = ev[0].value.get("reason") or {}
+    assert (r.get("kind"), r.get("open"), r.get("total")) == ("plan-unfinished", 1, 2), \
+        f"数的是真 dump 却数错了（形状假设又漂了？）：{r}"
+    # 「全勾完不发」那一档的对照在 s17 t18②（同一颗函数，替身图与真图各证一次，不在这儿重复造状态）
+    print(f"  ok  t8 真图档：真 build_team 的 plans dump 数出 open=1/total=2（剧本勾掉 t1），"
+          f"替身图那格（s17 t18）的形状假设至此被真图复核过")
+
+
 async def t7_pingpong_brake():
     """队长无视回报反复重派 → 必须靠 team_rounds 刹车散会，而不是烧到 recursion_limit 把整场打成 failed。
     剧本刻意只给一条回复：FakeLLM 耗尽后重复最后一条，于是「派活→收口」与「汇报→收口」每轮都重演，
@@ -320,7 +378,8 @@ def main():
     t5_original_message_not_narrowed()
     asyncio.run(t6_report_path())
     asyncio.run(t7_pingpong_brake())
-    print("\ns22_delegate_route: 7/7 全绿")
+    asyncio.run(t8_plan_open_reads_real_dump())
+    print("\ns22_delegate_route: 8/8 全绿")
     return 0
 
 
