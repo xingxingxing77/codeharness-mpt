@@ -205,11 +205,23 @@ class Agent:
                 # 兜底失败就**按 END 收口**（本轮收工，不是把整场打死），并留一行可 grep 的 warning。
                 from codeharness.logs import logger
                 from codeharness.provider.repair import llm_repair_json
-                logger.warning(f"[agent-structured-fallback] {self.profile['name']} 决策回包解析失败，"
-                               f"走兜底收口：{type(e).__name__}: {e}")
-                raw = await self.llm.aask(prompt, tag="agent_fallback")
-                choice = await llm_repair_json(raw, ActionChoice, self.llm) or ActionChoice(
-                    thought=f"[解析失败，已按 END 收口] {str(raw)[:200]}", action="END")
+                from codeharness.provider.gateway import blocked_reason
+                reason = blocked_reason(e)
+                if reason:
+                    # C157（C154 同款到经典线）：拦停**不发重问**——下面的 aask 会把同一内容原样再发
+                    # 一遍，451 重发必再拦（与 `_retryable` 不重发 4xx 同一条理由），改前实际形状是
+                    # 「structured 拦 → 重问再拦 → 整场 failed」。按 END 收口 = 本轮优雅收工，产出保留，
+                    # `[session-failed]` 不再因此响，改打可 grep 的 `[llm-blocked]`。
+                    logger.warning(f"[llm-blocked] role={self.profile['name']} {type(e).__name__}: {e}")
+                    choice = ActionChoice(
+                        thought=f"⚠ {reason}：本轮没有可用产出，此前已产出的文件与会话记录都保留。",
+                        action="END")
+                else:
+                    logger.warning(f"[agent-structured-fallback] {self.profile['name']} 决策回包解析失败，"
+                                   f"走兜底收口：{type(e).__name__}: {e}")
+                    raw = await self.llm.aask(prompt, tag="agent_fallback")
+                    choice = await llm_repair_json(raw, ActionChoice, self.llm) or ActionChoice(
+                        thought=f"[解析失败，已按 END 收口] {str(raw)[:200]}", action="END")
             await rep.content(choice.thought)
         return {"chosen": choice.action, "loops": s["loops"] + 1}
 

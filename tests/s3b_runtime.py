@@ -825,6 +825,57 @@ def t19_blocked_think_degrades_not_dies():
     print("  ok  t19 C154：拦停 think 降级成通告+end（零重问、零炸场），普通 400 不误判为拦停")
 
 
+def t20_classic_line_blocked_degrades_to_end():
+    """C157（C154 同款到经典线）：`Agent._think` REACT 分支 structured 拦 → **不发重问** → 按 END 收口。
+    改前 fallback 把同款内容重问再拦，整场 failed；拦停判别同用 `gateway.blocked_reason` 一处定义。"""
+    import httpx
+    from openai import APIStatusError
+    from codeharness.roles.agent import Agent
+    from codeharness.provider.gateway import blocked_reason
+
+    resp451 = httpx.Response(451, request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+    blocked = APIStatusError(
+        "Error code: 451 - {'error': {'message': 'The content you provided or machine outputted is blocked.',"
+        " 'type': 'censorship_blocked'}}",
+        response=resp451,
+        body={"error": {"message": "The content you provided or machine outputted is blocked.",
+                        "type": "censorship_blocked"}})
+
+    class BlockedLLM:
+        def __init__(self):
+            self.aask_calls = 0
+
+        def structured(self, cls):
+            class _B:
+                async def ainvoke(self, msgs, **kw):
+                    raise blocked
+            return _B()
+
+        async def aask(self, *a, **kw):
+            self.aask_calls += 1
+            raise AssertionError("fallback 重问不该发生（451 同款内容重发必再拦）")
+
+    class _Act:
+        def __init__(self, name):
+            self.name = name
+
+    async def go():
+        agent = Agent({"name": "Alice", "profile": "PM", "goal": "g"},
+                      [_Act("a1"), _Act("a2")], BlockedLLM(), react_mode="REACT", max_loops=5)
+        s = {"plan": None, "inbox": [Message(content="写个 prd")], "loops": 0,
+             "action_cursor": -1, "memories": {}}
+        out = await agent._think(s)
+        assert out["chosen"] == "END", out
+        assert agent.llm.aask_calls == 0                    # 没走 repair 重问
+        # 反向对照：普通 400（调用写坏）不算拦停——repair 管线照旧是它的地盘
+        resp400 = httpx.Response(400, request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+        bad = APIStatusError("Error code: 400 - invalid_request_error", response=resp400, body=None)
+        assert blocked_reason(bad) is None
+
+    asyncio.run(go())
+    print("  ok  t20 C157：经典线 REACT 拦停降级成 END（零重问零炸场），普通 400 不误判")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -836,7 +887,8 @@ def main():
               t15_no_dead_state_channels, t16_run_code_named_delivery,
               t17_react_think_survives_a_broken_structured_reply,
               t18_log_file_sink_is_bounded,
-              t19_blocked_think_degrades_not_dies]
+              t19_blocked_think_degrades_not_dies,
+              t20_classic_line_blocked_degrades_to_end]
     try:
         for c in checks:
             c()
