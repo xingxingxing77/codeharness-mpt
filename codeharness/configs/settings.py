@@ -146,6 +146,11 @@ class RecallFloorConfig(BaseModel):
     # 部署后给记忆腿试 `rerank` 档——validator 已把守「开 rerank 必须有 RERANKER__BASE_URL」，
     # 读数出口仍是这份曲线工装。
     memory_mode: Literal["off", "score", "rank", "rerank"] = "off"
+    # C159：记忆腿的线**单独一档**。为什么必须有：min_score 的刻度随 mode/端点变（本类 docstring 开头
+    # 三行），而 kb/memory 两腿原来**共用一个字段**——kb 的 0.55 是 dense 余弦刻度，记忆腿若开 rerank 档
+    # （C158：T=0 纯重排即最优，不设线）读同一个 0.55 就是拿另一把尺的读数砍自己的召回。
+    # None = 跟主字段走（既有配置逐字节兼容）；设了值只在 memory 腿生效。
+    memory_min_score: float | None = None
     oversample: int = 3        # dense 候选窗 = k × 此数（≥1；rerank 档不用它，它用 reranker.recall_k）
     min_score: float = 0.55    # score 档的余弦下限：新刻度上「代价仍在 1~2/300 里」的最高档（依据见上面常量）
     max_rank: int = 5          # rank 档的名次上限（≥1）
@@ -156,13 +161,19 @@ class RecallFloorConfig(BaseModel):
         为什么不把「记忆腿不设闸」写死在 `recall()` 里：那等于用代码替一次标定说话，下次有人给
         记忆腿标了线，只能改函数；现在它是一档配置，改默认值会先红在 s5 t39① 那一格上。
         """
-        if doc_type == "memory" and self.memory_mode != self.mode:
-            return self.model_copy(update={"mode": self.memory_mode})
+        if doc_type == "memory" and (self.memory_mode != self.mode or self.memory_min_score is not None):
+            update = {"mode": self.memory_mode}
+            if self.memory_min_score is not None:
+                update["min_score"] = self.memory_min_score
+
+            return self.model_copy(update=update)
         return self
 
-    @field_validator("min_score")
+    @field_validator("min_score", "memory_min_score")
     @classmethod
     def check_min_score(cls, v):
+        if v is None:
+            return v
         if v < 0 or v > 1:
             raise ValueError(f"RECALL_FLOOR__MIN_SCORE 必须在 [0,1]（余弦与精排分都在这个刻度），收到 {v}")
         return v

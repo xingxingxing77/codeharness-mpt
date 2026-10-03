@@ -1773,6 +1773,24 @@ def t39_recall_floor_applies_per_leg():
         assert C23_LOUD not in got_on, \
             f"③失效：memory_mode 打开后记忆腿仍没吃这一刀（{got_on}）⇒ ② 的「没砍」是硬编码不是配置"
 
+        # ⑤ C159：memory_min_score 分腿——kb/memory 各读各的线。rerank 档 T=0「纯重排不设线」
+        # 配 memory_min_score=0.0 时，kb 的 0.55/0.4 照旧只管 kb；None=跟主字段走（既有配置逐字节兼容）。
+        d2 = RecallFloorConfig(mode="score", memory_mode="rerank", min_score=0.55, memory_min_score=0.0)
+        assert (d2.for_leg("kb").min_score, d2.for_leg("memory").min_score) == (0.55, 0.0), \
+            "⑤失效：memory_min_score 没分腿——记忆腿的精排刻度会拿 kb 的 dense 线来砍自己（C158 的教训）"
+        assert RecallFloorConfig(mode="score", memory_mode="score",
+                                 min_score=0.55).for_leg("memory").min_score == 0.55, \
+            "⑤失效：None 兜底变了（老配置的逐字节兼容破口）"
+        try:
+            RecallFloorConfig(memory_min_score=1.5)
+            raise AssertionError("⑤失效：memory_min_score 越界被收下了")
+        except ValidationError:
+            pass
+        with _FloorCfg(mode="score", memory_mode="score", oversample=3, min_score=0.4, memory_min_score=0.0):
+            got_own = [m.content for m in asyncio.run(mem.recall(C23_Q, k=2))]
+        assert C23_LOUD in got_own, \
+            f"⑤失效：memory_min_score 没在召回里生效（{got_own}）——记忆腿还在吃 kb 的 0.4"
+
         for bad in [dict(memory_mode="nope"), dict(memory_mode="score", min_score=1.5),
                     dict(memory_mode="score", min_score=0.0), dict(memory_mode="rank", max_rank=0)]:
             try:
