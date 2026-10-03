@@ -479,6 +479,25 @@ class LLMGateway:
         return False
 
 
+def blocked_reason(exc: BaseException) -> str | None:
+    """「供应侧把内容拦了」的判别，**一处定义**（C154，自 runner._fail_kind 收编）。
+
+    为什么搬进 gateway：runner 要它分类死因（C116），role 侧要它决定「拦停不发重问」（C116 档位②，
+    `_think` 的 fallback 会把同一内容原样重问——451 重发必再拦，与 `_retryable` 不重发 4xx 是同一条
+    理由）。规则的第二个读者出现时，规则就该搬进被读的那一层；runner 的死因文案留在 runner
+    （`_fail_kind` 拼它自己的后半句），这里只负责认出「这是拦停」并给一句前缀。
+
+    认三条形状（10-01 真实 StepFun 451 现证第一条）：`status_code == 451`；body/str 里带
+    `censorship_blocked` / `content_blocked`；或 `content policy`（不分区大小写）。
+    """
+    code = getattr(exc, "status_code", None)
+    body = f"{getattr(exc, 'body', '') or ''}{exc}"
+    if code == 451 or "censorship_blocked" in body or "content_blocked" in body \
+            or "content policy" in body.lower():
+        return "内容被供应侧拦停（HTTP 451 一类）"
+    return None
+
+
 def _retryable(exc: BaseException) -> bool:
     """重试判据按 ADR-06 拆成两半：**可能已被受理的不重发，连接没建立的照旧重发**。
 

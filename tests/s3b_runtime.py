@@ -773,6 +773,58 @@ def t18_log_file_sink_is_bounded():
           f"③临时根里落了 {n_files} 本且中文行按 utf-8 读回原样")
 
 
+def t19_blocked_think_degrades_not_dies():
+    """C154（C116 档位②）：供应侧拦停的那一发在 `_think` 里降级——**不发重问**（改前实际形状是
+    structured 拦 → fallback 把同一内容原样重问 → 再拦 → 整场 failed；451 重发必再拦，与
+    `gateway._retryable` 不重发 4xx 同一条理由）。降级成通告 thought + 零命令，走既有 end 契约
+    ⇒ Worker 被拦=该角色优雅收工（图继续）、Leader 被拦=整场收进 finished，产出保留，
+    `[session-failed]` 不再因此响。"""
+    import httpx
+    from openai import APIStatusError
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.provider.gateway import blocked_reason
+
+    resp451 = httpx.Response(451, request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+    blocked = APIStatusError(
+        "Error code: 451 - {'error': {'message': 'The content you provided or machine outputted is blocked.',"
+        " 'type': 'censorship_blocked'}}",
+        response=resp451,
+        body={"error": {"message": "The content you provided or machine outputted is blocked.",
+                        "type": "censorship_blocked"}})
+
+    class BlockedLLM:
+        def __init__(self):
+            self.aask_calls = 0
+
+        def structured(self, cls):
+            class _B:
+                async def ainvoke(self, msgs, **kw):
+                    raise blocked
+            return _B()
+
+        async def aask(self, *a, **kw):
+            self.aask_calls += 1
+            raise AssertionError("fallback 重问不该发生（451 同款内容重发必再拦）")
+
+    async def go():
+        role = RoleZero({"name": "Alice", "profile": "Product Manager", "goal": "g"},
+                        [], BlockedLLM(), brain=None)
+        s = {"task": "写个 prd", "history": [], "respond_language": "中文", "finished": False,
+             "act_cursor": 0, "pending_ask": False}
+        out = await role._think(s)
+        entry = out["history"][-1]
+        assert "拦停" in entry["thought"] and "保留" in entry["thought"], entry["thought"]
+        assert entry["commands"] == [{"command_name": "end", "args": {}}], entry["commands"]
+        assert role.llm.aask_calls == 0                        # 没走 repair 重问
+        # 反向对照：普通 400（我们自己把调用写坏）不算拦停——repair 管线的地盘不许被误判抢走
+        resp400 = httpx.Response(400, request=httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions"))
+        bad = APIStatusError("Error code: 400 - invalid_request_error", response=resp400, body=None)
+        assert blocked_reason(bad) is None
+
+    asyncio.run(go())
+    print("  ok  t19 C154：拦停 think 降级成通告+end（零重问、零炸场），普通 400 不误判为拦停")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -783,7 +835,8 @@ def main():
               t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
               t15_no_dead_state_channels, t16_run_code_named_delivery,
               t17_react_think_survives_a_broken_structured_reply,
-              t18_log_file_sink_is_bounded]
+              t18_log_file_sink_is_bounded,
+              t19_blocked_think_degrades_not_dies]
     try:
         for c in checks:
             c()

@@ -996,13 +996,16 @@ class SessionRunner:
         这里也**不碰重试判据**（那是 `codeharness/provider/gateway.py::_retryable` 的事，且在审查线地界，
         不跨面、不把两处口径合并成一颗共享函数）。
         """
+        # C154：拦停的判别收成 `gateway.blocked_reason` 一处定义——`_think` 的降级（档位②）要认同一个
+        # 形状，规则的第二个读者出现时规则就该搬进被读的那层。死因**文案**留在本函数（s17 t9④ 按它
+        # grep，逐字不变），这里只借「认出拦停」与那句前缀。
+        from codeharness.provider.gateway import blocked_reason
+        reason = blocked_reason(exc)
+        if reason:
+            return "blocked", (reason + "：这一发没有可用产出，本场就此停在这一点；"
+                               "此前已产出的文件与会话记录都保留。要接着做，请改写触发拦停的那段内容后重开一场。")
         code = getattr(exc, "status_code", None)
         body = f"{getattr(exc, 'body', '') or ''}{exc}"
-        blocked = (code == 451 or "censorship_blocked" in body or "content_blocked" in body
-                   or "content policy" in body.lower())
-        if blocked:
-            return "blocked", ("内容被供应侧拦停（HTTP 451 一类）：这一发没有可用产出，本场就此停在这一点；"
-                               "此前已产出的文件与会话记录都保留。要接着做，请改写触发拦停的那段内容后重开一场。")
         # C147：超窗单列一族。它和编排崩溃在改前是同一条路（`_retryable` 按 `gateway.py:494` 的口径
         # 故意不重发 400 ⇒ 直冒到这里记 `kind=crash`），后果是运维 grep 不出「我们把话撑爆了」与
         # 「代码炸了」，用户拿到一句裸 repr，不知道该切文件还是该报 bug。

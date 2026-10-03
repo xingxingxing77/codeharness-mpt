@@ -399,13 +399,28 @@ class RoleZero:
             try:
                 thought = ZeroThought.model_validate_json(
                     await self.llm_cached_think(req=context + [HumanMessage(content=prompt)]))
-            except Exception:
-                # structured 失败 → 纯文本重问 + repair 管线 + LLM 自修（源 parse_commands + JSON_REPAIR 链）
-                from codeharness.provider.repair import llm_repair_json
-                raw = await self.llm.aask([*context, HumanMessage(content=prompt)], tag="rz_fallback")
-                thought = await llm_repair_json(raw, ZeroThought, self.llm) or ZeroThought(
-                    thought=f"[解析失败，已按 end 处理] {raw[:200]}",
-                    commands=[{"command_name": "end", "args": {}}])
+            except Exception as e:
+                from codeharness.provider.gateway import blocked_reason
+                reason = blocked_reason(e)
+                if reason:
+                    # C154（C116 档位②）：被拦的那一发**不发重问**——fallback 的 aask 会把同一内容原样
+                    # 再发一遍，451 重发必再拦（gateway._retryable 不重发 4xx 的同一条理由），改前实际
+                    # 形状就是「structured 拦 → 重问再拦 → 整场 failed」。降级成通告 thought + 零命令：
+                    # 下面的契约把空命令转成 end ⇒ Worker 被拦=该角色优雅收工（图继续，别的成员照跑），
+                    # Leader 被拦=整场收进 finished（_settle，C148 的 plan-unfinished 行报没做完的账），
+                    # 既有产出天然保留，`[session-failed]` 不再因此响。重试/退避不做（451 无意义）。
+                    from codeharness.runtime import CURRENT_SESSION
+                    logger.warning(f"[llm-blocked] role={self.profile['name']} "
+                                   f"sid={CURRENT_SESSION.get()} {type(e).__name__}: {e}")
+                    thought = ZeroThought(thought=f"⚠ {reason}：本轮没有可用产出，"
+                                                  f"此前已产出的文件与会话记录都保留。")
+                else:
+                    # structured 失败 → 纯文本重问 + repair 管线 + LLM 自修（源 parse_commands + JSON_REPAIR 链）
+                    from codeharness.provider.repair import llm_repair_json
+                    raw = await self.llm.aask([*context, HumanMessage(content=prompt)], tag="rz_fallback")
+                    thought = await llm_repair_json(raw, ZeroThought, self.llm) or ZeroThought(
+                        thought=f"[解析失败，已按 end 处理] {raw[:200]}",
+                        commands=[{"command_name": "end", "args": {}}])
             await rep.content(thought.thought)
         commands = [c.model_dump() for c in thought.commands]
         if not commands:                                      # 契约：至少一条命令，否则视作结束
