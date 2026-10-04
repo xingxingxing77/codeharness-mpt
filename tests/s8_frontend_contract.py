@@ -2068,7 +2068,10 @@ def t28_stream_ux_batch():
     assert "class _ProseStream" in runner, "t28① 抽取器没了（JSON 原文会重新直接上屏）"
     assert "MIN_PROSE = 24" in runner, "t28① 达标下限被改动（判据里的成员挑选会变；80 是活体证伪的旧值）"
     assert "value=chunk.content" not in runner, "t28① 又拿 chunk.content 原样发布了"
-    assert runner.count('name="live"') == 2,         f"t28① 逐片通道该在两个落点各一条（内核块 / stream- 兜底），现命中 {runner.count('name=\"live\"')} 条"
+    assert runner.count('name="live"') == 3,         f"t28① 逐片通道该在三处各一条（内核块 / stream- 兜底 / C173 的接缝分隔），现命中 {runner.count('name=\"live\"')} 条"
+    es_seg = runner.split("def _end_stream_rows", 1)
+    assert len(es_seg) == 2 and 'name="live"' in es_seg[1].split("    def ", 1)[0], \
+        "t28① 接缝分隔不是由 `_end_stream_rows` 发的（C173 那条换行跑到别处，落点就没人管了）"
     assert 'LIVE_BLOCKS = ("Thought", "Docs", "Task")' in runner, "t28① 可承载逐片的块类型被改"
     assert 'self._live_blk[sid] = (uid, event.get("block"),' in runner, \
         "t28① 落点不再由报道槽登记（逐片会全部掉进 stream-{node}，文档块又不流了）" \

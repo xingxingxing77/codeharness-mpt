@@ -339,6 +339,13 @@ class SessionRunner:
         # 「meta 先于这一笔首片到达」的既有前提不变，只是把读取点从「首片」提前到「start」。
         # `_live_blk` 本身保留「当前开着」语义：end_marker 配对（:703）与 start 的静默期判定（:1071）还靠它。
         self._blk_of: dict[tuple[str, str], tuple] = {}
+        # C172：sid -> {兜底行 uuid `stream-{node}`: 这一行有没有真收到过逐片}。
+        # 兜底行的收口标记**只**挂在 `on_chat_model_end` 上，而中断的调用压根走不到那儿——下面
+        # `_forget` 里那句「中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净」早就认了
+        # 这件事，只是当时只扫了在途表，**没扫事件流**：那块在流里保持开着，前端三处只认
+        # `b.closed`（Think 行停在 running 扫光、Docs 的 mermaid 不水合、轮尾行不发＝分叉入口也没了），
+        # 且冷档回放同形。这张表就是「散会时还有谁没关」的账，值用来决定要不要补分隔（C173）。
+        self._stream_rows: dict[str, dict[str, bool]] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def _spawn(self, sid: str, coro):
@@ -831,6 +838,29 @@ class SessionRunner:
             except Exception as exc:
                 logger.warning(f"[ring-retire] {sid} 落冷档失败，ring 原样留着：{type(exc).__name__}: {exc}")
 
+    def _end_stream_rows(self, sid: str, only: str = ""):
+        """给打字机兜底行收口（C172）：先补一条换行分隔（只在这行**真有过逐片**时补），再发 end_marker。
+
+        两个调用点：`on_chat_model_end` 的正常收口（`only` 给那一颗），以及 `_forget` 的散会清扫
+        （不给 `only`，把这一场还挂着的全收掉）——取消/异常那两条路走不到前一个调用点。
+        分隔符是给 C173 的：兜底行的 uuid 按节点名复用，第二笔块外调用重开**同一行**，而换行分隔
+        只在同一次 `_ProseStream` 内部给（`emitted` 每笔调用新建），前端又是 `live.join('')`
+        ⇒ 现证过接缝零分隔，两笔的话粘成一句。
+        「没字不补」这条守卫不是客气：`ChatNode.vue:14` 的判据是 `open || text`，一个光秃秃的
+        `\\n` 会让「收口后零字的 Think 行不渲染」那条规则失效——屏上多一行空白 Think。
+        """
+        rows = self._stream_rows.get(sid) or {}
+        for uid in ([only] if only else list(rows)):
+            had = rows.pop(uid, False)
+            node = uid[len("stream-"):] if uid.startswith("stream-") else uid
+            if had:
+                self.bus.publish(sid, kind="report", block="Thought", uuid=uid,
+                                 name="live", value="\n", role=node)
+            self.bus.publish(sid, kind="report", block="Thought", uuid=uid,
+                             name="end_marker", value=None, role=node)
+        if not rows:
+            self._stream_rows.pop(sid, None)
+
     def _forget(self, sid: str, terminal: bool):
         """散会（`terminal=True`）才清图与整场的进程态；**停在待人工处（`terminal=False`）只扫在途表**。
 
@@ -847,6 +877,9 @@ class SessionRunner:
         注意这不是「永不回收」：`_settle` 的正常收口、`_fail`、取消、以及 stop 的那两条路都走
         `terminal=True`，断点态只是**留到这一场真正结束**为止。"""
         self.chats.pop(sid, None)
+        # C172：散会前把还挂着的兜底行收掉。**顺序要紧**：`_retire_ring` 就在下面这个 `if terminal:`
+        # 里把这场的 ring 落冷档，补在它之后等于冷档里那条一直开着——回放同形，刷新也不会好。
+        self._end_stream_rows(sid)
         if terminal:
             self.costs.pop(sid, None)
             self._last_span.pop(sid, None)
@@ -1157,6 +1190,8 @@ class SessionRunner:
             if not self._live_blk.get(sid):
                 self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
                                  name="meta", value={"streaming": node}, role=node)
+                # C172：这颗行现在开着，记进散会要收的账（值先置 False：还没发过任何一个逐片）
+                self._stream_rows.setdefault(sid, {})[f"stream-{node}"] = False
         elif kind == "on_chat_model_end":
             self._sync_cost(sid)
             used_kernel = bool(self._used_kernel_block.pop((sid, rid), None))
@@ -1169,8 +1204,7 @@ class SessionRunner:
             # （离线工装现证过这条多余事件；孤立 end_marker 前端虽有守卫，长流里那行若被上一笔开过就会被无端关掉）。
             node = ev.get("metadata", {}).get("langgraph_node", "")
             if not used_kernel:      # 落进内核块的那一笔不替兜底行收口，其余照旧（t3/t7 钉的就是它）
-                self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
-                                 name="end_marker", value=None, role=node)
+                self._end_stream_rows(sid, only=f"stream-{node}")   # C172+C173（有字才补分隔）
             self._trace_span(sid, node, self._call_t0.pop((sid, rid), None) if rid else None)
         elif kind == "on_chat_model_stream":
             # structured 的逐片 JSON 在这儿抽成散文（`_ProseStream` 的 docstring 记了为什么）；
@@ -1210,6 +1244,7 @@ class SessionRunner:
             else:
                 self.bus.publish(sid, kind="report", block="Thought",
                                  uuid=f"stream-{node}", name="live", value=piece, role=node)
+                self._stream_rows.setdefault(sid, {})[f"stream-{node}"] = True   # C173：有字才补分隔
         # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
         # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
         # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，

@@ -1231,6 +1231,124 @@ async def t15_parallel_sends_each_keep_their_block():
     print("  ok  t15 C130 落点快照：并行 Send 下逐片各投各的块、role 不串、收口即弃")
 
 
+async def t16_forgotten_run_closes_the_stream_rows():
+    """C172+C173（10-05）：中断的那一场，散会必须把还开着的打字机行收掉，而且**收在落冷档之前**。
+
+    改前收口标记只挂在 `on_chat_model_end` 上，而 cancel/异常走不到那儿——零花费真 astream 桩现证：
+    被 cancel 那一笔见过的事件名止于 `on_chat_model_stream`，`on_chat_model_end` 一个没有
+    （`tests/manual_stream_landing.py` ⑧，散会前后各数一次）。那块在事件流里保持开着，而前端
+    **三处只认 `b.closed`**：Think 行停在 running 扫光（ReasoningRow.vue:43）、Docs 的 mermaid 永不
+    水合（MarkdownText.vue:32）、轮尾行不发（turns.ts:70 ⇒ 复制/点赞/**分叉入口**一起没）。
+
+    顺序这一半怎么钉的要说实话：冷档那条**测不出顺序**——落盘排在 `to_thread` 里，快照在 `_forget`
+    返回之后才取，补发放前面还是后面，档里都有那条 end_marker。所以冷档只证「回放里那行是收口的」
+    （用户看得见的就是这件事），顺序由 ⑤ 的字面守卫钉：`_forget` 体内补发那一行必须在
+    `_retire_ring` 之前，变异刀 k2 把补发行挪到落盘之后就该红在 ⑤。
+    （顺带量到一条既存形状：`_forget(terminal=True)` 从**没有 running loop 的线程**里调用会在
+    `create_task(close_terminal(sid))` 那一句抛穿，把后面的在途表清扫与 `close_editor` 整段跳掉——
+    隔壁 `_retire_ring` 有 `except RuntimeError` 就地跑的兜底，这一句没有。本件的格走主线程，
+    没在生产路径上撞它，故只登记不动它：今天五处终态全在协程里。）
+    ② 没收过字的行只补收口、**不补换行**：`ChatNode.vue:14` 的判据是 `open || text`，一个光秃秃的
+    `\\n` 会让「收口后零字的 Think 行不渲染」那条守卫失效，屏上多一行空白行。
+    ③ 正常收口那一路（end 自己发过）散会不许再补第二条。
+    ④ 停在待人工（terminal=False）照样收口，但不落冷档——收口与卸出是两件事。
+    """
+    tmp = Path(tempfile.mkdtemp())
+    store = SessionStore(path=tmp / "sessions.json")
+    spill = tmp / "spill"
+    bus = SessionEventBus(spill_dir=spill)
+    runner = SessionRunner(store, bus)
+
+    async def forget(sid, terminal=True):
+        runner._forget(sid, terminal)
+        # 旁路落盘是 fire-and-forget（`_closers`），断言之前先等它真跑完——C115 那条「异步任务没跑完
+        # 就断言」的假红就是这儿埋的
+        for t in list(runner._closers):
+            await t
+
+    def start(sid, rid, node):
+        runner._translate(sid, {"event": "on_chat_model_start", "run_id": rid,
+                                "metadata": {"langgraph_node": node}})
+
+    def piece(sid, rid, node, content):
+        runner._translate(sid, {"event": "on_chat_model_stream", "run_id": rid,
+                                "metadata": {"langgraph_node": node},
+                                "data": {"chunk": type("C", (), {"content": content})()}})
+
+    def new_session(tag):
+        s = store.create(tag, project_name="c172")
+        store.update(s.id, status=SessionStatus.running)
+        return s
+
+    def cold(sid, uuid):
+        p = spill / f"{sid}.jsonl"
+        if not p.exists():
+            return None
+        rows = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
+        return [(r.get("name"), r.get("value")) for r in rows if r.get("uuid") == uuid]
+
+    try:
+        # ① 第一笔正常收口、第二笔被 cancel ⇒ 接缝两条换行，末条必须是收口标记
+        s1 = new_session("c172 中断场")
+        start(s1.id, "rA", "PM")
+        piece(s1.id, "rA", "PM", '{"p": "')
+        piece(s1.id, "rA", "PM", "甲角色的思考正文，长度足够跨过二十四字的门槛线，这一笔由 end 自己收口")
+        runner._translate(s1.id, {"event": "on_chat_model_end", "run_id": "rA",
+                                  "metadata": {"langgraph_node": "PM"}})
+        start(s1.id, "rB", "PM")
+        piece(s1.id, "rB", "PM", '{"p": "')
+        piece(s1.id, "rB", "PM", "第二笔正文同样够长，它这一笔永远不会收到 end 事件")
+        await forget(s1.id)
+        rows = cold(s1.id, "stream-PM")
+        assert rows is not None, "① 冷档没写出来，这格就没在测顺序（量法失效，判红不判绿）"
+        assert rows[-1] == ("end_marker", None), \
+            f"① 补发排在落冷档之后（＝改前形状，回放里那行永远开着）：末两条 {rows[-2:]}"
+        assert [r for r in rows if r[0] == "live" and r[1] == "\n"] and \
+            sum(1 for r in rows if r == ("live", "\n")) == 2, \
+            f"① 两次调用的接缝各该有一条换行分隔（C173）：{rows}"
+        assert not runner._stream_rows.get(s1.id), "① 散会后这张表还留着这一场的账"
+
+        # ② 只有静默期建块、一个逐片都没发 ⇒ 补收口，绝不补换行
+        s2 = new_session("c172 空行")
+        start(s2.id, "rC", "QA")
+        await forget(s2.id)
+        assert cold(s2.id, "stream-QA") == [("meta", {"streaming": "QA"}), ("end_marker", None)], \
+            f"② 零字的兜底行被塞了东西（那会渲染出一行空白 Think）：{cold(s2.id, 'stream-QA')}"
+
+        # ③ 正常收口过的那一行，散会不许再补第二条 end_marker
+        s3 = new_session("c172 已收")
+        start(s3.id, "rD", "Eng")
+        piece(s3.id, "rD", "Eng", '{"p": "')
+        piece(s3.id, "rD", "Eng", "这一笔走完 on_chat_model_end，收口由它自己发")
+        runner._translate(s3.id, {"event": "on_chat_model_end", "run_id": "rD",
+                                  "metadata": {"langgraph_node": "Eng"}})
+        await forget(s3.id)
+        got3 = [r for r in (cold(s3.id, "stream-Eng") or []) if r[0] == "end_marker"]
+        assert len(got3) == 1, f"③ 散会替已收口的行重复发了收口标记：{got3} 条"
+
+        # ④ 停在待人工：收口照做，冷档不落（卸出只在 terminal=True 那一支）
+        s4 = new_session("c172 待人工")
+        start(s4.id, "rE", "Boss")
+        piece(s4.id, "rE", "Boss", '{"p": "')
+        piece(s4.id, "rE", "Boss", "停在待人工这一格测的是 terminal=False 也别忘了收口")
+        await forget(s4.id, terminal=False)
+        live4 = [(e.name, e.value) for e in bus.history(s4.id) if e.uuid == "stream-Boss"]
+        assert live4[-1] == ("end_marker", None), f"④ 待人工散会没收口：{live4[-2:]}"
+        assert not (spill / f"{s4.id}.jsonl").exists(), "④ terminal=False 不该落冷档"
+
+        # ⑤ 顺序的字面守卫（冷档测不出顺序，原因写在上面）：`_forget` 体内补发那一行必须排在落盘之前
+        import inspect
+        src = inspect.getsource(type(runner)._forget)
+        a, c = src.rindex("self._end_stream_rows(sid)"), src.rindex("self._retire_ring(sid)")
+        assert a < c, f"⑤ 补发行（偏移 {a}）落到了 `_retire_ring`（偏移 {c}）之后：冷档里那行永远开着"
+        assert src.count("self._end_stream_rows(sid)") == 1, "⑤ 分母不是一（多插一处就没人管顺序了）"
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  ok  t16 C172/C173 散会补收兜底行：冷档末条是 end_marker（顺序有牙）、"
+          "接缝有分隔、零字行不塞换行、已收不重复、待人工也收口但不落档")
+
+
 def main():
     t1_add_usage_visible()
     t2_seeded_ledger()
@@ -1247,7 +1365,8 @@ def main():
     t13_assembly_ledger_identity_recall()             # R1 未验①可信部分：装配期的 meter 指认（零花费）
     t14_prose_key_positions_never_leak()              # C129：键位/值位区分（括号栈）
     asyncio.run(t15_parallel_sends_each_keep_their_block())   # C130：并行 Send 落点快照
-    print("\ns8_runner_meter: 15/15 全绿")
+    asyncio.run(t16_forgotten_run_closes_the_stream_rows())   # C172+C173：散会补收兜底行（顺序用冷档钉）
+    print("\ns8_runner_meter: 16/16 全绿")
 
 
 if __name__ == "__main__":

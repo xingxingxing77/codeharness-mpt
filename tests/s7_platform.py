@@ -1495,7 +1495,8 @@ async def t25_terminal_ring_offloads_to_cold_storage():
         # `_forget` 扫的登记表（逐个列出来是有意的：判据要跟着这条出口一起改，
         # 用 `vars(run)` 那种自动播种会被「新增一张表但没在这里登记」的形态糊过去）
         for attr in ("chats", "costs", "_last_span", "_trunc_reported", "_call_t0", "_prose",
-                     "_prompts", "_used_kernel_block", "_blk_of", "_live_blk", "graphs",
+                     "_prompts", "_used_kernel_block", "_blk_of", "_live_blk", "_stream_rows",
+                     "graphs",
                      "projects"):
             setattr(r, attr, {})
         r._closers = set()                                # 这张是 set（add/discard），别给成 dict
@@ -1733,11 +1734,11 @@ async def t27_session_state_evicted_at_terminal():
         containers = {name: getattr(runner, name) for name in
                       ("chats", "costs", "graphs", "projects", "_last_span", "_trunc_reported",
                        "_call_t0", "_prose", "_prompts", "_used_kernel_block", "_blk_of",
-                       "_live_blk")}
+                       "_live_blk", "_stream_rows")}
         leftovers = {k: len(v) for k, v in containers.items() if v}
         assert not leftovers, f"散会后仍有 per-sid 进程态残留：{leftovers}"
         assert not runner.tasks, "tasks 表没清"
-        _ok("t27", "C155：散会即收干净——12 张 per-sid 表全部回零（「进程内常驻只增不减」的旧前提"
+        _ok("t27", f"C155：散会即收干净——{len(containers)} 张 per-sid 表全部回零（「进程内常驻只增不减」的旧前提"
                   "判伪，本格是防退化常驻守卫）")
     finally:
         await bus.aclose()

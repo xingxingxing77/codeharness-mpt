@@ -10,11 +10,18 @@
 它同时是「事件形状不许凭印象钉进判据」这条教训的可复跑凭证。
 ⑥ 那一格还顺手挡掉另一类空转：名单里打错一个字段名不会报错，只会让该字段静默落回名单外——
    所以对照用的是「没声明名单」那一跑，它必须把 `programming_language` 打回流里。
+
+10-05 加 ⑧⑨⑩ 三格（流式收口批 C172/C173 的取证，同样零花费）：⑧ 真 cancel 落在飞行中的那一笔上，
+数「有没有人给兜底行收口」——前端三处只认 `b.closed`（Think 行扫光、Docs 的 mermaid 水合、轮尾行），
+所以「没人收」是可见缺陷而不是过渡态；⑨ 同一节点第二笔块外调用重开兜底行，量接缝有没有分隔；
+⑩ 落点表每会话只有一个槽，量「一块还开着时它的第二笔投进了谁」。三格都带**前提自证**：桩吐太快、
+第二笔没重开行、压根没发逐片，一律判红——数到一个像是结论的读数，前提没成立就是假绿。
 """
 import asyncio
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -58,6 +65,11 @@ def _sse(content):
     return "".join(f"data: {f}\n\n" for f in frames) + "data: [DONE]\n\n"
 
 
+# ⑧ 要「这一笔还在飞行中就被 cancel」，而桩一口气吐完的话 on_chat_model_end 自己就到了 ⇒ 假绿。
+# 逐块之间垫一点延时，让流持续 ~1 秒；只有 ⑧ 那两格用它，其余格保持原来的快档。
+STUB_DELAY = 0.0
+
+
 class Stub(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         raw = self.rfile.read(int(self.headers.get("content-length") or 0)).decode("utf-8", "replace")
@@ -72,15 +84,16 @@ class Stub(BaseHTTPRequestHandler):
         for i in range(0, len(b), 512):
             seg = b[i:i + 512]
             self.wfile.write(f"{len(seg):X}\r\n".encode() + seg + b"\r\n")
+            if STUB_DELAY:
+                time.sleep(STUB_DELAY)
         self.wfile.write(b"0\r\n\r\n")
 
     def log_message(self, *a):
         pass
 
 
-async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=None, block="Docs"):
-    """跑一笔真 structured 调用，把事件灌进真 `SessionRunner._translate`，返回总线上的块序列。"""
-    from langchain_openai import ChatOpenAI
+def _env():
+    """一份真的 store/bus/runner + 一场建好的会话（⑨⑩ 要两笔调用共用同一场，不能各跑各的）。"""
     from codeharness.provider.cost import CostManager
     from server.events import SessionEventBus
     from server.runner import SessionRunner
@@ -94,6 +107,15 @@ async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=No
     s = store.create("流式落地", project_name="stream_landing")
     store.update(s.id, status=SessionStatus.running)
     runner.costs[s.id] = CostManager()      # 本工装不判账，只判流；给一份账免得 _sync_cost 走空路
+    return store, bus, runner, s
+
+
+async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=None, block="Docs",
+                   env=None, forget=True):
+    """跑一笔真 structured 调用，把事件灌进真 `SessionRunner._translate`，返回总线上的块序列。"""
+    from langchain_openai import ChatOpenAI
+
+    store, bus, runner, s = env or _env()
 
     if open_block_uuid:            # 模拟内核 `async with docs_block(...)` / `task_block(...)`：先开一块
         val = {"type": "prd"} if block == "Docs" else {"type": "tasks"}
@@ -118,7 +140,8 @@ async def run_case(name, schema_cls, msgs, open_block_uuid=None, prose_fields=No
            if e.kind == "report"]
     live = "".join(str(e.value or "") for e in bus.history(s.id)
                    if e.kind == "report" and e.name == "live")
-    runner._forget(s.id, terminal=True)
+    if forget:
+        runner._forget(s.id, terminal=True)
     print(f"\n[{name}] start.input 的类型 = {shapes} | 总线事件序列 = {seq}")
     print(f"  逐片 {len(live)} 字 = {live[:70]!r}")
     return live, seq, runner
@@ -130,7 +153,7 @@ async def main():
     from codeharness.roles.role_zero import ZeroThought
     from server.runner import _prompt_text
 
-    global BASE_URL
+    global BASE_URL, STUB_DELAY
 
     fails = []
     msgs = [SystemMessage(content="你是产品经理，按 schema 输出 json。"),
@@ -201,7 +224,92 @@ async def main():
     if not any(n == "live" and u == "task-1" for n, u, _ in tseq):
         fails.append("⑦ 逐片没落进开着的 Task 块（那条开块 meta 没把块登记进落点表）")
 
-    print("\n" + ("\n".join(f"❌ {f}" for f in fails) if fails else "✅ 七条全过（零花费）"))
+    # ============ 10-05 取证三格（C172/C173/落点单槽）：形状全由真 astream 现取，不猜 ============
+
+    # ⑨ 同一节点跑第二笔**块外**调用 ⇒ 兜底行被重开。前端正文是 `live.join('')`，而换行分隔只在
+    #    同一次 `_ProseStream` 内部给（emitted 每笔调用新建）⇒ 第二笔第一句直接接在第一笔末句后面。
+    st9, bus9, rn9, s9 = _env()
+    env9 = (st9, bus9, rn9, s9)
+    msgs9 = [SystemMessage(content="按 schema 输出"), HumanMessage(content="用两三句话解释二分查找，说完结束。")]
+    la, seqa, _ = await run_case("⑨a 兜底行第一笔", ZeroThought, msgs9, env=env9, forget=False)
+    lb, seqb, _ = await run_case("⑨b 同一节点第二笔（行被重开）", ZeroThought, msgs9, env=env9, forget=False)
+    own_b = lb[len(la):]
+    n_meta = len([1 for n, u, _ in seqb if n == "meta" and u.startswith("stream-")])
+    n_end = len([1 for n, u, _ in seqb if n == "end_marker" and u.startswith("stream-")])
+    print(f"\n[⑨ 重开] 兜底行 meta={n_meta} 次、end_marker={n_end} 次 | 接缝 {la[-12:]!r} ⇄ {own_b[:12]!r}")
+    if n_meta < 2 or not own_b:
+        fails.append("⑨ 前提没成立：第二笔没重开行或一个字没发，这格测不到分隔符（判红，不留假读数）")
+    elif la.endswith("\n") or own_b.startswith("\n"):
+        print("  读数：接缝有换行 ⇒ 修后形状（这条要是变成「零分隔」就是 C173 复发）")
+    else:
+        print("  读数：接缝没有任何分隔 ⇒ 两笔的话粘成一句（C173 的改前形状）")
+
+    # ⑩ 落点表是**每会话一个槽**（runner.py:334），start 时刻的快照取的就是那个槽（:1148）。
+    #     形状：Alice 的 Thought 块开着 → 她的第一笔落自己那块；Bob 的 Docs 块此时开起来（顶掉槽）→
+    #     Alice 的第二笔（她那块**还没收口**，`_think` 块内本就有 structured/aask/repair 三笔）
+    #     快照到的就是 Bob 的块 ⇒ 她的话进他的卡。可观察的是「落点 uuid」，归属靠 blk-A 无收口标记自证。
+    from collections import Counter
+    stX, busX, rnX, sX = _env()
+    envX = (stX, busX, rnX, sX)
+    sinkX = rnX._make_sink(sX.id)
+    sinkX({"block": "Thought", "uuid": "blk-A", "name": "meta", "value": {"type": "react"}, "role": "Alice"})
+    _, seqX1, _ = await run_case("⑩1 Alice 第一笔（槽=A 那块）", ZeroThought, msgs9, env=envX, forget=False)
+    sinkX({"block": "Docs", "uuid": "blk-B", "name": "meta", "value": {"type": "prd"}, "role": "Bob"})
+    _, seqX2, _ = await run_case("⑩2 Alice 第二笔（她那块还开着，槽已被 Bob 顶）", ZeroThought, msgs9,
+                                 env=envX, forget=False)
+    own_live = (Counter(u for n, u, _ in seqX2 if n == "live") - Counter(u for n, u, _ in seqX1 if n == "live"))
+    closedA = [u for n, u, _ in seqX2 if n == "end_marker" and u == "blk-A"]
+    print(f"\n[⑩ 落点单槽] 第二笔逐片落点={dict(own_live)} | 此刻 blk-A 的收口标记={closedA}")
+    if not own_live:
+        fails.append("⑩ 前提没成立：第二笔压根没发逐片，这格测不到落点")
+    elif not closedA and set(own_live) == {"blk-B"}:
+        print("  读数：一块**还开着**的块，它的第二笔投进了后开的那块 ⇒ 串块现证（立 C174）")
+    else:
+        print("  读数：这一形状没出现 ⇒ 落点单槽今天不构成串块，不立号")
+
+    # ⑧ 这一笔还在飞行中就被 cancel（C172 的核心前提：langchain 会不会补发 on_chat_model_end）。
+    #     不成立就判红——数到「有收口」如果是桩自己吐完了，那这格测的不是取消路径。
+    from langchain_openai import ChatOpenAI
+    STUB_DELAY = 0.05
+    st8, bus8, rn8, s8 = _env()
+    mm = ChatOpenAI(model="step-3.5-flash", api_key="stub", base_url=BASE_URL, streaming=True)
+    rr = mm.with_structured_output(ZeroThought.model_json_schema(), include_raw=True,
+                                   method="json_schema", strict=True)
+    seen = []
+
+    async def consume():
+        async for ev in rr.astream_events(msgs9, version="v2"):
+            seen.append(ev.get("event", ""))
+            rn8._translate(s8.id, ev)
+
+    t8 = asyncio.get_running_loop().create_task(consume())
+    for _ in range(2000):
+        if any(e == "on_chat_model_stream" for e in seen):
+            break
+        await asyncio.sleep(0.01)
+    t8.cancel()
+    try:
+        await t8
+    except asyncio.CancelledError:
+        pass
+    STUB_DELAY = 0.0
+    ev8 = [(e.name, str(e.uuid)[:10]) for e in bus8.history(s8.id) if e.kind == "report"]
+    print(f"\n[⑧ 取消那一笔] 见过的事件名={sorted(set(seen))} | 总线 report={ev8}")
+    if "on_chat_model_end" in seen:
+        fails.append("⑧ 前提没成立：桩吐完了（on_chat_model_end 自己到了），这格没测到取消路径＝假绿")
+    elif not any(n == "meta" and u.startswith("stream-") for n, u in ev8):
+        fails.append("⑧ 前提没成立：取消前没建出兜底行，这格测不到收口")
+    else:
+        mid = [u for n, u in ev8 if n == "end_marker" and u.startswith("stream-")]
+        rn8._forget(s8.id, terminal=True)      # 散会：五处终态唯一的汇聚口，修法就挂这儿
+        ev8b = [(e.name, str(e.uuid)[:10]) for e in bus8.history(s8.id) if e.kind == "report"]
+        swept = [u for n, u in ev8b if n == "end_marker" and u.startswith("stream-")]
+        print(f"  读数：cancel 当场收口标记={mid or '无（预期：cancel 走不到 on_chat_model_end）'}"
+              f" | _forget(terminal=True) 之后={swept or '还是没有'}")
+        if not swept:
+            fails.append("⑧ C172 复发：散会没把还开着的兜底行收掉 ⇒ 前端那行停在 running 扫光、整轮没有轮尾行")
+
+    print("\n" + ("\n".join(f"❌ {f}" for f in fails) if fails else "✅ 十条全过（零花费）"))
     return 1 if fails else 0
 
 
