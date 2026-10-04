@@ -2073,9 +2073,11 @@ def t28_stream_ux_batch():
     assert len(es_seg) == 2 and 'name="live"' in es_seg[1].split("    def ", 1)[0], \
         "t28① 接缝分隔不是由 `_end_stream_rows` 发的（C173 那条换行跑到别处，落点就没人管了）"
     assert 'LIVE_BLOCKS = ("Thought", "Docs", "Task")' in runner, "t28① 可承载逐片的块类型被改"
-    assert 'self._live_blk[sid] = (uid, event.get("block"),' in runner, \
+    assert 'self._live_blk[(sid, self._config_owner())] = (' in runner, \
         "t28① 落点不再由报道槽登记（逐片会全部掉进 stream-{node}，文档块又不流了）" \
         "——C104 后这行换行写了，锚点取它的主干（登记仍在 sink 内这一条不变）"
+    assert "def _config_owner(self)" in runner and "k[0] == sid and v[0] == uid" in runner, \
+        "t28① C174 的分槽与按 uid 摘槽被回退：落点又会跨角色串，而且别人收口时摘不掉自己那格"
     # 上一版靠字符串比对丢掉整段重发；这一版由通道分开（live=逐片、content=定稿）——旧 machinery 不许复活
     for dead in ("_already_streamed", "_prose_out", "PROSE_DEDUPE_CAP"):
         assert dead not in runner, f"t28① 字符串比对式去重复活了：{dead}"

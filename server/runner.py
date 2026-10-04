@@ -328,7 +328,7 @@ class SessionRunner:
         self._prose: dict[tuple[str, str], _ProseStream] = {}
         self._prompts: dict[tuple[str, str], str] = {}   # (sid, run_id) -> 这笔的输入文本（回显判定用）
         self._used_kernel_block: dict[tuple[str, str], bool] = {}   # (sid, run_id) -> 这一笔是否落进了内核块
-        # sid -> 这一笔 LLM 调用的逐片该投进哪一块：内核报道槽里**最后开着且未收口**的那块
+        # (sid, 外层节点名=角色) -> 这一笔 LLM 调用的逐片该投进哪一块：那个角色手上**最后开着且未收口**的块
         # （`Thought`/`Docs`/`Task`，值带它的 block 名），没有就由 `_translate` 落 `stream-{node}` 兜底。
         # 于是文档块自己就在流：逐片进 `live`，内核定稿（`content`）一到前端把 `live` 整段撤掉。
         self._live_blk: dict[str, tuple] = {}
@@ -337,8 +337,11 @@ class SessionRunner:
         # 这个**每会话单槽**，后开的块把登记覆盖掉，前一个角色的散文就投进别人块的 uuid（事件
         # role 还是自己的节点名，前端拼出串色块）。快照把「这一笔属于哪块」定死在 start 时刻——
         # 「meta 先于这一笔首片到达」的既有前提不变，只是把读取点从「首片」提前到「start」。
-        # `_live_blk` 本身保留「当前开着」语义：end_marker 配对（:703）与 start 的静默期判定（:1071）还靠它。
+        # `_live_blk` 本身保留「当前开着」语义：end_marker 配对与 start 的静默期判定还靠它。
         self._blk_of: dict[tuple[str, str], tuple] = {}
+        # C174：上面的槽改键成 (sid, owner) 之前的形状是「每会话一个槽」，桩 ⑩ 现证过它的后果——
+        # Alice 的块还开着时她的第二笔（同一个 thought_block 里本就有 structured/aask/repair 三笔）
+        # 恰好被 Bob 后开的块顶掉槽 ⇒ 逐片整把投进 Bob 的卡。owner 取外层节点名，两侧同源（见 `_owner`）。
         # C172：sid -> {兜底行 uuid `stream-{node}`: 这一行有没有真收到过逐片}。
         # 兜底行的收口标记**只**挂在 `on_chat_model_end` 上，而中断的调用压根走不到那儿——下面
         # `_forget` 里那句「中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净」早就认了
@@ -726,6 +729,23 @@ class SessionRunner:
         return self._ck
 
     # ---- 报道槽 → 总线（内核块的唯一通道） ----------------------------------
+
+    @staticmethod
+    def _owner(md) -> str:
+        """落点身份＝**外层节点名**（动态线里就是角色名）。两侧共用这一个来源，不靠名字相等去赌：
+        事件侧读 `metadata["checkpoint_ns"]` 首段，报道槽侧读节点内 `get_config()` 的同一个键——
+        `tests/manual_c174_llm_identity.py` 现证两者逐字相同（`Alice:<uuid>` vs `Alice:<uuid>|think:<uuid>`）。
+        不在图里（单测直接喂 sink、合成事件不带 ns）退空串：事件侧同形，替身场的落点照旧对得上。"""
+        return str((md or {}).get("checkpoint_ns") or "").split(":", 1)[0]
+
+    def _config_owner(self) -> str:
+        """报道槽那一侧的 owner（此刻正跑在某个节点里，config 在 contextvar 上）。"""
+        try:
+            from langgraph.config import get_config
+            cfg = get_config() or {}
+        except Exception:                      # 不在图里：单测直接调 sink 就是这一支
+            return ""
+        return self._owner(cfg.get("configurable"))
     def _make_sink(self, sid: str):
         bus = self.bus
 
@@ -742,8 +762,10 @@ class SessionRunner:
                 event["uuid"] = uid = "plan-" + (event.get("role") or "")
             if uid:
                 if nm == "end_marker":
-                    if self._live_blk.get(sid, (None,))[0] == uid:
-                        self._live_blk.pop(sid, None)
+                    # 按 uid 摘，不再问「槽里那个是不是它」：改前并发两块时后开的把先开的顶出单槽，
+                    # 先开那块收口时槽里已经不是它 ⇒ 槽永久留着别人的块（C174）
+                    for k in [k for k, v in self._live_blk.items() if k[0] == sid and v[0] == uid]:
+                        self._live_blk.pop(k, None)
                 elif event.get("block") in LIVE_BLOCKS and nm == "meta":
                     # 第三格是这块声明的正文字段名单（来自开块那条 meta）：逐片抽散文时按它门控。
                     v = event.get("value")
@@ -755,8 +777,9 @@ class SessionRunner:
                     #   b) 交错块里上一块的定稿（同块名、不同 uid）把落点从当前开着的块抢回去。
                     # 「已登记那块自己的后继事件也重新登记」那一支删掉了：它写回的就是字典里已有的那个三元组，
                     # 观察上恒等——变异刀 n2（只认 meta）存活就是这条等价性的证明。等价就删，别留第二段看似有条件的代码。
-                    self._live_blk[sid] = (uid, event.get("block"),
-                                           v.get("prose_fields") if isinstance(v, dict) else None)
+                    self._live_blk[(sid, self._config_owner())] = (
+                        uid, event.get("block"),
+                        v.get("prose_fields") if isinstance(v, dict) else None)
             bus.publish(sid, kind="report", **event)
 
         return sink
@@ -896,7 +919,8 @@ class SessionRunner:
             self._used_kernel_block.pop(k, None)
         for k in [k for k in self._blk_of if k[0] == sid]:      # C130：快照表同规扫
             self._blk_of.pop(k, None)
-        self._live_blk.pop(sid, None)
+        for k in [k for k in self._live_blk if k[0] == sid]:   # C174：键是 (sid, owner)，按前缀摘
+            self._live_blk.pop(k, None)
         if terminal:
             self.graphs.pop(sid, None)
             self.projects.pop(sid, None)
@@ -1178,7 +1202,8 @@ class SessionRunner:
             if rid:
                 self._call_t0[(sid, rid)] = [time.time(), None]
                 self._prompts[(sid, rid)] = _prompt_text(ev.get("data") or {})
-                self._blk_of[(sid, rid)] = self._live_blk.get(sid)   # C130：start 时刻的落点快照
+                self._blk_of[(sid, rid)] = self._live_blk.get((sid, self._owner(ev.get("metadata"))))
+                # C130 的快照 + C174 的分槽：取**自己角色**手上开着的块；别人的块不再是这一笔的落点
             # 静默期要有东西可看：思考型模型在首 token 前实测要等 40~51 秒，而这段时间**没有**
             # 真文本可发——reasoning 增量拿不到（langchain-openai 1.5.1 的 `chat_models/base.py`
             # 模块头「API scope」明文：第三方私有字段如 `reasoning_content` 不被提取；09-28 现证
@@ -1187,9 +1212,12 @@ class SessionRunner:
             # 与成本读数一个都不动——拿静默期冒充首 token 就是假读数。
             node = ev.get("metadata", {}).get("langgraph_node", "")
             # 内核已经有块开着就不再另起一行——那一行本来就在那儿、就是 running 态。
-            if not self._live_blk.get(sid):
-                self.bus.publish(sid, kind="report", block="Thought", uuid=f"stream-{node}",
-                                 name="meta", value={"streaming": node}, role=node)
+            who = self._owner(ev.get("metadata"))            # C174：这一笔在哪个角色手上起跑的
+            row = f"stream-{who or node}"                      # 兜底行也按角色分（改前都叫 stream-think，两角色并行就同屏交错）
+            if not self._live_blk.get((sid, who)):
+                self.bus.publish(sid, kind="report", block="Thought", uuid=row,
+                                 name="meta", value={"streaming": node}, role=who or node)
+
                 # C172：这颗行现在开着，记进散会要收的账（值先置 False：还没发过任何一个逐片）
                 self._stream_rows.setdefault(sid, {})[f"stream-{node}"] = False
         elif kind == "on_chat_model_end":
@@ -1203,8 +1231,8 @@ class SessionRunner:
             # 但**落进内核块的那一笔不替兜底行收口**：那一行这一笔压根没碰，收它等于替别人关
             # （离线工装现证过这条多余事件；孤立 end_marker 前端虽有守卫，长流里那行若被上一笔开过就会被无端关掉）。
             node = ev.get("metadata", {}).get("langgraph_node", "")
-            if not used_kernel:      # 落进内核块的那一笔不替兜底行收口，其余照旧（t3/t7 钉的就是它）
-                self._end_stream_rows(sid, only=f"stream-{node}")   # C172+C173（有字才补分隔）
+            if not used_kernel:      # 落进内核块的那一笔不替兜行收口，其余照旧（t3/t7 钉的就是它）
+                self._end_stream_rows(sid, only=f"stream-{self._owner(ev.get("metadata")) or node}")
             self._trace_span(sid, node, self._call_t0.pop((sid, rid), None) if rid else None)
         elif kind == "on_chat_model_stream":
             # structured 的逐片 JSON 在这儿抽成散文（`_ProseStream` 的 docstring 记了为什么）；
@@ -1242,9 +1270,11 @@ class SessionRunner:
                 self.bus.publish(sid, kind="report", block=btype,
                                  uuid=uid, name="live", value=piece, role=node)
             else:
+                row = f"stream-{self._owner(ev.get("metadata")) or node}"
                 self.bus.publish(sid, kind="report", block="Thought",
-                                 uuid=f"stream-{node}", name="live", value=piece, role=node)
-                self._stream_rows.setdefault(sid, {})[f"stream-{node}"] = True   # C173：有字才补分隔
+                                 uuid=row, name="live", value=piece,
+                                 role=self._owner(ev.get("metadata")) or node)
+                self._stream_rows.setdefault(sid, {})[row] = True   # C173：有字才补分隔
         # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
         # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
         # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，

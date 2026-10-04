@@ -31,6 +31,16 @@ from server.sessions import SessionStore, SessionStatus
 def _ok(n, msg):
     print(f"✅ {n}: {msg}")
 
+def _slot(runner, sid, owner=""):   # C174 后落点表的键是 (sid, 外层节点名)。单测直接喂 sink、
+    # 合成事件不带 checkpoint_ns ⇒ 两侧同形退空串。取用口写死这一点，免得有人把
+    # 旧的下标写法抄回来——那在新键下要么 KeyError、要么把「查不到」读成「清干净了」（恒真）。
+    return runner._live_blk[(sid, owner)]
+
+def _slots(runner, sid):
+    return [k for k in runner._live_blk if k[0] == sid]
+
+
+
 
 class _RecLogger:
     """替掉 codeharness.provider.cost.logger：断言打在「有没有留这条 warning」上。"""
@@ -742,7 +752,7 @@ async def t12_prose_from_structured_stream():
     assert late and "".join(e.value for e in late) == want, \
         "⑥ 块收口后落点没释放：下一笔还往那块里投（那块已经收口，用户看不见）"
     runner2._forget(s2.id, terminal=True)
-    assert s2.id not in runner2._live_blk, "散会没清落点表（长跑会一直攒）"
+    assert not _slots(runner2, s2.id), "散会没清落点表（长跑会一直攒）"
 
     # ⑦ 回显排除：值原样出现在这一笔的输入里 ⇒ 那是模型在抄用户的话，不发。
     #    09-29 经典线活体（会话 `b2d49b85`）现证逐片最前面就是那句需求原文，紧跟其后的才是模型自己的话。
@@ -810,11 +820,11 @@ async def t12_prose_from_structured_stream():
     sink3({"block": "Docs", "uuid": "doc-2", "name": "meta", "role": "Architect",
            "value": {"type": "design",
            "prose_fields": ["implementation_approach", "product_goals", "anything_unclear"]}})
-    assert runner3._live_blk[s3.id][2] == ["implementation_approach", "product_goals", "anything_unclear"], \
+    assert _slot(runner3, s3.id)[2] == ["implementation_approach", "product_goals", "anything_unclear"], \
         "⑧ 开块 meta 里的名单没跟着块登记（门控拿不到名单＝静默退回按长度挑，正是本仓踩过两次的空转形状）"
     # 名单要活得过非 meta 事件：内核在块里发 object/content 时不带 value 里的那些键
     sink3({"block": "Docs", "uuid": "doc-2", "name": "path", "value": "design.md", "role": "Architect"})
-    assert runner3._live_blk[s3.id][2] is not None, "⑧ 一个非 meta 事件就把登记好的名单冲掉了"
+    assert _slot(runner3, s3.id)[2] is not None, "⑧ 一个非 meta 事件就把登记好的名单冲掉了"
 
     # C130：start 必须先于首片（生产 astream_events 恒有 start，这里补上对齐真实事件序——
     # 落点快照就取在 start 那一刻；改前判据只发 stream、靠「首片时读单槽」蒙混过去）。
@@ -842,7 +852,7 @@ async def t12_prose_from_structured_stream():
     runner4.costs[s4.id] = CostManager()
     sink4 = runner4._make_sink(s4.id)
     sink4({"block": "Docs", "uuid": "doc-3", "name": "meta", "value": {"type": "design"}, "role": "Arch"})
-    assert runner4._live_blk[s4.id][2] is None, "⑧ 没声明名单却拿到了名单（阳性对照自己先失效）"
+    assert _slot(runner4, s4.id)[2] is None, "⑧ 没声明名单却拿到了名单（阳性对照自己先失效）"
     for i in range(0, len(design_txt), 9):
         runner4._translate(s4.id, {"event": "on_chat_model_stream", "run_id": "g2",
                                    "metadata": {"langgraph_node": "Arch"},
@@ -874,7 +884,7 @@ async def t12_prose_from_structured_stream():
     assert "".join(live9) == think, f"⑧c 思考行里混进了别的东西（args 正文/枚举值）：{(''.join(live9))[:70]!r}"
     sink3({"block": "Thought", "uuid": "zt-1", "name": "content", "value": think, "role": "Zero"})
     sink3({"block": "Thought", "uuid": "zt-1", "name": "end_marker", "value": None, "role": "Zero"})
-    assert runner3._live_blk.get(s3.id) is None, "⑧c 块收口后落点没释放"
+    assert not _slots(runner3, s3.id), "⑧c 块收口后落点没释放"
     runner3._forget(s3.id, terminal=True)
 
     # ⑨ Task 块（第七件）：开块那条 `meta` 是它进落点表的**唯一入口**。改前 `task_block` 只建 reporter
@@ -995,15 +1005,15 @@ async def t12_prose_from_structured_stream():
     plan_a = {"block": "Task", "uuid": "a" * 32, "name": "object", "role": "PMManager",
               "value": {"tasks": [{"task_id": "T1", "is_finished": False}], "current_task_id": "T1"}}
     sink8(dict(plan_a))
-    assert runner8._live_blk[s8i.id][:2] == ("task-8", "Task"), \
-        f"⑫ 计划卡的 object 抢走了逐片落点（改前形状）：现登记 {runner8._live_blk[s8i.id]!r}"
+    assert _slot(runner8, s8i.id)[:2] == ("task-8", "Task"), \
+        f"⑫ 计划卡的 object 抢走了逐片落点（改前形状）：现登记 {_slot(runner8, s8i.id)!r}"
     # 同族第二形（这才是有牙的那格，n1 那刀就红在这里）：交错块里**上一块的定稿**不许把落点
     # 从当前开着的块抢回去——光比字典不够，要看这一笔的逐片到底投进了哪块。
     sink8({"block": "Docs", "uuid": "doc-9", "name": "meta", "role": "Architect",
            "value": {"type": "design", "prose_fields": ["anything_unclear"]}})
     sink8({"block": "Task", "uuid": "task-8", "name": "content", "value": "上一块的定稿", "role": "PMManager"})
-    assert runner8._live_blk[s8i.id] == ("doc-9", "Docs", ["anything_unclear"]), \
-        f"⑫ 交错块：上一块的定稿把落点从当前开着的 Docs 块抢回去了：{runner8._live_blk[s8i.id]!r}"
+    assert _slot(runner8, s8i.id) == ("doc-9", "Docs", ["anything_unclear"]), \
+        f"⑫ 交错块：上一块的定稿把落点从当前开着的 Docs 块抢回去了：{_slot(runner8, s8i.id)!r}"
     dsnug = json.dumps({"anything_unclear": "这里是要上屏的一句人话说明，长度要过散文门槛所以再补几句凑够字。"},
                        ensure_ascii=False)
     # C130：start 先于首片（对齐生产事件序，同 ⑧ 的 g1/g3）
@@ -1034,7 +1044,7 @@ async def t12_prose_from_structured_stream():
     tmp9, store9, bus9, runner9, s9i = await _make_runner()
     runner9.costs[s9i.id] = CostManager()
     runner9._make_sink(s9i.id)(dict(plan_a))
-    assert not runner9._live_blk.get(s9i.id), "⑫ 孤身一颗 object 仍被登记成落点（守卫没生效＝下面两格白测）"
+    assert not _slots(runner9, s9i.id), "⑫ 孤身一颗 object 仍被登记成落点（守卫没生效＝下面两格白测）"
     runner9._translate(s9i.id, {"event": "on_chat_model_start", "run_id": "m1",
                                 "metadata": {"langgraph_node": "PMManager"}})
     assert [e for e in bus9.history(s9i.id) if e.name == "meta" and e.uuid == "stream-PMManager"], \
@@ -1306,7 +1316,6 @@ async def t16_forgotten_run_closes_the_stream_rows():
         assert [r for r in rows if r[0] == "live" and r[1] == "\n"] and \
             sum(1 for r in rows if r == ("live", "\n")) == 2, \
             f"① 两次调用的接缝各该有一条换行分隔（C173）：{rows}"
-        assert not runner._stream_rows.get(s1.id), "① 散会后这张表还留着这一场的账"
 
         # ② 只有静默期建块、一个逐片都没发 ⇒ 补收口，绝不补换行
         s2 = new_session("c172 空行")
@@ -1336,6 +1345,10 @@ async def t16_forgotten_run_closes_the_stream_rows():
         assert live4[-1] == ("end_marker", None), f"④ 待人工散会没收口：{live4[-2:]}"
         assert not (spill / f"{s4.id}.jsonl").exists(), "④ terminal=False 不该落冷档"
 
+        # ⑥ 账本格排在最后：它拦的是「表没摘干净」这种残留，若排在前面会把 ③ 的
+        # 「重复 end_marker」遮掉（变异 k5 第一轮就是这么红的——红在别处不等于没牙，但每格该有自己那颗牙）
+        assert not runner._stream_rows.get(s1.id), "⑥ 散会后这张表还留着这一场的账（s7 t27 的常驻守卫同族）"
+
         # ⑤ 顺序的字面守卫（冷档测不出顺序，原因写在上面）：`_forget` 体内补发那一行必须排在落盘之前
         import inspect
         src = inspect.getsource(type(runner)._forget)
@@ -1345,28 +1358,108 @@ async def t16_forgotten_run_closes_the_stream_rows():
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
-    print("  ok  t16 C172/C173 散会补收兜底行：冷档末条是 end_marker（顺序有牙）、"
-          "接缝有分隔、零字行不塞换行、已收不重复、待人工也收口但不落档")
+    print("  ok  t16 C172/C173 散会补收兜底行：冷档末条是 end_marker（⑤ 字面守卫钉顺序）、"          "接缝有分隔、零字行不塞换行、③ 已收不重复（k5 的牙在这格）、④ 待人工也收口但不落档、⑥ 账本清干净")
+
+
+async def t17_each_role_keeps_its_own_block():
+    """C174（10-05）：两个角色的块并发开着时，逐片只投**自己那块**。
+
+    改前 `_live_blk` 是每会话一个槽 ⇒ Bob 的 meta 把 Alice 的登记顶掉，Alice 的第二笔
+    （同一个 `thought_block` 里本就有 structured / aask 兜底 / `llm_repair_json` 三笔）快照到的
+    是 Bob 的块 ⇒ 她的话进他的卡。桩 `tests/manual_stream_landing.py` ⑩ 现证过这个形状
+    （`{blk-B: 2}`），而 `tests/manual_c174_llm_identity.py` 现证了修法可用的身份：
+    **外层节点名同时挂在两侧**——事件侧 `metadata["checkpoint_ns"]` 首段，报道槽侧
+    `get_config()["configurable"]["checkpoint_ns"]` 首段，逐字相同。
+
+    本格就用那个 contextvar 驱动（`var_child_runnable_config`，langgraph 的 `get_config()` 读的
+    就是它），不是另造一套键——**替身必须走生产那条读数路**，否则测的是我设计的键而不是产品用的键。
+    三条断言：① Alice 的第二笔落 blk-A（改前落 blk-B）；② Bob 那一笔仍落 blk-B（分槽没把投递搞坏）；
+    ③ blk-A 收口后 (sid, Alice) 这个槽出表（改前那种「槽里是别人、摘不掉」的残留形状）。
+    """
+    tmp, store, bus, runner, s = await _make_runner()
+    from langchain_core.runnables.config import var_child_runnable_config
+
+    def in_role(ns):
+        """把「此刻正跑在某个角色的节点里」这件事做成生产同款的 config 上下文。"""
+        tok = var_child_runnable_config.set({"configurable": {"checkpoint_ns": ns}, "metadata": {}})
+        return tok
+
+    def md(ns, node="think"):
+        return {"langgraph_node": node, "checkpoint_ns": ns}
+
+    try:
+        sink = runner._make_sink(s.id)
+        tA = in_role("Alice:a1")
+        try:
+            sink({"uuid": "blk-A", "name": "meta", "block": "Thought",
+                  "value": {"prose_fields": ("p",)}, "role": "Alice"})
+        finally:
+            var_child_runnable_config.reset(tA)
+        tB = in_role("Bob:b1")
+        try:
+            sink({"uuid": "blk-B", "name": "meta", "block": "Docs",
+                  "value": {"prose_fields": ("p",)}, "role": "Bob"})
+        finally:
+            var_child_runnable_config.reset(tB)
+        assert {k for k in runner._live_blk if k[0] == s.id} == {(s.id, "Alice"), (s.id, "Bob")}, \
+            f"两块并发开着时槽没按角色分：{[k for k in runner._live_blk if k[0] == s.id]}"
+
+        def feed(rid, ns, text):
+            runner._translate(s.id, {"event": "on_chat_model_start", "run_id": rid,
+                                     "metadata": md(ns)})
+            for chunk in ('{"p": "', text):
+                runner._translate(s.id, {"event": "on_chat_model_stream", "run_id": rid,
+                                         "metadata": md(ns),
+                                         "data": {"chunk": type("C", (), {"content": chunk})()}})
+
+        # ① Alice 的第一笔（Bob 的块已经开着了——这正是改前被顶掉槽的那一瞬）
+        feed("rA1", "Alice:a1", "甲角色的思考正文，长度足够跨过二十四字的门槛线，这一笔该进她自己那块")
+        live = [e.uuid for e in bus.history(s.id) if e.name == "live"]
+        assert live and all(u == "blk-A" for u in live), f"① Alice 的逐片没进她自己那块：{live}"
+        # ② Bob 那一笔进 blk-B（分槽不许把投递改坏）
+        feed("rB1", "Bob:b1", "乙角色的思考正文同样够长，这一笔该进 Bob 自己那块而不是别人的")
+        got = {e.uuid for e in bus.history(s.id) if e.name == "live"}
+        assert got == {"blk-A", "blk-B"}, f"② 两路各投各的没成立：{got}"
+        # ③ blk-A 收口：它自己的槽出表，blk-B 那一路不受影响
+        tA = in_role("Alice:a1")
+        try:
+            sink({"uuid": "blk-A", "name": "end_marker", "block": "Thought", "value": None,
+                  "role": "Alice"})
+        finally:
+            var_child_runnable_config.reset(tA)
+        assert (s.id, "Alice") not in runner._live_blk and (s.id, "Bob") in runner._live_blk, \
+            f"③ 收口摘槽摘错了对象：{[k for k in runner._live_blk if k[0] == s.id]}"
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  ok  t17 C174 分槽落点：Alice 的逐片进 Alice 的块、Bob 不受影响、收口只摘自己那格")
 
 
 def main():
-    t1_add_usage_visible()
-    t2_seeded_ledger()
-    asyncio.run(t3_midrun_sync())
-    asyncio.run(t4_ensure_graph_single_ledger())
-    asyncio.run(t11_park_keeps_the_live_ledger())
-    t5_lifespan_unwires_seams()
-    t6_events_history_bounded()
-    asyncio.run(t7_span_timing())
-    t9_two_endpoints_one_ledger()
-    t8_two_currency_buckets()
-    t10_cost_injection_end_to_end()      # C19 未验②：注入链端到端（要起本机桩，放最后）
-    asyncio.run(t12_prose_from_structured_stream())   # 流式 UX 批：抽取器与翻译层接线
-    t13_assembly_ledger_identity_recall()             # R1 未验①可信部分：装配期的 meter 指认（零花费）
-    t14_prose_key_positions_never_leak()              # C129：键位/值位区分（括号栈）
-    asyncio.run(t15_parallel_sends_each_keep_their_block())   # C130：并行 Send 落点快照
-    asyncio.run(t16_forgotten_run_closes_the_stream_rows())   # C172+C173：散会补收兜底行（顺序用冷档钉）
-    print("\ns8_runner_meter: 16/16 全绿")
+    # 分母从名单长度推，不写死组数（本仓点过名两次的手抄组数：加了一格而末行还写旧数 ⇒ 读数指不回输出）。
+    # 协程格用 iscoroutinefunction 分流；顺序照这张表，t10 要起本机桩所以仍放最后。
+    steps = [
+        t1_add_usage_visible,
+        t2_seeded_ledger,
+        t3_midrun_sync,
+        t4_ensure_graph_single_ledger,
+        t11_park_keeps_the_live_ledger,
+        t5_lifespan_unwires_seams,
+        t6_events_history_bounded,
+        t7_span_timing,
+        t9_two_endpoints_one_ledger,
+        t8_two_currency_buckets,
+        t10_cost_injection_end_to_end,
+        t12_prose_from_structured_stream,
+        t13_assembly_ledger_identity_recall,
+        t14_prose_key_positions_never_leak,
+        t15_parallel_sends_each_keep_their_block,
+        t16_forgotten_run_closes_the_stream_rows,
+        t17_each_role_keeps_its_own_block,
+    ]
+    for fn in steps:
+        asyncio.run(fn()) if asyncio.iscoroutinefunction(fn) else fn()
+    print(f"\ns8_runner_meter: {len(steps)}/{len(steps)} 全绿")
 
 
 if __name__ == "__main__":
