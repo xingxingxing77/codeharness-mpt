@@ -7,13 +7,16 @@ RoleZero.llm_cached_think（role_zero.py:343），而 **classic 默认线走 cla
 Qdrant 默认集合始终不存在）。要量池必须跑 **dynamic**（RoleZero 线）。classic 要不要接线
 另立待拍，不在本工装里顺手改。
 
-回答的问题：EXP_POOL 四开关真开 + dynamic 真端点真会话，量 0.9 余弦阈值对真中文请求的——
+回答的问题：EXP_POOL 四开关真开 + dynamic 真端点真会话，量 **0.97** 余弦判定线（C167 定档）对真中文请求的——
   ① 命中行数与 sim 分布（"经验命中" INFO 行）；
   ② 复跑省钱：同题复跑场的 ¥ 对冷写场（dynamic 单发贵，场数压到 3）；
-  ③ 误命中审计：sim>=0.9 但命中的是**别人**的经验（全员同 tag，跨角色跨步骤撞车是真实敞口；
+  ③ 误命中审计：sim>=阈值 但**决策身份不同**那一档（C168 起 tag 带角色名，跨角色复用已被 action_tag
+     硬过滤挡死；剩下能误命中的只有同角色不同决策，所以审计口径跟着改到这里，
      任务关键词互斥自动判 + 会话原文落盘供人复核）；
   ④ 改写召回：同义改写题按题面查池 top3；
   ⑤ 池点数（Qdrant doc_type=exp）与 db15 exp_hits 键数；C165 打分腿真钱读数（新经验数=打分发数）。
+  ⑥ 带矩阵（C170 定档原料）：拿池里真实存在的键互相查一遍——复用带（同键自查）与同 tag 异键危险带
+     两头落在同一把尺子上，判定线该往下调到哪一档由这两个数说话（封顶 12 个点 = 12 次 embed）。
 
 场次（3 场 dynamic，真 StepFun；dynamic 单发均 ¥0.078，C114 读数）：
   T1 冷写 → T1r 原题复跑 → P1 同义改写（≈T1）。T2/T3 砍掉：①③④ 的判别力不受影响，⑤ 的
@@ -198,6 +201,9 @@ def main() -> int:
         print(f"⚠ {redis_note}")
 
     _install_gate()
+    import inspect
+    from codeharness.exp_pool.decorator import exp_cache
+    threshold_in_use = inspect.signature(exp_cache).parameters["threshold"].default
 
     from fastapi.testclient import TestClient
     from server.app import create_app
@@ -280,13 +286,16 @@ def main() -> int:
 
             # ── ④ 改写题按题面查池 top3；⑤ 池点数与命中计数键 ──
             from codeharness.document_store.exp_store import ExpStore
+            from codeharness.const import TEAMLEADER_NAME
             store = ExpStore(user_id="default")
+            # C168 起 tag 带角色名，探题面这一腿要跟产线同口径（dynamic 队长名是常量，team.py:27）
+            LEADER_TAG = f"RoleZero.{TEAMLEADER_NAME}.llm_cached_think"
             pool_probe = {}
             for code, idea, rnd in RUNS:
                 if rnd != 2:
                     continue
                 try:
-                    got = asyncio.run(store.search("RoleZero.llm_cached_think", idea, k=3))
+                    got = asyncio.run(store.search(LEADER_TAG, idea, k=3))
                     pool_probe[code] = [{"req": (g["input"] or "")[:60], "sim": round(g["score"], 4),
                                          "quality": g.get("quality_score")} for g in got]
                 except Exception as e:
@@ -306,6 +315,30 @@ def main() -> int:
                     db=settings.redis.db).scan_iter("exp_hits:*"))
             except Exception as e:
                 n_hit_keys = f"<扫描失败 {type(e).__name__}: {e}>"
+
+            # ── ⑥ 带矩阵（C168/C170 落地后的定档原料）：拿池里真实存在的键互相查一遍 ──
+            # 命中行只报 ≥阈值的 sim，跨不过线的近邻看不见；这里「一条经验的键去查全池」取 top-k，
+            # 复用带（同键自查）与危险带（同 tag 异键）两头落在同一把尺子上。封顶 12 个点 = 12 次 embed。
+            # 注：search 按 action_tag 等值过滤（C168 的硬挡），所以矩阵量的就是**同角色不同决策**那一档。
+            band = []
+            try:
+                rows = asyncio.run(qs.client.scroll(
+                    collection_name=qs.collection,
+                    scroll_filter=QdrantStore._filters("exp", "default"),
+                    with_payload=["text", "action_tag"], limit=12))[0]
+                for r in rows:
+                    pl = r.payload or {}
+                    tag, key = pl.get("action_tag") or "", (pl.get("text") or "")
+                    if not key:
+                        continue
+                    got = asyncio.run(store.search(tag, key, k=6))
+                    band.append({"tag": tag, "key_head": key[:70],
+                                 "reuse_sim": round(got[0]["score"], 4) if got else None,
+                                 "same_tag_other_keys": [
+                                     {"key_head": (g["input"] or "")[:70], "sim": round(g["score"], 4)}
+                                     for g in got[1:]]})
+            except Exception as e:
+                band = f"<带矩阵失败 {type(e).__name__}: {e}>"
     finally:
         if hid is not None:
             logger.remove(hid)
@@ -341,16 +374,28 @@ def main() -> int:
     print(f"④ 改写题查池 top3：{json.dumps(pool_probe, ensure_ascii=False)[:600]}")
     print(f"⑤ 池点数（exp/default）：{n_points}｜exp_hits 键数：{n_hit_keys}｜"
           f"新经验（=打分发数）{sum(x['new_exps'] for x in results)}｜池警告 {sum(x['pool_warn_lines'] for x in results)} 行")
+    reuse = [b["reuse_sim"] for b in band if isinstance(b, dict) and b.get("reuse_sim")]
+    danger = [o["sim"] for b in band if isinstance(b, dict)
+              for o in b.get("same_tag_other_keys", [])]
+    if reuse and danger:
+        print(f"⑥ 带矩阵（{len(band)} 个点）：复用带 min={min(reuse):.4f}｜"
+              f"同 tag 异键危险带 max={max(danger):.4f}｜判定线现值 {threshold_in_use}")
+    else:
+        print(f"⑥ 带矩阵：点数不足或失败，两头数没取到（{band if isinstance(band, str) else len(band)} 个点）")
     print(f"账：全场累计 ¥{total_cny:.4f}（闸线 ¥{TOTAL_CNY}，授权 ≤¥1）｜{redis_note}")
     out = ROOT / "storage" / "benchmark"
     out.mkdir(parents=True, exist_ok=True)
-    (out / "c164_exp_pool_live.json").write_text(json.dumps(
+    name = os.environ.get("LIVE_OUT", "c170_exp_pool_key_live.json")
+    (out / name).write_text(json.dumps(
         {"note": "C164 经验池真场活体读数（10-04，StepFun+生产同款 embedding，EXP_POOL 四开，"
-                 "dynamic 3 场：T1 冷写 + T1r 原题复跑 + P1 同义改写；classic 线零接线见文件头）",
+                 "dynamic 3 场：T1 冷写 + T1r 原题复跑 + P1 同义改写；classic 线零接线见文件头）；"
+                 f"{name} 这一份是 C168（tag 带角色名）+ C170（键裁到决策身份段）落地后的复量",
+         "threshold_in_use": threshold_in_use,
          "results": results, "pool_probe": pool_probe,
+         "band_matrix": band,
          "pool_points": n_points, "hit_keys": n_hit_keys,
          "total_cny": round(total_cny, 6)}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"读数落盘 {out / 'c164_exp_pool_live.json'}")
+    print(f"读数落盘 {out / name}")
     return 0
 
 

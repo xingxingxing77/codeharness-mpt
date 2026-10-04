@@ -1,0 +1,151 @@
+{
+  "note": "C164 经验池真场活体读数（10-04，StepFun+生产同款 embedding，EXP_POOL 四开，dynamic 3 场：T1 冷写 + T1r 原题复跑 + P1 同义改写；classic 线零接线见文件头）；c170_exp_pool_key_live.json 这一份是 C168（tag 带角色名）+ C170（键裁到决策身份段）落地后的复量",
+  "threshold_in_use": 0.97,
+  "results": [
+    {
+      "code": "T1",
+      "round": 1,
+      "sid": "f5e4161d",
+      "status": "finished",
+      "sec": 45.7,
+      "cost_cny": 0.011404,
+      "gate": null,
+      "hit_lines": 0,
+      "sims": [],
+      "new_exps": 3,
+      "pool_warn_lines": 0,
+      "warn_sample": "",
+      "misfire_suspect": null,
+      "first_hit_line": "",
+      "session_text_excerpt": "这是一个简单的 Python 脚本任务，需要合并\n当前目录下所有\n .txt 文件\n并在\n每行前\n添加来源文件名。\n任务\n复杂度\n低\n（XS级别\n），直接\n编写\n代码即可，\n无需分配给\n团队成员\n。\n2026-10-04 23:57:15.443 | INFO     | codeharness.provider.cost:update_cost:100 - Total running cost: $0.000 / ¥0.005 | Current: 0.004637 CNY, pt=3588, ct=1012\n2026-10-04 23:57:19.347 | INFO     | codeharness.provider.cost:update_cost:100 - Total running cost: $0.000 / ¥0.292 | Current: 0.292289 CNY,"
+    },
+    {
+      "code": "T1r",
+      "round": 2,
+      "sid": "d5da0dda",
+      "status": "finished",
+      "sec": 3.1,
+      "cost_cny": 0.0,
+      "gate": null,
+      "hit_lines": 3,
+      "sims": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "new_exps": 0,
+      "pool_warn_lines": 0,
+      "warn_sample": "",
+      "misfire_suspect": null,
+      "first_hit_line": "经验命中 (tag=RoleZero.Mike.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n",
+      "session_text_excerpt": "2026-10-04 23:57:51.432 | INFO     | codeharness.exp_pool.decorator:wrapper:71 - 经验命中 (tag=RoleZero.Mike.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文件名。任务复杂度低（XS级别），直接编写代码即可，无需分配给团队成员。\n已写入 merge_txt_files.py（2514 字符）\n2026-10-04 23:57:51.814 | INFO     | codeharness.exp_pool.decorator:wrapper:71 - 经验命中 (tag=RoleZero.Mike.llm_cached_think, sim=1.000)：跳过本"
+    },
+    {
+      "code": "P1",
+      "round": 2,
+      "sid": "c5fbc379",
+      "status": "finished",
+      "sec": 3.1,
+      "cost_cny": 0.0,
+      "gate": null,
+      "hit_lines": 3,
+      "sims": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "new_exps": 0,
+      "pool_warn_lines": 0,
+      "warn_sample": "",
+      "misfire_suspect": null,
+      "first_hit_line": "经验命中 (tag=RoleZero.Mike.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n",
+      "session_text_excerpt": "2026-10-04 23:57:54.543 | INFO     | codeharness.exp_pool.decorator:wrapper:71 - 经验命中 (tag=RoleZero.Mike.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文件名。任务复杂度低（XS级别），直接编写代码即可，无需分配给团队成员。\n已写入 merge_txt_files.py（2514 字符）\n2026-10-04 23:57:54.930 | INFO     | codeharness.exp_pool.decorator:wrapper:71 - 经验命中 (tag=RoleZero.Mike.llm_cached_think, sim=1.000)：跳过本"
+    }
+  ],
+  "pool_probe": {
+    "T1r": [
+      {
+        "req": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件",
+        "sim": 0.9129,
+        "quality": 8
+      },
+      {
+        "req": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件",
+        "sim": 0.8739,
+        "quality": 10
+      },
+      {
+        "req": "# Current Plan\n(no plan yet)\n\n# Current Task\nstep 1/15",
+        "sim": 0.342,
+        "quality": 10
+      }
+    ],
+    "P1": [
+      {
+        "req": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件",
+        "sim": 0.8858,
+        "quality": 8
+      },
+      {
+        "req": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件",
+        "sim": 0.8546,
+        "quality": 10
+      },
+      {
+        "req": "# Current Plan\n(no plan yet)\n\n# Current Task\nstep 1/15",
+        "sim": 0.3651,
+        "quality": 10
+      }
+    ]
+  },
+  "band_matrix": [
+    {
+      "tag": "RoleZero.Mike.llm_cached_think",
+      "key_head": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文",
+      "reuse_sim": 1.0,
+      "same_tag_other_keys": [
+        {
+          "key_head": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文",
+          "sim": 0.9416
+        },
+        {
+          "key_head": "# Current Plan\n(no plan yet)\n\n# Current Task\nstep 1/15",
+          "sim": 0.5058
+        }
+      ]
+    },
+    {
+      "tag": "RoleZero.Mike.llm_cached_think",
+      "key_head": "# Current Plan\n(no plan yet)\n\n# Current Task\nstep 1/15",
+      "reuse_sim": 1.0,
+      "same_tag_other_keys": [
+        {
+          "key_head": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文",
+          "sim": 0.5243
+        },
+        {
+          "key_head": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文",
+          "sim": 0.5059
+        }
+      ]
+    },
+    {
+      "tag": "RoleZero.Mike.llm_cached_think",
+      "key_head": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文",
+      "reuse_sim": 1.0,
+      "same_tag_other_keys": [
+        {
+          "key_head": "# Current Plan\n- [1] 这是一个简单的 Python 脚本任务，需要合并当前目录下所有 .txt 文件并在每行前添加来源文",
+          "sim": 0.9416
+        },
+        {
+          "key_head": "# Current Plan\n(no plan yet)\n\n# Current Task\nstep 1/15",
+          "sim": 0.5245
+        }
+      ]
+    }
+  ],
+  "pool_points": 3,
+  "hit_keys": 3,
+  "total_cny": 0.011404
+}

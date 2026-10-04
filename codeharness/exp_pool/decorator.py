@@ -12,7 +12,7 @@
 - 只支持 async 函数（源为 ActionNode 同步线保留的 `choose_wrapper`/NestAsyncio 在本仓零调用场景）；
 - 经验池整体受 `settings.exp_pool` 开关控制（enabled / enable_read / enable_write / enable_score）。
 
-源契约保留：**kw 必须带 `req`**；tag 缺省 = `类名.方法名`（源 `_generate_tag:202`）。
+源契约保留：**kw 必须带 `req`**；tag 缺省 = `类名.方法名`（源 `_generate_tag:202`），本仓再加角色名段（C168）。
 存储、计数与打分故障只 warning 不断主流程（源 `handle_exception` 的鲁棒语义）。
 """
 from functools import wraps
@@ -99,9 +99,17 @@ async def _attach_score(exp: Experience, scorer: Optional[BaseScorer], req: str,
 
 
 def _auto_tag(args, func) -> str:
-    """源 `_generate_tag:202`：挂在方法上记 `类名.方法名`，裸函数记函数名。"""
+    """源 `_generate_tag:202`：挂在方法上记 `类名.方法名`，裸函数记函数名。
+
+    C168：再加一段**角色名**（`类名.角色名.方法名`）。dynamic 线三个角色都是 `RoleZero` 实例，
+    只到类名 ⇒ 同一个 tag，而 `exp_store.search` 按 action_tag 等值过滤（硬过滤，不是软阈值），
+    于是队长的 think 能复用成员那轮的经验——命中的是一条**带 args 的 ZeroThought**，等于执行
+    别人的命令（C164 冷写场现证 12 发跨角色命中）。名字取自 `profile`（装配期就定，见 team.py），
+    认不出 profile 形态的类退回旧形状，不为它造第二套 tag 语法。"""
     if args and hasattr(args[0], "__class__") and not isinstance(args[0], type):
-        return f"{type(args[0]).__name__}.{func.__name__}"
+        prof = getattr(args[0], "profile", None)
+        role = prof.get("name", "") if isinstance(prof, dict) else ""
+        return ".".join(p for p in (type(args[0]).__name__, role, func.__name__) if p)
     return func.__name__
 
 

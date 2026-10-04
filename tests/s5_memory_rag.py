@@ -674,13 +674,14 @@ def t21_hit_count_reorders():
     点 id 用真实的派生式（record_hit 按 (tag,req) 反推同一个 id，这里必须一致）。"""
     from codeharness.document_store.exp_store import exp_point_id
     from codeharness.exp_pool.manager import ExperienceManager
-    hi, lo = exp_point_id("T", "近问题", "u21"), exp_point_id("T", "远问题", "u21")
+    hi, lo = exp_point_id("T", "近问题", "u21", "p21"), exp_point_id("T", "远问题", "u21", "p21")
     rows = [{"id": hi, "action_tag": "T", "input": "近问题", "output": "A", "score": 0.99},
             {"id": lo, "action_tag": "T", "input": "远问题", "output": "B", "score": 0.85}]
     counts = {lo: 3}                                     # 低相似但被复用 3 次的那条
     # user_id 必须与上面 hi/lo 的派生同一个租户：C4 之后经验 id 带租户，
     # record_hit 反推的键只有同租户才对得上（不同租户本来就是两条不同的经验）
-    mgr = ExperienceManager(store=StubStore(rows), counter=StubCounter(counts), user_id="u21")
+    mgr = ExperienceManager(store=StubStore(rows), counter=StubCounter(counts),
+                            user_id="u21", project="p21")
     got = asyncio.run(mgr.query_exps("q", tag="T"))
     assert [e.resp for e, _ in got] == ["B", "A"], "命中计数没有改变排序"
     counts[hi] = 3                                       # 追平 → 相似度做 tie-break
@@ -772,9 +773,10 @@ def t23_exp_store_replay_on_qdrant():
     from codeharness.exp_pool.schema import Experience
 
     user = f"u_exp_{uuid.uuid4().hex[:6]}"
-    store = ExpStore(embeddings=HashEmbeddings(), user_id=user, store=gate_store())
+    proj = "p_t23"          # C171：项目段写进派生与过滤，这里显式给值，不靠门禁环境的 ContextVar 现取
+    store = ExpStore(embeddings=HashEmbeddings(), user_id=user, project=proj, store=gate_store())
     counter = HitCounter(user_id=user)
-    KEYS.append(f"exp_hits:{user}:{exp_point_id('RoleZero.llm_cached_think', '做个2048', user)}")
+    KEYS.append(f"exp_hits:{user}:{exp_point_id('RoleZero.llm_cached_think', '做个2048', user, proj)}")
     mgr = ExperienceManager(store=store, counter=counter)
     exp = Experience(req="做个2048", resp='{"thought":"先建文件","commands":[]}',
                      tag="RoleZero.llm_cached_think")
@@ -786,9 +788,9 @@ def t23_exp_store_replay_on_qdrant():
     exact_miss = asyncio.run(mgr.query_exps("写一个五子棋", tag=exp.tag, query_type=QueryType.EXACT))
     assert exact_miss == [] or all(e.req == "写一个五子棋" for e, _ in exact_miss)
     asyncio.run(mgr.record_hit(exp))
-    assert asyncio.run(counter.get(exp_point_id(exp.tag, exp.req, user))) == 1, "真 Redis 计数没落"
+    assert asyncio.run(counter.get(exp_point_id(exp.tag, exp.req, user, proj))) == 1, "真 Redis 计数没落"
     asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=user))
-    print("  t23 真 Qdrant+真 Redis：入库→召回→计数落盘→作用域清理")
+    print("  t23 真 Qdrant+真 Redis：入库→召回→计数落盘→作用域清理（点 id 与过滤都带项目段）")
 
 
 def t24_rolezero_think_wired():
@@ -822,7 +824,9 @@ def t24_rolezero_think_wired():
         req = [HumanMessage(content="CMD")]
         first = asyncio.run(role.llm_cached_think(req=req))
         assert ZeroThought.model_validate_json(first).thought == "先写文件"
-        assert len(llm.payloads) == 1 and len(fake.saved) == 1 and fake.saved[0].tag == "RoleZero.llm_cached_think"
+        assert len(llm.payloads) == 1 and len(fake.saved) == 1 \
+            and fake.saved[0].tag == "RoleZero.RZ.llm_cached_think", \
+            f"tag 形状变了（C168 起带角色名，这里是夹具的 RZ）：{fake.saved[0].tag}"
         n0 = len(llm.payloads)
         again = asyncio.run(role.llm_cached_think(req=req))
         assert again == first and len(llm.payloads) == n0, "命中后仍进模型 = 没接线"
@@ -833,7 +837,7 @@ def t24_rolezero_think_wired():
     finally:
         settings.exp_pool = saved
         mg._managers.pop("default", None)
-    print("  t24 RoleZero.llm_cached_think 接线：命中零模型调用，关池透传，tag=类名.方法名")
+    print("  t24 RoleZero 的 think 接线：命中零模型调用，关池透传，tag=类名.角色名.方法名（C168）")
 
 
 def live_embedding() -> bool:
@@ -1830,6 +1834,12 @@ def t38_both_recall_legs_clamp_their_query():
             return [[0.0] * 64 for _ in ts]
 
     class NoStore:
+        """只测「发出去的 query 有多长」的替身：`ensure` 是 C169 起真 QdrantStore 接口的一部分
+        （读侧也挂 ensure），替身不补齐就会以 AttributeError 冒充成结论。"""
+
+        async def ensure(self, dim):
+            pass
+
         async def search(self, *a, **kw):
             return []
 
@@ -1884,6 +1894,10 @@ def t40_exp_signature_is_embedded_the_same_on_both_sides():
     class FakeStore:
         async def write(self, points):
             return len(points)
+
+        async def ensure(self, dim):
+            """C169 起读侧也挂 ensure——替身要补齐真接口，否则 AttributeError 会冒充成「这一侧没发出去」。"""
+            pass
 
         async def search(self, *a, **kw):
             return []
@@ -2610,6 +2624,219 @@ def t49_ensure_names_a_dimension_mismatch():
             asyncio.run(st.client.close())
 
 
+def t55_exp_tag_carries_role_identity():
+    """C168：自动 tag 要带角色名。dynamic 线三个角色都是 `RoleZero` 实例——只到类名就是**同一个 tag**，
+    而 `ExpStore.search` 按 action_tag 等值**硬过滤**（exp_store.py:81，那条腿本身由 t23 的
+    「跨 tag 不漏」在真 Qdrant 上钉着），于是队长的 think 能复用成员那轮的经验；命中的是一条**带 args 的
+    ZeroThought**＝执行别人的命令（C164 冷写场现证 12 发跨角色命中）。
+    四格：① `_auto_tag` 逐字形状（两个角色名 → 两个不同 tag）；② 真装饰过的 RoleZero 走一遍，池查询
+    收到的 tag 就带角色名（钉「接线」，不是只测纯函数）；③ **同角色同键必须仍命中**（不许把复用一起杀掉）；
+    ④ 认不出 profile 形态（字符串 profile / 裸函数）退回旧形状，t22 的 `tag == "ask"` 口径不破。"""
+    from codeharness.configs.settings import settings
+    from codeharness.exp_pool.decorator import _auto_tag
+    from codeharness.exp_pool.schema import QueryType
+    from codeharness.roles.role_zero import RoleZero
+    import codeharness.exp_pool.manager as mg
+
+    class Holder:
+        def __init__(self, prof):
+            self.profile = prof
+
+        async def llm_cached_think(self, *, req):
+            raise AssertionError("不该被调用（①④ 只算 tag）")
+
+    assert _auto_tag([Holder({"name": "Mike"})], Holder.llm_cached_think) \
+        == "Holder.Mike.llm_cached_think", "① tag 没带角色名"
+    assert _auto_tag([Holder({"name": "Alice"})], Holder.llm_cached_think) \
+        != _auto_tag([Holder({"name": "Mike"})], Holder.llm_cached_think), "① 两个角色共用同一个 tag"
+    assert _auto_tag([Holder("字符串 profile")], Holder.llm_cached_think) == "Holder.llm_cached_think", \
+        "④ 认不出 profile 必须退回旧形状，别为它造第二套 tag 语法"
+
+    async def bare(*, req):
+        raise AssertionError("不该被调用")
+
+    assert _auto_tag([], bare) == "bare", "④ 裸函数仍是函数名（源 _generate_tag 口径）"
+
+    class TagMgr:
+        """tag 等值过滤——与 ExpStore.search 同语义（那条腿的真读数在 t23）。"""
+
+        def __init__(self):
+            self.saved, self.tags, self.hits = [], [], []
+
+        async def query_exps(self, req, tag="", query_type=QueryType.SEMANTIC, k=2):
+            self.tags.append(tag)
+            return [(e, 0.99) for e in self.saved if e.tag == tag][:k]
+
+        async def create_exp(self, exp):
+            self.saved.append(exp)
+
+        async def record_hit(self, exp):
+            self.hits.append(exp.tag)
+
+    fake = TagMgr()
+    saved, settings.exp_pool = settings.exp_pool, settings.exp_pool.model_copy()
+    mg._managers["default"] = fake
+    try:
+        settings.exp_pool.enabled = settings.exp_pool.enable_read = settings.exp_pool.enable_write = True
+        from langchain_core.messages import HumanMessage
+        req = [HumanMessage(content="# Current Plan\n- [ ] t1: 起步\n# Current Task\nt1: 起步")]
+        leader = RoleZero({"name": "Mike", "profile": "Team Leader", "goal": "g"}, [], FakeLLM())
+        worker = RoleZero({"name": "Alice", "profile": "PM", "goal": "g"}, [], FakeLLM())
+        first = asyncio.run(leader.llm_cached_think(req=req))            # miss：进模型、入库
+        assert "Mike" in fake.tags[0], f"② 查询 tag 没带角色名：{fake.tags[0]}"
+        assert fake.saved and fake.saved[0].tag == fake.tags[0]
+        assert len(leader.llm.payloads) == 1 and len(worker.llm.payloads) == 0
+        again = asyncio.run(leader.llm_cached_think(req=req))             # ③ 同角色同键：必须仍命中
+        assert again == first and len(leader.llm.payloads) == 1, "③ 同角色复用被杀掉了"
+        assert fake.hits == [fake.tags[0]]
+        worker_out = asyncio.run(worker.llm_cached_think(req=req))        # ② 跨角色：不许领走队长的经验
+        assert len(worker.llm.payloads) == 1, "跨角色复用了队长的 think（C168 要灭的就是这条）"
+        assert worker_out == first and len(fake.saved) == 2, "跨角色那条自己入库了才对"
+    finally:
+        settings.exp_pool = saved
+        mg._managers.pop("default", None)
+    print("  t55 tag 带角色身份：跨角色不复用、同角色照常命中、认不出 profile 退回旧形状")
+
+
+def t56_exp_store_search_ensures_its_collection():
+    """C169：读侧也要 ensure。集合只由首次写（`write`→`ensure`）创建，新池第一场的第一读会 404 一跳
+    （C164 现证：只被 decorator 的降级守卫接住成一行 warning——看着像「池没货」，其实是「池还没建」）。
+    ① 钉调用点：`ExpStore.search` 真调了 ensure，且 dim = **刚算出的那条向量的长度**（顺带把同名集合
+    的维度比对搬到读侧）；② 真 Qdrant 上一个全新集合名首读：不抛、返回空、集合被建出来（正证）。
+    离线档只跑 ①（不碰容器），② 显式跳过。"""
+    from codeharness.document_store.exp_store import ExpStore
+
+    dims = []
+
+    class SpyStore:
+        async def ensure(self, dim):
+            dims.append(dim)
+
+        async def search(self, *a, **kw):
+            return []
+
+    emb = HashEmbeddings()
+    asyncio.run(ExpStore(embeddings=emb, user_id="u_c169", store=SpyStore()).search("T.any", "首读问题"))
+    v = asyncio.run(emb.aembed_query("首读问题"))
+    assert dims == [len(v)], f"① 读侧没挂 ensure 或 dim 不是向量长度：{dims} vs {[len(v)]}"
+    assert len(v) == emb.dim, "① 用的向量长度与探针自身口径不一致，本格结论作废"
+
+    if not live_qdrant():
+        print(f"  ok  t56 读侧 ensure 在位（dim={len(v)}）；② 真 Qdrant 首读格跳过（无容器）")
+        return
+    from codeharness.document_store.qdrant_store import QdrantStore
+    coll = "s5gate_c169"
+    try:
+        st = QdrantStore(collection=coll)
+        assert not asyncio.run(st.client.collection_exists(coll)), "夹具集合已存在，② 测不到首读"
+        got = asyncio.run(ExpStore(embeddings=emb, user_id="u_c169_live", store=st)
+                          .search("T.first", "首读问题"))
+        assert got == [], f"② 空池首读该回空列表，实回 {got}"
+        assert asyncio.run(QdrantStore(collection=coll).client.collection_exists(coll)), \
+            "② 首读没把集合建出来——下一场首读还会 404"
+        print(f"  ok  t56 读侧 ensure 在位（dim={len(v)}）+ 真 Qdrant 首读不炸且建出集合")
+    finally:
+        fresh = QdrantStore(collection=coll)
+        try:
+            asyncio.run(fresh.client.delete_collection(coll))
+        finally:
+            asyncio.run(fresh.client.close())
+
+
+def t57_decision_key_drops_scaffold():
+    """C170：序列化键只取决策身份（`# Current Plan`→`# Response Language` 之间 = plan_status+current_task）。
+    整份 CMD_PROMPT 当键时三段噪声主导这把尺子：尾部十几行静态指导（逐字不变、字数最大）、
+    `{current_state}` 在产线**恒填 "ready"**（role_zero.py:380）、`{experience}` 是长期记忆每轮召回的措辞。
+    用**真模板**渲染（`CMD_PROMPT.format`），不手写形状：
+    ① experience 不同而决策身份相同 ⇒ 键逐字相同（跨场复用成立的那一半）；
+    ② current_task 不同 ⇒ 键必须不同（不许把两个决策当同一条）；
+    ③ 静态指导/"ready"/Past Experience 标头都不得留在键里（裁到位的正证）+ 决策身份两段都在（反向钉，
+       防「裁成空串也满足 ③」）；
+    ④ 认不出模板的输入整段原样进键（**产线那半没模板就宁大不空**）；空消息列表退 str()（旧形状）。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from codeharness.exp_pool.serializers import RoleZeroSerializer
+    from codeharness.prompts.role_zero import CMD_PROMPT
+
+    def cmd(exp, plan, task):
+        return CMD_PROMPT.format(experience=exp, current_state="ready", plan_status=plan,
+                                 current_task=task, respond_language="中文")
+
+    ser = RoleZeroSerializer()
+    whole = cmd("长期记忆甲：先读 README", "- [x] t1: 立计划", "t2: 写 main.py")
+    other = cmd("长期记忆乙，措辞完全不同的一段召回结果", "- [x] t1: 立计划", "t2: 写 main.py")
+    assert len(whole) != len(other) and whole != other, "夹具没造出 experience 在变的前提，① 会恒真"
+    k1 = ser.serialize_req(req=[SystemMessage(content="人设"), HumanMessage(content=whole)])
+    k2 = ser.serialize_req(req=[HumanMessage(content=other)])
+    assert k1 == k2, "① experience 槽一动键就动 ⇒ 跨场命中不成立（C170 要修的就是这条）"
+    k3 = ser.serialize_req(req=[HumanMessage(content=cmd("长期记忆甲", "- [x] t1: 立计划", "t3: 跑测试"))])
+    assert k3 != k1, "② current_task 变了键却没变 = 把两个不同决策冻成同一条经验"
+    for noise in ("Pay close attention", "ready", "# Past Experience", "# Response Language", "```json"):
+        assert noise not in k1, f"③ 噪声段没裁干净：{noise}"
+        assert noise in whole, f"③ 夹具里根本没有 {noise}，这条断言是空的"
+    assert "- [x] t1: 立计划" in k1 and "t2: 写 main.py" in k1, "③ 反向钉：决策身份被一起裁掉了"
+    assert len(k1) * 3 < len(whole), f"③ 键没显著变短（{len(k1)}/{len(whole)}）= 静态尾还挂着"
+    bare = "这不是 CMD_PROMPT 渲染出来的一段裸文本"
+    assert ser.serialize_req(req=[HumanMessage(content=bare)]) == bare, "④ 认不出模板必须整段进键"
+    assert ser.serialize_req(req=bare) == bare
+    only_sys = [SystemMessage(content="整份只有系统消息，没有 human")]
+    assert ser.serialize_req(req=only_sys) == str(only_sys), "④ 没有 human 消息时必须退 str()（旧形状，别造空键）"
+    assert ser.serialize_req(req=[]) == "", "④ 空 req 在 `or \"\"` 就被短路（改前同形，本件没动这条腿）"
+    print(f"  t57 键=决策身份段（{len(whole)}→{len(k1)} 字）：experience 在键外、任务在键内、认不出模板整段照旧")
+
+
+def t58_exp_point_is_scoped_by_project():
+    """C171（10-04 带矩阵撞出来的）：经验这一条腿此前是**唯一没带项目段**的入库路——
+    `longterm.point_id` 的 scope 是 `doc_type/user/project`（longterm.py:160）、读侧过滤也带 project（`:270`），
+    而 `exp_point_id` 只到租户。后果与 C4 那条逐字同形：同一用户给两个项目教出**同一条决策**
+    （C170 把键裁短之后这反而更容易）⇒ 同一个点 id ⇒ 后写的项目把先写的答案连 tag 一起顶掉。
+    三格：① 同 user/同 tag/同 req、不同 project ⇒ 两条点，**两边都召得回自己那份**；
+    ② 阳性对照：同 project 重入仍是一条且值是后写的（幂等覆盖语义不许被顺手改掉）；
+    ③ 计数的键也带项目段（record_hit 与 query_exps 反推同一个 id）。离线显式跳过。"""
+    if not live_qdrant():
+        print("  t58 跳过（无 Qdrant）")
+        return
+    from codeharness.document_store.exp_store import ExpStore, exp_point_id
+    from codeharness.exp_pool.manager import ExperienceManager, HitCounter
+    from codeharness.exp_pool.schema import Experience
+
+    user = f"u_c171_{uuid.uuid4().hex[:6]}"
+    req, tag = "# Current Plan\n- [ ] t1: 读 README", "RoleZero.Mike.llm_cached_think"
+    KEYS.append(f"exp_hits:{user}:{exp_point_id(tag, req, user, 'projA')}")
+    KEYS.append(f"exp_hits:{user}:{exp_point_id(tag, req, user, 'projB')}")
+    try:
+        outs = {}
+        for proj, ans in (("projA", "答案A"), ("projB", "答案B")):
+            st = ExpStore(embeddings=HashEmbeddings(), user_id=user, project=proj, store=gate_store())
+            mgr = ExperienceManager(store=st, counter=HitCounter(user_id=user))
+            asyncio.run(mgr.create_exp(Experience(req=req, resp=ans, tag=tag)))
+            got = asyncio.run(mgr.query_exps(req, tag=tag))
+            assert got and got[0][0].resp == ans, f"① {proj} 召不回自己那份：{[g[0].resp for g in got]}"
+            assert len(got) == 1, f"① {proj} 的候选里混进了别的项目的同一条决策（{len(got)} 条）" \
+                                  "——读侧过滤没带项目段"
+            outs[proj] = ans
+        n = asyncio.run(gate_store().client.count(
+            collection_name=GATE_COLL,
+            count_filter=gate_store()._filters("exp", user), exact=True)).count
+        assert n == 2, f"① 两个项目本该是两条点，实际 {n} 条——项目段没进派生式就会被后写的顶掉"
+        st_a = ExpStore(embeddings=HashEmbeddings(), user_id=user, project="projA", store=gate_store())
+        asyncio.run(st_a.save(tag, req, "答案A改写后"))
+        n = asyncio.run(gate_store().client.count(
+            collection_name=GATE_COLL,
+            count_filter=gate_store()._filters("exp", user, project="projA"), exact=True)).count
+        assert n == 1, f"② 同项目重入必须幂等覆盖成一条，实际 {n} 条（口径被改坏了）"
+        got = asyncio.run(ExpStore(embeddings=HashEmbeddings(), user_id=user, project="projA",
+                                   store=gate_store()).search(tag, req))
+        assert got[0]["output"] == "答案A改写后", f"② 阳性对照：同项目后写的没顶掉先写的 {got}"
+        mgr_a = ExperienceManager(store=st_a, counter=HitCounter(user_id=user))
+        exp = Experience(req=req, resp="答案A改写后", tag=tag)
+        asyncio.run(mgr_a.record_hit(exp))
+        cnt = asyncio.run(mgr_a.counter.get(exp_point_id(tag, req, user, "projA")))
+        assert cnt == 1, f"③ 计数键没跟着带项目段（实读 {cnt}）——与写侧不同源就是 C4 那个形状"
+        print("  ok  t58 经验点按项目隔离：两项目两条各自召得回、同项目仍幂等、计数键同源")
+    finally:
+        asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=user))
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -2653,11 +2880,14 @@ def main():
               t49_ensure_names_a_dimension_mismatch,
               t50_hit_counter_incr_is_atomic, t51_redis_incr_degrades_like_get_set,
               t52_debug_logs_carry_lengths_not_payloads,
-              t53_exp_score_wiring_and_default_off, t54_exp_quality_score_roundtrip_on_qdrant]
+              t53_exp_score_wiring_and_default_off, t54_exp_quality_score_roundtrip_on_qdrant,
+              t55_exp_tag_carries_role_identity, t56_exp_store_search_ensures_its_collection,
+              t57_decision_key_drops_scaffold, t58_exp_point_is_scoped_by_project]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
-        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23/t25/t34–t37/t39/t43/t49 跳过。"
+        print(f"⚠ 没连上 Qdrant({settings.qdrant.url})：t12/t13/t15–t18/t23/t25/t34–t37/t39/t43/t49/"
+              f"t54/t56②/t58 跳过。"
               f"R9 这层的门禁必须起容器跑一次才算数。")
     if not live_embedding():
         print(f"⚠ 真 embedding 不在线（{settings.embedding.base_url} / {settings.embedding.model}）："
@@ -2679,6 +2909,8 @@ def main():
           f"真 Qdrant+Redis 存取回放/RoleZero 接线命中零模型调用）"
           f"+ 经验池完善批 C162–C165 5 组（INCR 并发原子/死端口降级/两处 DEBUG 收行/"
           f"打分接线默认关、炸了照常入库/质量分落库往返）"
+          f"+ 经验池键口径批 C168–C170 3 组（tag 带角色身份、跨角色不复用/读侧 ensure 首读不 404/"
+          f"序列化键裁到决策身份段、点按项目隔离）"
           f"+ S9.2 scorer 2 组（打分模板逐字/FakeLLM 打分路径）"
           f"+ S5.1 记忆 14 组（Redis 真往返与死端口降级/"
           f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/驱逐即落盘摘要失败也保原文/"

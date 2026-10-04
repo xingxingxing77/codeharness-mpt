@@ -13,7 +13,7 @@ from codeharness.exp_pool.schema import (DEFAULT_SIMILARITY_TOP_K, Experience, Q
 from codeharness.logs import logger
 from codeharness.utils.redis import Redis
 
-HIT_KEY = "exp_hits"          # key = exp_hits:{user_id}:{point_id}，point id 由 (tag, req) 派生
+HIT_KEY = "exp_hits"          # key = exp_hits:{user_id}:{point_id}，point id 由 (user, project, tag, req) 派生
 
 
 def _resolve_user(user_id: str | None) -> str:
@@ -49,7 +49,8 @@ class HitCounter:
 
 
 class ExperienceManager:
-    def __init__(self, store=None, counter: HitCounter | None = None, user_id: str | None = None):
+    def __init__(self, store=None, counter: HitCounter | None = None, user_id: str | None = None,
+                 project: str | None = None):
         if store is None:
             from codeharness.document_store.exp_store import ExpStore
             store = ExpStore(user_id=_resolve_user(user_id))
@@ -57,6 +58,10 @@ class ExperienceManager:
         # 命中计数）必须同一个租户，否则计数打在别的键上——C4 之后 id 带租户，这个不一致从
         # 「看着没事」变成「静默丢计数」，所以在构造时收掉，不靠调用点自觉。
         user_id = user_id or getattr(store, "user_id", None) or _resolve_user(None)
+        # C171：项目段同一套收法（显式 > store 身上的 > CURRENT_PROJECT）——写侧 id 派生与读侧
+        # 计数键必须与 `ExpStore.search` 的过滤用同一段，否则计数落在别的键上（C4 同族形状）。
+        from codeharness.runtime import CURRENT_PROJECT
+        self.project = project or getattr(store, "project", None) or CURRENT_PROJECT.get("")
         self.store, self.user_id = store, user_id
         self.counter = counter or HitCounter(user_id=user_id)
 
@@ -76,7 +81,7 @@ class ExperienceManager:
             exp = Experience(req=h["input"], resp=h["output"], tag=h["action_tag"])
             if query_type == QueryType.EXACT and exp.req != req:
                 continue
-            pid = h.get("id") or exp_point_id(exp.tag, exp.req, self.user_id)
+            pid = h.get("id") or exp_point_id(exp.tag, exp.req, self.user_id, self.project)
             scored.append((exp, h["score"], await self.counter.get(pid)))
         scored.sort(key=lambda t: (-t[2], -t[1]))
         return [(exp, score) for exp, score, _ in scored]
@@ -84,7 +89,7 @@ class ExperienceManager:
     async def record_hit(self, exp: Experience) -> None:
         """只有真复用的那次才计数：召回了没看上的不计（计了就是把噪声排到前面）。"""
         from codeharness.document_store.exp_store import exp_point_id
-        await self.counter.bump(exp_point_id(exp.tag, exp.req, self.user_id))
+        await self.counter.bump(exp_point_id(exp.tag, exp.req, self.user_id, self.project))
 
     async def delete_all_exps(self) -> None:
         if hasattr(self.store, "clear"):
