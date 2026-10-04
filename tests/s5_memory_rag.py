@@ -755,6 +755,10 @@ def t22_exp_cache_semantics():
     finally:
         settings.exp_pool = saved
         mg._managers.pop("default", None)
+    # C167：阈值默认定档 0.97（依据 C164 活体带分离：危险带 0.901~0.935 vs 同任务带 0.984~1.0）
+    # ——钉在签名上，谁把它调回 0.9 谁当场红
+    import inspect
+    assert inspect.signature(exp_cache).parameters["threshold"].default == 0.97, "阈值默认漂了"
     print("  t22 @exp_cache：透传/命中跳LLM/阈值把关/计数/读挂降级/req 契约 六条全过")
 
 

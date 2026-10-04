@@ -2,7 +2,9 @@
 
 与源的四处分叉（都是判定表里写死的）：
 - `perfect_judges` 判 `推迟`：源用 LLM 判「这条经验配不配当前问题」；这里判定 = dense 余弦
-  >= threshold（默认 0.9，宁缺勿滥）。打分那半（C165，用户 10-04 拍「现在接线」）走
+  >= threshold（默认 0.97，C167 定档——C164 活体读数的带分离：跨角色/跨任务 CMD_PROMPT 落
+  0.901~0.935 的危险带，同任务复用带 0.984~1.0；0.9 坐在危险带内对误命中开门）。打分那半
+  （C165，用户 10-04 拍「现在接线」）走
   `enable_score`（默认关——可选那级不默认烧钱）：开了才在入库前调 `SimpleScorer`，
   分数**只存账不拦截**（判定闸仍是余弦阈值，分数有没有资格参判要等 C164 真命中率读数）；
 - `context_builders` 不搬：源把落选经验注入 prompt 的 EXPERIENCE_MASK 槽，本仓 `_think` 的
@@ -32,7 +34,7 @@ def exp_cache(
     manager: Optional[ExperienceManager] = None,
     serializer: Optional[BaseSerializer] = None,
     tag: Optional[str] = None,
-    threshold: float = 0.9,
+    threshold: float = 0.97,
     scorer: Optional[BaseScorer] = None,
 ):
     """Decorator to get a perfect experience, otherwise, executes the function and creates a new one.
@@ -40,7 +42,8 @@ def exp_cache(
     Args:
         query_type: SEMANTIC=向量近即复用；EXACT=req 逐字相等才复用。
         manager/serializer: 缺省在调用时现取单例（源 ExpCacheHandler.initialize 的惰性同款）。
-        threshold: 余弦判定线。同一个问题的两次措辞也有差异，0.9 之上复用才是安全的。
+        threshold: 余弦判定线。C164 活体定档 0.97（C167）：真异题/跨角色的 CMD_PROMPT 落 0.93 带、
+            同题复用落 0.98+ 带，线要坐在两带之间；误命中代价（执行错经验）远大于 miss（多一发 LLM）。
     """
 
     def decorator(func):
