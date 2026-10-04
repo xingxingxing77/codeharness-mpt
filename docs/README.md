@@ -116,6 +116,7 @@ PYTHONPATH=/e/Codeharness PYTHONIOENCODING=utf-8 F:/anaconda/python.exe tests/s1
 - 上一轮新修两处（提交 `8db857d`）：① `tools/_safe` 用 `str.startswith` 判越界，`workspace_root=ws` 时 `../ws_probe/x` 因前缀命中被判区内，`write_file` 可写到沙箱外——改 `Path.is_relative_to`，门禁 t2 锁死；② 三处超时分支 `kill()` 后不 `drain`，Windows 退出时抛 `unclosed transport` 噪声，`sandbox` 两处还丢超时前已产出的 stdout（**本轮实测：只补 `drain` 并不够，见上条 ③**）。
 - 仓库级陷阱 #1 已清：`docs/` 从 `.gitignore` 移除并入库（`33244d8`）；P2 的 0 字节 `actions/action.py` 已 `git rm`（`a30b91c`）。
 - **仍未闭合的真实缺口**：S5 整层偏薄且**无门禁**（`memory` 185 行 / `document_store` 84 / `rag` 60 / `exp_pool` 29 / `strategy` 111，`tests/s5_memory_rag.py` 不存在，R9 hybrid 检索要求的 Qdrant named vectors 无处落）；`repo_parser.py` 63 vs 源 1,023；S4 侧剩 `Editor` 命令面接线（S6）+ per-session 强制边界与浏览器类（同批等 S7）；server/S8 层零门禁。供体 `E:\MetaGPT` **2026-09-15 已授权读取**。
+  **（2026-10-03 注：上句全部过时，留作当日记录——`tests/s5_memory_rag.py` 现 53 组门禁在跑、Qdrant named vectors 即 R9 `QdrantStore` 底座；`repo_parser.py` 1,051 行（超源全量）；`Editor` 命令面经 `tools/libs/editor_tools.py` 落地；per-session 边界经 `runtime.session_root()` 落地；server/S8 门禁 `s7_platform`/`s8_frontend_contract` 常驻。「仍未闭合」一律以 `plan/PLAN.md` §8 为准，此处不再是账本。）**
 
 ### 2026-09-15 晚 · S5.1（记忆层第一条闭环）
 
