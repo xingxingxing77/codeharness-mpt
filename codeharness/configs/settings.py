@@ -256,11 +256,14 @@ class RedisConfig(BaseModel):
 class ExpPoolConfig(BaseModel):
     """字段名与默认值照源 configs/exp_pool_config.py（默认全关，显式开了接线才生效）。
     源的 retrieval_type/persist_path/collection_name/use_llm_ranker 随「存储换 Qdrant +
-    Redis 命中计数」的判定失去意义（chroma/bm25 双存储与 LLM ranker 都不搬），不带过来。"""
+    Redis 命中计数」的判定失去意义（chroma/bm25 双存储与 LLM ranker 都不搬），不带过来。
+    enable_score 是本仓新增（C165，源没有对应字段）：写侧入库前调 SimpleScorer 打质量分，
+    每条新经验多一发 LLM 调用 ⇒ 默认关，与「可选那级不默认烧钱」同一条纪律。"""
 
     enabled: bool = False
     enable_read: bool = False
     enable_write: bool = False
+    enable_score: bool = False
 
 
 class SearchConfig(BaseModel):

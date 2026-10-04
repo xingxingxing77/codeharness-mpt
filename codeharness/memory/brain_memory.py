@@ -175,7 +175,8 @@ class BrainMemory(BaseModel):
         if keep_language:
             system_msgs.append("The generated summary should be in the same language as the original text.")
         response = await self.llm.aask(text, system_msgs=system_msgs, tag="memory_summary")
-        logger.debug(f"summary rsp: {response}")
+        # C163：回包全文不上日志（原来整段模型输出落 DEBUG，日志里堆正文）——只留长度够定位异常
+        logger.debug(f"summary rsp: len={len(response)}")
         return response
 
     @staticmethod

@@ -910,6 +910,205 @@ def t25_real_bge_semantic_path():
           f"→{hit(ranks['hybrid'])}/{n} 全收；表已存 s5_hitrate_bge.json")
 
 
+# ---------------- C162–C165 · 经验池完善批（INCR 原子 / DEBUG 收行 / 打分接线） ----------------
+
+
+def t50_hit_counter_incr_is_atomic():
+    """C162：bump 走单命令 INCR——100 个并发自增必须一个不少。
+    旧 get+set 实现两次 await 之间隔着网络，并发各自读到 N 各写 N+1，这里必丢（变异刀 m1 红的半句）。"""
+    if not live_redis():
+        print("  t50 跳过（无 Redis）")
+        return
+    from codeharness.exp_pool.manager import HitCounter
+
+    async def go():
+        c = HitCounter()
+        exp_id = fresh_key("c162")
+        KEYS.append(c._key(exp_id))
+        await asyncio.gather(*[c.bump(exp_id) for _ in range(100)])
+        n = await c.get(exp_id)
+        assert n == 100, f"并发 100 次自增丢数：只数到 {n}"
+    asyncio.run(go())
+    print("  t50 HitCounter 并发 100 次自增一个不少（INCR 原子）")
+
+
+def t51_redis_incr_degrades_like_get_set():
+    """C162 降级半：连不上时 incr 返回 None 不抛，bump 全程静默（t2 同款死端口姿势）。
+    incr 是 utils/redis 五件里最后一件，降级语义必须与 get/set/expire 同源。"""
+    from codeharness.exp_pool.manager import HitCounter
+    keep = settings.redis.port
+    settings.redis.port = DEAD_PORT
+    try:
+        async def go():
+            r = Redis()
+            assert await r.incr(fresh_key()) is None
+            c = HitCounter(redis=r)
+            await c.bump("whatever")                      # 不许抛
+            assert await c.get("whatever") == 0
+            await r.close()
+        asyncio.run(go())
+    finally:
+        settings.redis.port = keep
+    print("  t51 INCR 死端口降级：返回 None 不抛，bump 静默，get 仍 0")
+
+
+def t52_debug_logs_carry_lengths_not_payloads():
+    """C163：两处 DEBUG 不再落模型回包全文——exp_pool 入库行只有 tag/uuid/长度，
+    brain 摘要行只有 len。正文标记双双不得出现在日志里。"""
+    from io import StringIO
+    from loguru import logger
+    from codeharness.exp_pool.decorator import exp_cache
+    import codeharness.exp_pool.manager as mg
+
+    buf = StringIO()
+    hid = logger.add(buf, format="{message}", level="DEBUG")
+    saved, settings.exp_pool = settings.exp_pool, settings.exp_pool.model_copy()
+    try:
+        class FakeMgr:
+            def __init__(self):
+                self.saved = []
+
+            async def query_exps(self, req, tag="", query_type=None, k=2):
+                return []
+
+            async def create_exp(self, exp):
+                self.saved.append(exp)
+
+        marker_resp = "绝密回包正文ABC123"
+        settings.exp_pool.enabled = True
+        settings.exp_pool.enable_read = False
+        settings.exp_pool.enable_write = True
+        mg._managers["default"] = FakeMgr()
+
+        @exp_cache(manager=None, serializer=None)
+        async def ask(*, req):
+            return marker_resp
+
+        asyncio.run(ask(req="问题Q"))
+
+        b = BrainMemory()
+        b.llm = FakeLLM(summary="摘要正文标记XYZ789")
+        out = asyncio.run(b._get_summary("一" * 200, max_words=20))
+        assert out == "摘要正文标记XYZ789"
+    finally:
+        logger.remove(hid)
+        settings.exp_pool = saved
+        mg._managers.pop("default", None)
+    text = buf.getvalue()
+    assert "New experience: " in text and "req_len=" in text and "resp_len=" in text, \
+        f"入库行形状变了：{[l for l in text.splitlines() if 'experience' in l.lower()]}"
+    assert marker_resp not in text, "回包全文仍在日志里"
+    assert "summary rsp: len=" in text, "brain 摘要行没有收成长度"
+    assert "摘要正文标记XYZ789" not in text, "摘要全文仍在日志里"
+    print("  t52 两处 DEBUG 收行：只落长度与 tag/uuid，回包与摘要全文零上屏")
+
+
+def t53_exp_score_wiring_and_default_off():
+    """C165 ①②③：enable_score 开了才打分（FakeLLM 注入，分数随 exp.metric 落库）；
+    默认档注入了打分器也零调用；打分炸了经验照常入库 + warning 可 grep。"""
+    from io import StringIO
+    from loguru import logger
+    from codeharness.exp_pool.decorator import exp_cache
+    from codeharness.exp_pool.scorers import SimpleScorer
+    from codeharness.provider.fake import FakeLLM as ProviderFake
+    import codeharness.exp_pool.manager as mg
+
+    class FakeMgr:
+        def __init__(self):
+            self.saved = []
+
+        async def query_exps(self, req, tag="", query_type=None, k=2):
+            return []
+
+        async def create_exp(self, exp):
+            self.saved.append(exp)
+
+        async def record_hit(self, exp):
+            pass
+
+    class BoomScorer(SimpleScorer):
+        async def evaluate(self, req, resp):
+            raise RuntimeError("scorer down")
+
+    buf = StringIO()
+    hid = logger.add(buf, format="{message}", level="WARNING")
+    saved, settings.exp_pool = settings.exp_pool, settings.exp_pool.model_copy()
+    try:
+        settings.exp_pool.enabled = True
+        settings.exp_pool.enable_read = False
+        settings.exp_pool.enable_write = True
+
+        # ② 默认档（enable_score 缺省 False）：打分器注入了也一次不调，metric 留 None
+        pf0 = ProviderFake(['```json\n{"val": 5, "reason": "不该被调"}\n```'])
+        mgr = FakeMgr()
+        mg._managers["default"] = mgr
+
+        @exp_cache(manager=None, serializer=None, scorer=SimpleScorer(llm=pf0))
+        async def ask0(*, req):
+            return "resp-default-off"
+
+        asyncio.run(ask0(req="q-off"))
+        assert len(mgr.saved) == 1 and mgr.saved[0].metric is None
+        assert pf0.calls == [], "默认档竟打分了"
+
+        # ① 开了才打分：分数随 exp.metric 带出（manager.create_exp 再透传给 store，t54 接力）
+        settings.exp_pool.enable_score = True
+        pf = ProviderFake(['```json\n{"val": 9, "reason": "满足需求"}\n```'])
+        mgr2 = FakeMgr()
+        mg._managers["default"] = mgr2
+
+        @exp_cache(manager=None, serializer=None, scorer=SimpleScorer(llm=pf))
+        async def ask1(*, req):
+            return "resp-scored"
+
+        asyncio.run(ask1(req="q-on"))
+        assert len(mgr2.saved) == 1
+        e = mgr2.saved[0]
+        assert e.metric and e.metric.score and e.metric.score.val == 9 \
+            and e.metric.score.reason == "满足需求", e.metric
+        assert len(pf.calls) == 1, "打分调用数不对"
+
+        # ③ 打分炸 → 经验照常入库、metric 留空、warning 可 grep
+        mgr3 = FakeMgr()
+        mg._managers["default"] = mgr3
+
+        @exp_cache(manager=None, serializer=None, scorer=BoomScorer())
+        async def ask2(*, req):
+            return "resp-boom"
+
+        asyncio.run(ask2(req="q-boom"))
+        assert len(mgr3.saved) == 1 and mgr3.saved[0].metric is None
+        assert "经验打分失败" in buf.getvalue(), "打分失败没有可 grep 的 warning"
+    finally:
+        logger.remove(hid)
+        settings.exp_pool = saved
+        mg._managers.pop("default", None)
+    print("  t53 打分接线：默认关零调用 / 开了才打分且分数落 exp / 炸了照常入库带 warning")
+
+
+def t54_exp_quality_score_roundtrip_on_qdrant():
+    """C165 ④：质量分经 manager.create_exp 落 Qdrant payload，读侧以 quality_score 原样回来。
+    quality_score 与 score（召回余弦）是两把尺子：一个只是账，一个管复用判定——分数不参与拦截。"""
+    if not live_qdrant():
+        print("  t54 跳过（无 Qdrant）")
+        return
+    from codeharness.document_store.exp_store import ExpStore
+    from codeharness.exp_pool.manager import ExperienceManager, HitCounter
+    from codeharness.exp_pool.schema import Experience, Metric, Score
+
+    user = f"u_expq_{uuid.uuid4().hex[:6]}"
+    store = ExpStore(embeddings=HashEmbeddings(), user_id=user, store=gate_store())
+    mgr = ExperienceManager(store=store, counter=HitCounter(user_id=user))
+    exp = Experience(req="质量分问题Q", resp="质量分答案A", tag="T.quality",
+                     metric=Metric(score=Score(val=8, reason="不错")))
+    asyncio.run(mgr.create_exp(exp))
+    got = asyncio.run(store.search("T.quality", "质量分问题Q"))
+    assert got and got[0]["quality_score"] == 8, f"质量分没落库：{got}"
+    assert got[0]["score"] >= 0.99, "召回相似度那把尺子被影响了"
+    asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=user))
+    print("  t54 质量分落 Qdrant payload 往返（quality_score=8，与相似度分两把尺子）")
+
+
 def t26_plan_state_machine_wired():
     """台账 #10：Plan.* 不再是吞命令的字符串桩——schema.Plan 的拓扑排序/游标推进/级联 reset
     有运行时读者；参数错（未知依赖断言）走 _act 的 [错误] self-heal 回喂。"""
@@ -2447,7 +2646,10 @@ def main():
               t46_experience_state_key_is_gone_and_recall_still_happens,
               t47_clip_marks_the_truncation_and_the_sites_still_call_it,
               t48_metric_round_trips_its_own_dump,
-              t49_ensure_names_a_dimension_mismatch]
+              t49_ensure_names_a_dimension_mismatch,
+              t50_hit_counter_incr_is_atomic, t51_redis_incr_degrades_like_get_set,
+              t52_debug_logs_carry_lengths_not_payloads,
+              t53_exp_score_wiring_and_default_off, t54_exp_quality_score_roundtrip_on_qdrant]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():
@@ -2471,6 +2673,8 @@ def main():
     print(f"\nS5 门禁通过：{len(checks)} 组 —— S5.3 经验池与真语义 7 组（Experience 逐字段 roundtrip/"
           f"think 载荷无损往返与裁剪键/命中计数改变排序/@exp_cache 开关矩阵/"
           f"真 Qdrant+Redis 存取回放/RoleZero 接线命中零模型调用）"
+          f"+ 经验池完善批 C162–C165 5 组（INCR 并发原子/死端口降级/两处 DEBUG 收行/"
+          f"打分接线默认关、炸了照常入库/质量分落库往返）"
           f"+ S9.2 scorer 2 组（打分模板逐字/FakeLLM 打分路径）"
           f"+ S5.1 记忆 14 组（Redis 真往返与死端口降级/"
           f"BrainMemory dirty 才写盘、溢出判定有读者、分窗摘要落盘/驱逐即落盘摘要失败也保原文/"

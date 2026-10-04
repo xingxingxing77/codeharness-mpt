@@ -74,6 +74,9 @@ class ExpStore:
                                        doc_type="exp", user_id=self.user_id)
         out = [{"id": str(h.id), "action_tag": h.payload.get("action_tag"),
                 "input": h.payload.get("text"), "output": h.payload.get("output"),
-                "score": h.score}
+                "score": h.score,
+                # C165：入库时的质量分（save 侧 payload["score"]，没打过分是 0.0）。
+                # 与上面的 "score"（余弦相似度）是两把尺子：一个管召回、一个只是账。
+                "quality_score": h.payload.get("score")}
                for h in hits if h.payload.get("action_tag") == action_tag]
         return out[:k]

@@ -62,6 +62,17 @@ class Redis:
             logger.warning(f"Redis SET {key} failed: {type(e).__name__}: {e}")
             return False
 
+    async def incr(self, key: str) -> Optional[int]:
+        """原子自增并返回新值（C162：get+set 两次 await 中间隔着网络，并发各自读到 N 各写 N+1，
+        一次自增就这么丢的）。降级语义同 get/set：连不上只 warning 返回 None，绝不抛。"""
+        if not await self._connect() or not key:
+            return None
+        try:
+            return await self._client.incr(key)
+        except Exception as e:
+            logger.warning(f"Redis INCR {key} failed: {type(e).__name__}: {e}")
+            return None
+
     async def expire(self, key: str, timeout_sec: int) -> bool:
         """给既有 key 续 TTL（C150 滑动续期用）。0/负值不动手——Redis 语义里 expire 0 = 删键，
         不是本壳想要的。降级语义同 get/set：连不上只 warning 返回 False，绝不抛。"""

@@ -1,22 +1,25 @@
 """@exp_cache：语义对齐源 exp_pool/decorator.py:29——命中即复用，未命中执行后入库。
 
 与源的四处分叉（都是判定表里写死的）：
-- `perfect_judges`/`scorers` 判 `推迟`：源用 LLM 判「这条经验配不配当前问题」、入库时再 LLM 打分；
-  这里判定 = dense 余弦 >= threshold（默认 0.9，宁缺勿滥），`Metric.score` 留 None 不造数据；
+- `perfect_judges` 判 `推迟`：源用 LLM 判「这条经验配不配当前问题」；这里判定 = dense 余弦
+  >= threshold（默认 0.9，宁缺勿滥）。打分那半（C165，用户 10-04 拍「现在接线」）走
+  `enable_score`（默认关——可选那级不默认烧钱）：开了才在入库前调 `SimpleScorer`，
+  分数**只存账不拦截**（判定闸仍是余弦阈值，分数有没有资格参判要等 C164 真命中率读数）；
 - `context_builders` 不搬：源把落选经验注入 prompt 的 EXPERIENCE_MASK 槽，本仓 `_think` 的
   experience 槽已由长期记忆召回喂着（S5.2），不再叠第二路；
 - 只支持 async 函数（源为 ActionNode 同步线保留的 `choose_wrapper`/NestAsyncio 在本仓零调用场景）；
-- 经验池整体受 `settings.exp_pool` 三开关控制（enabled / enable_read / enable_write，字段照源）。
+- 经验池整体受 `settings.exp_pool` 开关控制（enabled / enable_read / enable_write / enable_score）。
 
 源契约保留：**kw 必须带 `req`**；tag 缺省 = `类名.方法名`（源 `_generate_tag:202`）。
-存储与计数故障只 warning 不断主流程（源 `handle_exception` 的鲁棒语义）。
+存储、计数与打分故障只 warning 不断主流程（源 `handle_exception` 的鲁棒语义）。
 """
 from functools import wraps
 from typing import Callable, Optional, TypeVar
 
 from codeharness.configs.settings import settings
 from codeharness.exp_pool.manager import ExperienceManager, get_exp_manager
-from codeharness.exp_pool.schema import Experience, QueryType
+from codeharness.exp_pool.schema import LOG_NEW_EXPERIENCE_PREFIX, Experience, Metric, QueryType
+from codeharness.exp_pool.scorers import BaseScorer, SimpleScorer
 from codeharness.exp_pool.serializers import BaseSerializer, SimpleSerializer
 from codeharness.logs import logger
 
@@ -30,6 +33,7 @@ def exp_cache(
     serializer: Optional[BaseSerializer] = None,
     tag: Optional[str] = None,
     threshold: float = 0.9,
+    scorer: Optional[BaseScorer] = None,
 ):
     """Decorator to get a perfect experience, otherwise, executes the function and creates a new one.
 
@@ -68,12 +72,27 @@ def exp_cache(
 
             if cfg.enable_write:
                 exp = Experience(req=req_s, resp=ser.serialize_resp(result), tag=exp_tag)
+                if cfg.enable_score:
+                    await _attach_score(exp, scorer, req_s, exp.resp)
                 await _safe(mgr.create_exp(exp), "经验入库")
-                logger.debug(f"New experience: {exp.model_dump_json(include={'uuid', 'req', 'resp', 'tag'})}")
+                # C163：正文不上日志（req 是用户原话、resp 是模型回包，整段落 DEBUG 只会堆日志）——
+                # 留 tag/uuid/长度够对账。前缀常量在 schema（源同名常量，此前零消费者）。
+                logger.debug(f"{LOG_NEW_EXPERIENCE_PREFIX}tag={exp_tag} uuid={exp.uuid} "
+                             f"req_len={len(req_s)} resp_len={len(exp.resp)}")
             return result
         return wrapper
 
     return decorator(_func) if _func else decorator
+
+
+async def _attach_score(exp: Experience, scorer: Optional[BaseScorer], req: str, resp: str) -> None:
+    """C165：入库前打质量分。失败只 warning、metric 留空照常入库——质量分永远不能挡住经验池主路；
+    也不造分（打不了就空着，与判定表「留 None 不造数据」同一条纪律）。"""
+    try:
+        s = scorer or SimpleScorer()
+        exp.metric = Metric(score=await s.evaluate(req, resp))
+    except Exception as e:
+        logger.warning(f"经验打分失败（照常入库）: {type(e).__name__}: {e}")
 
 
 def _auto_tag(args, func) -> str:

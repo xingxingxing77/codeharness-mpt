@@ -43,7 +43,9 @@ class HitCounter:
             return 0
 
     async def bump(self, exp_id: str) -> None:
-        await self.redis.set(self._key(exp_id), str(await self.get(exp_id) + 1))
+        # C162：单命令 INCR 原子自增。原来 get+set 两次 await，同 user 并发激活各自读到 N
+        # 各写 N+1，丢一次计数（审查文档 04:112 在册；后果只是 tie-break 抖，但一行就能修）。
+        await self.redis.incr(self._key(exp_id))
 
 
 class ExperienceManager:
@@ -59,7 +61,9 @@ class ExperienceManager:
         self.counter = counter or HitCounter(user_id=user_id)
 
     async def create_exp(self, exp: Experience) -> None:
-        await self.store.save(exp.tag, exp.req, exp.resp)
+        # C165：质量分随经验落库（store.save 的 score 参数管道本就在，此前恒 0.0）；没打过分照旧 0.0
+        val = exp.metric.score.val if exp.metric and exp.metric.score else 0.0
+        await self.store.save(exp.tag, exp.req, exp.resp, score=val)
 
     async def query_exps(self, req: str, tag: str = "",
                          query_type: QueryType = QueryType.SEMANTIC,
