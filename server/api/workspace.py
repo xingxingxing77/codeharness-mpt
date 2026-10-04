@@ -260,6 +260,11 @@ async def upload_kb(sid: str, request: Request, files: list[UploadFile] = File(.
             # C146：维度不符那族（qdrant_store 的集合维度守卫）不是连接级失败——触发它的是
             # 上传的用户/运维，得让他看见原因；改前原样上抛 ⇒ 界面只有一句 generic 500。
             # 400 + 原文（含集合维度与 embedding 维度两个数）一字不改地带出去。
+            # C160（10-03 全天回归 t6④ 当场红）：C146 原先接住**所有** ValueError——摄取路径上
+            # 任何真 bug 都被归成 400 客户端错，t6④「真 bug 仍 500」的契约被破。收窄到维度族：
+            # 守卫的报错文本是本仓自己的（qdrant_store.ensure），按它认；其余 ValueError 照旧上抛 500。
+            if "当前 embedding 输出" not in str(exc):
+                raise
             raise HTTPException(400, f"知识库写入被拒：{exc}") from exc
         except Exception as exc:
             if not _unreachable(exc):

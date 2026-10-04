@@ -491,9 +491,18 @@ def t6_vector_service_down_says_so():
             assert rsp4.status_code == 500, \
                 f"t6④：把真异常降级成了 {rsp4.status_code}——「服务不可用」的谎就是这么写出来的"
             assert "没有切片" not in rsp4.text, f"t6④：500 里混进了降级文案：{rsp4.text[:160]}"
+            # ⑤ C160：维度族 ValueError（C146 的本意族）→ 400 带原文；真 bug（④）仍 500。两族不许混。
+            mod.QdrantStore = lambda *a, **k: _Store(
+                boom=ValueError("集合 c23mem 是 64 维，当前 embedding 输出 1024 维——"
+                                "换刻度必须换集合名或重建集合（分数阈值与已灌切片本来也不可跨刻度复用）"))
+            rsp5 = c.post(f"/api/sessions/{sid}/workspace/upload_kb", files=parts(extra_exe=False))
+            assert rsp5.status_code == 400, \
+                f"t6⑤：维度不符没按 C146 走 400（{rsp5.status_code}）——用户被当成旁观者了"
+            assert "当前 embedding 输出" in rsp5.text, f"t6⑤：两个数字没带到用户面前：{rsp5.text[:200]}"
+            assert "没有切片" not in rsp5.text, f"t6⑤：400 里混进了降级文案：{rsp5.text[:160]}"
         print("  ok  t6 两种不可达各取真读数（qdrant/openai 各包一层，类名都不提「连接」）、"
               "文案三件事齐（没切片 / 原件在 kb/ / 该查哪两台）、门口拒因不被盖掉；"
-              "阳性对照 200、反向对照真 bug 仍 500")
+              "阳性对照 200、反向对照真 bug 仍 500、维度族 400 带原文（C160 收窄）")
     finally:
         mod.QdrantStore, mod.LLMGateway, settings.qdrant.url, settings.embedding.base_url = saved
         if keep is not None:
