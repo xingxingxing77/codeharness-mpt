@@ -758,7 +758,10 @@ class SessionRunner:
             # C104 之一（计划卡的频道身份）：`Plan._report_plan` 每推进一次就发一颗**全新 uuid** 的 Task
             # `object`，而载荷本来就是整份计划 ⇒ 前端按 uuid 聚块，一场跑下来攒出 N 张几乎一样的计划卡。
             # 这一路的身份按 (块, 角色) 收敛成一颗：后一次覆盖前一次，角色之间仍各一张卡。
-            if nm == "object" and event.get("block") == "Task":
+            # C175（10-05）把收敛从「只改 object」扩到**整块**——改前 `task_block` 自己那颗 uuid
+            # （meta/live/content/end_marker）仍在，于是一次计划更新在界面上出**两张**「更新任务清单」
+            # （一张念正文、一张念对勾）。扩完之后：同一颗卡先念逐片、清单到达后念对勾。
+            if event.get("block") == "Task":   # C175：整块都收敛（改前只改 object ⇒ 双卡）
                 event["uuid"] = uid = "plan-" + (event.get("role") or "")
             if uid:
                 if nm == "end_marker":

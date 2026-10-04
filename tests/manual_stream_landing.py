@@ -221,7 +221,7 @@ async def main():
         fails.append("⑦ Task 块里混进了标识符（filename / required_packages）")
     if "砍掉一半候选" not in tlive or "纯静态文件" not in tlive:
         fails.append("⑦ Task 名单内的 instruction（嵌套那一层）或 shared_knowledge 没进流")
-    if not any(n == "live" and u == "task-1" for n, u, _ in tseq):
+    if not any(n == "live" and u == "plan-PM" for n, u, _ in tseq):   # C175：整块收敛后的 uuid
         fails.append("⑦ 逐片没落进开着的 Task 块（那条开块 meta 没把块登记进落点表）")
 
     # ============ 10-05 取证三格（C172/C173/落点单槽）：形状全由真 astream 现取，不猜 ============

@@ -912,8 +912,9 @@ async def t12_prose_from_structured_stream():
                                    "metadata": {"langgraph_node": "PMManager"},
                                    "data": {"chunk": AIMessage(content=ttxt[i:i + 8])}})
     tlive = [e for e in bus5.history(s5.id) if e.name == "live"]
-    assert tlive and all(e.uuid == "task-1" and e.block == "Task" for e in tlive), \
-        f"⑨ 逐片没进开着的那块 Task：{[(e.uuid, e.block) for e in tlive][:3]}"
+    # C175：Task 整块按角色收敛 ⇒ 逐片落的那颗就是 meta 那颗（收敛后 uuid）
+    assert tlive and all(e.uuid == "plan-PMManager" and e.block == "Task" for e in tlive), \
+        f"⑨ 逐片没进开着的那块 Task（C175 后应为 plan-<role>）：{[(e.uuid, e.block) for e in tlive][:3]}"
     got9 = "".join(e.value for e in tlive)
     assert got9 == instr_a + "\n" + instr_b + "\n" + knowl, \
         f"⑨ Task 名单内的三段（含嵌套一层里的 instruction）没照发或发多了：{got9[:70]!r}"
@@ -1005,7 +1006,8 @@ async def t12_prose_from_structured_stream():
     plan_a = {"block": "Task", "uuid": "a" * 32, "name": "object", "role": "PMManager",
               "value": {"tasks": [{"task_id": "T1", "is_finished": False}], "current_task_id": "T1"}}
     sink8(dict(plan_a))
-    assert _slot(runner8, s8i.id)[:2] == ("task-8", "Task"), \
+    # C175 之后 meta 自己也被收敛 ⇒ 落点槽里的就是那一颗卡的 uuid（改前是 task_block 自己的随机串）
+    assert _slot(runner8, s8i.id)[:2] == ("plan-PMManager", "Task"), \
         f"⑫ 计划卡的 object 抢走了逐片落点（改前形状）：现登记 {_slot(runner8, s8i.id)!r}"
     # 同族第二形（这才是有牙的那格，n1 那刀就红在这里）：交错块里**上一块的定稿**不许把落点
     # 从当前开着的块抢回去——光比字典不够，要看这一笔的逐片到底投进了哪块。
@@ -1038,6 +1040,17 @@ async def t12_prose_from_structured_stream():
     assert objs[-1].uuid == "plan-Engineer", f"⑫ 换角色也并进同一颗卡（该各一张）：{objs[-1].uuid}"
     assert {e.uuid for e in objs} == {"plan-PMManager", "plan-Engineer"}, \
         f"⑫ 计划卡的频道数不是「每角色一颗」：{sorted({e.uuid for e in objs})}"
+
+    # ⑫B（C175）：收敛要覆盖**整块**——meta/content/object/end_marker 全部落在同一颗卡上。
+    #    改前只改 object，task_block 自己那颗随机 uuid 仍在 ⇒ 界面上两张「更新任务清单」
+    #    （一张念正文、一张念对勾）。现证读数：5 条事件 / 3 颗 uuid（E:/tmp/c176/taskcards2.out）。
+    sink8({"block": "Task", "uuid": "c" * 32, "name": "end_marker", "value": None, "role": "PMManager"})
+    task_cards = {e.uuid for e in bus8.history(s8i.id) if e.block == "Task" and e.role == "PMManager"}
+    assert task_cards == {"plan-PMManager"}, \
+        f"⑫B Task 整块没收敛成一颗卡（改前形状：正文卡与清单卡并存）：{sorted(task_cards)}"
+    assert [e.name for e in bus8.history(s8i.id) if e.uuid == "plan-PMManager"] == \
+        ["meta", "object", "content", "object", "end_marker"], \
+        "⑫B 那颗卡上的事件序不是「开块→推进→定稿→收口」一条链，看起来像被拼过"
 
     # 阳性对照＝改前的病能复现：没有开块 meta 时，object 之后那一笔的逐片该落兜底行、按长度挑
     # （改前它被 object 抢住 ⇒ 既没兜底行也没名单，正是第六件的病复发）
