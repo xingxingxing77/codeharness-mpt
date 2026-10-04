@@ -1,0 +1,140 @@
+{
+  "note": "C164 经验池真场活体读数（10-04，StepFun+生产同款 embedding，EXP_POOL 四开，dynamic 3 场：T1 冷写 + T1r 原题复跑 + P1 同义改写；classic 线零接线见文件头）",
+  "results": [
+    {
+      "code": "T1",
+      "round": 1,
+      "sid": "20c9fbfd",
+      "status": "finished",
+      "sec": 48.9,
+      "cost_cny": 0.016179,
+      "gate": null,
+      "hit_lines": 12,
+      "sims": [
+        0.901,
+        0.986,
+        0.988,
+        0.935,
+        0.935,
+        0.932,
+        0.931,
+        0.931,
+        0.931,
+        0.931,
+        0.93,
+        0.93
+      ],
+      "new_exps": 3,
+      "pool_warn_lines": 1,
+      "warn_sample": "经验池读取失败，照常执行: UnexpectedResponse: Unexpected Response: 404 (Not Found)\nRaw response content:\nb'{\"status\":{\"error\":\"Not found: Collection `codeharness` doesn\\'t ",
+      "misfire_suspect": null,
+      "first_hit_line": "经验命中 (tag=RoleZero.llm_cached_think, sim=0.901)：跳过本次 LLM 调用\n",
+      "session_text_excerpt": "2026-10-04 20:06:47.407 | WARNING  | codeharness.document_store.embed_split:clamp_query:60 - 文本超长，按端点窗口截断：1556→1200 字（不截就是端点静默保头丢尾；读侧 query 与经验池签名共用这一处）\n2026-10-04 20:06:47.648 | WARNING  | codeharness.exp_pool.decorator:wrapper:63 - 经验池读取失败，照常执行: UnexpectedResponse: Unexpected Response: 404 (Not Found)\nRaw response content:\nb'{\"status\":{\"error\":\"Not found: Collection `codeharness` doesn\\'t exist!"
+    },
+    {
+      "code": "T1r",
+      "round": 2,
+      "sid": "31cdbdd0",
+      "status": "finished",
+      "sec": 6.1,
+      "cost_cny": 0.0,
+      "gate": null,
+      "hit_lines": 15,
+      "sims": [
+        1.0,
+        1.0,
+        0.997,
+        0.99,
+        0.986,
+        0.984,
+        0.935,
+        0.932,
+        0.932,
+        0.931,
+        0.931,
+        0.931,
+        0.931,
+        0.93,
+        0.93
+      ],
+      "new_exps": 0,
+      "pool_warn_lines": 0,
+      "warn_sample": "",
+      "misfire_suspect": null,
+      "first_hit_line": "经验命中 (tag=RoleZero.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n",
+      "session_text_excerpt": "2026-10-04 20:07:34.628 | WARNING  | codeharness.document_store.embed_split:clamp_query:60 - 文本超长，按端点窗口截断：1556→1200 字（不截就是端点静默保头丢尾；读侧 query 与经验池签名共用这一处）\n2026-10-04 20:07:34.754 | INFO     | codeharness.exp_pool.decorator:wrapper:68 - 经验命中 (tag=RoleZero.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n这是一个简单的 Python 脚本任务，属于 XS 级别。我可以直接创建这个脚本，不需要分配给其他团队成员。脚本需要：1) 遍历当前目录所有 .txt 文件；2) 读取每个文件的内容；3) 在每行前加上来源文件名"
+    },
+    {
+      "code": "P1",
+      "round": 2,
+      "sid": "216c3b15",
+      "status": "finished",
+      "sec": 6.1,
+      "cost_cny": 0.0,
+      "gate": null,
+      "hit_lines": 15,
+      "sims": [
+        1.0,
+        1.0,
+        0.997,
+        0.99,
+        0.986,
+        0.984,
+        0.935,
+        0.932,
+        0.932,
+        0.931,
+        0.931,
+        0.931,
+        0.931,
+        0.93,
+        0.93
+      ],
+      "new_exps": 0,
+      "pool_warn_lines": 0,
+      "warn_sample": "",
+      "misfire_suspect": null,
+      "first_hit_line": "经验命中 (tag=RoleZero.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n",
+      "session_text_excerpt": "2026-10-04 20:07:40.717 | WARNING  | codeharness.document_store.embed_split:clamp_query:60 - 文本超长，按端点窗口截断：1556→1200 字（不截就是端点静默保头丢尾；读侧 query 与经验池签名共用这一处）\n2026-10-04 20:07:40.874 | INFO     | codeharness.exp_pool.decorator:wrapper:68 - 经验命中 (tag=RoleZero.llm_cached_think, sim=1.000)：跳过本次 LLM 调用\n这是一个简单的 Python 脚本任务，属于 XS 级别。我可以直接创建这个脚本，不需要分配给其他团队成员。脚本需要：1) 遍历当前目录所有 .txt 文件；2) 读取每个文件的内容；3) 在每行前加上来源文件名"
+    }
+  ],
+  "pool_probe": {
+    "T1r": [
+      {
+        "req": "\n# Past Experience\n\n\n# Tool State\nready\n\n# Current Plan\n- [1",
+        "sim": 0.7769,
+        "quality": 10
+      },
+      {
+        "req": "\n# Past Experience\n\n\n# Tool State\nready\n\n# Current Plan\n- [1",
+        "sim": 0.6522,
+        "quality": 9
+      },
+      {
+        "req": "\n# Past Experience\n\n\n# Tool State\nready\n\n# Current Plan\n(no ",
+        "sim": 0.4309,
+        "quality": 10
+      }
+    ],
+    "P1": [
+      {
+        "req": "\n# Past Experience\n\n\n# Tool State\nready\n\n# Current Plan\n- [1",
+        "sim": 0.7684,
+        "quality": 10
+      },
+      {
+        "req": "\n# Past Experience\n\n\n# Tool State\nready\n\n# Current Plan\n- [1",
+        "sim": 0.6509,
+        "quality": 9
+      },
+      {
+        "req": "\n# Past Experience\n\n\n# Tool State\nready\n\n# Current Plan\n(no ",
+        "sim": 0.4464,
+        "quality": 10
+      }
+    ]
+  },
+  "pool_points": 3,
+  "hit_keys": 3,
+  "total_cny": 0.016179
+}
