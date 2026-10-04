@@ -262,6 +262,40 @@ def t9b_brain_persists_on_eviction_even_if_summary_fails():
     print("  t9b 摘要失败也落盘：驱逐原文在 Redis、新实例可恢复（C150 落盘时机）")
 
 
+def t9d_brain_history_dedups_on_retry_after_rollback():
+    """C161：摘要失败回滚窗口后，同一批消息下轮再驱逐**不得在 brain.history 翻倍**。
+    源 :103 的 int 单调守卫对 uuid4 id 形同虚设（照抄会把第二条之后全拦掉），
+    本仓按 id 精确去重——回滚重试是它存在的意义，C150 落盘后翻倍还会被持久化。"""
+    if not live_redis():
+        print("  t9d 跳过（无 Redis）")
+        return
+    CURRENT_PROJECT.set("s5_mem_session")
+
+    class DeadSummarizer:
+        async def aask(self, msg, system_msgs=None, stream=False, tag="", **kw) -> str:
+            return ""
+
+    role = _role(brain=BrainMemory(), memory_k=2)
+    role.llm = DeadSummarizer()
+    for i in range(5):
+        role.memory.add(Message(content=f"c{i}命令结果" + "长" * 100))
+    key = role._brain_key()
+    KEYS.append(key)
+    sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                     db=settings.redis.db).delete(key)
+    asyncio.run(role._compress())                       # 第一轮：驱逐 c0-c2 进 brain（回滚，窗口 5 条）
+    assert len(role.brain.history) == 3
+    role.memory.add(Message(content="w5新结果"))         # 窗口 6 条 ⇒ 二轮驱逐 c0-c3（c0-c2 是同一批对象）
+    asyncio.run(role._compress())
+    ids = [m.id for m in role.brain.history]
+    assert len(ids) == len(set(ids)) == 4, \
+        f"C161 失守：回滚后二次驱逐把 brain.history 翻倍了（{len(ids)} 条，id 去重后 {len(set(ids))}）"
+    # 二轮驱逐集 = [c0,c1,c2,c3]（c0-c2 被 id 去重挡回，只有新面孔 c3 入史；w5 留在窗口里）
+    assert [m.content for m in role.brain.history] == \
+        [f"c{i}命令结果" + "长" * 100 for i in range(4)]
+    print("  ok  t9d C161：回滚后二次驱逐去重——brain.history 4 条 id 唯一，不翻倍")
+
+
 def t9c_brain_ttl_is_configurable_and_slides():
     """C150：TTL 走 settings.brain_ttl_sec——0=不过期（默认，随会话存续）；>0=dumps 刷新、
     loads 命中即滑动续期。旧实现死值 1800 且只挂在 summarize 那一跳，谁也配不了它。"""
@@ -2385,6 +2419,7 @@ def main():
               t9c_brain_ttl_is_configurable_and_slides,
               t10_memory_keys_are_per_role_and_per_session,
               t10b_brain_key_carries_user_tenant,
+              t9d_brain_history_dedups_on_retry_after_rollback,
               t11_observe_dedupes_and_survives_partial_results,
               t12_collection_shape, t13_tenant_and_doctype_isolation,
               t14_sparse_indices_are_process_stable, t15_longterm_overflow_recall_roundtrip,

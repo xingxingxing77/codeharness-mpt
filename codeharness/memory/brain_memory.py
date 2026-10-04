@@ -46,6 +46,11 @@ class BrainMemory(BaseModel):
         self.is_dirty = True
 
     def add_history(self, msg: Message):
+        # C161：恢复源 :103 守卫的**意图**（回喂去重）——源的 int 单调比较对 uuid4 id 形同虚设
+        # （to_int 全落 0，照抄会把第二条之后的全拦掉），本仓按 id 精确去重：摘要失败回滚窗口后，
+        # 同一批消息下轮再驱逐时不能在 brain.history 里翻倍（C150 落盘后翻倍还会被持久化）。
+        if msg.id and any(m.id == msg.id for m in self.history):
+            return
         self.history.append(msg)
         self.last_history_id = str(msg.id)
         self.is_dirty = True
