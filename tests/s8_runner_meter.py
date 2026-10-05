@@ -615,6 +615,65 @@ def t10_cost_injection_end_to_end():
         shutil.rmtree(Path("workspace") / project, ignore_errors=True)
 
 
+async def t18_task_block_is_one_moving_card():
+    """C175 的两条可见形状各有**自己**的牙（⑫B 从 t12 里拆出来独立成组，10-05 第六棒）。
+
+    为什么要拆：上一轮两把变异刀 c1（整块退回「只改 object」）、c2（收敛键丢掉角色）都 CAUGHT，
+    但**都红在 t12 的 ⑨**——同一个函数里 ⑫B 排在 ⑨ 之后，文件在第一处红就中断，
+    后面那两格到底有没有牙没被证明（照 t16 ③/k5 那条改判法：「红在别处」可能是顺序问题）。
+    处置两条一起做：① 本组排在 t12 **之前**（各组自带夹具、互不依赖，顺序只决定谁先说话）；
+    ② 断言按牙分格——① 只管「每角色一颗」（object 通道），② 才管「整块一颗」（Task 频道的卡数）。
+    于是 d1 只能红在 ②、d2 只能红在 ①，两格各有一颗独立的牙（两刀的红格由变异台现证）。
+
+    事件形状照真实发射器：`task_block` 发 meta/content/end_marker（自己那颗 uuid），
+    `Plan._report_plan` 每推进一次发一颗**全新 uuid** 的 object（现证 5 条事件 / 3 颗 uuid，
+    `E:/tmp/c176/taskcards2.out`）。改前是「一张念正文的卡 + 一张念对勾的卡」两张并存。
+    """
+    tmp, store, bus, runner, s = await _make_runner()
+    try:
+        sink = runner._make_sink(s.id)
+        plan = {"block": "Task", "name": "object",
+                "value": {"tasks": [{"task_id": "T1", "is_finished": False}], "current_task_id": "T1"}}
+        sink({**plan, "uuid": "task-1", "name": "meta", "role": "PMManager",
+              "value": {"type": "tasks", "prose_fields": ["instruction", "shared_knowledge"]}})   # 开块 meta
+        sink({**plan, "uuid": "a" * 32, "role": "PMManager"})                             # 推进一次
+        sink({**plan, "uuid": "task-1", "role": "PMManager", "name": "content",
+              "value": "任务清单正文（task_block 定稿）"})
+        sink({**plan, "uuid": "b" * 32, "role": "PMManager"})                             # 再推进一次
+        sink({**plan, "uuid": "task-2", "role": "Architect", "name": "meta",
+              "value": {"type": "tasks", "prose_fields": ["instruction"]}})               # 另一角色开块
+        sink({**plan, "uuid": "task-2", "role": "Architect", "name": "content", "value": "另一个角色的正文"})
+        sink({**plan, "uuid": "c" * 32, "role": "Architect"})
+        sink({**plan, "uuid": "d" * 32, "role": "PMManager", "name": "end_marker", "value": None})
+        sink({**plan, "uuid": "e" * 32, "role": "Architect", "name": "end_marker", "value": None})
+
+        # ① 牙一：object 通道**按角色**分颗。丢掉角色段的收敛（d2）在这里红，且只在这里红。
+        objs = [e.uuid for e in bus.history(s.id) if e.name == "object"]
+        assert set(objs) == {"plan-PMManager", "plan-Architect"}, \
+            f"① 计划卡不是「每角色一颗」：object 通道聚出 {sorted(set(objs))}（应为两颗、按角色分）"
+        assert objs[:2] == ["plan-PMManager", "plan-PMManager"], \
+            f"① 同角色两次推进没收敛成同一颗卡（该覆盖掉）：{objs}"
+
+        # ② 牙二：**整块**收敛（meta/content/end_marker 也在同一颗卡上）。退回「只改 object」（d1）
+        #    在这里红——object 通道照旧对（① 不红），只有卡数不对，界面上就是两张「更新任务清单」。
+        cards = {e.uuid for e in bus.history(s.id) if e.block == "Task"}
+        assert cards == {"plan-PMManager", "plan-Architect"}, \
+            (f"② Task 整块没收敛成每角色一颗（改前形状：正文卡与清单卡并存）："
+             f"{sorted(cards)}")
+
+        # ③ 一条链：一颗卡上的事件序是「开块→推进→定稿→再推进→收口」，不是两条链拼两张卡。
+        chain = [e.name for e in bus.history(s.id) if e.uuid == "plan-PMManager"]
+        assert chain == ["meta", "object", "content", "object", "end_marker"], \
+            f"③ 那颗卡上的事件序不是「开块→推进→定稿→收口」一条链，看起来像被拼过：{chain}"
+    finally:
+        import shutil
+        runner._forget(s.id, terminal=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    _ok("t18", "C175 一颗在变的卡：① object 通道按角色分颗（d2 的牙）② Task **整块**收敛成每角色一颗"
+               "（d1 的牙，只有卡数不对而 live/object 投递照旧对）③ 一颗卡上的事件序是一条链；"
+               "本组排在 t12 之前，免得同一函数里后格的缺失被前格的红遮住")
+
+
 async def t12_prose_from_structured_stream():
     """流式 UX 批：structured 的逐片 JSON 必须在翻译层抽成散文才上屏。
 
@@ -1041,16 +1100,9 @@ async def t12_prose_from_structured_stream():
     assert {e.uuid for e in objs} == {"plan-PMManager", "plan-Engineer"}, \
         f"⑫ 计划卡的频道数不是「每角色一颗」：{sorted({e.uuid for e in objs})}"
 
-    # ⑫B（C175）：收敛要覆盖**整块**——meta/content/object/end_marker 全部落在同一颗卡上。
-    #    改前只改 object，task_block 自己那颗随机 uuid 仍在 ⇒ 界面上两张「更新任务清单」
-    #    （一张念正文、一张念对勾）。现证读数：5 条事件 / 3 颗 uuid（E:/tmp/c176/taskcards2.out）。
-    sink8({"block": "Task", "uuid": "c" * 32, "name": "end_marker", "value": None, "role": "PMManager"})
-    task_cards = {e.uuid for e in bus8.history(s8i.id) if e.block == "Task" and e.role == "PMManager"}
-    assert task_cards == {"plan-PMManager"}, \
-        f"⑫B Task 整块没收敛成一颗卡（改前形状：正文卡与清单卡并存）：{sorted(task_cards)}"
-    assert [e.name for e in bus8.history(s8i.id) if e.uuid == "plan-PMManager"] == \
-        ["meta", "object", "content", "object", "end_marker"], \
-        "⑫B 那颗卡上的事件序不是「开块→推进→定稿→收口」一条链，看起来像被拼过"
+    # ⑫B（C175 的「整块收敛成一颗卡」）已拆成独立组 **t18**：留在本函数里它必然排在 ⑨ 之后，
+    #    而上一轮两把变异刀 c1/c2 都红在 ⑨、文件第一处红就中断 ⇒ 这两格有没有牙没被证明。
+    #    拆出去 + 排在 t12 之前 + 按牙分格（每角色一颗 / 整块一颗各一格），10-05 第六棒。
 
     # 阳性对照＝改前的病能复现：没有开块 meta 时，object 之后那一笔的逐片该落兜底行、按长度挑
     # （改前它被 object 抢住 ⇒ 既没兜底行也没名单，正是第六件的病复发）
@@ -1448,6 +1500,122 @@ async def t17_each_role_keeps_its_own_block():
     print("  ok  t17 C174 分槽落点：Alice 的逐片进 Alice 的块、Bob 不受影响、收口只摘自己那格")
 
 
+def t19_bounded_live_cap_fires_at_accounting():
+    """C176：有界真模型跑的金额闸判在**记账那一刻**，不判在轮询里（全格零花费，不碰任何云端端点）。
+
+    病形（10-05 现证，账在 `plan/model-gateway.md` §1.7 第五棒）：闸写在外部轮询里读
+    `runner.costs[sid]` 的快照，而账本的累计只在**每一发结束**时经 `update_cost` 增长 ⇒
+    轮询永远慢一整发，thinking 模型一发就烧穿（授权 ≤¥0.2、实花 ¥0.356093）。四格各钉一条：
+      ① 撞线在这一笔记完**之后**，且下一笔记不进来（`peak` 含撞线那笔＝「已花的拦不回」是明说的）；
+      ② 生产的兜底形状（`except Exception:` 里再问一发）咽不掉它——配「普通异常确实被咽掉」的阳性对照；
+      ③ 发前闸三条拒发（估不动／闸罩不住／币种对不上）与放行档各一格；
+      ④ 卸载必还原 + **产品账本字段面零增长**（§7 ⛔「预算强制全家」，配 `s2 t11` 那把反回潮尺）；
+      ⑤ 累加点唯一性扫描：`cost_usd/cost_cny` 只许在 `update_cost`（增长）与 `_seeded_ledger`（续算播种）
+         两处被写——闸判的是 `update_cost`，第三处长出来就会绕过它。
+    """
+    import ast
+    from codeharness.provider import cost as cost_mod
+    from codeharness.provider.token_costs import TOKEN_COSTS
+    from tests.cost_gate import CapHit, armed, estimate, precheck
+
+    model = "step-3.5-flash"                       # .env 那台；币种 CNY，价目表现值
+    rate = TOKEN_COSTS[model]
+    unit = (200 * rate["prompt"] + 200 * rate["completion"]) / 1000
+
+    def _usage_msg():
+        m = AIMessage(content="x")
+        m.usage_metadata = {"input_tokens": 200, "output_tokens": 200}
+        return m
+
+    orig = cost_mod.CostManager.update_cost
+    uninstall, gate = armed(unit * 1.5)            # 闸卡在「第二笔记完账」这一档
+    try:
+        cm = CostManager()
+        raised, attempts = None, 0
+        for i in range(3):
+            attempts += 1
+            try:
+                cm.add_usage(_usage_msg(), model=model, tag=f"c{i}")
+            except CapHit as e:
+                raised = e
+                break                              # 撞线就停手——这就是「下一发发不出去」的形状
+        assert raised is not None, "① 撞线判定没响：闸装了等于没装"
+        assert (attempts, gate["calls"]) == (2, 2), \
+            f"① 撞线的时刻不对（应红在第 2 笔记账之后、第 3 笔记不进来）：试了 {attempts} 笔、记了 {gate['calls']} 笔"
+        assert abs(gate["peak_cny"] - 2 * unit) < 1e-12, \
+            f"① 峰值读数没含撞线那一笔（{gate['peak_cny']!r} ≠ 2×{unit!r}）⇒ 「拦不回已花的」这条是假的"
+        assert raised.calls == 2 and abs(raised.cny - 2 * unit) < 1e-12, \
+            f"② 异常对象上没带读数（账本随后被 `_forget` pop，闸不留一份就读不到）：{raised!r}"
+
+        # ② 生产的兜底形状：`roles/role_zero.py::_think` 与 `roles/agent.py`（C76）都是
+        #    `except Exception:` 里**再问一发**。普通异常在这里会变成第二笔花费——闸不会。
+        def _think_like_production(bang):
+            asked = 0
+
+            def one_call():
+                nonlocal asked
+                asked += 1
+                if bang is not None:
+                    raise bang
+            try:
+                try:
+                    one_call()
+                except Exception:                   # 逐字照生产兜底那一层
+                    one_call()
+            except BaseException:
+                pass
+            return asked
+        assert _think_like_production(CapHit(0.4, 0.0, 2, 0.2, 0.0)) == 1, \
+            "② 闸被 `except Exception` 咽掉了 ⇒ 兜底立刻又问一发，那正是要拦的东西"
+        assert _think_like_production(RuntimeError("普通异常")) == 2, \
+            "② 阳性对照失守：连普通异常都没被兜底咽掉，上面那条 1 是恒真不是读数"
+
+        # ③ 发前闸：三条拒发 + 一档放行，每条都指得回 HISTORY 里那行的出处
+        assert precheck("no-such-paradigm", 5.0, model) != "", "③ 没有本形状的历史却放行了（估不动就该不发）"
+        assert precheck("react", 0.2, model) != "", "③ 事故已进价（react 档 ¥0.356093）却还放行 ≤¥0.2 的场"
+        assert precheck("react", 0.4, model) == "", f"③ 闸抬到过估之上仍被拒：{precheck('react', 0.4, model)}"
+        assert precheck("react", 5.0, "gpt-4o") != "", "③ 闸是人民币档、模型按美元计价 ⇒ 撞线永不响，这条必须拒"
+        assert precheck("react", 5.0, "no-such-model-xyz") != "", \
+            "③ 模型不在价目表＝账恒 0＝闸看不见钱，这条必须拒"
+        est, src = estimate("react")
+        assert est == 0.356093 and "§1.7" in src, f"③ 取的该是历史**最贵**一场：{est!r} / {src!r}"
+
+        # ⑤ 累加点唯一性：闸判在 `update_cost`，别处再长出写 `cost_*` 的手就绕过了它。
+        #    （`CostManager(cost_cny=…)` 这种构造形参不是属性赋值，扫不到也不算——它建的是新账本。）
+        root = Path(__file__).resolve().parents[1]
+        writers = []
+        for py in list((root / "codeharness").rglob("*.py")) + list((root / "server").rglob("*.py")):
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            for fn in (n for n in ast.walk(tree)
+                       if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                for node in ast.walk(fn):
+                    if isinstance(node, (ast.Assign, ast.AugAssign)):
+                        tgts = node.targets if isinstance(node, ast.Assign) else [node.target]
+                        for t in tgts:
+                            if isinstance(t, ast.Attribute) and t.attr in ("cost_usd", "cost_cny"):
+                                writers.append(f"{py.relative_to(root).as_posix()}::{fn.name}")
+        assert set(writers) == {"codeharness/provider/cost.py::update_cost",
+                                "server/runner.py::_seeded_ledger"}, \
+            f"⑤ 出现第三处写 `cost_usd/cost_cny` 的地方（闸会被绕过）：{sorted(set(writers))}"
+    finally:
+        uninstall()
+    assert cost_mod.CostManager.update_cost is orig, "④ 闸没摘干净（泄漏的闸会掐掉同进程后面的任何会话）"
+    leaked = [f for f in CostManager.model_fields if "cap" in f or "budget" in f]
+    assert not leaked, f"④ 产品账本长出了预算字段（§7 ⛔ 预算强制全家）：{leaked}"
+    cm_after = CostManager()
+    cm_after.add_usage(_usage_msg(), model=model, tag="after")     # 摘掉之后必须照常记账
+    assert abs(cm_after.cost_cny - unit) < 1e-12, \
+        f"④ 卸载后记账形状变了（应照常累计）：{cm_after.cost_cny!r}"
+    _ok("t19", "C176 有界活体的金额闸：撞线判在**记账那一刻**（第 2 笔记完账才响、第 3 笔记不进来、"
+               "峰值含撞线那笔且异常自带读数）；抛的是 BaseException 后代，生产的 `except Exception` "
+               "兜底重问咽不掉它（普通异常那侧配了阳性对照）；发前闸按同形状历史最贵一场判，"
+               "估不动／闸罩不住／币种对不上三条各拒一格，抬到过估之上才放行；卸载还原 + 产品字段面零增长 "
+               "+ 累加点唯一性扫描（`update_cost` 与 `_seeded_ledger` 之外不许写 `cost_*`）")
+
+
 def main():
     # 分母从名单长度推，不写死组数（本仓点过名两次的手抄组数：加了一格而末行还写旧数 ⇒ 读数指不回输出）。
     # 协程格用 iscoroutinefunction 分流；顺序照这张表，t10 要起本机桩所以仍放最后。
@@ -1463,12 +1631,16 @@ def main():
         t9_two_endpoints_one_ledger,
         t8_two_currency_buckets,
         t10_cost_injection_end_to_end,
+        # t18 排在 t12 **之前**：它俩验的是同一条收敛规则的两半，而文件在第一处红就中断——
+        # 顺序颠倒过来才证得出「每角色一颗」与「整块一颗」各有独立的牙（见 t18 的 docstring）。
+        t18_task_block_is_one_moving_card,
         t12_prose_from_structured_stream,
         t13_assembly_ledger_identity_recall,
         t14_prose_key_positions_never_leak,
         t15_parallel_sends_each_keep_their_block,
         t16_forgotten_run_closes_the_stream_rows,
         t17_each_role_keeps_its_own_block,
+        t19_bounded_live_cap_fires_at_accounting,
     ]
     for fn in steps:
         asyncio.run(fn()) if asyncio.iscoroutinefunction(fn) else fn()
