@@ -492,11 +492,23 @@ class RoleZero:
                             from codeharness.report import tool_call_report
                             await tool_call_report(name, args, "", ok=False)
                             continue
-                        out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
+                        # C179：**执行前**先把这一行立起来（meta 先行）⇒ 工具在跑的这段时间界面上
+                        # 就有这张卡（状态 running）。改前它只在 ainvoke 返回后才发，写代码那几十秒
+                        # 屏上什么都没有（C177 挡下打字机之后这段空窗更显眼）。
+                        from codeharness.report import tool_call_open, tool_call_report
+                        card = await tool_call_open(name, args)
+                        try:
+                            out = await asyncio.wait_for(self.tools[name].ainvoke(args), timeout=180)
+                        except BaseException as exc:
+                            # 收口这一行再**原样抛**给外层（超时/取消/interrupt 各有自己的处置，本节点
+                            # 一条都不改）。为什么敢在取消路径上 await：`tool_call_report` 内部只有同步
+                            # `_emit`、全程不挂起 ⇒ 不会给事件循环一个投递二次取消的机会；不收口就是
+                            # 又一张永远 running 的卡（C172/C178 那一族）。
+                            await tool_call_report(name, args, f"[{type(exc).__name__}] {name}", ok=False, rep=card)
+                            raise
                         # 每一步都发一行（C6/对话流：只读类工具原本一个块都不发 ⇒ "每步一行"无从谈起）。
                         # 只发事实（工具名+参数摘要+结果首行），动词与摘要由前端派生。
-                        from codeharness.report import tool_call_report
-                        await tool_call_report(name, args, out)
+                        await tool_call_report(name, args, out, rep=card)
                         results.append({"name": name, "result": clip(out, 4000)})
                     else:
                         # T4-③：这是「召回/名册漏了」这件事在线上**唯一数得出来**的信号——命中率要真值才算得出

@@ -440,15 +440,32 @@ def recall_notice(*legs) -> list[str]:
     return out
 
 
-async def tool_call_report(name: str, args: dict | None, out, ok: bool = True, role: str = ""):
+async def tool_call_open(name: str, args: dict | None, role: str = "") -> BlockReporter:
+    """执行**前**把工具卡立起来：meta 先到 ⇒ 工具在跑的那段时间里界面上就有这一行（状态 running）。
+
+    改前这一行只在 `ainvoke` 返回之后才发（`tool_call_report` 把 meta/content/close 一次做完），
+    于是 `_act` 里那些耗时工具（写代码动辄几十秒、长 `shell` 命令）执行期间屏上**什么都没有**——
+    C177 把 `_act` 那族产代码的块外调用挡下打字机之后，这段空窗更显眼。
+    `ok` 此刻还不知道（结果没回来），留到 `tool_call_report(..., rep=card)` 那一次 meta 覆盖。
+    """
+    rep = BlockReporter(BlockType.TOOL_CALL.value, role)
+    await rep.meta({"type": "tool_call", "tool": name, "args": _brief_args(args)})
+    return rep
+
+
+async def tool_call_report(name: str, args: dict | None, out, ok: bool = True, role: str = "",
+                           rep: Optional[BlockReporter] = None):
     """一次工具调用 → 一个 ToolCall 块（meta 带工具名与参数摘要，正文带结果首行）。
+
+    `rep` 给了就复用它：`_act` 用 `tool_call_open` 在执行前已把这一行立起来，这里是**同一颗 uuid**
+    的第二次 meta（把 `ok` 补上）+ 正文 + 收口；没给就现开一张（被拒分支那种一次性调用点）。
 
     与参照系的差别要写清：它那一行 `Read · app\api\admin.py` 的"标题"也不是模型给的，
     而是「变体名 + 从 args 派生的摘要」（`ui-tool/src/client/tool/models/tool-call-model.ts`
     的 `SUMMARY_KEYS`）——所以我们只发**事实**（工具名 + 参数 + 结果摘要），
     动词与摘要由前端派生，不新造一个"意图"字段去求模型填（那要动 prompt，属 C6 那类风险）。
     """
-    rep = BlockReporter(BlockType.TOOL_CALL.value, role)
+    rep = rep if rep is not None else BlockReporter(BlockType.TOOL_CALL.value, role)
     await rep.meta({"type": "tool_call", "tool": name, "args": _brief_args(args), "ok": ok})
     await rep.content(f"[已拒绝] 未获批准，不执行" if not ok else str(out).split("\n")[0][:400])
     await rep.close()

@@ -1694,6 +1694,86 @@ def t18_plan_open_at_settle():
           f"全勾完不发、无计划不发、graphs 已清不发）")
 
 
+def t19_tool_card_is_open_during_the_call():
+    """C179（10-05）：工具卡要在工具**跑的时候**就在流里，失败那一步也有自己一行。
+
+    C177 把 `_act` 里那族产出代码的块外调用挡下打字机之后留了这条边界：`tool_call_report` 是
+    **一次性**的（meta/content/close 三件都排在 `ainvoke` 返回之后）⇒ 写代码动辄几十秒的执行期间
+    屏上**什么都没有**；而超时与异常那两条路更彻底——**一个块都不发**，「这一步发生过且失败了」
+    在流里不可见（与拒绝分支已有的可见性口径不对称，同 `role_zero.py:487-490` 那句
+    「界面上『这一步没发生』和『这一步被拦下』长得一样，而后者是用户该看见的」）。
+    改法＝执行前先 `tool_call_open`（meta 先行，`ok` 留到结果那次 meta 覆盖），成功/超时/异常/中断
+    四条出口都收口。三格：
+      ① 探针工具在 `ainvoke` **内部**读当前事件表 ⇒ 那一瞬已经有这张卡的 meta（改前这里是空的）；
+      ② 执行中那条 meta 与随后 content/end_marker 是**同一颗 uuid**（一张卡，不是两张）；
+      ③ 抛异常那一笔照样留下一张 `ok=false` 的卡 + end_marker，回喂串逐字照旧。
+    为什么直接打 `_act` 不走真图：与 t10/t16 同形——这里判的是「报道槽上这一行的顺序与归属」，
+    绕开图反而少一层替身假绿（真图那条路 t5/t6 已覆盖）。
+    """
+    import asyncio
+
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.role_zero import RoleZero
+    from codeharness.runtime import REPORT_SINK
+
+    ev = []
+    seen = {}
+
+    class _Tool:
+        name = "probe_tool"
+
+        async def ainvoke(self, args):
+            seen["during"] = [dict(e) for e in ev]      # 执行**中**这一瞬的流，钉死时序
+            return "探针结果首行"
+
+    class _Boom:
+        name = "boom_tool"
+
+        async def ainvoke(self, args):
+            raise RuntimeError("炸了")
+
+    role = RoleZero({"name": "Alice", "profile": "PM", "goal": "g"},
+                    [_Tool(), _Boom()], FakeLLM([""]))
+
+    def act(commands):
+        return asyncio.run(role._act({"task": "跑工具", "history":
+                                      [{"thought": "t", "commands": commands}],
+                                      "respond_language": "中文", "finished": False}))
+
+    tok = REPORT_SINK.set(lambda e: ev.append(e))
+    try:
+        act([{"command_name": "probe_tool", "args": {}}])
+        during = seen.get("during")
+        assert during and [e for e in during if e["name"] == "meta"], \
+            f"① 工具正在跑的时候流里什么都没有（＝改前形状：卡要等 ainvoke 返回才发）：{during}"
+        m0 = [e for e in during if e["name"] == "meta"][0]
+        assert m0["block"] == "ToolCall" and m0["value"]["tool"] == "probe_tool", \
+            f"① 执行中那条不是工具卡：{m0}"
+
+        uids = {e["uuid"] for e in ev}
+        assert len(uids) == 1, f"② 一次调用摊成了不止一张卡（uuid 不同源）：{uids}"
+        names = [e["name"] for e in ev]
+        assert names[-1] == "end_marker" and names.count("content") == 1, \
+            f"② 这一行没收口（前端会一直 running）：{names}"
+        assert [e for e in ev if e["name"] == "meta"][-1]["value"].get("ok") is True, \
+            f"② 结果那次 meta 没把 ok 补上：{[e['value'] for e in ev if e['name'] == 'meta']}"
+
+        ev.clear()
+        out = act([{"command_name": "boom_tool", "args": {}}])
+        names2 = [e["name"] for e in ev]
+        assert names2 and names2[-1] == "end_marker", \
+            f"③ 失败那一笔一个块都没发（改前形状：这一步在流里不可见）：{names2}"
+        m2 = [e for e in ev if e["name"] == "meta"][-1]["value"]
+        assert m2.get("ok") is False and m2["tool"] == "boom_tool", f"③ 失败卡没标成失败：{m2}"
+        res = out["history"][-1]["results"][0]
+        assert "RuntimeError" in res["result"], f"③ self-heal 回喂串漂了：{res}"
+    finally:
+        REPORT_SINK.reset(tok)
+
+    print("  ok  t19 工具卡在执行中就在流里（执行中已有 meta）＋同一颗 uuid 一张卡（ok 由结果那次覆盖）"
+          "＋抛异常那一笔也留 ok=false 的卡并收口（回喂串逐字不变）")
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1707,7 +1787,8 @@ def main():
               t15_approval_receipt_records_actor,
               t16_invalid_args_is_countable,
               t17_throat_tells_crash_from_dropped,
-              t18_plan_open_at_settle]
+              t18_plan_open_at_settle,
+              t19_tool_card_is_open_during_the_call]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1721,7 +1802,8 @@ def main():
           f"**回执记审批人 who/when、首到生效、旧格式兼容、两档同形 1 组（C119）** + "
           f"**无效 args 第四计数：schema 违例落账、回喂不变、不虚计、快照带出 1 组（C122）** + "
           f"**咽喉分得清装配崩溃与行已不在 + 多 worker 撞车口拒收 1 组（C125/C131）** + "
-          f"**收口读图里那本 Plan 状态机、未完成数发一条轮尾提示（全勾完/无计划/graphs 已清三种都不发）1 组（C148）**")
+          f"**收口读图里那本 Plan 状态机、未完成数发一条轮尾提示（全勾完/无计划/graphs 已清三种都不发）1 组（C148）** + "
+          f"**工具卡在执行中就在流里（执行中已有 meta）＋同一颗 uuid 一张卡＋异常那笔也留 ok=false 的卡 1 组（C179）**")
 
 
 if __name__ == "__main__":
