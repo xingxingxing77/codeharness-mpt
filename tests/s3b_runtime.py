@@ -876,6 +876,72 @@ def t20_classic_line_blocked_degrades_to_end():
     print("  ok  t20 C157：经典线 REACT 拦停降级成 END（零重问零炸场），普通 400 不误判")
 
 
+def t21_classic_step_card_covers_the_action():
+    """C180（10-05）：经典线也要「每一步一行」——动作卡在执行**中**就在流里，失败那一步也留一行。
+
+    改前这条线上**一个块都不发**（全仓 `tool_call_report` 只有 `role_zero.py` 两处调用点），
+    而动作自己那一发 LLM 又被 C177 挡下打字机 ⇒ 一场里长动作（写代码几十秒）执行期间屏上只有
+    产物块（Docs/Editor）**落地**的那一下，中间没有任何「正在做什么」的行。与动态线 C179 同形：
+    执行前 `tool_call_open`（meta 先行），成功/中断/异常三条出口都收口。三格：
+      ① 动作 `run()` **内部**读事件表 ⇒ 那一瞬已有这张卡的 meta（block=ToolCall、tool=动作名）；
+      ② 同一颗 uuid 一张卡（执行中那条 meta 与结果那次同源）；
+      ③ 抛异常那一笔也留 `ok=false` 的卡 + end_marker，且 T12 那条自愈回喂链逐字不动。
+    为什么直接打 `_act` 不走真图：与 T12 同形——这里判的是「报道槽上这一行的时序与归属」，
+    绕开图少一层替身假绿。
+    """
+    from codeharness.roles.agent import Agent
+
+    ev: list = []
+    seen: dict = {}
+
+    class Slow(BaseAction):
+        output_schema = Rec
+
+        async def run(self, msg: Message) -> Message:
+            seen["during"] = [dict(e) for e in ev]      # 动作跑**中**这一瞬的流，钉死时序
+            return Message(content="慢动作跑完了", role="assistant", cause_by=self.name,
+                           sent_from=self.name)
+
+    class Boom(BaseAction):
+        output_schema = Rec
+
+        async def run(self, msg: Message) -> Message:
+            raise ValueError("非法产物文件名 '/main.py'")
+
+    def st(act):
+        return {"name": "E", "inbox": [Message(content="go", cause_by="WriteTasks")],
+                "memory": [], "action_cursor": -1, "chosen": act, "loops": 1, "output": []}
+
+    ag = Agent({"name": "E", "profile": "p", "goal": "g"},
+               [Slow(llm=None), Boom(llm=None)], None, max_loops=2)
+
+    tok = REPORT_SINK.set(lambda e: ev.append(e))
+    try:
+        asyncio.run(ag._act(st("Slow")))
+        during = seen.get("during") or []
+        metas = [e for e in during if e["name"] == "meta"]
+        assert metas and metas[0]["block"] == "ToolCall" and metas[0]["value"]["tool"] == "Slow", \
+            f"① 动作在跑的时候流里没有这张卡（＝改前形状：经典线一个块都不发）：{during}"
+        uids = {e["uuid"] for e in ev}
+        assert len(uids) == 1, f"② 一次动作摊成了不止一张卡（uuid 不同源）：{uids}"
+        names = [e["name"] for e in ev]
+        assert names[-1] == "end_marker" and "content" in names, f"② 卡没收口（前端会一直 running）：{names}"
+
+        ev.clear()
+        out = asyncio.run(ag._act(st("Boom")))
+        names2 = [e["name"] for e in ev]
+        assert names2 and names2[-1] == "end_marker", f"③ 失败那一笔没留卡：{names2}"
+        m = [e for e in ev if e["name"] == "meta"][-1]["value"]
+        assert m.get("ok") is False and m["tool"] == "Boom", f"③ 失败卡没标成失败：{m}"
+        assert out["output"][0].content.startswith("[错误]"), \
+            f"③ 自愈回喂链被改了：{out['output'][0].content!r}"
+    finally:
+        REPORT_SINK.reset(tok)
+
+    print("  ok  t21 经典线动作卡：动作执行中已有 meta ＋ 同一颗 uuid 一张卡（ok 由结果那次覆盖）"
+          "＋ 抛异常那一笔也留 ok=false 的卡并收口（回喂链逐字不变）")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -888,7 +954,8 @@ def main():
               t17_react_think_survives_a_broken_structured_reply,
               t18_log_file_sink_is_bounded,
               t19_blocked_think_degrades_not_dies,
-              t20_classic_line_blocked_degrades_to_end]
+              t20_classic_line_blocked_degrades_to_end,
+              t21_classic_step_card_covers_the_action]
     try:
         for c in checks:
             c()
@@ -908,7 +975,8 @@ def main():
           f"设计决定 1 组（<all> 不广播）+ 自测无磁盘副作用 1 组 + 兜底组队与 SOP 目标名自洽 1 组 + "
           f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组 + "
           f"写→评审→摘要生产装配 1 组 + C2 假通道不复燃守卫 1 组（TeamState 无 docs 键 + 三处初值源码无写入）+ "
-          f"生产级具名投递两分支 1 组 + REACT 档坏回包兜底 1 组（C76）+ C106 日志上界 1 组（t18：`logs.py` 那颗文件 sink 必须带 rotation/retention，三种形状对照各对，临时根里真落一本且中文行按 utf-8 读回）")
+          f"生产级具名投递两分支 1 组 + REACT 档坏回包兜底 1 组（C76）+ C106 日志上界 1 组（t18：`logs.py` 那颗文件 sink 必须带 rotation/retention，三种形状对照各对，临时根里真落一本且中文行按 utf-8 读回）+ "
+          f"**经典线动作卡：动作执行中已有 meta ＋ 同一颗 uuid 一张卡 ＋ 异常那笔也留 ok=false 的卡 1 组（C180）**")
 
 
 if __name__ == "__main__":

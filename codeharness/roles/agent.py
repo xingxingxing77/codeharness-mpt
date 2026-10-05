@@ -265,6 +265,10 @@ class Agent:
                 msg = Message(content=f"[已拒绝] {name} 未获批准，不执行",
                               role="user", cause_by=name, sent_from=self.profile["name"],
                               send_to={MESSAGE_ROUTE_TO_SELF})
+                # C180：被拒也要有一行——否则界面上「这一步没发生」和「这一步被拦下」长得一样
+                # （口径同 `role_zero._act` 的拒绝分支）。
+                from codeharness.report import tool_call_report
+                await tool_call_report(name, args, "", ok=False)
                 return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],
                         "inbox": [], "action_cursor": s["action_cursor"]}
         if s["inbox"]:                                       # 首个动作：触发源 = 最新收件
@@ -279,14 +283,23 @@ class Agent:
         # 知识库那条不一样：动作的 prompt 在 `Action._ask` 那个唯一出口上才成型，所以在这里取一次、
         # 经 ContextVar 交给它（`runtime.KB_CONTEXT`）——**一次动作只检索一次**，补问轮复用同一份。
         from codeharness.runtime import KB_CONTEXT, LTM_CONTEXT
+        from codeharness.report import tool_call_open, tool_call_report
         kb_tok = KB_CONTEXT.set(await self._kb_block(prompt))
         ltm_tok = LTM_CONTEXT.set(await self._ltm_block(prompt))
+        # C180：经典线也要「每一步一行」。改前这条线上**一个块都不发**（全仓 `tool_call_report` 只有
+        # `role_zero.py` 两处调用点），而动作自己那一发 LLM 又被 C177 挡下打字机 ⇒ 长动作（写代码
+        # 几十秒）执行期间屏上只有产物块（Docs/Editor）**落地**的那一下。与动态线 C179 同形：执行前
+        # 开卡（meta 先行），成功/中断/异常三条出口都收口。`tool_call_report` 内部只有同步 `_emit`、
+        # 全程不挂起 ⇒ 中断/取消路径上收口是安全的；不收口就是一张永远 running 的卡（C172/C178 那一族）。
+        card_args = {"task": (prompt or "").split("\n")[0][:120]}
+        card = await tool_call_open(action.name, card_args)
         try:
             result = await action.run(Message(
                 content=prompt, role="user", cause_by=trig.cause_by, sent_from=trig.sent_from,
                 instruct_content=trig.instruct_content,      # 上下文模型透传（CodingContext/TestingContext 的接缝）
                 instruct_schema=trig.instruct_schema))
         except GraphInterrupt:
+            await tool_call_report(action.name, card_args, "[interrupt] 挂起等人回答", ok=False, rep=card)
             raise                                            # interrupt 靠抛异常暂停图，绝不能吞（role_zero 同律）
         except Exception as e:
             # Action 抛错 → 错误消息回喂记忆，下一轮自愈——真模型输出漂移是常态（第十二处：
@@ -303,6 +316,11 @@ class Agent:
             result = Message(content=f"[错误] {action.name} 执行失败: {type(e).__name__}: {e}",
                              role="user", cause_by=action.name, sent_from=self.profile["name"],
                              send_to={MESSAGE_ROUTE_TO_SELF})
+            await tool_call_report(action.name, card_args, f"[错误] {type(e).__name__}: {e}",
+                                   ok=False, rep=card)
+        else:
+            await tool_call_report(action.name, card_args,
+                                   str(getattr(result, "content", "") or result), rep=card)
         finally:
             # 挂在 try 上而不是 try 后：GraphInterrupt 那条要暂停整场、抛错那条要自愈，
             # 两支都得把这份上下文摘掉——留着下一轮就会拿上一轮动作的知识库片段干活。
