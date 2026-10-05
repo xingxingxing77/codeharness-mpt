@@ -882,13 +882,19 @@ def t21_classic_step_card_covers_the_action():
     改前这条线上**一个块都不发**（全仓 `tool_call_report` 只有 `role_zero.py` 两处调用点），
     而动作自己那一发 LLM 又被 C177 挡下打字机 ⇒ 一场里长动作（写代码几十秒）执行期间屏上只有
     产物块（Docs/Editor）**落地**的那一下，中间没有任何「正在做什么」的行。与动态线 C179 同形：
-    执行前 `tool_call_open`（meta 先行），成功/中断/异常三条出口都收口。三格：
+    执行前 `tool_call_open`（meta 先行），成功/异常/挂起/被拒**四条出口**都收口。五格：
       ① 动作 `run()` **内部**读事件表 ⇒ 那一瞬已有这张卡的 meta（block=ToolCall、tool=动作名）；
       ② 同一颗 uuid 一张卡（执行中那条 meta 与结果那次同源）；
-      ③ 抛异常那一笔也留 `ok=false` 的卡 + end_marker，且 T12 那条自愈回喂链逐字不动。
+      ③ 抛异常那一笔也留 `ok=false` 的卡 + end_marker，且 T12 那条自愈回喂链逐字不动；
+      ④ 装了待批通道又没批 ⇒ 动作**不执行**，但照样留一张 `ok=false` 的卡（改前「这一步没发生」
+         和「这一步被拦下」在界面上长得一样）；
+      ⑤ `GraphInterrupt` 那一笔也留卡收口，且异常**照抛**——收口不能吞掉挂起，吞了整场就暂停不了。
+    ④ 的形状：经典线动作名不在 `ACTION_TIER` 里 ⇒ `required_tier` 退 `full_access`，而档位默认
+    `readonly` ⇒ 只要装上 `APPROVAL_IO` 且没批就走被拒分支（与 `s8_frontend_contract` 那组同一配方）。
     为什么直接打 `_act` 不走真图：与 T12 同形——这里判的是「报道槽上这一行的时序与归属」，
     绕开图少一层替身假绿。
     """
+    from langgraph.errors import GraphInterrupt
     from codeharness.roles.agent import Agent
 
     ev: list = []
@@ -908,12 +914,18 @@ def t21_classic_step_card_covers_the_action():
         async def run(self, msg: Message) -> Message:
             raise ValueError("非法产物文件名 '/main.py'")
 
+    class Halt(BaseAction):
+        output_schema = Rec
+
+        async def run(self, msg: Message) -> Message:
+            raise GraphInterrupt()          # 挂起等人回答：卡要收口，但异常必须照抛
+
     def st(act):
         return {"name": "E", "inbox": [Message(content="go", cause_by="WriteTasks")],
                 "memory": [], "action_cursor": -1, "chosen": act, "loops": 1, "output": []}
 
     ag = Agent({"name": "E", "profile": "p", "goal": "g"},
-               [Slow(llm=None), Boom(llm=None)], None, max_loops=2)
+               [Slow(llm=None), Boom(llm=None), Halt(llm=None)], None, max_loops=2)
 
     tok = REPORT_SINK.set(lambda e: ev.append(e))
     try:
@@ -935,11 +947,48 @@ def t21_classic_step_card_covers_the_action():
         assert m.get("ok") is False and m["tool"] == "Boom", f"③ 失败卡没标成失败：{m}"
         assert out["output"][0].content.startswith("[错误]"), \
             f"③ 自愈回喂链被改了：{out['output'][0].content!r}"
+
+        # ④ 被拒那一笔：动作**不执行**，但流里必须留一张 ok=false 的卡（C180 补的就是这一行）
+        ev.clear()
+        from codeharness.runtime import APPROVAL_IO, PERMISSION
+
+        class _IO:
+            sid = "t21"
+            d: dict = {}
+            def decision(self, aid):
+                return self.d.get(aid)      # 空＝没批 ⇒ gate 返回 (None, item) ⇒ 按不执行处理
+
+        t_io, t_p = APPROVAL_IO.set(_IO()), PERMISSION.set("readonly")
+        try:
+            out_r = asyncio.run(ag._act(st("Slow")))
+        finally:
+            APPROVAL_IO.reset(t_io)
+            PERMISSION.reset(t_p)
+        names4 = [e["name"] for e in ev]
+        assert names4 and names4[-1] == "end_marker", \
+            f"④ 被拒那一笔没留卡（＝改前形状：没发生与被拦下长得一样）：{names4}"
+        m4 = [e for e in ev if e["name"] == "meta"][-1]["value"]
+        assert m4.get("ok") is False and m4["tool"] == "Slow", f"④ 被拒的卡没标成失败：{m4}"
+        assert out_r["output"][-1].content.startswith("[已拒绝]"), \
+            f"④ 拒绝回喂被改了：{out_r['output'][-1].content!r}"
+
+        # ⑤ GraphInterrupt 那一笔：卡要收口，异常照抛（收口是在 `raise` 之前补的，不许吞）
+        ev.clear()
+        held = None
+        try:
+            asyncio.run(ag._act(st("Halt")))
+        except GraphInterrupt as gi:
+            held = gi
+        assert held is not None, "⑤ GraphInterrupt 被吞了——interrupt/resume 会静默失效"
+        names5 = [e["name"] for e in ev]
+        assert names5 and names5[-1] == "end_marker", f"⑤ 挂起那一笔没留卡：{names5}"
+        m5 = [e for e in ev if e["name"] == "meta"][-1]["value"]
+        assert m5.get("ok") is False, f"⑤ 挂起的卡没标成失败：{m5}"
     finally:
         REPORT_SINK.reset(tok)
 
     print("  ok  t21 经典线动作卡：动作执行中已有 meta ＋ 同一颗 uuid 一张卡（ok 由结果那次覆盖）"
-          "＋ 抛异常那一笔也留 ok=false 的卡并收口（回喂链逐字不变）")
+          "＋ 抛异常/被拒/挂起那三笔都留 ok=false 的卡并收口（回喂链逐字不变、挂起照抛）")
 
 
 def main():
