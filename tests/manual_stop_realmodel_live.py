@@ -35,7 +35,8 @@ N_CALLS_CAP = int(os.environ.get("N_CALLS_CAP", "8"))      # 记账笔数上限�
 MAX_TOKEN = 600         # 名义单发上限——⚠ thinking 模型不认它，别当花费上限读
 CALL_DEADLINE_SEC = int(os.environ.get("CALL_DEADLINE_SEC", "45"))   # 唯一掐得住在飞那一发的闸
 WALL_SEC = int(os.environ.get("WALL_SEC", "150"))
-PARADIGM = "react"      # 前置闸按这一档的历史单价估
+PARADIGM = os.environ.get("PARADIGM", "react")   # 前置闸按这一档的历史单价估；10-05 用户拍「换 dynamic 线」
+IDEA = os.environ.get("IDEA", "用两句话说清什么是二分查找，不要写文件、不要建计划")
 OUT = Path(os.environ.get("OUT", "E:/tmp/c176/live_readings.json"))
 
 
@@ -81,7 +82,7 @@ def main() -> int:
     uninstall, gate = armed(CAP_CNY)
     with TestClient(create_app()) as c:
         try:
-            sid = c.post("/api/sessions", json={"idea": "用两句话说清什么是二分查找，不要写文件、不要建计划",
+            sid = c.post("/api/sessions", json={"idea": IDEA,
                                                 "project_name": "c176live", "paradigm": PARADIGM,
                                                 "permission": "readonly", "n_round": 1}).json()["id"]
             runner = c.app.state.runner
