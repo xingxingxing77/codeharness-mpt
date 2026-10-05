@@ -1236,8 +1236,11 @@ class SessionRunner:
                 self.bus.publish(sid, kind="report", block="Thought", uuid=row,
                                  name="meta", value={"streaming": node}, role=who or node)
 
-                # C172：这颗行现在开着，记进散会要收的账（值先置 False：还没发过任何一个逐片）
-                self._stream_rows.setdefault(sid, {})[f"stream-{node}"] = False
+                # C172：这颗行现在开着，记进散会要收的账（值先置 False：还没发过任何一个逐片）。
+                # C178：键必须与**开行的 uuid 同源**（`row`）——写 `stream-{node}` 在生产形状下会分家：
+                # 真图里 `who` 是角色名（C174 现证）而 `node` 是 think/act，于是开行发 `stream-Alice`、
+                # 收口的 `only=` 也按 `who or node`，只有这张表按 node 登记 ⇒ 零逐片那一行散会收不了口。
+                self._stream_rows.setdefault(sid, {})[row] = False
         elif kind == "on_chat_model_end":
             self._sync_cost(sid)
             used_kernel = bool(self._used_kernel_block.pop((sid, rid), None))

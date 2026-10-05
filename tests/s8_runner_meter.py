@@ -1837,6 +1837,94 @@ async def t20_code_body_stays_off_the_typewriter():
         rmtree(tmp, ignore_errors=True)
 
 
+async def t21_fallback_row_key_matches_uuid():
+    """C178（10-05）：打字机兜底行的**登记键**必须与它开行的 uuid 同源——生产形状下 `who` 是角色名。
+
+    合成事件（t16 那一族）不带 `checkpoint_ns` ⇒ `_owner()` 与 `who or node` 双双退空串、
+    `stream-{node}` 与 `stream-{who or node}` 恰好相等，于是「登记用 node、开行用 who」这种错位
+    **在那把夹具下恒等**。真图里 `_owner()` 首段是角色名（`tests/manual_c174_llm_identity.py`
+    现证 `Alice:<uuid>`）⇒ `who="Alice"`、`node="think"`，开行发的是 `stream-Alice`；登记若写成
+    `stream-think`，两处就分家：
+      · 正常收口 `_end_stream_rows(sid, only="stream-Alice")` 在表里查不到那一格 ⇒ `stream-think`
+        永远留着（`if not rows` 也清不掉它）；
+      · 散会 `_end_stream_rows(sid)` 按**表里的键**发 ⇒ 给 `stream-think` 发一条没人开过的孤立
+        end_marker（前端按「孤立收口标记」丢弃），而真正开着的那行 `stream-Alice` **永远收不了口**
+        ——Think 行停在 running 扫光、轮尾行不发（复制/点赞/分叉一起没），正是 C172 要治的形状。
+    阳性对照两条：① 有逐片那一笔收口后表里不留任何键（键对了 `only` 才摘得掉它）；
+    ② `who` 名下有活块时压根不登记兜底行——防「把守卫改成无条件登记」那种过修。
+    """
+    tmp = Path(tempfile.mkdtemp())
+    store = SessionStore(path=tmp / "sessions.json")
+    bus = SessionEventBus(spill_dir=tmp / "spill")
+    runner = SessionRunner(store, bus)
+
+    def md(node, who):
+        # 真图形状：checkpoint_ns 首段是外层角色名，`_owner()` 只取冒号前那一截
+        m = {"langgraph_node": node}
+        if who:
+            m["checkpoint_ns"] = f"{who}:0f3a|{node}:9c1e"
+        return m
+
+    def start(sid, rid, node, who):
+        runner._translate(sid, {"event": "on_chat_model_start", "run_id": rid, "metadata": md(node, who)})
+
+    def piece(sid, rid, node, who, content):
+        runner._translate(sid, {"event": "on_chat_model_stream", "run_id": rid, "metadata": md(node, who),
+                                "data": {"chunk": type("C", (), {"content": content})()}})
+
+    def end(sid, rid, node, who):
+        runner._translate(sid, {"event": "on_chat_model_end", "run_id": rid, "metadata": md(node, who)})
+
+    def new_session(tag):
+        s = store.create(tag, project_name="c178")
+        store.update(s.id, status=SessionStatus.running)
+        return s
+
+    async def forget(sid, terminal=True):
+        runner._forget(sid, terminal)
+        for task in list(runner._closers):
+            await task
+
+    try:
+        # ① 生产形状：零逐片的那一行，登记键必须就是它开行的 uuid（错位时这里是 stream-think）
+        s1 = new_session("c178 零逐片")
+        start(s1.id, "rA", "think", "Alice")
+        assert runner._stream_rows.get(s1.id) == {"stream-Alice": False}, \
+            f"① 登记键与开行 uuid 不同源：表里是 {runner._stream_rows.get(s1.id)}，而开行的 uuid 是 stream-Alice"
+        await forget(s1.id)
+        got1 = [(e.name, e.value) for e in bus.history(s1.id) if e.uuid == "stream-Alice"]
+        assert got1 and got1[-1] == ("end_marker", None), \
+            f"① 真正开着的那行散会没收口（前端会一直 running）：{got1}"
+        assert not [e for e in bus.history(s1.id) if e.uuid == "stream-think"], \
+            "① 给没人开过的 stream-think 发了孤立收口（表里的键与开行 uuid 分家的直接后果）"
+        assert not runner._stream_rows.get(s1.id), "① 散会后这张表还留着这一场的账"
+
+        # ② 阳性对照：有逐片那一笔走正常收口后，表里不许留任何键
+        s2 = new_session("c178 有逐片")
+        start(s2.id, "rB", "act", "Bob")
+        piece(s2.id, "rB", "act", "Bob", '{"p": "')
+        piece(s2.id, "rB", "act", "Bob", "这一笔在动作节点里吐了正文，长度跨过二十四字的门槛线")
+        end(s2.id, "rB", "act", "Bob")
+        assert not runner._stream_rows.get(s2.id), \
+            f"② 已收口的那一行键还挂在表里（键对了 only 才摘得掉）：{runner._stream_rows.get(s2.id)}"
+        got2 = [(e.name, e.value) for e in bus.history(s2.id) if e.uuid == "stream-Bob"]
+        assert got2 and got2[-1] == ("end_marker", None), f"② 角色兜底行没收口：{got2}"
+        assert not [e for e in bus.history(s2.id) if e.uuid == "stream-act"], \
+            "② 又把收口发到了节点名那一颗（键没同源）"
+
+        # ③ 阳性对照：who 名下有活块时压根不登记兜底行（防过修成「无条件登记」）
+        s3 = new_session("c178 有活块")
+        runner._live_blk[(s3.id, "Carol")] = ("blk-1", "Thought", None)
+        start(s3.id, "rC", "think", "Carol")
+        assert not runner._stream_rows.get(s3.id), \
+            f"③ who 名下有活块却仍登记了兜底行（过修）：{runner._stream_rows.get(s3.id)}"
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("  ok  t21 兜底行登记键与开行 uuid 同源（生产形状 who=角色名）：零逐片散会也收口、"
+          "不再给 stream-{node} 发孤立收口、表清空；有逐片/有活块两条阳性对照")
+
+
 def main():
     # 分母从名单长度推，不写死组数（本仓点过名两次的手抄组数：加了一格而末行还写旧数 ⇒ 读数指不回输出）。
     # 协程格用 iscoroutinefunction 分流；顺序照这张表，t10 要起本机桩所以仍放最后。
@@ -1861,6 +1949,7 @@ def main():
         t15_parallel_sends_each_keep_their_block,
         t16_forgotten_run_closes_the_stream_rows,
         t17_each_role_keeps_its_own_block,
+        t21_fallback_row_key_matches_uuid,
         t19_bounded_live_cap_fires_at_accounting,
         # t20 排最后：它和 t10 一样要起本机桩（这台桩回的是 SSE 分帧，事件形状必须现取）
         t20_code_body_stays_off_the_typewriter,
