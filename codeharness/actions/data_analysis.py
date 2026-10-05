@@ -14,7 +14,7 @@ Task: {task}"""
 
 class WriteAnalysisCode(BaseAction):
     async def run(self, msg: Message) -> Message:
-        code = await self._aask(ANALYSIS_CODE_PROMPT.format(task=msg.content))
+        code = await self._aask(ANALYSIS_CODE_PROMPT.format(task=msg.content), no_stream=True)
         from codeharness.actions.write_code import _parse_code
         return Message(content=_parse_code(code), role="assistant", cause_by=self.name, sent_from="DataAnalyst")
 

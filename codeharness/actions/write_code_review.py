@@ -160,7 +160,8 @@ class WriteCodeReview(BaseAction):
                                instruct_content={"filename": ctx.filename, "review": "LGTM"},
                                instruct_schema="WriteCodeReviewOutput")
             rewrite_rsp = await self._aask(
-                f"{context_prompt}\n{cr_rsp}\n" + REWRITE_CODE_TEMPLATE.format(filename=ctx.filename))
+                f"{context_prompt}\n{cr_rsp}\n" + REWRITE_CODE_TEMPLATE.format(filename=ctx.filename),
+                no_stream=True)          # C177：这一支的产出是改写后的整份代码（上一条 cr_rsp 是评审散文，照旧上屏）
             fixed = _parse_code(rewrite_rsp)
             iterative = fixed or iterative                 # 解析不出代码就保留上一版，不写空
             await store.save(RepoName.SRC, Document(filename=ctx.filename, content=iterative))

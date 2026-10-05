@@ -116,7 +116,9 @@ class WriteCode(BaseAction):
                                             feedback=feedback,
                                             filename=ctx.filename, demo_filename=Path(ctx.filename).stem)
         try:
-            rsp = await self._aask(prompt)
+            # C177：产出是要落盘的代码正文 ⇒ 这一笔不上打字机行（09-29 现证：整段 jsx 714 片 / 8002 字
+            # 落 `stream-act` 刷屏）。记账与 span 照旧，界面进度由 `ToolCall` 卡承担。
+            rsp = await self._aask(prompt, no_stream=True)
             code = _parse_code(rsp)                              # 见文末工具函数
             code_doc = await store.save(RepoName.SRC, Document(filename=ctx.filename, content=code))
         except Exception as e:

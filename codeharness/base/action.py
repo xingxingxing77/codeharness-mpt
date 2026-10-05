@@ -62,9 +62,14 @@ class Action(BaseModel):
         return "## History Messages\n" + "\n".join(
             f"{idx}: {i}" for idx, i in enumerate(reversed(msgs)))
 
-    async def _aask(self, prompt: str, system_msgs: Optional[list[str]] = None) -> str:
+    async def _aask(self, prompt: str, system_msgs: Optional[list[str]] = None,
+                    no_stream: bool = False) -> str:
+        """`no_stream=True`（C177）＝这一笔的逐片不上打字机行——产出是**要落盘的代码正文**的那些调用用它
+        （`write_code`/`write_test`/`debug_error`/`write_code_review` 的改写支路/`WriteAnalysisCode`）。
+        挡的只有上屏：记账、span、`ToolCall` 卡一个不动。理由与现证读数写在 `codeharness/const.py`。"""
         msgs = ([self.prefix] if self.prefix else []) + (system_msgs or [])
-        return await self.llm.aask(prompt, system_msgs=msgs or None, tag=self.name)
+        return await self.llm.aask(prompt, system_msgs=msgs or None, tag=self.name,
+                                   no_stream=no_stream)
 
     # ---- 结构化输出 + 字段级定向重试 ----
     async def _structured(self, prompt: str, schema: Optional[Type[BaseModel]] = None,

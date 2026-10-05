@@ -11,6 +11,7 @@ import json
 import time
 import traceback
 from contextlib import contextmanager
+from codeharness.const import NO_STREAM_TAG
 from codeharness.logs import logger
 from langgraph.types import Command
 from server.bridges import SESSION_ID
@@ -328,6 +329,10 @@ class SessionRunner:
         self._prose: dict[tuple[str, str], _ProseStream] = {}
         self._prompts: dict[tuple[str, str], str] = {}   # (sid, run_id) -> 这笔的输入文本（回显判定用）
         self._used_kernel_block: dict[tuple[str, str], bool] = {}   # (sid, run_id) -> 这一笔是否落进了内核块
+        # C177：(sid, run_id) -> 这一笔由**调用方**声明了「不上打字机行」（`const.NO_STREAM_TAG`，
+        # 产出是要落盘的代码正文那五处 `_aask`）。记账与 span 照旧，挡的只有上屏；
+        # 收口那一步要认它，否则兜底行会被这一笔无端关掉（同一节点里另一笔还开着）。
+        self._silent_runs: dict[tuple[str, str], bool] = {}
         # (sid, 外层节点名=角色) -> 这一笔 LLM 调用的逐片该投进哪一块：那个角色手上**最后开着且未收口**的块
         # （`Thought`/`Docs`/`Task`，值带它的 block 名），没有就由 `_translate` 落 `stream-{node}` 兜底。
         # 于是文档块自己就在流：逐片进 `live`，内核定稿（`content`）一到前端把 `live` 整段撤掉。
@@ -920,6 +925,8 @@ class SessionRunner:
             self._prompts.pop(k, None)
         for k in [k for k in self._used_kernel_block if k[0] == sid]:
             self._used_kernel_block.pop(k, None)
+        for k in [k for k in self._silent_runs if k[0] == sid]:       # C177：同规扫（停在待人工处也要扫干净）
+            self._silent_runs.pop(k, None)
         for k in [k for k in self._blk_of if k[0] == sid]:      # C130：快照表同规扫
             self._blk_of.pop(k, None)
         for k in [k for k in self._live_blk if k[0] == sid]:   # C174：键是 (sid, owner)，按前缀摘
@@ -1202,6 +1209,14 @@ class SessionRunner:
         kind = ev.get("event", "")
         rid = str(ev.get("run_id") or "")
         if kind == "on_chat_model_start":
+            if NO_STREAM_TAG in (ev.get("tags") or []):
+                # C177：调用方声明这一笔不上打字机 ⇒ **连 `meta` 都不建**（建了就是一个空扫光的行），
+                # 兜底行登记表 `_stream_rows` 也不登记（散会时没人欠它收口）。计时照记：
+                # span 与账本吃的还是同一本账，挡的是上屏不是计量。
+                if rid:
+                    self._call_t0[(sid, rid)] = [time.time(), None]
+                    self._silent_runs[(sid, rid)] = True
+                return
             if rid:
                 self._call_t0[(sid, rid)] = [time.time(), None]
                 self._prompts[(sid, rid)] = _prompt_text(ev.get("data") or {})
@@ -1226,6 +1241,7 @@ class SessionRunner:
         elif kind == "on_chat_model_end":
             self._sync_cost(sid)
             used_kernel = bool(self._used_kernel_block.pop((sid, rid), None))
+            silent = bool(self._silent_runs.pop((sid, rid), None))      # C177：这一笔全程没上过屏
             if rid:
                 self._prose.pop((sid, rid), None)
                 self._prompts.pop((sid, rid), None)
@@ -1234,10 +1250,14 @@ class SessionRunner:
             # 但**落进内核块的那一笔不替兜底行收口**：那一行这一笔压根没碰，收它等于替别人关
             # （离线工装现证过这条多余事件；孤立 end_marker 前端虽有守卫，长流里那行若被上一笔开过就会被无端关掉）。
             node = ev.get("metadata", {}).get("langgraph_node", "")
-            if not used_kernel:      # 落进内核块的那一笔不替兜行收口，其余照旧（t3/t7 钉的就是它）
+            if not (used_kernel or silent):      # 落进内核块的那一笔不替兜行收口，其余照旧（t3/t7 钉的就是它）；
+                # C177：声明不上屏的那一笔同样不收——它这一笔压根没碰过兜底行，收它等于替同一节点里
+                # 另一笔还开着的行关门。
                 self._end_stream_rows(sid, only=f"stream-{self._owner(ev.get("metadata")) or node}")
             self._trace_span(sid, node, self._call_t0.pop((sid, rid), None) if rid else None)
         elif kind == "on_chat_model_stream":
+            if (sid, rid) in self._silent_runs:      # C177：这一笔由调用方声明不上屏，逐片照旧进模型、只是不发布
+                return
             # structured 的逐片 JSON 在这儿抽成散文（`_ProseStream` 的 docstring 记了为什么）；
             # 裸文本流原样透传，与改动前逐字一致。
             chunk = ev["data"]["chunk"]

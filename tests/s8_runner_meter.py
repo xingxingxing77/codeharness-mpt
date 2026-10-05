@@ -1616,6 +1616,227 @@ def t19_bounded_live_cap_fires_at_accounting():
                "+ 累加点唯一性扫描（`update_cost` 与 `_seeded_ledger` 之外不许写 `cost_*`）")
 
 
+def _sse_frames(body: str, usage=(120, 340)):
+    """按 OpenAI 的 SSE 逐块吐（真 provider 就是这个形状；12 字一片是给抽取器/落点喂真粒度）。"""
+    frames = []
+    for i in range(0, len(body), 12):
+        frames.append(json.dumps({"id": "x", "object": "chat.completion.chunk", "created": 1,
+                                  "model": "step-3.5-flash",
+                                  "choices": [{"index": 0, "delta": {"content": body[i:i + 12]},
+                                               "finish_reason": None}]}, ensure_ascii=False))
+    frames.append(json.dumps({"id": "x", "object": "chat.completion.chunk", "created": 1,
+                              "model": "step-3.5-flash",
+                              "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                              "usage": {"prompt_tokens": usage[0], "completion_tokens": usage[1],
+                                        "total_tokens": sum(usage)}}, ensure_ascii=False))
+    return b"".join(f"data: {f}\n\n".encode() for f in frames) + b"data: [DONE]\n\n"
+
+
+async def t20_code_body_stays_off_the_typewriter():
+    """C177：产出是**要落盘的代码正文**的那族 `_aask` 不上打字机行（零花费：本机 SSE 桩 + 真 astream_events）。
+
+    病形是现证的（09-29，账在 `plan/frontend.md` §1.1）：`act` 节点里没被块包住的调用落打字机兜底行
+    `stream-act`，而兜底行**没有名单可挑**（它是翻译层自造的、不知道 schema），只按长度挑 ⇒ 模型吐的
+    整份代码（`## Code: src/main.jsx` + 三枚反引号的 jsx 围栏）当散文上屏，714 片 / 8002 字。
+    修法由**调用方声明**（`gateway.ainvoke(no_stream=True)` → `with_config(tags=[NO_STREAM_TAG])`），
+    界面进度交给已有的 `ToolCall` 卡，前端零改动。
+
+    六格，其中 ① 是整套改动的**地基**（tags 到不到得了事件），所以它必须走真网关 + 真 astream_events：
+      ① 带标记那一笔的每个 `on_chat_model_*` 事件都带 tag，不带的那个都不带（阳性对照）；
+      ② 把 ① 现证到的真事件灌进真 `_translate` ⇒ 静默那一笔零 `live`、零 `meta`，`_stream_rows`/`_live_blk` 一个不登记；
+      ③ 反向对照：同一条正文不带标记 ⇒ 兜底行照旧建块 + 逐片上屏（否则 ② 的「零」是恒真）；
+      ④ 挡上屏**不挡账**：两笔的 pt/ct 都进 `runner.costs[sid]`（用量页不许少一格）；
+      ⑤ 静默那一笔的 `on_chat_model_end` 不许关掉同节点里**别人**正开着的兜底行；
+      ⑥ 一族按形状找齐（AST）：凡 `_aask` 的返回进 `_parse_code(...)` 的调用点都必须带 `no_stream=True`，
+         并报扫描面（只数到 4 处就说明扫描器没看全）。
+    """
+    import ast
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from shutil import rmtree
+    from tempfile import mkdtemp
+
+    from codeharness.const import NO_STREAM_TAG
+    from langchain_core.messages import HumanMessage
+    from codeharness.provider.gateway import LLMGateway
+    from codeharness.configs.settings import settings
+
+    CODE_BODY = ("## Code: src/main.jsx\n```jsx\n"
+                 "export default function App() {\n  // 这一段是要落盘的代码正文，不是给用户读的话\n"
+                 "  return <main className=\"wrap\"><h1>二分查找</h1></main>;\n}\n```\n")
+    captured = {}
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length") or 0))
+            out = _sse_frames(CODE_BODY)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Stub)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    keep = (settings.llm.base_url, settings.llm.api_key, settings.llm.model, settings.llm.stream)
+    tmp = Path(mkdtemp())
+    try:
+        settings.llm.base_url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        settings.llm.api_key = "stub-key"
+        settings.llm.model = "step-3.5-flash"
+        settings.llm.stream = True
+
+        async def _drive(no_stream: bool):
+            """走**产品那一条路**（`LLMGateway.ainvoke`），事件用真 astream_events 现取——不许我手写形状。"""
+            gw = LLMGateway()
+            evs = []
+
+            async def _inner(_):
+                return await gw.ainvoke([HumanMessage(content="写一个页面")], tag="WriteCode",
+                                         no_stream=no_stream)
+            from langchain_core.runnables import RunnableLambda
+            async for ev in RunnableLambda(_inner).astream_events("go", version="v2"):
+                if str(ev.get("event", "")).startswith("on_chat_model"):
+                    evs.append(ev)
+            return gw, evs
+
+        gw_s, ev_s = await _drive(True)
+        gw_n, ev_n = await _drive(False)
+        assert ev_s and ev_n, f"① 地基塌了：真 astream_events 没出 chat_model 事件（静默 {len(ev_s)} 条 / 对照 {len(ev_n)} 条）"
+        kinds = {e["event"] for e in ev_s} | {e["event"] for e in ev_n}
+        for want in ("on_chat_model_start", "on_chat_model_stream", "on_chat_model_end"):
+            assert want in kinds, f"① 桩这一跑没出 {want} 事件，后面几格没有对象可判"
+        assert all(NO_STREAM_TAG in (e.get("tags") or []) for e in ev_s), \
+            f"① 带标记的那一笔里，有事件没带 tag（整套改动的地基）：{[(e['event'], e.get('tags')) for e in ev_s if NO_STREAM_TAG not in (e.get('tags') or [])]}"
+        assert all(NO_STREAM_TAG not in (e.get("tags") or []) for e in ev_n), \
+            "① 阳性对照失守：不带标记的那一笔也带上了 tag ⇒ ②的「零」就不是守卫挡的"
+
+        # ②③④⑤ 把现证到的真事件灌进真 runner 的翻译层
+        def _env():
+            from codeharness.provider.cost import CostManager
+            from server.events import SessionEventBus
+            from server.runner import SessionRunner
+            from server.sessions import SessionStore, SessionStatus
+            store = SessionStore(path=tmp / "sessions.json")
+            bus = SessionEventBus()
+            runner = SessionRunner(store, bus)
+            s = store.create("C177 打字机挡屏", project_name="c177")
+            store.update(s.id, status=SessionStatus.running)
+            runner.costs[s.id] = CostManager()
+            return store, bus, runner, s
+
+        _store, bus1, r1, s1 = _env()
+        for ev in ev_s:
+            r1._translate(s1.id, ev)
+        rep1 = [e.name for e in bus1.history(s1.id) if e.kind == "report"]
+        assert not rep1, f"② 静默那一笔还是上了屏（发了 {rep1}）：兜底行的语义是「没有块就建行」，声明了不上屏就连行都不该建"
+        assert not _slots(r1, s1.id) and not r1._stream_rows.get(s1.id), \
+            f"② 静默那一笔仍占了落点/散会账：{_slots(r1, s1.id)} / {r1._stream_rows.get(s1.id)}"
+        c_s, c_n = gw_s.cost_manager.get_costs(), gw_n.cost_manager.get_costs()
+        assert (c_s.total_prompt_tokens, c_s.total_completion_tokens) == (120, 340), \
+            f"④ 静默那一笔没记账（挡上屏把账也挡了，用量页要少一格）：{c_s}"
+        assert (c_n.total_prompt_tokens, c_n.total_completion_tokens) == (120, 340) and c_s.cost_cny == c_n.cost_cny, \
+            f"④ 两笔的账必须同形（同一条正文、同一台桩）：静默 {c_s} / 对照 {c_n}"
+
+        _store2, bus2, r2, s2 = _env()
+        for ev in ev_n:
+            r2._translate(s2.id, ev)
+        rep2 = [(e.name, e.uuid) for e in bus2.history(s2.id) if e.kind == "report"]
+        assert any(n == "meta" for n, _ in rep2) and any(n == "live" for n, _ in rep2), \
+            f"③ 不带标记的同一笔没建块也没发逐片（那 ② 的零是恒真）：{rep2}"
+        assert {u for _, u in rep2} and all(u.startswith("stream-") for _, u in rep2), \
+            f"③ 对照那一笔的落点不是兜底行：{sorted({u for _, u in rep2})}"
+
+        # ⑤ 静默那一笔的 end 不许关掉别人正开着的兜底行（产线形状：同一节点里两笔并发，
+        #    一笔声明不上屏、另一笔在打字机行上）。序列要照真事件序来：**静默那笔的 start 也必须灌**，
+        #    不灌就等于造一个「没收过 start 的 end」——那不是现实里的形状（第一版就漏灌了这一条）。
+        _store3, bus3, r3, s3 = _env()
+        for ev in ev_n:
+            if ev["event"] != "on_chat_model_end":
+                r3._translate(s3.id, ev)
+        for ev in ev_s:
+            if ev["event"] == "on_chat_model_start":
+                r3._translate(s3.id, ev)
+        before = len([e for e in bus3.history(s3.id) if e.name == "end_marker"])
+        for ev in ev_s:
+            if ev["event"] == "on_chat_model_end":
+                r3._translate(s3.id, ev)
+        after = len([e for e in bus3.history(s3.id) if e.name == "end_marker"])
+        assert before == after == 0, \
+            f"⑤ 静默那一笔收口时替别人关了行（同节点另一笔还在流）：before={before} after={after}"
+        assert (s3.id, str(next(e for e in ev_s if e["event"] == "on_chat_model_end")["run_id"])) \
+            not in r3._silent_runs, "⑤ 静默档在 end 之后还留着（同 rid 复用会读到上一笔的档）"
+        r3._forget(s3.id, terminal=True)
+        assert not r3._silent_runs, f"⑤ 散会后静默档没扫干净：{list(r3._silent_runs)}"
+
+        r2._forget(s2.id, terminal=True)      # 夹具用完自己收干净（别让下一组读到这一场的账）
+        _store, bus1, r1, s1 = _env()
+        for ev in ev_s:
+            r1._translate(s1.id, ev)
+        rep1 = [e.name for e in bus1.history(s1.id) if e.kind == "report"]
+        assert not rep1, f"② 静默那一笔还是上了屏（发了 {rep1}）：兜底行的语义是「没有块就建行」，声明了不上屏就连行都不该建"
+        assert not _slots(r1, s1.id) and not r1._stream_rows.get(s1.id), \
+            f"② 静默那一笔仍占了落点/散会账：{_slots(r1, s1.id)} / {r1._stream_rows.get(s1.id)}"
+        c_s, c_n = gw_s.cost_manager.get_costs(), gw_n.cost_manager.get_costs()
+        assert (c_s.total_prompt_tokens, c_s.total_completion_tokens) == (120, 340), \
+            f"④ 静默那一笔没记账（挡上屏把账也挡了，用量页要少一格）：{c_s}"
+        assert (c_n.total_prompt_tokens, c_n.total_completion_tokens) == (120, 340) and c_s.cost_cny == c_n.cost_cny, \
+            f"④ 两笔的账必须同形（同一条正文、同一台桩）：静默 {c_s} / 对照 {c_n}"
+
+        _store2, bus2, r2, s2 = _env()
+        for ev in ev_n:
+            r2._translate(s2.id, ev)
+        rep2 = [(e.name, e.uuid) for e in bus2.history(s2.id) if e.kind == "report"]
+        assert any(n == "meta" for n, _ in rep2) and any(n == "live" for n, _ in rep2), \
+            f"③ 不带标记的同一笔没建块也没发逐片（那 ② 的零是恒真）：{rep2}"
+        assert {u for _, u in rep2} and all(u.startswith("stream-") for _, u in rep2), \
+            f"③ 对照那一笔的落点不是兜底行：{sorted({u for _, u in rep2})}"
+
+        # ⑥ 一族按形状找齐：`_aask` 的返回进了 `_parse_code(...)` ⇒ 那一笔必须声明不上屏
+        root = Path(__file__).resolve().parents[1]
+        hits, missing = 0, []
+        for py in sorted((root / "codeharness" / "actions").glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+            for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                from_aask = {}
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Assign) and isinstance(node.value, ast.Await) and \
+                            isinstance(node.value.value, ast.Call) and \
+                            getattr(node.value.value.func, "attr", "") == "_aask":
+                        for t in node.targets:
+                            if isinstance(t, ast.Name):
+                                from_aask[t.id] = node.value.value
+                for node in ast.walk(fn):
+                    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_parse_code":
+                        for a in node.args:
+                            if isinstance(a, ast.Name) and a.id in from_aask:
+                                hits += 1
+                                if "no_stream" not in {k.arg for k in from_aask[a.id].keywords}:
+                                    missing.append(f"{py.name}::{fn.name}:{from_aask[a.id].lineno}")
+        assert not missing, f"⑥ 这一族还有产出代码正文却上屏的调用点：{missing}"
+        assert hits >= 5, f"⑥ 扫描面自证：只数到 {hits} 处「_aask → _parse_code」，比现证的 5 处少 ⇒ 扫描器没看全"
+        # ⑦ 取消那一档（**没有 end 的那一笔**）：散会必须扫掉静默档——真图里 run_id 不复用，但这张表
+        #    与 `_used_kernel_block` 同族，C155 的常驻守则在 s7 t27 里数的是「列出来的那些表」，
+        #    而 FakeLLM 那一场压根不产生带 tag 的事件 ⇒ 这一档只有在这里才有牙。
+        orphan = "00000000-0000-0000-0000-00000000c177"
+        r1._translate(s1.id, dict(next(e for e in ev_s if e["event"] == "on_chat_model_start"),
+                                  run_id=orphan))
+        assert (s1.id, orphan) in r1._silent_runs, "⑦ 前提没成立：只灌 start 那一笔没登记静默档"
+        r1._forget(s1.id, terminal=True)
+        assert not r1._silent_runs, f"⑦ 散会没扫静默档（这张表会跨场留着别人的 run_id）：{list(r1._silent_runs)}"
+        _ok("t20", f"C177 代码正文不上打字机行：① tag 真到得了三类 chat_model 事件（真网关+真 astream_events+本机 SSE 桩，"
+                   f"静默 {len(ev_s)} 条全带、对照 {len(ev_n)} 条全不带）② 静默那一笔零 report、落点与散会账都不登记 "
+                   f"③ 不带标记照旧建兜底行并发逐片 ④ 两笔的 pt/ct 都进账（挡上屏不挡账）"
+                   f"⑤ 静默那一笔的 end 不替别人关行、散会不留档 ⑥ 一族 {hits} 处「_aask→_parse_code」全带 no_stream")
+    finally:
+        srv.shutdown()
+        (settings.llm.base_url, settings.llm.api_key, settings.llm.model, settings.llm.stream) = keep
+        rmtree(tmp, ignore_errors=True)
+
+
 def main():
     # 分母从名单长度推，不写死组数（本仓点过名两次的手抄组数：加了一格而末行还写旧数 ⇒ 读数指不回输出）。
     # 协程格用 iscoroutinefunction 分流；顺序照这张表，t10 要起本机桩所以仍放最后。
@@ -1641,6 +1862,8 @@ def main():
         t16_forgotten_run_closes_the_stream_rows,
         t17_each_role_keeps_its_own_block,
         t19_bounded_live_cap_fires_at_accounting,
+        # t20 排最后：它和 t10 一样要起本机桩（这台桩回的是 SSE 分帧，事件形状必须现取）
+        t20_code_body_stays_off_the_typewriter,
     ]
     for fn in steps:
         asyncio.run(fn()) if asyncio.iscoroutinefunction(fn) else fn()

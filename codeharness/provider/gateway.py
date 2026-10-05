@@ -26,7 +26,7 @@ from codeharness.configs.llm_config import LLMConfig, LLMType
 from codeharness.logs import log_llm_stream, logger
 
 # 源 `USE_CONFIG_TIMEOUT = 0` 表示"用配置里的 timeout"，非 0 则本次调用覆盖它
-from codeharness.const import USE_CONFIG_TIMEOUT
+from codeharness.const import NO_STREAM_TAG, USE_CONFIG_TIMEOUT
 
 
 def _message_to_dict(m: Union[str, dict, BaseMessage]) -> dict:
@@ -253,12 +253,18 @@ class LLMGateway:
         return msgs
 
     async def ainvoke(self, msgs: Union[str, list, None] = None, tag: str = "",
-                      stream: bool = False, timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> BaseMessage:
+                      stream: bool = False, timeout: int = USE_CONFIG_TIMEOUT,
+                      no_stream: bool = False, **kwargs) -> BaseMessage:
         """唯一的出口：所有计数/trace 都在这里，**别在别处再算一遍**。"""
         msgs = self.format_msg(msgs or [])
         msgs = self._apply_compression(msgs)
-        
+
         model = self._model.bind(**kwargs) if kwargs else self._model
+        if no_stream:
+            # C177：这一笔的逐片不上打字机行（翻译层认这个 tag）。⚠ 只能走 `with_config`——
+            # `bind(config=…)` 在 `astream_events` 上直接 TypeError（"got multiple values for
+            # argument 'config'"，10-05 本机现证），而界面吃的就是 astream_events。
+            model = model.with_config(tags=[NO_STREAM_TAG])
         deadline = timeout or self.cfg.timeout
 
         if stream:
@@ -314,11 +320,13 @@ class LLMGateway:
                        f"这一发没有 usage 回执、不进账 (model={self.cfg.model}, tag={tag})")
 
     async def aask(self, msg: Union[str, list], system_msgs: Optional[list[str]] = None,
-                   stream: bool = False, tag: str = "", timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> str:
+                   stream: bool = False, tag: str = "", timeout: int = USE_CONFIG_TIMEOUT,
+                   no_stream: bool = False, **kwargs) -> str:
         """源 :179。⚠ 必须走 ainvoke，否则不记账（源 FakeLLM 曾在此漏记账）。"""
         msgs = [SystemMessage(content=s) for s in (system_msgs or [])]
         msgs += self.format_msg(msg) if not isinstance(msg, str) else [HumanMessage(content=msg)]
-        return (await self.ainvoke(msgs, tag=tag, stream=stream, timeout=timeout, **kwargs)).content
+        return (await self.ainvoke(msgs, tag=tag, stream=stream, timeout=timeout,
+                                   no_stream=no_stream, **kwargs)).content
 
     async def aask_batch(self, msgs: list, *, stream: bool = False, tag: str = "",
                          timeout: int = USE_CONFIG_TIMEOUT, **kwargs) -> str:

@@ -54,7 +54,8 @@ class DebugError(BaseAction):
             return Message(content="已通过，无需修复", role="assistant", cause_by=self.name)
         rsp = await self._aask(PROMPT_TEMPLATE.format(code=code_doc.content,
                                                       test_code=test_doc.content,
-                                              logs=clip(detail.stderr + "\n" + detail.stdout, 4000)))
+                                              logs=clip(detail.stderr + "\n" + detail.stdout, 4000)),
+                                              no_stream=True)     # C177：产出是修复后的整份代码
         from codeharness.actions.write_code import _parse_code
         fixed = _parse_code(rsp)
         # 源 :155：QA 的修复产物写回 **tests/**（此前无条件进 SRC/——修测试的用例把测试码污染进源码目录）

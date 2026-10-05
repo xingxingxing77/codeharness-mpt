@@ -27,7 +27,10 @@ class FakeLLM:
         self.cost_manager.add_usage(resp, model="gpt-4o", tag=tag)
         return resp
 
-    async def aask(self, prompt, system_msgs: Optional[list[str]] = None, tag: str = "") -> str:
+    async def aask(self, prompt, system_msgs: Optional[list[str]] = None, tag: str = "",
+                   no_stream: bool = False) -> str:
+        """签名与 `LLMGateway.aask` 同构——`no_stream`（C177）在这里**必然是空转**（替身没有流式路），
+        但不接着它就会在 `_aask(no_stream=True)` 那一族调用点上 TypeError，把整条替身门禁打穿。"""
         msgs = [SystemMessage(content=s) for s in (system_msgs or [])] + [HumanMessage(content=prompt)]
         return (await self.ainvoke(msgs, tag=tag)).content   # 走 ainvoke 才记账（与 LLMGateway.aask 同构）
 

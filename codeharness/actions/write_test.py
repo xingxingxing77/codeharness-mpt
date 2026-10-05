@@ -34,7 +34,7 @@ class WriteTest(BaseAction):
         prompt = PROMPT_TEMPLATE.format(code_to_test=ctx.code_doc.content, test_file_name=test_name,
                                         source_file_path=f"{fake_root}/{ctx.code_doc.root_relative_path}",
                                         workspace=fake_root)
-        rsp = await self._aask(prompt)
+        rsp = await self._aask(prompt, no_stream=True)
         from codeharness.actions.write_code import _parse_code
         await store.save(RepoName.TESTS, Document(filename=test_name, content=_parse_code(rsp)))
         return Message(content=f"测试已写: {test_name}", role="assistant", cause_by=self.name,

@@ -140,6 +140,13 @@ AGGREGATION = "Aggregate"
 
 # Timeout
 USE_CONFIG_TIMEOUT = 0  # Using llm.timeout configuration.
+
+# C177：调用方给这一笔模型调用挂的标签——**逐片不上打字机行**（记账、trace span 一个都不动）。
+# 为什么要有它：`act` 节点里那些没被块包住的调用（典型＝`write_code` 那一笔）落打字机兜底行
+# `stream-act`，而兜底行没有名单可挑（它是翻译层自造的、不知道 schema），只按长度挑 ⇒ 09-29 现证
+# 整段代码正文（`## Code: xxx.jsx` + ```jsx 围栏）714 片 / 8002 字打上屏。挡上屏不挡账：
+# 界面可见性由已存在的 `ToolCall` 卡承担，前端零改动。
+NO_STREAM_TAG = "no_stream"
 LLM_API_TIMEOUT = 300
 
 # Assistant alias
