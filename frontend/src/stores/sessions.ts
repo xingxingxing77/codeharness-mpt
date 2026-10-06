@@ -541,6 +541,7 @@ export const useSessionStore = defineStore('sessions', {
           // closed 必须真：末块没收口就不发轮次尾行，而 error 事件本身就是收口信号
           b.closed = true
           b.lines = String(ev.value ?? '').split('\n')
+          b.code = ev.code ?? null   // C182：死因码进块，ChatNode 按它开第三列；旧事件没有就是 null
           if (typeof ev.ts === 'number') {
             b.ts = ev.ts
             b.lastTs = ev.ts

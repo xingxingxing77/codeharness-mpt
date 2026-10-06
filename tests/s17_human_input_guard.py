@@ -863,6 +863,69 @@ def t9_failure_is_loud():
           f"C147 分类：超窗→kind=context_overflow+人话、同码坏请求→kind=crash 且文案一字未改）")
 
 
+def t22_error_event_carries_fail_kind():
+    """C182：`_fail` 发的 error 事件必须带**死因码**（`code` 字段 = `_fail_kind` 的族名，同一来源
+    不发明第二套分类）。前端那半由 `s8_frontend_contract::t12` 钉源值（`.turnErrorCode` 槽）
+      ① crash 档（真 `APIConnectionError`）⇒ error 事件 `code="crash"`；
+      ② blocked 档（真 451 `censorship_blocked`，形状照 t9④ 的现证原文）⇒ `code="blocked"`；
+      ③ context_overflow 档（真 400 + 窗口字样，形状照 t9⑥）⇒ `code="context_overflow"`；
+      ④ 反向：**别的 kind 不许沾码**——码只随 error 走，洒到 report/status 上就是第二个事实源；
+      ⑤ 兼容：无 `code` 的旧落库事件读回 ⇒ `code is None`（回放不炸，前端按空渲染）。
+    """
+    import httpx
+    from openai import APIConnectionError, APIStatusError
+    from server.events import Event
+
+    def one(boom_exc):
+        """跑一版真 runner（替身图），返回全部事件的 (kind, code) 表。"""
+        store, runner, s = _make_runner()
+        _install(runner, _Team(boom=boom_exc), s.project_name)
+
+        async def body():
+            task = asyncio.create_task(runner._run(s))
+            runner.tasks[s.id] = task
+            await asyncio.gather(task, return_exceptions=True)
+            return [(e.kind, e.code) for e in runner.bus.history(s.id)]
+        return asyncio.run(body())
+
+    req = httpx.Request("POST", "http://127.0.0.1:1/v1/chat/completions")
+    crash_kinds = one(APIConnectionError(request=req))
+    assert any(k == "error" and c == "crash" for k, c in crash_kinds), \
+        f"t22① crash 场 error 事件没带码或带错：{crash_kinds}"
+
+    resp451 = httpx.Response(451, request=req)
+    blocked = APIStatusError(
+        "Error code: 451 - {'error': {'message': 'The content you provided or machine outputted is blocked.',"
+        " 'type': 'censorship_blocked'}}", response=resp451,
+        body={"error": {"message": "The content you provided or machine outputted is blocked.",
+                        "type": "censorship_blocked"}})
+    blocked_kinds = one(blocked)
+    assert any(k == "error" and c == "blocked" for k, c in blocked_kinds), \
+        f"t22② 拦停场 error 事件没带码或带错：{blocked_kinds}"
+
+    resp400 = httpx.Response(400, request=req)
+    overflow = APIStatusError(
+        "Error code: 400 - {'error': {'message': \"This model's maximum context length is 128000 tokens. "
+        "However, your messages resulted in 145000 tokens\", 'type': 'context_length_exceeded'}}",
+        response=resp400,
+        body={"error": {"message": "This model's maximum context length is 128000 tokens. "
+                                   "However, your messages resulted in 145000 tokens",
+                        "type": "context_length_exceeded"}})
+    overflow_kinds = one(overflow)
+    assert any(k == "error" and c == "context_overflow" for k, c in overflow_kinds), \
+        f"t22③ 超窗场 error 事件没带码或带错：{overflow_kinds}"
+
+    # ④ 用 crash 场的完整事件表判「码只随 error 走」——替身图会发 status/report 等别的 kind
+    assert all(c is None for k, c in crash_kinds if k != "error"), \
+        f"t22④ 码洒到了别的 kind 上：{crash_kinds}"
+
+    old = Event(session_id="s", seq=1, ts=0.0, kind="error", value="boom").model_dump_json()
+    assert Event.model_validate_json(old).code is None, "t22⑤ 无码旧事件读回不是 None（回放路径要炸）"
+
+    print("  ok  t22（C182：error 事件带死因码 crash/blocked/context_overflow 三族各一格、"
+          "别的 kind 不沾码、无码旧事件读回 None）")
+
+
 def t10_unknown_command_is_countable():
     """T4-③：模型吐「本轮工具面里没有的命令」必须留下一行可 grep 的话——线上唯一数得出的召回信号。
 
@@ -1788,7 +1851,8 @@ def main():
               t16_invalid_args_is_countable,
               t17_throat_tells_crash_from_dropped,
               t18_plan_open_at_settle,
-              t19_tool_card_is_open_during_the_call]
+              t19_tool_card_is_open_during_the_call,
+              t22_error_event_carries_fail_kind]
     for f in checks:
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
@@ -1803,7 +1867,8 @@ def main():
           f"**无效 args 第四计数：schema 违例落账、回喂不变、不虚计、快照带出 1 组（C122）** + "
           f"**咽喉分得清装配崩溃与行已不在 + 多 worker 撞车口拒收 1 组（C125/C131）** + "
           f"**收口读图里那本 Plan 状态机、未完成数发一条轮尾提示（全勾完/无计划/graphs 已清三种都不发）1 组（C148）** + "
-          f"**工具卡在执行中就在流里（执行中已有 meta）＋同一颗 uuid 一张卡＋异常那笔也留 ok=false 的卡 1 组（C179）**")
+          f"**工具卡在执行中就在流里（执行中已有 meta）＋同一颗 uuid 一张卡＋异常那笔也留 ok=false 的卡 1 组（C179）** + "
+          f"**error 事件带死因码三族各一格＋别的 kind 不沾码＋无码旧事件读回 None 1 组（C182）**")
 
 
 if __name__ == "__main__":

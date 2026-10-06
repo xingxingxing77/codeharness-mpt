@@ -65,6 +65,8 @@ export interface WEvent {
   name: string | null
   value: any
   role: string | null
+  /** C182：死因码（blocked/context_overflow/crash），只随 kind=error 发；旧事件没有 ⇒ null。 */
+  code: string | null
   extra: any
 }
 
@@ -101,6 +103,8 @@ export interface Block {
   lastTs?: number
   /** B3：最后一个落到这块上的事件游标（分叉点取它）。只在内存里，不进任何接口响应。 */
   endCursor?: string
+  /** C182：error 块的死因码；旧会话回放没有 ⇒ null（行上不渲染第三列）。 */
+  code?: string | null
 }
 
 /** `/trace` 一行 = 一笔 LLM 调用的节点名与 token/成本增量。

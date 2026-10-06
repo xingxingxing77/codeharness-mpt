@@ -24,15 +24,17 @@
 
   <!-- Error：轮内红点行（B1）。后端 server/runner.py 的 _fail 发 kind=error，value 是
        整段 traceback——行里只报最后那一行「异常类型: 消息」，全段留给右栏台账。
-       几何照参考项目 MessageItem.module.css 的 .turnErrorRow 家族；源里第三列 auto 是
-       放错误码的（.turnErrorCode），我们的 error 事件不带码，所以不留空轨。 -->
-  <div v-else-if="b.type === 'Error'" class="errRow" role="status" :title="traceback"
-       :data-chat-anchor-key="b.key">
+       几何照参考项目 MessageItem.module.css 的 .turnErrorRow 家族；C182 起死因码上 wire
+       （runner._fail_kind 三族 blocked/context_overflow/crash），那列 auto 轨只在带码时
+       出现——旧会话回放无码，仍是两列，像素零漂移。 -->
+  <div v-else-if="b.type === 'Error'" class="errRow" :class="{ hasCode: !!b.code }" role="status"
+       :title="traceback" :data-chat-anchor-key="b.key">
     <VStateDot state="error" class="errDot" />
     <div class="errCopy">
       <span class="errTitle">本轮运行失败</span>
       <span class="errMsg">{{ errMessage }}</span>
     </div>
+    <span v-if="b.code" class="errCode">{{ b.code }}</span>
   </div>
 
   <!-- MaxTokens：轮内黄点行（B8）。后端 `_translate` 读出 finish_reason=length 才发 kind=turn，
@@ -214,6 +216,24 @@ const row = computed(() => {
 /* 点 10px、行 20px → 下移 5px 才和文字光学居中 */
 .errDot {
   margin-top: 5px;
+}
+
+/* C182：第三列（死因码轨）只在带码时开——同一份 .errRow 还被 MaxTokens/PlanOpen 行共用，
+   无条件改三列会让那两行的 1fr 平白让出一条 8px 的 gap，等一行像素漂移。 */
+.errRow.hasCode {
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+}
+
+.errCode {
+  margin-top: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  align-self: start;
+  white-space: nowrap;
 }
 
 .errCopy {

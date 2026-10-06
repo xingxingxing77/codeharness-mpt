@@ -1113,7 +1113,9 @@ class SessionRunner:
                                     error=f"{human}（{message}）" if human else message,
                                     finished_at=_now())
         detail = traceback.format_exc(limit=6)
-        self.bus.publish(sid, kind="error", value=f"{human}\n{detail}" if human else detail)
+        # C182：死因码上 wire——`_fail_kind` 三族在界面上要分得开（前端留了 `.turnErrorCode` 槽
+        # 三年没东西可放），码 = kind 同一来源，不发明第二套分类。
+        self.bus.publish(sid, kind="error", code=kind, value=f"{human}\n{detail}" if human else detail)
         self._publish_status(session, session.error if human else message)
         self._forget(sid, terminal=True)
 

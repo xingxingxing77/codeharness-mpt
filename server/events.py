@@ -55,6 +55,9 @@ class Event(BaseModel):
     name: Optional[str] = None
     value: Any = None
     role: Optional[str] = None
+    # C182：死因码（`runner._fail_kind` 三族 blocked/context_overflow/crash），只随 kind=error 发。
+    # 旧落库事件没这字段 ⇒ 读回是 None，前端按空渲染，回放不炸。
+    code: Optional[str] = None
     extra: Optional[dict] = None
 
     @field_validator("cursor", mode="after")

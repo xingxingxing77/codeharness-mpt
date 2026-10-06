@@ -739,8 +739,20 @@ def t12_offline_banner_and_turn_error_row():
     css = node.split(".errRow", 1)[-1]
     for prop in ("grid-template-columns: 10px minmax(0, 1fr)", "font-size: 13px", "line-height: 20px"):
         assert prop in css, f"B1 回归：.errRow 源值 {prop} 丢了"
+    # C182：死因码上 wire 并进块、上屏。三半缺一 = 后端发了前端不收（码丢在 store）、
+    # 收了不上屏（槽白留）、或上屏但无条件开三列（共用 .errRow 的 MaxTokens/PlanOpen 行白让 8px gap）。
+    ty = (FE / "types.ts").read_text(encoding="utf-8")
+    assert "code: string | null" in ty, "C182：WEvent 没有 code 字段（SSE 上的死因码没人接）"
+    assert "b.code = ev.code ?? null" in st, "C182：applyEvent 的 error 分支没把码写进块"
+    assert re.search(r'class="\{ hasCode: !!b\.code \}"', node), \
+        "C182：ChatNode 的 Error 行没按码开第三列（hasCode 绑定丢了）"
+    assert '<span v-if="b.code" class="errCode">{{ b.code }}</span>' in node, \
+        "C182：errCode 码片节点丢了（.turnErrorCode 槽还是空的）"
+    assert ".errRow.hasCode" in node and "grid-template-columns: 10px minmax(0, 1fr) auto" in node, \
+        "C182：hasCode 三列源值丢了——三列必须条件开，不许无条件改 .errRow（共用行像素漂移）"
     _ok("t12", "B1：横幅唯一状态源=store.stream 三态（idle/open/down，readyState 派生已禁）+ "
-               "fixed 顶条源值 + error 走块管线（type/closed/入序/台账并存）+ ChatNode 显式分支与 .errRow 源值")
+               "fixed 顶条源值 + error 走块管线（type/closed/入序/台账并存）+ ChatNode 显式分支与 .errRow 源值 + "
+               "C182 死因码三半同判（WEvent.code→b.code→errCode 片，三列条件开）")
 
 
 def t13_size_cap_and_truncation_reach_the_user():
