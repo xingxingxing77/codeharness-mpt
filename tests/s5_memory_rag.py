@@ -257,6 +257,34 @@ def t8_no_brain_windows_at_prompt_time():
     print("  t8 无 brain：截窗行为不变 + 条数落账（增量）+ [silent-lost] 留痕；有去路的角色不长这笔账")
 
 
+def t8b_silent_lost_reachable_via_registry():
+    """P0 的 `[silent-lost]` 告警**在生产跑图的三条装配线里不可达**（`default_team`/`classic_team`/
+    `build_hired_role` 一律经 `attach_memory` ⇒ RoleZero 必挂 brain），但**经公开的注册表构造路径可达**：
+    `RoleZero.__init__(brain=None)` 本就是默认值，而 `roles.registry.build_role(...)` 不挂记忆
+    ⇒ 这类角色超窗时真会走静默丢失那一支。本格钉住这条**可达路径**——免得哪天被当成死码删掉。
+    读数与 t8 同源（同一个 `_note_silent_loss`）：条数落账 + 可 grep 告警。
+    """
+    import io
+
+    from codeharness.logs import logger
+    from codeharness.roles.registry import build_role
+
+    role = build_role("TeamLeader", FakeLLM(), memory_k=2)
+    assert role.brain is None, f"注册表构造居然挂了 brain（这一格就没有对象了）：{role.brain!r}"
+    for i in range(5):
+        role.memory.add(Message(content=f"reg{i}结果", role="user"))
+    cm = role.llm.cost_manager
+    buf = io.StringIO()
+    hid = logger.add(buf, format="{message}", level="WARNING")
+    try:
+        asyncio.run(role._compress())
+    finally:
+        logger.remove(hid)
+    assert cm.silent_lost == 3, f"注册表构造的角色超窗没落静默丢失账：{cm.silent_lost}"
+    assert "[silent-lost]" in buf.getvalue(), f"也没留可 grep 的告警：{buf.getvalue()!r}"
+    print("  t8b 注册表构造（无 brain）的角色超窗：静默丢失那支真可达（非死码）")
+
+
 def t9_brain_overflow_summarizes_and_restores():
     """溢出 → 摘要 → 落 Redis → 新实例 loads 回来，整条闭环一次跑完。"""
     if not live_redis():
@@ -3127,6 +3155,7 @@ def main():
               t5_summarize_rolls_history_into_summary_and_persists,
               t6_split_texts_overlaps_and_multiwindow_reduces,
               t7_tool_results_feed_next_round_prompt, t8_no_brain_windows_at_prompt_time,
+              t8b_silent_lost_reachable_via_registry,
               t9_brain_overflow_summarizes_and_restores,
               t9b_brain_persists_on_eviction_even_if_summary_fails,
               t9c_brain_ttl_is_configurable_and_slides,

@@ -32,19 +32,20 @@ from codeharness.provider.cost import CostManager
 # 也不许把 `E:/tmp` 那种会被清掉的落点当出处。这张表只能靠「读过台账再改代码」长大：
 # 安全闸的每一次加宽都必须出现在 diff 里，这正是它住在源码而不在数据文件里的理由
 # （`storage/` 被 .gitignore:16 整目录忽略，放那儿等于悄悄改数）。
-# ⚠ 2026-10-08：表里的数**来自修前的虚高读数**——那时非流式支路把「本端点每个 chunk 都回的 usage」
-# 按块累加（实测同一发：厂商回执 312 / 我方 19,038），`cost_cny` 因此虚高 1~2 个数量级。该缺陷已修
-# （`provider/gateway.py` 非流式支路改走 `astream` 取末块 usage；判据 `tests/s2_gateway.py::t23`）。
-# **未重测**：留着现值只是**更保守**（闸拒得比实际需要的多），不会误放行；要重标得按修后真读数重跑
-# 同形状，属单独一件（见 `plan/model-gateway.md` §1.12.1 的再基线项）。
+# ⚠ 2026-10-08 **已按修后真读数重标**（原值来自修前虚高路径：那时非流式支路把「本端点每个 chunk
+# 都回的 usage」按块累加，实测同一发厂商回执 312 / 我方 19,038 ⇒ `cost_cny` 虚高 1~2 个数量级；
+# 缺陷已修，判据 `tests/s2_gateway.py::t23`）。**旧值已删**——它们指回的那些台账行本身就是虚高读数，
+# 留着会让这张表谎报形状的真实花费（后果是闸拒掉本来批得下来的小额场：旧 react 档 0.356093 会让
+# 任何 <¥0.36 的闸一律不发）。本次重测的读数与探针在 `plan/model-gateway.md` §1.12.2。
+# ponytail: 这张表是**已观测的最大值**，不是尾部风险上界——thinking 模型单发能烧多少不由它兜。
+# 尾部靠「撞线判在记账那一刻」的闸 + 用户批的发数/墙钟上限，别指望这张表。
 HISTORY: dict[str, list[tuple[float, str]]] = {
-    "react": [(0.002652, "plan/frontend.md §1.4 末（09-30，1 发 18s、pt 71/ct 1239）"),
-              (0.356093, "plan/model-gateway.md §1.7 第五棒（10-05 事故，pt 45700/ct 154335）")],
-    "dynamic": [(0.004377, "plan/frontend.md 流式批活体段（09-29 00:2x，三场 n_round=1 小跑的单场）")],
-    "classic": [(0.039975, "plan/frontend.md §1.1（09-29 17:0x，会话 `9ffe3892`，stopped）"),
-                (0.025006, "plan/frontend.md §1.1（09-29 18:3x 按护栏补跑，会话 `9678f3e3`）"),
-                (0.035127, "plan/frontend.md §1.1（生产复跑第三场经典线，565 条逐片）"),
-                (21.615805, "plan/frontend.md §1.1（09-29 全员写代码那场，pt 11,853,766/ct 6,341,985）")],
+    "react": [(0.003461, "plan/model-gateway.md §1.12.2（10-08 修后重测：react/readonly/n_round=1，"
+                         "1 发、17.8s、pt 70/ct 1625、awaiting_human）")],
+    "dynamic": [(0.003123, "plan/model-gateway.md §1.12.2（10-08 修后重测：dynamic/readonly/n_round=1，"
+                           "2 发、10.5s、pt 3580/ct 294、finished）")],
+    "classic": [(0.015846, "plan/model-gateway.md §1.12.2（10-08 修后重测：classic/workspace_write/"
+                           "n_round=2，**只跑完 1 发**、150s 墙钟到仍在 running、pt 422/ct 7405）")],
 }
 
 

@@ -1383,6 +1383,36 @@ def t23_usage_not_summed_across_chunks():
             _fail(f"23. {tag} 这一发连正文都没回来，判据是空转")
 
 
+# ---------- 24. P2 校准链：k 由「厂商回执 ÷ 本地估算」写进来 ----------
+def t24_calibration_written_from_ratio():
+    """P0 只落了 k 的**定义与语义**（初值 1、夹 [0.5,4]、切模型即重置），P1 只落了**读**（clip 按 k
+    换算）；写入口 `note_calibration` 在此之前**产品代码零调用者** ⇒ k 恒 1、`clip_quota` 恒等
+    （挂账在 `plan/model-gateway.md` §1.10 未验①）。本格钉住**写入点**：
+    k = 厂商回执 pt ÷ 本地对**同一串 msgs**的估算（`gateway._calib_local_pt`）。
+
+    两格互为对照（都走 `ainvoke`、零联网）：
+      ① 有回执且远大于本地估算 ⇒ k 夹到上界 4、`clip_quota` **真收紧**（1000→250）；
+      ② **没回执**（pt=ct=0）⇒ 不写（k 停在 1、额度原样）——「没回执不是读数」那条纪律的牙。
+    """
+    from codeharness.provider.context_budget import ContextBudget
+
+    g = _gw(usage={"prompt_tokens": 10 ** 6, "completion_tokens": 1})
+    asyncio.run(g.ainvoke("校准链：回执远大于本地估算"))
+    if g.cost_manager.calibration_k != 4.0:
+        _fail(f"24. ① 校准没写进来（期望夹到上界 4.0）：k={g.cost_manager.calibration_k}")
+    if ContextBudget(meter=g.cost_manager).clip_quota(1000) != 250:
+        _fail(f"24. ① k 写了但 clip 额度没跟着收紧："
+              f"{ContextBudget(meter=g.cost_manager).clip_quota(1000)}")
+
+    g2 = _gw(usage={"prompt_tokens": 0, "completion_tokens": 0})
+    asyncio.run(g2.ainvoke("校准链：没有回执"))
+    if g2.cost_manager.calibration_k != 1.0:
+        _fail(f"24. ② 阳性对照失守：没有回执也写了读数 ⇒ ① 就无从判断是不是「有回执才写」："
+              f"k={g2.cost_manager.calibration_k}")
+    if ContextBudget(meter=g2.cost_manager).clip_quota(1000) != 1000:
+        _fail("24. ② 没回执却收紧了额度")
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
@@ -1394,7 +1424,8 @@ def main():
               t20_c79_token_counting_never_leaves_the_process,
               t21_c80_llm_config_terminal_states,
               t22_c81_serializer_noise_filter_is_scoped,
-              t23_usage_not_summed_across_chunks]
+              t23_usage_not_summed_across_chunks,
+              t24_calibration_written_from_ratio]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

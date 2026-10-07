@@ -149,7 +149,7 @@ class CostManager(BaseModel):
         return Costs(self.total_prompt_tokens, self.total_completion_tokens,
                      self.cost_usd, self.cost_cny)
 
-    def add_usage(self, resp, model: str = "", tag: str = ""):
+    def add_usage(self, resp, model: str = "", tag: str = "", local_pt: int = 0):
         """取一次响应的用量，两个来源按新栈口径排优先级：
 
         1. `usage_metadata` —— LangChain 1.x 标准字段。`streaming=True` 建出来的 ChatOpenAI
@@ -178,6 +178,11 @@ class CostManager(BaseModel):
             logger.warning(f"add_usage: response 无 usage，本笔不进账 (model={model}, tag={tag})")
         self.note_window_usage(pt)
         self.update_cost(pt, ct, model)
+        # P2 校准链的**写入点**：k = 厂商回执 pt ÷ 本地对**同一串 msgs** 的估算。两个条件都成立才写——
+        # 这一笔有回执（pt>0）、且调用方给了本地估算（local_pt>0）。缺一个就不是读数（P0 口径：
+        # 没回执 ≠ 读数，0/负值不是读数）。写入口仍只有 `note_calibration` 一处，这里只负责算比值。
+        if pt > 0 and local_pt > 0:
+            self.note_calibration(pt / local_pt, model=model)
         # cc 是这一笔的币种（"" = 未计价模型）。逐笔留痕是给 trace 与对账用的：
         # 只有合计的话，混币种这件事在数据里就看不见了——正是 C12 的根因形状。
         self.records.append({"tag": tag, "model": model, "pt": pt, "ct": ct,

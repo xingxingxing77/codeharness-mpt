@@ -1648,15 +1648,20 @@ def t19_bounded_live_cap_fires_at_accounting():
         assert _think_like_production(RuntimeError("普通异常")) == 2, \
             "② 阳性对照失守：连普通异常都没被兜底咽掉，上面那条 1 是恒真不是读数"
 
-        # ③ 发前闸：三条拒发 + 一档放行，每条都指得回 HISTORY 里那行的出处
+        # ③ 发前闸：三条拒发 + 一档放行，每条都指得回 HISTORY 里那行的出处。
+        # ⚠ 2026-10-08 重标后**不写死数值**：期望值一律从 `estimate()` 现取——把数字抄进断言，
+        #   下一次重标（历史表按修后真读数换过一轮）就会把这一格变成「拿旧数当现值」的假绿。
+        est_react, src_react = estimate("react")
         assert precheck("no-such-paradigm", 5.0, model) != "", "③ 没有本形状的历史却放行了（估不动就该不发）"
-        assert precheck("react", 0.2, model) != "", "③ 事故已进价（react 档 ¥0.356093）却还放行 ≤¥0.2 的场"
-        assert precheck("react", 0.4, model) == "", f"③ 闸抬到过估之上仍被拒：{precheck('react', 0.4, model)}"
+        assert precheck("react", est_react / 2, model) != "", \
+            f"③ 闸低于该形状历史最贵一场（react ¥{est_react}）却还放行：{precheck('react', est_react / 2, model)}"
+        assert precheck("react", est_react * 2, model) == "", \
+            f"③ 闸抬到过估之上仍被拒：{precheck('react', est_react * 2, model)}"
         assert precheck("react", 5.0, "gpt-4o") != "", "③ 闸是人民币档、模型按美元计价 ⇒ 撞线永不响，这条必须拒"
         assert precheck("react", 5.0, "no-such-model-xyz") != "", \
             "③ 模型不在价目表＝账恒 0＝闸看不见钱，这条必须拒"
-        est, src = estimate("react")
-        assert est == 0.356093 and "§1.7" in src, f"③ 取的该是历史**最贵**一场：{est!r} / {src!r}"
+        assert est_react > 0 and "§1.12.2" in src_react, \
+            f"③ 取的该是历史**最贵**一场、且出处指得回台账：{est_react!r} / {src_react!r}"
 
         # ⑤ 累加点唯一性：闸判在 `update_cost`，别处再长出写 `cost_*` 的手就绕过了它。
         #    （`CostManager(cost_cny=…)` 这种构造形参不是属性赋值，扫不到也不算——它建的是新账本。）

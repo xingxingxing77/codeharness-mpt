@@ -105,6 +105,14 @@ class LLMGateway:
             kwargs["top_logprobs"] = cfg.top_logprobs
         return ChatOpenAI(**kwargs)
 
+    def _calib_local_pt(self, msgs) -> int:
+        """P2 校准链的**分母**：本地对**这一串 msgs**（＝真正发出去的那串）的 token 估算。
+        算不出来回 0——不是读数就不写（`add_usage` 只在 local_pt>0 且厂商 pt>0 时才落 k）。"""
+        try:
+            return int(self._count_tokens_direct(msgs))
+        except Exception:
+            return 0
+
     def _count_tokens_direct(self, messages: Union[str, list, None]) -> int:
         """直接计数消息的 token 数（tiktoken，不查模型表）。"""
         from tiktoken import get_encoding
@@ -334,7 +342,8 @@ class LLMGateway:
         if stream:
             log_llm_stream("\n")
         if self.cfg.calc_usage:                       # ⚠ 单点计数：cost 只在这里更新
-            self.cost_manager.add_usage(resp, model=self.cfg.model, tag=tag)
+            self.cost_manager.add_usage(resp, model=self.cfg.model, tag=tag,
+                                        local_pt=self._calib_local_pt(msgs))
         return resp
 
     def _timeout_lost(self, kind: str, deadline, tag: str):
@@ -416,13 +425,14 @@ class LLMGateway:
             def __init__(self, outer: "LLMGateway"):
                 self.outer, self.schema = outer, schema
 
-            def _account(self, raw, tag: str):
+            def _account(self, raw, tag: str, local_pt: int = 0):
                 """raw 有两种形态：langchain 消息，或 LengthFinishReasonError 挂的 openai ChatCompletion。
-                被截断的那次调用照样花了钱，不记就是漏账。"""
+                被截断的那次调用照样花了钱，不记就是漏账。`local_pt` 是 P2 校准链的分母（见 `add_usage`）。"""
                 if not self.outer.cfg.calc_usage or raw is None:
                     return
                 if getattr(raw, "usage_metadata", None) or getattr(raw, "response_metadata", None):
-                    self.outer.cost_manager.add_usage(raw, model=self.outer.cfg.model, tag=tag)
+                    self.outer.cost_manager.add_usage(raw, model=self.outer.cfg.model, tag=tag,
+                                                      local_pt=local_pt)
                     return
                 # ChatCompletion 这一支不经 add_usage，所以 B8 的截断计数在这里自己数一次：
                 # 抛 LengthFinishReasonError 的那一笔必然是 length 收尾，漏计就等于截断不说出去。
@@ -431,11 +441,16 @@ class LLMGateway:
                     self.outer.cost_manager.truncated_calls += 1
                 usage = getattr(raw, "usage", None)          # ChatCompletion.usage
                 if usage is not None:
-                    self.outer.cost_manager.update_cost(getattr(usage, "prompt_tokens", 0) or 0,
+                    pt = getattr(usage, "prompt_tokens", 0) or 0
+                    self.outer.cost_manager.update_cost(pt,
                                                         getattr(usage, "completion_tokens", 0) or 0,
                                                         self.outer.cfg.model)
                     # 这一支不经 add_usage，窗口占用也在这里补记（C184；add_usage 那条路自己记）
-                    self.outer.cost_manager.note_window_usage(getattr(usage, "prompt_tokens", 0) or 0)
+                    self.outer.cost_manager.note_window_usage(pt)
+                    # 同一条纪律：校准链的分母也在这里补一次（这一支绕过了 add_usage）。
+                    if pt > 0 and local_pt > 0:
+                        self.outer.cost_manager.note_calibration(
+                            pt / local_pt, model=self.outer.cfg.model)
 
             def _parse(self, text: str):
                 """严格解析：半截 JSON 在这里过不了，好让 repair 档带着 warning 接手。"""
@@ -477,7 +492,8 @@ class LLMGateway:
                         # B6 那族的第三条腿。超时的 `exc` 既不挂 `output` 也不挂 `completion`
                         # ⇒ 下一句 `_account(None)` 直接返回，这一发**零账也零响**；而它是动态线每轮思考的主路径。
                         self.outer._timeout_lost("structured", deadline, tag)
-                    self._account(getattr(exc, "output", None) or getattr(exc, "completion", None), tag)
+                    self._account(getattr(exc, "output", None) or getattr(exc, "completion", None), tag,
+                                  local_pt=self.outer._calib_local_pt(prompt))
                     fixed = self._repair(self._partial_text(exc))
                     if fixed is None:
                         if type(exc).__name__ == "LengthFinishReasonError":
@@ -488,7 +504,7 @@ class LLMGateway:
                         raise
                     return {"raw": getattr(exc, "output", None), "parsed": fixed} if include_raw else fixed
                 raw = (out or {}).get("raw")
-                self._account(raw, tag)
+                self._account(raw, tag, local_pt=self.outer._calib_local_pt(prompt))
                 text = getattr(raw, "content", "") or ""
                 parsed = self._parse(text)
                 if parsed is None:              # 解析失败时 langchain 不抛，只把 error 带在 dict 里
