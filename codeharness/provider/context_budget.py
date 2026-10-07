@@ -54,13 +54,27 @@ class ContextBudget:
         clip 还会用旧值。"""
         return float(getattr(self.meter, "calibration_k", 1.0) or 1.0)
 
+    @property
+    def effective_limit(self) -> float:
+        """按校准系数 k 换算后的**本 token 尺**对应的预算（P0 契约「P2 按它校正水位」的落点）。
+
+        `k = 厂商回执 pt ÷ 本地对同一串 msgs 的估算` ⇒ 本地尺量出来的 `tokens × k` 才是真占用量，
+        等价于把预算放成 `limit / k`。k 缺省 1（未校准/无 meter）⇒ **逐字等于 `token_limit`**，
+        零行为变化。只影响**水位判据**（主动压缩的触发点），不动 `clip_quota`（那条只收紧不放宽）
+        也不动网关的 `keep_tokens`（T2 是硬上界，用偏保守的本地数才安全）。
+        """
+        k = self.calibration_k or 1.0
+        return (self.token_limit / k) if self.token_limit else 0.0
+
     def should_compress(self, tokens: int) -> bool:
         """token 判据的唯一定义点（gateway 的闸口）：`armed=False`（契约休眠）恒 False。"""
         return self.armed and tokens > self.keep_tokens
 
     def water(self, tokens: int) -> float:
-        """水位：storage 全量的本地 token 数 ÷ 预算。未设预算 ⇒ 0.0（契约休眠）。"""
-        return (tokens / self.token_limit) if self.token_limit else 0.0
+        """水位：storage 全量的本地 token 数 ÷ 预算（**预算按 k 校正**，见 `effective_limit`）。
+        未设预算 ⇒ 0.0（契约休眠）。"""
+        lim = self.effective_limit
+        return (tokens / lim) if lim else 0.0
 
     def t1_triggered(self, water: float) -> bool:
         """T1 触发：契约通电 且 水位 ≥ 60%。（条数判据不在此——它不删、无闸。）"""

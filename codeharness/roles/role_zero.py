@@ -305,9 +305,12 @@ class RoleZero:
         return count_message_tokens(rows, model)
 
     def _plan_t1(self, before_tokens: int) -> int:
-        """T1 驱逐计划：从最老往新累计 token，直到剩余 ≲ 40% 预算；返回驱逐条数（最新一条不驱逐）。"""
+        """T1 驱逐计划：从最老往新累计 token，直到剩余 ≲ 40% 预算；返回驱逐条数（最新一条不驱逐）。
+
+        目标用 `budget.effective_limit`（预算按 k 校正，与水位同一把尺——P0 契约「P2 按它校正水位」），
+        否则「按 60% 触发、压回 40%」里那 40% 会与水位的量纲对不上。k=1 时逐字等于原式。"""
         from codeharness.provider.context_budget import T1_TARGET
-        excess = before_tokens - T1_TARGET * self.budget.token_limit
+        excess = before_tokens - T1_TARGET * self.budget.effective_limit
         if excess <= 0:
             return 0
         acc, m = 0, 0

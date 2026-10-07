@@ -45,7 +45,9 @@ HISTORY: dict[str, list[tuple[float, str]]] = {
     "dynamic": [(0.003123, "plan/model-gateway.md §1.12.2（10-08 修后重测：dynamic/readonly/n_round=1，"
                            "2 发、10.5s、pt 3580/ct 294、finished）")],
     "classic": [(0.015846, "plan/model-gateway.md §1.12.2（10-08 修后重测：classic/workspace_write/"
-                           "n_round=2，**只跑完 1 发**、150s 墙钟到仍在 running、pt 422/ct 7405）")],
+                           "n_round=2，**只跑完 1 发**、150s 墙钟到仍在 running、pt 422/ct 7405）"),
+                (0.013138, "plan/model-gateway.md §1.12.3（10-08 修后重测·补：同形状 n_round=2，"
+                           "**1 发即 finished**、176.8s、pt 427/ct 6114）")],
 }
 
 

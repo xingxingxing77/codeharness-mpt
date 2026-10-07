@@ -467,6 +467,36 @@ async def t15_calibration_contract_and_default_zero_change():
     print("✅（k 契约：初值/夹取/切模型重置/坏读数；默认档 prompt 对 k=0.5/1/4 逐字一致）")
 
 
+def t17_water_follows_calibration():
+    """P0 契约「P2 按它校正水位」的落点：水位 = storage 本地 token ÷ **按 k 校正后的**预算
+    （`ContextBudget.effective_limit = limit / k`）。k = 厂商回执 ÷ 本地对同一串的估算 ⇒
+    本地**高估**（k<1，本端点实测 0.56）时水位该**变小**（不早压）；**低估**（k>1）时该**变大**（早压）。
+
+    三格互相对照：k=1 逐字不变（零行为变化）、k=2 预算减半水位翻倍、k=0.5 预算翻倍水位减半。
+    **只动水位**——`clip_quota`（只收紧不放宽）与网关 `keep_tokens`（T2 硬上界，用偏保守的本地数才安全）都不跟 k 走。
+    """
+    from codeharness.provider.context_budget import ContextBudget
+    from codeharness.provider.cost import CostManager
+
+    cfg = LLMConfig(model="fake", context_length=1000, compress_threshold=0.8)
+    cm = CostManager()
+    b = ContextBudget.of(cfg, cm)
+    assert b.armed and b.water(600) == 0.6, f"k=1 时水位该逐字不变：{b.water(600)}"
+
+    cm.note_calibration(2.0, model="m")          # 本地低估一半 ⇒ 真占用是本地数的 2 倍
+    b2 = ContextBudget.of(cfg, cm)
+    assert b2.effective_limit == 500 and b2.water(600) == 1.2, \
+        f"k=2 时预算该减半、水位该翻倍：{b2.effective_limit} / {b2.water(600)}"
+    assert b2.t1_triggered(b2.water(600)) is True
+
+    cm.note_calibration(0.5, model="m")          # 本地高估一倍（本端点实测方向）⇒ 水位减半、不早触发
+    b3 = ContextBudget.of(cfg, cm)
+    assert b3.effective_limit == 2000 and abs(b3.water(600) - 0.3) < 1e-9, \
+        f"k=0.5 时预算该翻倍、水位该减半：{b3.effective_limit} / {b3.water(600)}"
+    assert b3.t1_triggered(b3.water(600)) is False, "k<1 时水位不该早触发"
+    print("  t17 水位随 k 校正（k=1 不变 / k=2 翻倍 / k=0.5 减半）；clip 与 keep 不跟 k")
+
+
 async def main():
     print("=" * 60)
     print("批次0/5: 网关 token 压缩门禁（token 口径 + 四策略）")
@@ -489,6 +519,7 @@ async def main():
         t14_llm_override_whitelist,
         t15_calibration_contract_and_default_zero_change,
         t16_context_budget_single_ruler,
+        t17_water_follows_calibration,
     ]
     try:
         for fn in steps:
