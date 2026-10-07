@@ -46,6 +46,12 @@ APPROVAL_IO: ContextVar[object] = ContextVar("approval_io", default=None)
 """待批通道：实现 `decision(aid)` / `request(item)` 的对象（server 注入 platforms.approval_store 适配器）。
 没装 = 内核直跑图（门禁与离线测试路径），此时 gate 一律放行——没有可问的人，挂起只会永久卡住。"""
 
+CURRENT_BUDGET: ContextVar[object] = ContextVar("current_budget", default=None)
+"""会话的上下文预算尺（`provider.context_budget.ContextBudget`；runner 在会话任务入口装、
+内核与工具层只读）。为什么要有这条通道：工具层（clip 的 16 处额度换算）够不到 llm/cfg，
+经这里读会话校准系数 k（P2 起会随校准变动）。None（脚本/单测/离线）= 无会话：
+clip 换算恒等，与 k=1 逐字节同行为。"""
+
 KB_CONTEXT: ContextVar[str] = ContextVar("kb_context", default="")
 """经典线（`roles/agent.py`）这一轮动作的知识库片段，已排好版（每条带 `〔来自 文件名〕`）。
 装在 `Agent._act` 里、读在 `Action._ask` 里——**一次动作只检索一次**（`_ask` 会被补问轮再调一次，

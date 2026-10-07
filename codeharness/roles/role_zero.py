@@ -16,7 +16,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError
-from codeharness.configs.settings import settings
 from codeharness.const import RequirementTag
 from codeharness.exp_pool import exp_cache
 from codeharness.exp_pool.serializers import RoleZeroSerializer
@@ -94,9 +93,14 @@ class RoleZero:
         # ponytail: 上限 = 本会话出现过的不同任务数（人话级）；升级路径 = 把 [Planned path] 落进
         #          子图 state，让重放从 checkpointer 读到而不是靠实例记忆。
         self._plan_memo: dict[str, str] = {}
-        self.brain = brain                  # None → 超窗直接丢，语义同源的 memory_k 截断
+        self.brain = brain                  # None → 超窗直接丢，语义同源的条数窗口截断
         self.redis_key = redis_key
-        self.memory_k = memory_k or settings.memory_overflow_size
+        from codeharness.provider.context_budget import ContextBudget
+        # P1：条数窗口（原 `self.memory_k`）与 token 侧预算的唯一存储 = ContextBudget；llm 可能是
+        # 判据替身（无 cfg/cost_manager ⇒ token 侧休眠、k=1），条数侧照常。外部读 `role.memory_k`
+        # 走下方只读转发属性。
+        self.budget = ContextBudget.of(getattr(llm, "cfg", None), getattr(llm, "cost_manager", None),
+                                       msg_window=memory_k)
         self._brain_loaded = False
         # P0：截窗静默丢失计数的实例水位——已计入 `silent_lost` 的「离开窗口条数」到这为止，
         # 只数增量、不把已计批次重数（口径见 _compress；实例重建后从 0 起，播种后的窗口不含旧账）。
@@ -208,7 +212,7 @@ class RoleZero:
         **静默丢失**。行为与本拆分之前逐字一致（不裁 storage、不摘要、不抛），只多一笔
         `silent_lost`（条数，走增量口径：只数新离开窗口的，已计批次不重数——实例水位
         `_silent_marked`）与一行可 grep 告警。PLAN 的唯一硬指标是「静默丢失计数恒为 0」。"""
-        n_out = len(self.memory.storage) - self.memory_k
+        n_out = len(self.memory.storage) - self.budget.msg_window
         if n_out <= 0:
             return
         if self.brain is None and self.ltm is None:
@@ -221,11 +225,11 @@ class RoleZero:
                     cm.silent_lost += newly
                     total = cm.silent_lost
                 logger.warning(f"[silent-lost] {self.profile['name']}：{newly} 条消息离开工作窗口"
-                               f"（memory_k={self.memory_k}）且无归档去路（brain/ltm 均未挂）——"
+                               f"（msg_window={self.budget.msg_window}）且无归档去路（brain/ltm 均未挂）——"
                                f"不进摘要、不进逐字归档，模型此后看不到它们（本场累计 {total} 条）")
             return
-        evicted = self.memory.storage[:-self.memory_k]
-        self.memory.storage = self.memory.storage[-self.memory_k:]
+        evicted = self.memory.storage[:-self.budget.msg_window]
+        self.memory.storage = self.memory.storage[-self.budget.msg_window:]
         if self.ltm is not None:
             try:
                 await self.ltm.overflow(evicted)
@@ -266,9 +270,15 @@ class RoleZero:
         out = []
         if self.brain is not None and self.brain.historical_summary:
             out.append(SystemMessage(content=f"[历史摘要] {self.brain.historical_summary}"))
-        for m in self.memory.get(self.memory_k):
+        for m in self.memory.get(self.budget.msg_window):
             out.append(AIMessage(content=m.content) if m.role == "assistant" else HumanMessage(content=m.content))
         return out
+
+    @property
+    def memory_k(self) -> int:
+        """P1：条数窗口的唯一存储是 `self.budget.msg_window`——这里只做转发（外部读点：判据/夹具）；
+        内部读点一律写 `self.budget.msg_window`（`s13 t16` 的申报口把 `memory_k` 的属性读清零）。"""
+        return self.budget.msg_window
 
     # ---- 源 _get_prefix(:276)：人设 + 约束 + 当前时间（对齐 Agent.build_prefix 的三段式）----
     def _prefix(self) -> str:
@@ -607,10 +617,10 @@ class RoleZero:
             # 照 C71 的形状走外层通道，不新造机制也不往实例槽塞：键用现成的 `TeamState.memories`
             # （`merge_memories`，经典线 `agent.py:320/323` 在用、动态线此前从没写过它），按名播种、收口按名写回。
             # 两条边界：① **只在新建实例（storage 为空）时播** ⇒ 同进程热路径逐字不变，零回归面；
-            # ② 只取尾部 `memory_k` 条 —— journal 是并集只增、`_compress` 裁掉的那些也留在里面，
+            # ② 只取尾部 `budget.msg_window` 条 —— journal 是并集只增、`_compress` 裁掉的那些也留在里面，
             # 整份灌回来会让 `_compress` 把同一批消息二次溢写给 brain/ltm。
             if not self.memory.storage:
-                self.memory.storage = list((state.get("memories") or {}).get(name) or [])[-self.memory_k:]
+                self.memory.storage = list((state.get("memories") or {}).get(name) or [])[-self.budget.msg_window:]
             # C71（口径 a）：计划状态机住外层 TeamState 键 `plans`（每角色一份、按名覆盖）。
             # 每个激活算出自己的**种子**随子图 state 走（RoleZeroState.plan）：续跑/回报按名
             # 播种外层旧计划（回报清了队长就没法 finish_current_task），新任务不播种（作废，

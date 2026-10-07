@@ -883,7 +883,9 @@ def t13_memories_survive_process_restart():
     guarded = [n for n in ast.walk(fn) if isinstance(n, ast.If)
                and ast.unparse(n.test) == "not self.memory.storage" and sets[0] in list(ast.walk(n))]
     assert guarded, "⑤ 那处赋值不在 `if not self.memory.storage:` 块里 ⇒「同进程热路径逐字不变」这条边界没了"
-    assert "[-self.memory_k:]" in ast.unparse(sets[0]), f"⑤ 播种没取尾：{ast.unparse(sets[0])}"
+    # P1：条数窗口的唯一存储改住 `budget.msg_window`（role_zero 里 `memory_k` 只剩转发属性）——
+    # 本格钉的形状不变（取尾播种），只是取值路径跟着重构走。
+    assert "[-self.budget.msg_window:]" in ast.unparse(sets[0]), f"⑤ 播种没取尾：{ast.unparse(sets[0])}"
 
     # ---- ⑥ 阳性对照：同进程连跑两激活，哨兵不许被播种盖掉 ----
     async def _hot_path():

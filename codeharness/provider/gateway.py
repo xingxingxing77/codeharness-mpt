@@ -242,19 +242,23 @@ class LLMGateway:
 
         接线前量过分布（09-27，db0 trace 306 笔真 span：p50=1451 / p99=10841 / max=11625 pt；
         现配置 `context_length=None` ⇒ 闸全路径休眠，接线零行为变化）——闸只在显式配置了
-        `LLM__CONTEXT_LENGTH` 时才可能触发，届时两条路必须一起生效才算数。"""
+        `LLM__CONTEXT_LENGTH` 时才可能触发，届时两条路必须一起生效才算数。
+
+        P1：判据改读 `ContextBudget`（唯一一把尺）——闸条件、`keep_tokens`、水位比较全在它里面；
+        本方法只负责**计数**（`_count_tokens_direct` 是「数」不是「比」）与接线。外层 `armed`
+        是**计数短路**（契约休眠时不跑 tiktoken），逐字保住原行为。"""
         from codeharness.configs.compress_msg_config import CompressType
-        _ct = self.cfg.compress_type
+        from codeharness.provider.context_budget import ContextBudget
         # C184：system 段计数每笔都记（闸关着也记）——「上下文容量」卡的分类行要的是这个事实，
         # 不是闸的副产品。system 过滤口径与 `_compress_messages` 同一行；账本必有实例
         # （`__init__` 里 `or CostManager()`），这里不判空。
         self.cost_manager.last_system_tokens = self._count_tokens_direct(
             [m for m in msgs if getattr(m, "type", getattr(m, "role", "")) in ("system", "developer")])
-        if self.cfg.context_length and (_ct != CompressType.NO_COMPRESS or self.cfg.compress_threshold < 1.0):
-            strategy = _ct if _ct != CompressType.NO_COMPRESS else CompressType.POST_CUT_BY_TOKEN
-            keep_token = int(self.cfg.context_length * self.cfg.compress_threshold)
-            if self._count_tokens_direct(msgs) > keep_token:
-                return self._compress_messages(msgs, keep_token, strategy)
+        budget = ContextBudget.of(self.cfg, self.cost_manager)
+        if budget.armed and budget.should_compress(self._count_tokens_direct(msgs)):
+            strategy = (self.cfg.compress_type if self.cfg.compress_type != CompressType.NO_COMPRESS
+                        else CompressType.POST_CUT_BY_TOKEN)
+            return self._compress_messages(msgs, budget.keep_tokens, strategy)
         return msgs
 
     async def ainvoke(self, msgs: Union[str, list, None] = None, tag: str = "",

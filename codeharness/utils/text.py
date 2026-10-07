@@ -166,8 +166,16 @@ def clip(text, n: int) -> str:
 
     ponytail: `n` 比标记本身（约 16 字）还小时正文只能为 0、总长会超过 `n`。最小调用点是 500，够不到；
     真要下探到那个量级就得先砍措辞，不是改这里。
+
+    P1：`n` 的语义是「这条结果最多占多少上下文」——朴素 1:1 的字符实现经会话校准系数 k 换算
+    （`ContextBudget.clip_quota`，**只收紧不放宽**）。尺经 `CURRENT_BUDGET` 现取：无会话上下文
+    （脚本/单测/离线）或未校准（k=1）时恒等——16 处调用点与既有 `<= N` 断言一字不动。
     """
     s = text if isinstance(text, str) else str(text)
+    from codeharness.runtime import CURRENT_BUDGET
+    _budget = CURRENT_BUDGET.get()
+    if _budget is not None:
+        n = _budget.clip_quota(n)
     if len(s) <= n:
         return s
     note = "…[已截断，原长 " + str(_raw_len(s)) + " 字]"

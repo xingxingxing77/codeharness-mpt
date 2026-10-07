@@ -310,6 +310,83 @@ def t14_llm_override_whitelist():
     print(f"✅（档位枚举 {sorted(tiers)} 放行、6 种越权值 422、SSRF 键照旧丢）")
 
 
+def t16_context_budget_single_ruler():
+    """P1（不变量 1「一把尺」）：压缩/截断判据只能读 `ContextBudget`——本格两半：
+
+    ① **语义半**（组装与判据，口径取自现实现逐字）：`of(cfg, meter)` 的 `armed`＝原网关门条件
+       （预算显式配上 且（策略非 NO_COMPRESS 或 阈值 < 1））；`keep_tokens = int(limit × threshold)`；
+       k 从 meter **现读**（引用不是快照——P2 会话中校准后要吃到新值）；契约休眠档
+       `should_compress` 恒 False（ADR-20260922-01「显式选择」）；`clip_quota` **只收紧不放宽**。
+    ② **结构半**（读点申报口）：全树 AST 扫预算类字段的属性读（`x.context_length` /
+       `getattr(x, "context_length")`）——白名单外出现即红（＝「第二把尺」的常驻牙）。白名单里三处
+       是 P1 范围外登记在册的既有遗留（brain 摘要阈值 / 经典线溢出切片 / 档位输出值），P2 条数侧
+       改造时复议收编；方向只有「多出即红」（「少」由行为格兜底——读点被删会让 s13/s5 既有格红）。
+    """
+    import ast as _ast
+    from pathlib import Path as _P
+
+    from codeharness.configs.llm_config import LLMConfig
+    from codeharness.provider.context_budget import ContextBudget
+    from codeharness.provider.cost import CostManager
+
+    # ① 语义半
+    b = ContextBudget.of(LLMConfig(model="fake", context_length=200, compress_threshold=0.5))
+    assert b.armed and b.keep_tokens == 100, f"组装坏了：armed={b.armed} keep={b.keep_tokens}"
+    assert b.should_compress(101) and not b.should_compress(100), "水位判据（count > keep）破了"
+    off = ContextBudget.of(LLMConfig(model="fake"))
+    assert not off.armed and not off.should_compress(10 ** 9), \
+        "契约休眠档被弄通电了（未设预算 ⇒ 所有判据退化为「不压」，ADR-20260922-01）"
+    noop = ContextBudget.of(LLMConfig(model="fake", context_length=100, compress_threshold=1.0))
+    assert not noop.armed, "threshold=1.0 且 NO_COMPRESS 该是「刻意不触发」（s13 t1 同一口径）"
+
+    cm = CostManager()
+    bk = ContextBudget.of(None, cm)
+    assert bk.calibration_k == 1.0 and bk.clip_quota(10000) == 10000, "k=1 档 clip_quota 不是恒等"
+    cm.note_calibration(2.0, model="m")
+    assert bk.calibration_k == 2.0 and bk.clip_quota(10000) == 5000, \
+        "k>1 该收紧 n/k，且要**现读** meter（装进来若是快照，校准更新后这里还是旧值）"
+    cm.note_calibration(0.5, model="m")
+    assert bk.clip_quota(10000) == 10000, "k<1 不许放宽额度——放宽等于悄悄改上下文预算"
+
+    # ② 结构半：读点申报口
+    ROOT = _P(__file__).resolve().parents[1]
+    RULER_ATTRS = {"context_length", "compress_threshold", "memory_overflow_size", "memory_k",
+                   "_count_tokens_direct"}
+    ALLOWED = {
+        "codeharness/provider/context_budget.py": {"context_length", "compress_threshold",
+                                                   "memory_overflow_size"},
+        "codeharness/provider/gateway.py": {"_count_tokens_direct"},
+        "codeharness/memory/brain_memory.py": {"memory_overflow_size"},   # P1 范围外遗留：brain 摘要阈值
+        "codeharness/roles/agent.py": {"memory_overflow_size"},           # P1 范围外遗留：经典线溢出切片
+        "server/api/models.py": {"context_length"},                       # 输出层：model_window 值
+    }
+
+    found = {}
+    for sub in ("codeharness", "server"):
+        for py in (ROOT / sub).rglob("*.py"):
+            if "__pycache__" in py.parts:
+                continue
+            tree = _ast.parse(py.read_text(encoding="utf-8"))
+            rel = py.relative_to(ROOT).as_posix()
+            for node in _ast.walk(tree):
+                if isinstance(node, _ast.Attribute) and node.attr in RULER_ATTRS:
+                    found.setdefault(rel, set()).add(node.attr)
+                elif (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name)
+                      and node.func.id == "getattr" and len(node.args) >= 2
+                      and isinstance(node.args[1], _ast.Constant)
+                      and node.args[1].value in RULER_ATTRS):
+                    found.setdefault(rel, set()).add(node.args[1].value)
+
+    extra = {f: sorted(a - ALLOWED.get(f, set())) for f, a in found.items() if a - ALLOWED.get(f, set())}
+    assert not extra, (f"P1 不变量 1 破了：白名单外长出预算读点＝第二把尺（{extra}）——"
+                       f"压缩/截断判据只能读 ContextBudget；要加读点先来这张表申报")
+    assert found, "申报口阳性对照失守：一个读点都没扫到（采集器坏了，不是「全收干净」）"
+    assert "context_length" in found.get("codeharness/provider/context_budget.py", set()), \
+        "申报口阳性对照失守：本体不在扫描里——读点被搬走或采集器坏了"
+    print("✅（ContextBudget 组装/休眠/只收紧；读点申报口白名单精确命中，"
+          f"全树扫描 {sum(len(v) for v in found.values())} 处读点）")
+
+
 async def t15_calibration_contract_and_default_zero_change():
     """P0：校准系数 k 的契约语义（初值 1、夹 [0.5,4]、会话级、切模型即重置）+ 默认档零行为变化。
 
@@ -403,6 +480,7 @@ async def main():
         t13_session_tier_lands_in_gateway_cfg,
         t14_llm_override_whitelist,
         t15_calibration_contract_and_default_zero_change,
+        t16_context_budget_single_ruler,
     ]
     try:
         for fn in steps:

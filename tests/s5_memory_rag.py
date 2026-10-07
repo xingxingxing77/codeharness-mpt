@@ -2593,6 +2593,45 @@ def t47_clip_marks_the_truncation_and_the_sites_still_call_it():
           "AST 双向守卫）全绿")
 
 
+def t47b_clip_quota_follows_calibration():
+    """P1③：「clip 的 16 处额度按 k 换算」——换算住在共享件内部（调用点传的字符额度就是「最多占多少
+    上下文」的朴素 1:1 语义，经会话校准系数换算成字符），**调用点一行不改、既有 `<= N` 断言一字不改**。
+
+    四格（k 经 `CURRENT_BUDGET` 注入——与 runner 在会话任务入口装的是同一条通道）：
+      ① k=1 档逐字不变；② k>1 收紧到 n/k 且含标记总长恰等于收紧后的额度（clip 自身「总长 ≤ 额度」
+         的契约不许被换算破坏）、标记里的「原长」仍是真值；③ k<1 **不许放宽**（放宽＝悄悄改预算，
+         与调用点额度那条纪律同源）；④ 收口后无会话上下文（默认 None）必须回到恒等——判据/脚本/
+         离线路径的稳定形状。
+    """
+    import re as _re
+
+    from codeharness.provider.context_budget import ContextBudget
+    from codeharness.provider.cost import CostManager
+    from codeharness.runtime import CURRENT_BUDGET
+    from codeharness.utils.text import clip
+
+    MARK = _re.compile(r"…\[已截断，原长 (\d+) 字\]$")
+    long_text = "甲" * 30000
+    cm = CostManager()
+    tok = CURRENT_BUDGET.set(ContextBudget.of(None, cm))
+    try:
+        got1 = clip(long_text, 20000)
+        assert len(got1) == 20000 and int(MARK.search(got1).group(1)) == 30000, \
+            "①k=1 档不再是原行为（换算必须从恒等起步）"
+        cm.note_calibration(2.0, model="m")
+        got2 = clip(long_text, 20000)
+        assert len(got2) == 10000, f"②k=2 该收紧到 10000，实得 {len(got2)}（换算没接进 clip？）"
+        assert int(MARK.search(got2).group(1)) == 30000, "②收紧后标记的「原长」必须还是真值"
+        cm.note_calibration(0.5, model="m")
+        got3 = clip(long_text, 20000)
+        assert len(got3) == 20000, f"③k<1 放宽了额度（{len(got3)}）——放宽等于悄悄改预算"
+    finally:
+        CURRENT_BUDGET.reset(tok)
+    assert clip(long_text, 20000) == got1, \
+        "④无会话上下文（默认档）不是恒等——离线判据/脚本路径的稳定性破了"
+    print("  ok  t47b clip 额度随会话校准（k=1 恒等 / k>1 收紧且含标记恰等于额度 / k<1 不放宽 / 无上下文恒等）")
+
+
 def t48_metric_round_trips_its_own_dump():
     """`Metric.score` 的注解是 `Score` 而默认值是 `None`——**类型在骗默认值**。
 
@@ -2930,6 +2969,7 @@ def main():
               t45_shared_readers_short_circuit_once_per_session,
               t46_experience_state_key_is_gone_and_recall_still_happens,
               t47_clip_marks_the_truncation_and_the_sites_still_call_it,
+              t47b_clip_quota_follows_calibration,
               t48_metric_round_trips_its_own_dump,
               t49_ensure_names_a_dimension_mismatch,
               t50_hit_counter_incr_is_atomic, t51_redis_incr_degrades_like_get_set,
