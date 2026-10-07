@@ -13,6 +13,9 @@ from pydantic import BaseModel
 from codeharness.logs import logger
 from codeharness.provider.token_costs import CNY_MODELS, TOKEN_COSTS
 
+# P0：校准系数 k 的合法域（闭合夹取边界）——已定口径，不是可调参数。
+CALIBRATION_K_MIN, CALIBRATION_K_MAX = 0.5, 4.0
+
 
 class Costs(NamedTuple):
     """用量快照。**没有单一 total_cost 字段**——那是 C12 修掉的口径错误：两种币价的数字
@@ -84,6 +87,17 @@ class CostManager(BaseModel):
     last_prompt_tokens: int = 0
     peak_prompt_tokens: int = 0
     last_system_tokens: int = 0
+    # P0（10-07）：校准系数 k——「上下文预算契约」的一半（P1 的 ContextBudget 按它换算 clip 额度、
+    # P2 按它校正水位），住在**会话级账本**上（per-sid 单例、随快照持久化、resume 播种）。
+    # 口径已定不重议：初值 1、夹 [0.5,4]、切模型即重置（唯一写入口 `note_calibration`）；
+    # P0 期零消费者（默认档行为逐字不变，s13 t15 钉住）。`calibration_model` 是「切模型」的
+    # 判定依据，必须与 k 同批持久化——漏播种的形状：resume 后第一笔读数把 "" 当成「换了模型」误重置。
+    calibration_k: float = 1.0
+    calibration_model: str = ""
+    # P0（10-07）：截窗静默丢失的消息**条数**——消息离开工作窗口（超出 `memory_k`）时既无摘要(L1)
+    # 也无逐字归档(L2)去路的条数（招募成员装出来的形状最典型）。PLAN 唯一硬指标「静默丢失计数恒为 0」
+    # 数的是它；P3 给招募成员补挂 brain/ltm 之前，这个数是那条缺口的暴露面。
+    silent_lost: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""
@@ -116,6 +130,20 @@ class CostManager(BaseModel):
         if pt > 0:
             self.last_prompt_tokens = pt
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, pt)
+
+    def note_calibration(self, k: float, model: str = "") -> None:
+        """P0：校准系数的唯一写入口（口径已定：初值 1、夹 [0.5,4]、会话级、切模型即重置）。
+
+        切模型的语义 = **先回 1 再应用本笔读数**：`model` 非空且与上次不同时先重置——本笔有合法
+        读数（夹取后）就更新，坏读数/无读数就停在 1。这样旧模型的校准不会残留到新模型上
+        （tokenizer 的近似偏差是按模型变的），也不会把「没读数」读成新读数
+        （0/负值不是读数：把 0 夹成 0.5 是在编数据，与 `note_window_usage` 的 pt=0 同一条纪律）。
+        P0 期零调用者；P2 的 `_compress` 校准写它，P1 的 ContextBudget 读它。"""
+        m = str(model or "")
+        if m and m != self.calibration_model:
+            self.calibration_model, self.calibration_k = m, 1.0
+        if k and k > 0:
+            self.calibration_k = min(max(float(k), CALIBRATION_K_MIN), CALIBRATION_K_MAX)
 
     def get_costs(self) -> Costs:
         return Costs(self.total_prompt_tokens, self.total_completion_tokens,

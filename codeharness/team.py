@@ -2,8 +2,9 @@
 run_project = 脚本场景的 async generator；prepare_project = runner 专用的三件套。"""
 import re
 from pydantic import BaseModel, Field
-from codeharness.schema import Message
 from codeharness.const import RequirementTag, TEAMLEADER_NAME
+from codeharness.logs import logger
+from codeharness.schema import Message
 
 
 def default_team(llm, env_desc: str = "a software company"):
@@ -297,6 +298,12 @@ def build_hired_role(defn: dict, llm):
         from codeharness.provider.gateway import LLMGateway
         role.kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb",
                                  meter=getattr(llm, "cost_manager", None))   # R1：与队长同一份账本
+    # P0：缺口必须在**起跑装配**时喊出来——静态成员经 `_default_agents` 挂了 brain+ltm，招募路
+    # 只挂 kb；消息一旦溢出工作窗口就是静默丢失（运行期那半由 s5 t8 钉，本行由 s23 t9 钉）。
+    # 与 RAG 开关无关：判据只看 brain/ltm 是否缺席。P3 补上记忆腿后，这一行与它的判据一起改判。
+    if role.brain is None and role.ltm is None:
+        logger.warning(f"[hired-role-no-memory] 招募成员 {defn['name']} 未挂 brain/ltm："
+                       f"工作窗口外溢时既无摘要（L1）也无逐字归档（L2）——静默丢失计数将从这里长出来")
     return role
 
 

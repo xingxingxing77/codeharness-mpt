@@ -2228,6 +2228,25 @@ def t30_foreground_resync_c110():
                "与行为级探针文件（缺一不可，删任何一个都只会静默变红不了）")
 
 
+def t31_ctx_card_caliber_labels():
+    """P0③：上下文容量卡的分类行是**两把尺**——总/「其余」一侧来自厂商回执（`last_prompt_tokens`），
+    `system` 一侧是网关本地 tiktoken 计数（`last_system_tokens`），「其余」＝两尺相减的派生量。
+    正常时两尺差几十个百分点，tiktoken 降级到 `len//4` 时中文低估约 5 倍 ⇒「系统」行偏小、
+    虚高全跑「其余」行（顶部百分比 last/budget 是对的，只有分类行受污染）。
+
+    修法（P0 的二选一里选「标注」）：不造第三把尺——把每行的口径写在脸上，
+    估算不冒充真值、差额不冒充直接计量（C16 那族「只数事实不做判断」的用法：标注本身就是事实）。
+    行为级读数（配色/布局）维持 C184 的浏览器探针档；像素仍未验。
+    """
+    root = Path(__file__).resolve().parents[1]
+    cc = (root / "frontend" / "src" / "components" / "composer" / "ComposerCard.vue").read_text(encoding="utf-8")
+    assert "系统提示词（估算）" in cc, \
+        "t31① system 行没标「估算」——本地 tiktoken 尺不许在卡面上冒充厂商真值"
+    assert "其余对话与工具结果（差额）" in cc, \
+        "t31② 「其余」行没标「差额」——它 = last − system（两把尺相减的派生量），不标就是两尺混着读"
+    _ok("t31", "P0③ 上下文容量卡分类行两把尺如实标注（system=估算、其余=差额），不造第三把尺")
+
+
 def main():
     checks = (t1_blocktype_vocabulary, t2_envelope_and_kinds, t3_routes_exist,
               t4_graph_endpoint, t5_workspace_file_response_shape, t6_trace_span_vocabulary,
@@ -2240,7 +2259,8 @@ def main():
               t23_run_after_fork, t24_checkpoint_to_chat_jump,
               t25_frontend_one_liners_c92_c96,
               t26_ui_bugfix_batch, t27_recall_visibility,
-              t28_stream_ux_batch, t29_task_rows_c107, t30_foreground_resync_c110)
+              t28_stream_ux_batch, t29_task_rows_c107, t30_foreground_resync_c110,
+              t31_ctx_card_caliber_labels)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

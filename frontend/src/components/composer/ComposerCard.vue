@@ -64,11 +64,12 @@
                 <div v-if="peak" class="ctxPeak">本轮峰值 {{ fmtWan(peak) }}</div>
               </template>
               <div v-else class="ctxPeak">预算 {{ fmtWan(budget) }}，还没有用量回执</div>
-              <!-- 分类行只画有数据源的：厂商只回单发总 input_tokens，没有分类归因；
-                   system 段是网关侧自己的计数（last_system_tokens），「其余」= used − system 派生。 -->
+              <!-- 分类行只画有数据源的：厂商只回单发总 input_tokens，没有分类归因。system 段是
+                   网关侧本地 tiktoken 计数、「其余」= used − system——**两把尺相减**的派生量
+                   （P0③：估算不冒充真值、差额不冒充直接计量；修法是标注口径，不是再造一把尺）。 -->
               <template v-if="sysTok">
-                <div class="ctxRow"><span class="dot dotSys" />系统提示词<span class="ctxVal">{{ sysPct }}%</span></div>
-                <div class="ctxRow"><span class="dot dotRest" />其余对话与工具结果<span class="ctxVal">{{ restPct }}%</span></div>
+                <div class="ctxRow"><span class="dot dotSys" />系统提示词（估算）<span class="ctxVal">{{ sysPct }}%</span></div>
+                <div class="ctxRow"><span class="dot dotRest" />其余对话与工具结果（差额）<span class="ctxVal">{{ restPct }}%</span></div>
               </template>
             </template>
             <div v-else class="ctxPeak">未设上下文预算（超窗由厂商报错兜底）</div>

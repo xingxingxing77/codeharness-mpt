@@ -18,7 +18,7 @@ from codeharness.provider.gateway import LLMGateway
 from codeharness.provider.fake import FakeLLM
 
 
-def _mk_gateway(cfg):
+def _mk_gateway(cfg, cm=None):
     fake_llm = FakeLLM(responses=["test"])
     captured = []
 
@@ -28,7 +28,7 @@ def _mk_gateway(cfg):
 
     fake_llm.ainvoke = mock_ainvoke
     with patch.object(LLMGateway, "_build", return_value=fake_llm):
-        gw = LLMGateway(cfg=cfg, cost_manager=None)
+        gw = LLMGateway(cfg=cfg, cost_manager=cm)
     return gw, captured
 
 
@@ -310,6 +310,78 @@ def t14_llm_override_whitelist():
     print(f"✅（档位枚举 {sorted(tiers)} 放行、6 种越权值 422、SSRF 键照旧丢）")
 
 
+async def t15_calibration_contract_and_default_zero_change():
+    """P0：校准系数 k 的契约语义（初值 1、夹 [0.5,4]、会话级、切模型即重置）+ 默认档零行为变化。
+
+    k 是「上下文预算契约」的一半（P1 抽 ContextBudget 时按它换算 clip 额度、P2 按它校正水位），
+    住在**会话级账本** `CostManager` 上（per-sid 单例、随快照持久化、resume 播种）——P0 期
+    只有定义与语义、零消费者；「默认档零行为变化」由第 ⑤ 节照 C65 t19② 的先例钉住。
+    口径（PLAN 已定，不在此重议）：
+      ① 初值 1；② 值域实夹 [0.5,4]（闭合）；③ 会话级（持久化那半在 s8_runner_meter t2）；
+      ④ 切模型即重置——**先回 1、再应用本笔读数**：本笔有读数（夹取后）就更新，坏读数/无读数
+        就停在 1；这样切模型后旧模型的校准不会残留，也不会把「没读数」读成新读数。
+    """
+    from codeharness.provider.cost import CostManager
+
+    cm = CostManager()
+    assert cm.calibration_k == 1.0 and cm.calibration_model == "", \
+        f"①初值不是 1 或 model 不是空串：{cm.calibration_k}/{cm.calibration_model!r}"
+
+    cm.note_calibration(0.1, model="A")
+    assert cm.calibration_k == 0.5, f"②下夹失效：{cm.calibration_k}"
+    cm.note_calibration(2.5, model="A")
+    assert cm.calibration_k == 2.5, f"②中间该直取：{cm.calibration_k}"
+    cm.note_calibration(9.9, model="A")
+    assert cm.calibration_k == 4.0, f"②上夹失效：{cm.calibration_k}"
+    cm.note_calibration(0.5, model="A")
+    assert cm.calibration_k == 0.5, f"②边界 0.5 该闭合保留：{cm.calibration_k}"
+
+    cm.note_calibration(2.5, model="A")
+    cm.note_calibration(0, model="A")
+    assert cm.calibration_k == 2.5, "④0 不是读数——把 0 夹成 0.5 是在编数据"
+    cm.note_calibration(-1.0, model="A")
+    assert cm.calibration_k == 2.5, "④负值不是读数"
+
+    cm.note_calibration(0, model="B")
+    assert (cm.calibration_model, cm.calibration_k) == ("B", 1.0), \
+        f"④切模型 + 坏读数该重置为 1：现在 {cm.calibration_model!r}/{cm.calibration_k}（旧模型残留？）"
+    cm.note_calibration(2.0, model="B")
+    assert cm.calibration_k == 2.0, "④切模型后的干净读数该被应用"
+    cm.note_calibration(7.0, model="C")
+    assert (cm.calibration_model, cm.calibration_k) == ("C", 4.0), \
+        f"④再切一次 + 越界读数该夹到 4：{cm.calibration_k}"
+    cm.note_calibration(3.0, model="C")
+    assert cm.calibration_k == 3.0, "④同模型继续更新不该重置"
+
+    cm2 = CostManager()
+    cm2.note_calibration(2.0, model="A")
+    cm2.note_calibration(1.5)                      # 不带模型：不判切换，只更新
+    assert cm2.calibration_model == "A" and cm2.calibration_k == 1.5, \
+        f"④空模型名不该清掉归属：{cm2.calibration_model!r}/{cm2.calibration_k}"
+
+    # ⑤ 默认档零行为变化（照 C65 t19② 先例）：k 无消费者——把 k 拧到不同档位，默认档
+    #    （context_length=None）ainvoke 的出口 prompt 逐字不变。P1/P2 若把「未设预算」这条
+    #    契约睡眠档弄坏（让 k 在默认档参与决策），这一格会红。
+    def _gate_echo(kv):
+        cmx = CostManager()
+        cmx.note_calibration(kv, model="fake")
+        gw, cap = _mk_gateway(LLMConfig(model="fake"), cm=cmx)
+        return gw, cap
+
+    base_gw, base_cap = _gate_echo(1.0)
+    await base_gw.ainvoke([SystemMessage(content="sys"), HumanMessage(content="alpha"),
+                           HumanMessage(content="beta")], tag="t15")
+    base = _texts(base_cap[0])
+    assert base == ["sys", "alpha", "beta"], f"⑤阳性对照失守：默认档 prompt 本身就不对：{base}"
+    for kv in (4.0, 0.5):
+        gw, cap = _gate_echo(kv)
+        await gw.ainvoke([SystemMessage(content="sys"), HumanMessage(content="alpha"),
+                          HumanMessage(content="beta")], tag="t15")
+        assert _texts(cap[0]) == base, \
+            f"⑤默认档动了 prompt（k={kv}）：出口与 k=1 不一致——契约睡眠档不许被 k 碰"
+    print("✅（k 契约：初值/夹取/切模型重置/坏读数；默认档 prompt 对 k=0.5/1/4 逐字一致）")
+
+
 async def main():
     print("=" * 60)
     print("批次0/5: 网关 token 压缩门禁（token 口径 + 四策略）")
@@ -330,6 +402,7 @@ async def main():
         t12_long_conversation_reading,
         t13_session_tier_lands_in_gateway_cfg,
         t14_llm_override_whitelist,
+        t15_calibration_contract_and_default_zero_change,
     ]
     try:
         for fn in steps:

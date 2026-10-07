@@ -281,6 +281,11 @@ def _seeded_ledger(saved: dict):
     cm.last_prompt_tokens = int(saved.get("last_prompt_tokens", 0) or 0)
     cm.peak_prompt_tokens = int(saved.get("peak_prompt_tokens", 0) or 0)
     cm.last_system_tokens = int(saved.get("last_system_tokens", 0) or 0)
+    # P0：校准契约两键 + 静默丢失计数同规播种。k 缺省退 **1.0** 不是 0——0 不在合法域（[0.5,4]）里；
+    # `calibration_model` 漏播种会让 resume 后第一笔校准读数把 "" 误判成「换模型」而重置。
+    cm.calibration_k = float(saved.get("calibration_k") or 1.0)
+    cm.calibration_model = str(saved.get("calibration_model") or "")
+    cm.silent_lost = int(saved.get("silent_lost", 0) or 0)
     return cm
 
 
@@ -306,7 +311,11 @@ def cost_snapshot(cm) -> dict:
             # C184：窗口占用三笔（pt 是单发占用＝窗口口径，不是累计；见 CostManager 字段注释）
             "last_prompt_tokens": getattr(cm, "last_prompt_tokens", 0),
             "peak_prompt_tokens": getattr(cm, "peak_prompt_tokens", 0),
-            "last_system_tokens": getattr(cm, "last_system_tokens", 0)}
+            "last_system_tokens": getattr(cm, "last_system_tokens", 0),
+            # P0：校准契约两键 + 静默丢失计数（k 缺省 1.0 不是 0——0 不在 [0.5,4] 合法域里）
+            "calibration_k": getattr(cm, "calibration_k", 1.0),
+            "calibration_model": getattr(cm, "calibration_model", ""),
+            "silent_lost": getattr(cm, "silent_lost", 0)}
 
 
 class SessionRunner:

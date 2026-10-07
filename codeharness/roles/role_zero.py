@@ -98,6 +98,9 @@ class RoleZero:
         self.redis_key = redis_key
         self.memory_k = memory_k or settings.memory_overflow_size
         self._brain_loaded = False
+        # P0：截窗静默丢失计数的实例水位——已计入 `silent_lost` 的「离开窗口条数」到这为止，
+        # 只数增量、不把已计批次重数（口径见 _compress；实例重建后从 0 起，播种后的窗口不含旧账）。
+        self._silent_marked = 0
         # 计划状态机（接线台账 #10）：schema.Plan 从此有运行时读者——源 tool_execution_map
         # :121-124 的 Plan.* 四命令吃它。C71（口径 a）起 plan **不住实例**：真身随子图 state
         # 走（RoleZeroState.plan）、每激活一份副本、收口经 as_node 写回外层 TeamState.plans
@@ -198,8 +201,28 @@ class RoleZero:
             self.memory.add(Message(content=text, **kw))
 
     async def _compress(self):
-        """超窗：窗口外那截按源的分工两路走——逐字引用进 Qdrant(ltm)，背景理解进摘要(brain)。"""
-        if len(self.memory.storage) <= self.memory_k or (self.brain is None and self.ltm is None):
+        """超窗：窗口外那截按源的分工两路走——逐字引用进 Qdrant(ltm)，背景理解进摘要(brain)。
+
+        P0：把「无归档去路」这一支拆出来单独记账——消息离开工作窗口却没有 brain/ltm 接收
+        （`build_hired_role` 装出来的形状）时，它们不进摘要、不进逐字归档，模型此后看不见＝
+        **静默丢失**。行为与本拆分之前逐字一致（不裁 storage、不摘要、不抛），只多一笔
+        `silent_lost`（条数，走增量口径：只数新离开窗口的，已计批次不重数——实例水位
+        `_silent_marked`）与一行可 grep 告警。PLAN 的唯一硬指标是「静默丢失计数恒为 0」。"""
+        n_out = len(self.memory.storage) - self.memory_k
+        if n_out <= 0:
+            return
+        if self.brain is None and self.ltm is None:
+            newly = n_out - self._silent_marked
+            if newly > 0:
+                self._silent_marked = n_out
+                cm = getattr(self.llm, "cost_manager", None)
+                total = newly
+                if cm is not None:
+                    cm.silent_lost += newly
+                    total = cm.silent_lost
+                logger.warning(f"[silent-lost] {self.profile['name']}：{newly} 条消息离开工作窗口"
+                               f"（memory_k={self.memory_k}）且无归档去路（brain/ltm 均未挂）——"
+                               f"不进摘要、不进逐字归档，模型此后看不到它们（本场累计 {total} 条）")
             return
         evicted = self.memory.storage[:-self.memory_k]
         self.memory.storage = self.memory.storage[-self.memory_k:]

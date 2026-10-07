@@ -351,6 +351,48 @@ def t8_hired_role_subscribes_to_the_knowledge_base():
         CURRENT_USER.reset(tok_u)
 
 
+def t9_hired_role_memory_gap_warns_at_assembly():
+    """P0：招募成员没有 brain/ltm 这个缺口，必须在**起跑装配**（`build_hired_role`）时喊出来——
+    静默丢失的根因侧：`_default_agents` 给静态成员挂了 brain+ltm，招募路只挂 kb；成员一旦溢出
+    工作窗口，消息不进摘要、不进逐字归档，一个字都不说（运行期那一半由 `s5 t8` 钉住）。
+
+    两档 RAG 配置都喊：装配事实只由「brain/ltm 是否为 None」决定，与 RAG 开关无关。
+    阳性对照：`default_team` 的静态成员自带 brain，不许被这条告警牵连（告警不许恒亮）。
+    """
+    import io
+
+    from codeharness.configs.settings import settings
+    from codeharness.logs import logger
+    from codeharness.team import build_hired_role, default_team
+
+    keep = settings.enable_rag
+    try:
+        for rag in (True, False):
+            settings.enable_rag = rag
+            buf = io.StringIO()
+            hid = logger.add(buf, format="{message}", level="WARNING")
+            try:
+                role = build_hired_role(HIRED, FakeLLM(["x"]))
+            finally:
+                logger.remove(hid)
+            assert role.brain is None and role.ltm is None, \
+                f"t9 前提变了（enable_rag={rag}）：招募成员已经有记忆腿——这一格的判词要跟着改"
+            log = buf.getvalue()
+            assert "[hired-role-no-memory]" in log and "Cleo" in log, \
+                f"t9失效（enable_rag={rag}）：招募成员缺记忆腿没有起跑告警，根因侧一句话都不说：{log!r}"
+        buf2 = io.StringIO()
+        hid2 = logger.add(buf2, format="{message}", level="WARNING")
+        try:
+            default_team(FakeLLM(["x"]))
+        finally:
+            logger.remove(hid2)
+        assert "[hired-role-no-memory]" not in buf2.getvalue(), \
+            "告警恒亮了：带 brain 的静态成员也被喊缺记忆腿"
+    finally:
+        settings.enable_rag = keep
+    print("  ok  t9 招募成员缺记忆腿：两档 RAG 配置下起跑装配都告警（带名字）；静态成员不长这条告警")
+
+
 def main():
     t1_check_role_def()
     t2_tier_gate_and_rejections()
@@ -360,6 +402,7 @@ def main():
     t6_no_hot_swap()
     t7_fire_role()
     t8_hired_role_subscribes_to_the_knowledge_base()
+    t9_hired_role_memory_gap_warns_at_assembly()
     print("\ns23_hire_role: 8/8 全绿")
     return 0
 

@@ -128,7 +128,19 @@ def t2_seeded_ledger():
     assert cost_snapshot(c122)["invalid_args_calls"] == 5, "C122 回归：播种完的快照没把这笔带出去"
     c122_missing = _seeded_ledger({"total_prompt_tokens": 7})
     assert c122_missing.invalid_args_calls == 0, "C122：老记录没有这个键 ⇒ 退 0，不炸也不编数"
-    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 九个观测计数（C78 三笔 + R1 召回三笔 + R4 写腿两笔 + C122 一笔），"
+    # P0：校准契约两键 + 静默丢失计数同规播种与带出。`calibration_k` 的缺省退 **1.0** 不是 0——
+    # 0 不在 k 的合法域（[0.5,4]）里，「老记录没这个键」读成 0 等于给契约塞一个坏值。
+    p0 = _seeded_ledger({"calibration_k": 2.5, "calibration_model": "step-3.5-flash", "silent_lost": 7})
+    assert (p0.calibration_k, p0.calibration_model, p0.silent_lost) == (2.5, "step-3.5-flash", 7), \
+        f"P0 回归：三件没被播种（{p0.calibration_k}/{p0.calibration_model}/{p0.silent_lost}）"
+    snap0 = cost_snapshot(p0)
+    assert (snap0["calibration_k"], snap0["calibration_model"], snap0["silent_lost"]) == \
+        (2.5, "step-3.5-flash", 7), f"P0 回归：播种完的快照没把三件带出去：{snap0}"
+    p0_missing = _seeded_ledger({"total_prompt_tokens": 7})
+    assert (p0_missing.calibration_k, p0_missing.calibration_model, p0_missing.silent_lost) == (1.0, "", 0), \
+        "P0：老记录缺键该退 1.0/''/0——k 的初值 1 不是 0（0 不在合法域里）"
+    _ok("t2", "_seeded_ledger 从落盘快照续算两桶 + 九个观测计数（C78 三笔 + R1 召回三笔 + R4 写腿两笔 + C122 一笔）"
+              " + P0 三件（calibration_k/calibration_model/silent_lost），"
               "缺项/坏项退 0 不炸，且不回读混币种 total_cost")
 
 
@@ -424,11 +436,14 @@ def t8_two_currency_buckets():
     # 加键时没跑本套件，t8 在 HEAD 上红了一拍才补进来。这就是申报口存在的意义。
     # C184（10-07）：窗口占用三笔 last/peak/system 在此申报入列（口径见 cost.py 字段注释：
     # pt 是单发占用=窗口口径，不是累计）。申报口存在的意义见下一条 C123 的教训。
+    # P0（10-07）：校准契约两键（calibration_k/calibration_model）与静默丢失计数（silent_lost）申报入列——
+    # 三件都随快照持久化、都被 `/api/sessions` 带出（calibration_k 的缺省是 1.0 不是 0，见 t2）。
     assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
                           "truncated_calls", "unknown_command_calls", "empty_output_calls",
                           "recall_failures", "recall_zero_hits", "recall_returned",
                           "overflow_failed", "overflow_written", "invalid_args_calls",
-                          "last_prompt_tokens", "peak_prompt_tokens", "last_system_tokens"}, snap
+                          "last_prompt_tokens", "peak_prompt_tokens", "last_system_tokens",
+                          "calibration_k", "calibration_model", "silent_lost"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
     assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"],
             snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"],

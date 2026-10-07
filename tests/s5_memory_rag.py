@@ -50,6 +50,11 @@ class FakeLLM:
     def __init__(self, summary="已压缩的历史摘要"):
         self.payloads: list[list] = []
         self.summary = summary
+        # P0：与生产 LLMGateway 同形地挂一份账本——角色侧的新计数从 llm 上取
+        # （role_zero 的既有形状 `getattr(self.llm, "cost_manager", None)`，同 T4-③/C122）。
+        from codeharness.provider.cost import CostManager
+
+        self.cost_manager = CostManager()
 
     async def aask(self, msg, system_msgs=None, stream=False, tag="", **kw) -> str:
         self.payloads.append(list(msg) if isinstance(msg, list) else [msg])
@@ -194,13 +199,62 @@ def t7_tool_results_feed_next_round_prompt():
 
 
 def t8_no_brain_windows_at_prompt_time():
+    """无 brain 时只在组 prompt 时截窗，不动 storage、不抛不摘要。
+
+    P0：「截窗」＝消息离开工作窗口却**没有归档去路**（brain 与 ltm 都是 None）＝静默丢失。
+    本格钉三件：① 行为原样（storage 不裁、模型只看到尾部 `memory_k` 条——上一版断言一字不动）；
+    ② 条数落账（`silent_lost` 走**增量**口径：只数新离开窗口的，已计的整批不重数）；
+    ③ 可 grep 留痕（`[silent-lost]` 告警）。阳性对照：有去路的角色（ltm 在）不长这笔账。
+    PLAN 的唯一硬指标是「静默丢失计数恒为 0」——P3 给招募成员补挂 brain/ltm 之前，先把它暴露出来。
+    """
+    import io
+
+    from codeharness.logs import logger
+
     role = _role(brain=None, memory_k=2)
     for i in range(5):
         role.memory.add(Message(content=f"r{i}结果", role="user"))
-    asyncio.run(role._compress())
+    cm = role.llm.cost_manager
+    assert cm.silent_lost == 0, "阳性对照失守：还没截窗就长账了"
+    buf = io.StringIO()
+    hid = logger.add(buf, format="{message}", level="WARNING")
+    try:
+        asyncio.run(role._compress())
+    finally:
+        logger.remove(hid)
     assert len(role.memory.storage) == 5                       # 无 brain：不动 storage，也没什么可摘要
     assert [m.content for m in role._context_messages()] == ["r3结果", "r4结果"]
-    print("  t8 无 brain：只在组 prompt 时截窗，不动 storage、不抛不摘要")
+    assert cm.silent_lost == 3, f"P0 截窗 3 条（5-2）没落账：{cm.silent_lost}"
+    log = buf.getvalue()
+    assert "[silent-lost]" in log and "3 条" in log, \
+        f"P0 留痕缺了：截窗没有可 grep 的告警：{log!r}"
+    role.memory.add(Message(content="r5结果", role="user"))
+    asyncio.run(role._compress())
+    assert cm.silent_lost == 4, \
+        f"P0 增量口径破了：第二轮把已计的 3 条重数（=7）或没数新的（=3），实得 {cm.silent_lost}"
+
+    # 阳性对照：有归档去路的角色（ltm 在）在同一形状下不进静默丢失账——
+    # 证明这笔账数的是「无去路」，不是「溢出」本身。
+    from codeharness.roles.role_zero import RoleZero
+
+    class _FakeLtm:
+        def __init__(self):
+            self.calls = 0
+
+        async def overflow(self, msgs):
+            self.calls += 1
+            return len(msgs)
+
+    fallen = _FakeLtm()
+    role2 = RoleZero({"name": "Alice", "profile": "Product Manager", "goal": "g"},
+                     [], FakeLLM(), memory_k=2, longterm_memory=fallen)
+    for i in range(5):
+        role2.memory.add(Message(content=f"c{i}结果", role="user"))
+    asyncio.run(role2._compress())
+    assert fallen.calls == 1 and len(role2.memory.storage) == 2, "阳性对照前提没成立：ltm 没收到溢出批"
+    assert role2.llm.cost_manager.silent_lost == 0, \
+        "有 ltm 去路的角色也被记了静默丢失（这笔账该只数「无去路」）"
+    print("  t8 无 brain：截窗行为不变 + 条数落账（增量）+ [silent-lost] 留痕；有去路的角色不长这笔账")
 
 
 def t9_brain_overflow_summarizes_and_restores():
