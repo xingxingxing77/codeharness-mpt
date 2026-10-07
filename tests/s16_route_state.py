@@ -876,16 +876,24 @@ def t13_memories_survive_process_restart():
     assert '"memories": {name: self.memory.storage}' in src, "⑤ C99 的 memories 写回键不见了"
     fn = next(n for n in ast.walk(ast.parse(src))
               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_run")
-    sets = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Attribute) and t.attr == "storage"
-                    and ast.unparse(t.value) == "self.memory" for t in n.targets)]
-    assert len(sets) == 1, f"⑤ `_run` 里对 `self.memory.storage` 的赋值该恰好 1 处，实得 {len(sets)} 处：{[s.lineno for s in sets]}"
+    # P2：播种算式挪进 `_seed_from_journal`（游标 `compacted_upto` 要参与取尾）——本格钉的**形状**
+    # 跟到新位置：`_run` 里恰一处调用、且必须住在 `if not self.memory.storage:` 块里。
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "_seed_from_journal"]
+    assert len(calls) == 1, \
+        f"⑤ `_run` 里对 `_seed_from_journal` 的调用该恰好 1 处，实得 {len(calls)} 处：{[c.lineno for c in calls]}"
     guarded = [n for n in ast.walk(fn) if isinstance(n, ast.If)
-               and ast.unparse(n.test) == "not self.memory.storage" and sets[0] in list(ast.walk(n))]
-    assert guarded, "⑤ 那处赋值不在 `if not self.memory.storage:` 块里 ⇒「同进程热路径逐字不变」这条边界没了"
-    # P1：条数窗口的唯一存储改住 `budget.msg_window`（role_zero 里 `memory_k` 只剩转发属性）——
-    # 本格钉的形状不变（取尾播种），只是取值路径跟着重构走。
-    assert "[-self.budget.msg_window:]" in ast.unparse(sets[0]), f"⑤ 播种没取尾：{ast.unparse(sets[0])}"
+               and ast.unparse(n.test) == "not self.memory.storage" and calls[0] in list(ast.walk(n))]
+    assert guarded, "⑤ 播种调用不在 `if not self.memory.storage:` 块里 ⇒「同进程热路径逐字不变」这条边界没了"
+    tree2 = ast.parse(src)
+    keep_src = ast.unparse(next(n for n in ast.walk(tree2)
+                                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                and n.name == "_seed_keep"))
+    assert "compacted_upto" in keep_src, f"⑤ 播种条数没接游标（P2 的幂等约束就是它）：{keep_src}"
+    seed_src = ast.unparse(next(n for n in ast.walk(tree2)
+                                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                and n.name == "_seed_from_journal"))
+    assert "[-keep:]" in seed_src, f"⑤ 播种没取尾：{seed_src}"
 
     # ---- ⑥ 阳性对照：同进程连跑两激活，哨兵不许被播种盖掉 ----
     async def _hot_path():

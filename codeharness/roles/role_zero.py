@@ -6,7 +6,7 @@ ask_human(:456)/reply_to_human(:465)/_end(:474) → interrupt/记录/END。
 纯问函数，命中=跳过模型；默认全关，`EXP_POOL__ENABLED/ENABLE_READ/ENABLE_WRITE` 开）。"""
 import asyncio
 import json
-from codeharness.utils.text import clip   # R7
+from codeharness.utils.text import clip, compact_note   # R7 / P2
 from datetime import datetime
 from typing import ClassVar, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -105,6 +105,9 @@ class RoleZero:
         # P0：截窗静默丢失计数的实例水位——已计入 `silent_lost` 的「离开窗口条数」到这为止，
         # 只数增量、不把已计批次重数（口径见 _compress；实例重建后从 0 起，播种后的窗口不含旧账）。
         self._silent_marked = 0
+        # P2：T1 的运行计数（实例态、会话级）：每场压缩次数上限与摘要连败（成功清零、2 连败停 T1）。
+        self._t1_count = 0
+        self._summary_fails = 0
         # 计划状态机（接线台账 #10）：schema.Plan 从此有运行时读者——源 tool_execution_map
         # :121-124 的 Plan.* 四命令吃它。C71（口径 a）起 plan **不住实例**：真身随子图 state
         # 走（RoleZeroState.plan）、每激活一份副本、收口经 as_node 写回外层 TeamState.plans
@@ -207,29 +210,45 @@ class RoleZero:
     async def _compress(self):
         """超窗：窗口外那截按源的分工两路走——逐字引用进 Qdrant(ltm)，背景理解进摘要(brain)。
 
-        P0：把「无归档去路」这一支拆出来单独记账——消息离开工作窗口却没有 brain/ltm 接收
-        （`build_hired_role` 装出来的形状）时，它们不进摘要、不进逐字归档，模型此后看不见＝
-        **静默丢失**。行为与本拆分之前逐字一致（不裁 storage、不摘要、不抛），只多一笔
-        `silent_lost`（条数，走增量口径：只数新离开窗口的，已计批次不重数——实例水位
-        `_silent_marked`）与一行可 grep 告警。PLAN 的唯一硬指标是「静默丢失计数恒为 0」。"""
-        n_out = len(self.memory.storage) - self.budget.msg_window
-        if n_out <= 0:
-            return
+        P0 的「无归档去路 ⇒ 静默丢失计数」语义保留（`_note_silent_loss`）；P2 在此之上加
+        **T1 主动压缩**（PLAN 已定数，判据 s5 t59/t60 钉住）：
+        - 双判据：**水位 ≥ 60%**（storage 全量 token ÷ 预算）**或** 条数 > 窗口（旧路，不删）；
+        - 驱逐集：T1 从最老往新累计到「剩余 ≈ 40% 预算」；条数旧路保 `msg_window` 条；
+          **最新一条永不驱逐**（否则模型看不见自己刚做了什么）；
+        - 三闸：水位 60%（触发）/ 收益 ≥15 个百分点（压完得真降幅，白摘白写不压）/ 每场 ≤8 次；
+          连续 2 次摘要失败 ⇒ 本场停 T1（退化为既有的网关 T2 闸）；
+        - 游标：摘要成功后 `brain.compacted_upto += 已摘条数`（断点续跑的幂等凭证）；
+        - 事件：`kind=context name=compact value={before, after, freed, evicted_n}`（非块通道）。
+        两路共用同一条「写腿 → 落盘 → 摘要 → 回滚」链（C150 语义未动）。"""
+        from codeharness.provider.context_budget import T1_MAX_PER_RUN
+        from codeharness.report import emit_event
+
+        budget = self.budget
+        n_out = len(self.memory.storage) - budget.msg_window
         if self.brain is None and self.ltm is None:
-            newly = n_out - self._silent_marked
-            if newly > 0:
-                self._silent_marked = n_out
-                cm = getattr(self.llm, "cost_manager", None)
-                total = newly
-                if cm is not None:
-                    cm.silent_lost += newly
-                    total = cm.silent_lost
-                logger.warning(f"[silent-lost] {self.profile['name']}：{newly} 条消息离开工作窗口"
-                               f"（msg_window={self.budget.msg_window}）且无归档去路（brain/ltm 均未挂）——"
-                               f"不进摘要、不进逐字归档，模型此后看不到它们（本场累计 {total} 条）")
+            if n_out > 0:
+                self._note_silent_loss(n_out)
             return
-        evicted = self.memory.storage[:-self.budget.msg_window]
-        self.memory.storage = self.memory.storage[-self.budget.msg_window:]
+        # ① 双判据 + 三闸 → 驱逐条数 m（两路取更激进者）
+        before_tokens = self._tokens_of(self.memory.storage)
+        plan_t1 = 0
+        if budget.t1_triggered(budget.water(before_tokens)) \
+                and self._summary_fails < 2 and self._t1_count < T1_MAX_PER_RUN:
+            plan_t1 = self._plan_t1(before_tokens)
+            if plan_t1 > 0:
+                after = budget.water(self._tokens_of(self.memory.storage[plan_t1:]))
+                if not budget.t1_gain_ok(budget.water(before_tokens), after):
+                    plan_t1 = 0                     # 收益闸：不够本就不压
+        if plan_t1 > 0:
+            m = plan_t1                             # _plan_t1 已保「最新一条永不驱逐」
+        elif n_out > 0:
+            m = n_out                               # 条数旧路（不删、无闸；k≥1 ⇒ 天然不碰最新一条）
+        else:
+            return
+        if m <= 0:
+            return
+        evicted = self.memory.storage[:m]
+        self.memory.storage = self.memory.storage[m:]
         if self.ltm is not None:
             try:
                 await self.ltm.overflow(evicted)
@@ -238,16 +257,66 @@ class RoleZero:
                                f"{type(e).__name__}: {e}")
         if self.brain is None:
             return
-        for m in evicted:
-            self.brain.add_history(m)
+        for msg in evicted:
+            self.brain.add_history(msg)
         # C150：驱逐一进 brain 就落盘——旧实现只等 summarize 成功那一次写（还挂 30 分钟死 TTL），
         # 摘要这一发炸了或进程死在半路，窗口外历史就没影了。摘要失败 ValueError 的回滚语义不动。
         await self.brain.dumps(redis_key=self._brain_key())
         try:
             await self.brain.summarize(self.llm, redis_key=self._brain_key())
         except ValueError as e:                     # 摘要没产出不能把记忆丢了——退回原样，下轮再试
+            self._summary_fails += 1                # P2：连败计数（成功清零）——2 连败本场停 T1
             logger.warning(f"{self.profile['name']} 记忆压缩失败，保留窗口外 {len(evicted)} 条不裁剪: {e}")
             self.memory.storage = evicted + self.memory.storage
+            return
+        self._summary_fails = 0
+        # P2：游标与事件——两路都记（条数旧路的驱逐也算「已摘」，重放播种按游标取未摘段）
+        self.brain.compacted_upto += len(evicted)
+        self.brain.is_dirty = True                  # C150 同款：状态变了就自己标脏（dumps 只写脏位）
+        await self.brain.dumps(redis_key=self._brain_key())
+        if plan_t1 > 0:
+            self._t1_count += 1
+        after_tokens = self._tokens_of(self.memory.storage)
+        emit_event("context", name="compact",
+                   value={"before": before_tokens, "after": after_tokens,
+                          "freed": before_tokens - after_tokens, "evicted_n": len(evicted)})
+
+    def _note_silent_loss(self, n_out: int) -> None:
+        """P0：无归档去路（brain/ltm 均未挂）的截窗＝静默丢失——条数（增量口径）+ 可 grep 告警。"""
+        newly = n_out - self._silent_marked
+        if newly > 0:
+            self._silent_marked = n_out
+            cm = getattr(self.llm, "cost_manager", None)
+            total = newly
+            if cm is not None:
+                cm.silent_lost += newly
+                total = cm.silent_lost
+            logger.warning(f"[silent-lost] {self.profile['name']}：{newly} 条消息离开工作窗口"
+                           f"（msg_window={self.budget.msg_window}）且无归档去路（brain/ltm 均未挂）——"
+                           f"不进摘要、不进逐字归档，模型此后看不到它们（本场累计 {total} 条）")
+
+    def _tokens_of(self, msgs) -> int:
+        """一组消息的本地 token 数——水位/收益/事件三个读数的**同一把尺**（utils.token_counter，
+        与网关计数同源：model 取会话 cfg，未知模型回落 cl100k——存量近似值，不当计费口径引用）。"""
+        from codeharness.utils.token_counter import count_message_tokens
+        model = str(getattr(getattr(self.llm, "cfg", None), "model", "") or "")
+        rows = [{"role": str(getattr(m, "role", "") or "user"),
+                 "content": str(getattr(m, "content", ""))} for m in msgs]
+        return count_message_tokens(rows, model)
+
+    def _plan_t1(self, before_tokens: int) -> int:
+        """T1 驱逐计划：从最老往新累计 token，直到剩余 ≲ 40% 预算；返回驱逐条数（最新一条不驱逐）。"""
+        from codeharness.provider.context_budget import T1_TARGET
+        excess = before_tokens - T1_TARGET * self.budget.token_limit
+        if excess <= 0:
+            return 0
+        acc, m = 0, 0
+        for msg in self.memory.storage:
+            if acc >= excess:
+                break
+            acc += self._tokens_of([msg])
+            m += 1
+        return min(m, max(len(self.memory.storage) - 1, 0))
 
     async def _ltm_recall(self, task: str) -> str:
         """新任务先召回同项目的历史（源 _retrieve_experience:449 的位置）。
@@ -269,10 +338,30 @@ class RoleZero:
     def _context_messages(self) -> list:
         out = []
         if self.brain is not None and self.brain.historical_summary:
-            out.append(SystemMessage(content=f"[历史摘要] {self.brain.historical_summary}"))
+            # P2：摘要尾部挂「已压缩 N 条」锚点（与 clip 的截断标记同族、只数事实；不写「可检索回」——
+            # 读腿现网读数下那是在引导模型去查一个查不到的东西）。N 就是 compacted_upto 游标本身。
+            note = compact_note(self.brain.compacted_upto) if self.brain.compacted_upto > 0 else ""
+            out.append(SystemMessage(content=f"[历史摘要] {self.brain.historical_summary}{note}"))
         for m in self.memory.get(self.budget.msg_window):
             out.append(AIMessage(content=m.content) if m.role == "assistant" else HumanMessage(content=m.content))
         return out
+
+    def _seed_keep(self, journal: list) -> int:
+        """P2：播种取尾的条数——按 `compacted_upto` 取 journal 的「未摘部分」（token 口径驱逐后
+        保留段可能 ≠ 条数窗口；按 k 取会把已摘的灌回窗口、下轮再摘一遍）；游标不可用
+        （brain 缺/未加载/为 0）退回条数窗口——旧兜底，与改前同行为。"""
+        n = len(journal)
+        if n == 0:
+            return 0
+        if self.brain is not None and self.brain.compacted_upto > 0:
+            return max(1, n - self.brain.compacted_upto)
+        return min(n, self.budget.msg_window)
+
+    def _seed_from_journal(self, journal: list) -> None:
+        """`as_node._run` 的播种出口（P2 起按游标取未摘段；单独提出来给判据直接打——真图那层
+        由 s16 t13 盯）。"""
+        keep = self._seed_keep(journal)
+        self.memory.storage = list(journal)[-keep:] if keep else []
 
     @property
     def memory_k(self) -> int:
@@ -617,10 +706,15 @@ class RoleZero:
             # 照 C71 的形状走外层通道，不新造机制也不往实例槽塞：键用现成的 `TeamState.memories`
             # （`merge_memories`，经典线 `agent.py:320/323` 在用、动态线此前从没写过它），按名播种、收口按名写回。
             # 两条边界：① **只在新建实例（storage 为空）时播** ⇒ 同进程热路径逐字不变，零回归面；
-            # ② 只取尾部 `budget.msg_window` 条 —— journal 是并集只增、`_compress` 裁掉的那些也留在里面，
-            # 整份灌回来会让 `_compress` 把同一批消息二次溢写给 brain/ltm。
+            # ② P2：播种按 `compacted_upto` 游标取 journal 的「未摘部分」（token 口径驱逐后保留段
+            # 可能 ≠ 条数窗口；按条数窗口取会把已摘的灌回窗口、下轮再摘一遍——摘要出现重复段落）。
             if not self.memory.storage:
-                self.memory.storage = list((state.get("memories") or {}).get(name) or [])[-self.budget.msg_window:]
+                if self.brain is not None and not self._brain_loaded:
+                    # 游标在播种算式里要用——「只恢复一次」的加载挪到这里（_think 的懒加载条件
+                    # 读到已加载即跳过；语义不变，只是提前）。
+                    self._brain_loaded = True
+                    self.brain = await self.brain.loads(self._brain_key())
+                self._seed_from_journal(list((state.get("memories") or {}).get(name) or []))
             # C71（口径 a）：计划状态机住外层 TeamState 键 `plans`（每角色一份、按名覆盖）。
             # 每个激活算出自己的**种子**随子图 state 走（RoleZeroState.plan）：续跑/回报按名
             # 播种外层旧计划（回报清了队长就没法 finish_current_task），新任务不播种（作废，

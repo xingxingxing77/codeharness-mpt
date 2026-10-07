@@ -27,6 +27,10 @@ class BrainMemory(BaseModel):
     knowledge: List[Message] = Field(default_factory=list)
     historical_summary: str = ""
     last_history_id: str = ""
+    # P2：压缩游标——本角色**累计已摘除并入摘要**的消息条数（幂等约束的唯一凭证）。断点续跑时
+    # `_seed_from_journal` 按它取 journal 的「未摘部分」（token 口径驱逐后的保留段可能 ≠ 条数窗口），
+    # 否则已摘的会被灌回窗口、下轮再摘一遍（摘要里出现重复段落，比不摘更坏）。
+    compacted_upto: int = 0
     is_dirty: bool = False
     last_talk: Optional[str] = None
     cacheable: bool = True

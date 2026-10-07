@@ -773,6 +773,11 @@ class SessionRunner:
         bus = self.bus
 
         def sink(event: dict):                    # 普通函数（桥接铁律）
+            # P2：内核事件（非块，带 kind 键——`report.emit_event`）直接上流：不进块逻辑
+            # （不登记落点、不摘槽）；kind 从载荷走，前端对未知 kind 静默忽略且游标照推。
+            if event.get("kind"):
+                bus.publish(sid, **event)
+                return
             # 记一块「现在能收逐片正文的」：内核块在 `async with` 里先开（meta 走到这儿），
             # 它里面那一笔 LLM 调用的散文就投进它；收口即撤。上一版的「整段重发去重」
             # （比一下内核定稿是不是已逐片发过的那句话、是就丢掉）到此作废——逐片走 `live`

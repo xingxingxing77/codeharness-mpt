@@ -2930,6 +2930,196 @@ def t58_exp_point_is_scoped_by_project():
         asyncio.run(gate_store().delete_scope(doc_type="exp", user_id=user))
 
 
+def _t1_role(k=2, limit=0, armed=False, summary="窗口外历史的摘要"):
+    """T1 判据夹具：小窗口 RoleZero（brain 真挂、ltm 不挂——「能写则写」的单腿形状），
+    预算档直接构造在 `role.budget` 上。水位的水 token 走 `llm.count_tokens`（与生产网关同源：
+    token_counter 的本地尺）。"""
+    from codeharness.provider.context_budget import ContextBudget
+
+    role = _role(brain=BrainMemory(), memory_k=k)
+    role.llm = FakeLLM(summary=summary)
+    role.budget = ContextBudget(token_limit=(limit or None), keep_tokens=int((limit or 0) * 0.8),
+                                armed=bool(limit) and armed, msg_window=k,
+                                meter=role.llm.cost_manager)
+    return role
+
+
+def _tok_of(msgs):
+    # 与实现同源的取法：model 空串 ⇒ token_counter 回落 cl100k（生产 cfg.model=step 也走这条回落）
+    from codeharness.utils.token_counter import count_message_tokens
+
+    return count_message_tokens([{"role": m.role, "content": m.content} for m in msgs], "")
+
+
+def t59_compress_t1_dual_trigger_and_brakes():
+    """P2：`_compress` 的 T1 双判据与防抖三闸（水位 60% / 收益 15pp / 每场 8 次 / 连败 2 次退化）。
+
+    口径（PLAN 已定，判据在此钉死）：「水位」＝**storage 全量的本地 token 数 ÷ 预算**
+    （与条数判据同一对象的两个量纲：条数 > memory_k 是旧路、token ≥ 60% 是 T1）；
+    T1 驱逐到「剩余 ≈ 40% 预算」、**最新一条永不驱逐**；收益 = 水位下降的百分点，<15pp 弃压；
+    T1 每场 ≤ 8 次；连续 2 次摘要失败 ⇒ 本场停 T1（退化为既有的网关 T2 闸）。
+    本格五节：① 水位触发（含驱逐保真与事件/游标）；② 条数旧路不删（无预算档逐字保旧行为）；
+    ③ 收益闸弃压；④ 上限 8；⑤ 连败退化。
+    """
+    if not live_redis():
+        print("  t59 跳过（无 Redis）")
+        return
+
+    from codeharness.runtime import REPORT_SINK
+
+    CURRENT_PROJECT.set("s5_mem_session")
+
+    # ① 水位触发：造 ~1290 token 的 storage（limit=1000 ⇒ 水位 >1）⇒ 驱逐到 ≤40%
+    #    （口径：水位 = storage 全量本地 token ÷ 预算——cl100k 回落尺下中文 ~2 token/字）
+    role = _t1_role(k=50, limit=1000, armed=True)
+    for i in range(10):
+        role.memory.add(Message(content=f"第{i}条 " + "甲" * 60, role="user"))
+    key = role._brain_key()
+    KEYS.append(key)
+    sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                     db=settings.redis.db).delete(key)
+    before_n = len(role.memory.storage)
+    tok_all = _tok_of(role.memory.storage)
+    assert tok_all / 1000 >= 0.6, f"夹具前提失守：水位 {tok_all}/1000 < 60%"
+    last = role.memory.storage[-1].content
+    events = []
+    tok_sink = REPORT_SINK.set(lambda e: events.append(e))
+    try:
+        asyncio.run(role._compress())
+    finally:
+        REPORT_SINK.reset(tok_sink)
+    after_tok = _tok_of(role.memory.storage)
+    assert after_tok <= 0.40 * 1000, f"①失效：驱逐后水位 {after_tok}/1000 没压回 40%"
+    assert role.memory.storage and role.memory.storage[-1].content == last, \
+        "①失效：最新一条被驱逐了（模型将看不见自己刚做了什么）"
+    ev = [e for e in events if e.get("kind") == "context" and e.get("name") == "compact"]
+    assert ev, f"①失效：没发 kind=context/name=compact 事件：{events}"
+    v = ev[0].get("value") or {}
+    assert set(v) == {"before", "after", "freed", "evicted_n"}, f"①事件形状漂了：{v}"
+    assert v["before"] == tok_all and v["after"] == after_tok and v["freed"] == tok_all - after_tok, \
+        f"①事件读数不实（{v} vs before={tok_all}/after={after_tok}）"
+    assert v["evicted_n"] == before_n - len(role.memory.storage), f"①evicted_n 不对：{v}"
+    assert role.brain.compacted_upto == v["evicted_n"], \
+        f"①游标没按已摘条数累加：{role.brain.compacted_upto} vs {v['evicted_n']}"
+
+    # ①b 最新一条永不驱逐（极限档：预算小到该驱逐到只剩最新一条，保护仍生效）
+    lim = _t1_role(k=50, limit=100, armed=True)
+    for i in range(10):
+        lim.memory.add(Message(content=f"L{i} " + "丁" * 60, role="user"))
+    last_lim = lim.memory.storage[-1].content
+    asyncio.run(lim._compress())
+    assert len(lim.memory.storage) == 1 and lim.memory.storage[0].content == last_lim, \
+        f"①b失效：最新一条保护没生效（剩 {len(lim.memory.storage)} 条）"
+
+    # ② 条数旧路不删：无预算档 ⇒ 只条数判据、保 k 条（与改前逐字）
+    old = _t1_role(k=2, limit=0)
+    for i in range(5):
+        old.memory.add(Message(content=f"o{i}", role="user"))
+    asyncio.run(old._compress())
+    assert [m.content for m in old.memory.storage] == ["o3", "o4"], \
+        f"②失效：无预算档的条数旧路被改了：{[m.content for m in old.memory.storage]}"
+    assert old.brain.compacted_upto == 3, f"②条数路的游标没累加：{old.brain.compacted_upto}"
+
+    # ③ 收益闸：巨长尾消息使「驱逐老的也降不下 15pp」⇒ 弃压（storage/游标/事件全不动）
+    g = _t1_role(k=50, limit=1000, armed=True)
+    for i in range(3):
+        g.memory.add(Message(content=f"短{i}", role="user"))
+    g.memory.add(Message(content="巨" * 700, role="user"))
+    assert _tok_of(g.memory.storage) / 1000 >= 0.6, "③夹具前提失守"
+    snap_before = [m.content for m in g.memory.storage]
+    events2 = []
+    tok_sink2 = REPORT_SINK.set(lambda e: events2.append(e))
+    try:
+        asyncio.run(g._compress())
+    finally:
+        REPORT_SINK.reset(tok_sink2)
+    assert [m.content for m in g.memory.storage] == snap_before and g.brain.compacted_upto == 0, \
+        "③失效：收益不足 15pp 却压了（白摘白写）"
+    assert not [e for e in events2 if e.get("name") == "compact"], "③失效：弃压却发了 compact 事件"
+
+    # ④ 每场上限 8 次：计数到顶后水位再高也不 T1
+    c = _t1_role(k=50, limit=1000, armed=True)
+    for i in range(10):
+        c.memory.add(Message(content=f"c{i} " + "乙" * 60, role="user"))
+    c._t1_count = 8
+    snap_c = len(c.memory.storage)
+    asyncio.run(c._compress())
+    assert len(c.memory.storage) == snap_c, "④失效：T1 超过每场 8 次的上限还在压"
+
+    # ⑤ 连败退化：连续 2 次摘要失败 ⇒ 本场停 T1（回滚语义照旧——storage 不动）
+    class DeadSummarizer:
+        async def aask(self, msg, system_msgs=None, stream=False, tag="", **kw) -> str:
+            return ""
+
+    d = _t1_role(k=50, limit=1000, armed=True)
+    for i in range(10):
+        d.memory.add(Message(content=f"d{i} " + "丙" * 60, role="user"))
+    d.llm = DeadSummarizer()
+    asyncio.run(d._compress())
+    asyncio.run(d._compress())
+    assert len(d.memory.storage) == 10 and d._summary_fails >= 2, \
+        f"⑤前提失守：败了 {d._summary_fails} 次、storage={len(d.memory.storage)}"
+    d.llm = FakeLLM(summary="恢复了")
+    asyncio.run(d._compress())
+    assert len(d.memory.storage) == 10, \
+        "⑤失效：连续 2 次摘要失败后 T1 没停用（又一次白摘）"
+    print("  ok  t59 T1 双判据+三闸：水位触发（保最新/事件/游标）/ 条数旧路 / 收益闸弃压 / 上限 8 / 连败退化")
+
+
+def t60_compact_cursor_makes_replay_idempotent():
+    """P2：`compacted_upto` 幂等游标——断点续跑把同一批历史摘两遍的防线（PLAN 第九节）。
+
+    机制：游标 = 本角色**累计已摘条数**；播种（`_seed_from_journal`）按游标取 journal 的
+    「未摘部分」而不再一律取尾部 k 条——token 口径驱逐后保留段可能 ≠ k 条，且重放时
+    （journal 是并集只增、含已摘段）按 k 取会把已摘的灌回窗口、下轮再摘一遍（摘要里出现重复段落）。
+    两节：① 播种按游标取（含「游标不可用退回条数窗口」的旧兜底）；② 重放一轮：已摘段不回窗口、
+    新压只摘新消息（摘要输入不含重复）。
+    """
+    if not live_redis():
+        print("  t60 跳过（无 Redis）")
+        return
+
+    CURRENT_PROJECT.set("s5_mem_session")
+
+    # ① 播种算式（游标法与旧兜底必须有**区分度**：journal 长度 ≠ 游标 + 条数窗口）
+    s = _t1_role(k=2, limit=0)
+    s.brain.compacted_upto = 3
+    s._seed_from_journal([Message(content=f"j{i}") for i in range(10)])
+    assert [m.content for m in s.memory.storage] == [f"j{i}" for i in range(3, 10)], \
+        f"①失效：按游标播种没取「未摘部分」：{[m.content for m in s.memory.storage]}"
+    s2 = _t1_role(k=2, limit=0)
+    s2._seed_from_journal([Message(content=f"j{i}") for i in range(10)])
+    assert [m.content for m in s2.memory.storage] == ["j8", "j9"], \
+        "①失效：游标为 0（新场）没有退回条数窗口（旧兜底）"
+
+    # ② 重放一轮：首跑摘 3 条 ⇒ 模拟断点续跑（新实例 + 游标从 Redis 恢复 + journal = 历史∪新消息）
+    r = _t1_role(k=2, limit=0)
+    key = r._brain_key()
+    KEYS.append(key)
+    sync_redis.Redis(host=settings.redis.host, port=settings.redis.port,
+                     db=settings.redis.db).delete(key)
+    original = [Message(content=f"c{i}结果" + "长" * 300, role="user") for i in range(5)]
+    for m in original:
+        r.memory.add(m)
+    asyncio.run(r._compress())
+    assert r.brain.compacted_upto == 3 and len(r.memory.storage) == 2, "②前提失守：首跑没摘 3 条"
+
+    r2 = _t1_role(k=2, limit=0)
+    r2.brain = asyncio.run(BrainMemory().loads(key))          # 断点续跑：游标从 Redis 恢复
+    assert r2.brain.compacted_upto == 3, "②游标没持久化（dumps 漏了它的脏位？）"
+    journal = original + [Message(content=f"x{i}压缩后新加的", role="user") for i in (1, 2)]
+    r2._seed_from_journal(journal)                             # journal 并集只增：含已摘 + 压缩后新消息
+    assert [m.content for m in r2.memory.storage] == [m.content for m in original[-2:]] + \
+        [f"x{i}压缩后新加的" for i in (1, 2)], \
+        f"②失效：重放播种要么灌回了已摘的、要么丢了压缩后新消息：{[m.content[:8] for m in r2.memory.storage]}"
+    r2.memory.add(Message(content="新结果", role="user"))
+    asyncio.run(r2._compress())                                # 再压：本轮该摘 c3（最早的新面孔）
+    fed = "\n".join(str(p) for p in r2.llm.payloads)
+    assert "c3结果" in fed, f"②本轮该摘的 c3 没被喂给摘要器：{fed[:200]!r}"
+    assert "c0结果" not in fed, "②失效：已摘的 c0 在重放后被再摘一遍（摘要将出现重复段落）"
+    print("  ok  t60 compacted_upto 幂等游标：播种按游标取未摘段 + 重放不重摘（新压只摘新面孔）")
+
+
 def main():
     checks = [t1_redis_roundtrip_and_expiry,
  t2_redis_down_degrades_to_none,
@@ -2976,7 +3166,8 @@ def main():
               t52_debug_logs_carry_lengths_not_payloads,
               t53_exp_score_wiring_and_default_off, t54_exp_quality_score_roundtrip_on_qdrant,
               t55_exp_tag_carries_role_identity, t56_exp_store_search_ensures_its_collection,
-              t57_decision_key_drops_scaffold, t58_exp_point_is_scoped_by_project]
+              t57_decision_key_drops_scaffold, t58_exp_point_is_scoped_by_project,
+              t59_compress_t1_dual_trigger_and_brakes, t60_compact_cursor_makes_replay_idempotent]
     if not live_redis():
         print("⚠ 没连上 Redis：依赖它的组会跳过，降级路径（t2）仍会验。Redis 是可选依赖。")
     if not live_qdrant():

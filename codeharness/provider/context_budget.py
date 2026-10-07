@@ -15,6 +15,12 @@ from dataclasses import dataclass
 
 from codeharness.configs.compress_msg_config import CompressType
 
+# P2：T1 主动压缩的三闸与目标（已定数，不是可调参数——改这些数要先拍）。
+T1_TRIGGER = 0.60          # 触发水位（storage 全量 token ÷ 预算）
+T1_TARGET = 0.40           # 目标压回水位
+T1_MIN_GAIN = 0.15         # 最小收益（水位下降的百分点；不够本就不压）
+T1_MAX_PER_RUN = 8         # 每场 T1 次数上限
+
 
 @dataclass(frozen=True)
 class ContextBudget:
@@ -51,6 +57,18 @@ class ContextBudget:
     def should_compress(self, tokens: int) -> bool:
         """token 判据的唯一定义点（gateway 的闸口）：`armed=False`（契约休眠）恒 False。"""
         return self.armed and tokens > self.keep_tokens
+
+    def water(self, tokens: int) -> float:
+        """水位：storage 全量的本地 token 数 ÷ 预算。未设预算 ⇒ 0.0（契约休眠）。"""
+        return (tokens / self.token_limit) if self.token_limit else 0.0
+
+    def t1_triggered(self, water: float) -> bool:
+        """T1 触发：契约通电 且 水位 ≥ 60%。（条数判据不在此——它不删、无闸。）"""
+        return self.armed and water >= T1_TRIGGER
+
+    def t1_gain_ok(self, before: float, after: float) -> bool:
+        """收益闸：压完水位得降 ≥15 个百分点（不够本就是白摘白写，不压）。"""
+        return (before - after) >= T1_MIN_GAIN
 
     def clip_quota(self, chars: int) -> int:
         """clip 的字符额度按 k 换算：**只收紧、不放宽**（k>1 ⇒ n/k；k≤1 ⇒ 原样；k=1 ⇒ 逐字不变）。

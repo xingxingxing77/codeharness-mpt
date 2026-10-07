@@ -78,6 +78,16 @@ def _emit(block, uid: str, name: str, value, role: str = "", extra: Optional[dic
     sink(event)
 
 
+def emit_event(kind: str, name: str = "", value=None, role: str = ""):
+    """内核 → 事件流的**非块**出口（P2）：`sink` 收到带 `kind` 键的 event 时，server 侧
+    `_make_sink` 直接按事件转发（不进块逻辑——不登记落点、不摘槽）。块走 `_emit`（带 block/uuid）、
+    事件走这里——两条通道分开，块渲染器与落点表对事件零感知。前端对未知 kind 静默忽略（游标照推）。"""
+    sink = REPORT_SINK.get()
+    if not sink:
+        return
+    sink({"kind": kind, "name": name, "value": value, "role": role or (_role_name() or "")})
+
+
 class ResourceReporter(BaseModel):
     """Base class for resource reporting.
 
