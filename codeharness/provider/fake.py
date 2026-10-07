@@ -1,7 +1,7 @@
 """FakeLLM：按剧本吐回复，所有单测用它（花不起真钱也跑得起测试）。"""
 from contextlib import contextmanager
 from typing import Optional
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 
@@ -33,6 +33,17 @@ class FakeLLM:
         但不接着它就会在 `_aask(no_stream=True)` 那一族调用点上 TypeError，把整条替身门禁打穿。"""
         msgs = [SystemMessage(content=s) for s in (system_msgs or [])] + [HumanMessage(content=prompt)]
         return (await self.ainvoke(msgs, tag=tag)).content   # 走 ainvoke 才记账（与 LLMGateway.aask 同构）
+
+    async def astream(self, msgs, tag: str = "", **kw):
+        """A2（2026-10-08）起**非流式支路也走 `astream` 收口**（取末块 usage——本端点在每个 chunk 都回
+        usage，直接 `ainvoke` 会让 LangChain 把合并时的累加值记进账，虚高 ≈ 块数），所以替身必须有这条腿。
+        形状与 `ainvoke` 同构：入参记录与记账都不变；分片携带 `response_metadata`，好让网关那一层照旧读得到用量。
+        """
+        self.calls.append(msgs)
+        resp = AIMessage(content=self._next())
+        resp.response_metadata = {"token_usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+        self.cost_manager.add_usage(resp, model="gpt-4o", tag=tag)
+        yield AIMessageChunk(content=resp.content, response_metadata=dict(resp.response_metadata))
 
     def astream_text(self, msgs, tag: str = ""):
         async def gen():

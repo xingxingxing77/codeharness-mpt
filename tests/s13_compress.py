@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 
 from codeharness.configs.llm_config import LLMConfig
 from codeharness.provider.gateway import LLMGateway
@@ -26,7 +26,15 @@ def _mk_gateway(cfg, cm=None):
         captured.append(msgs)
         return AIMessage(content="test response")
 
+    async def mock_astream(msgs, **kw):
+        # 2026-10-08 起**非流式支路也走 `astream` 收口**（`gateway._collect_quiet`：本端点每个 chunk 都回
+        # usage，直接 `ainvoke` 会把 LangChain 合并时的累加值记进账 ⇒ 虚高 ≈ 块数）。抓取点跟着挪——
+        # 只补 `ainvoke` 的话 `cap` 恒空、整组判据变成空转（t1 当场 IndexError）。
+        captured.append(msgs)
+        yield AIMessageChunk(content="test response")
+
     fake_llm.ainvoke = mock_ainvoke
+    fake_llm.astream = mock_astream
     with patch.object(LLMGateway, "_build", return_value=fake_llm):
         gw = LLMGateway(cfg=cfg, cost_manager=cm)
     return gw, captured

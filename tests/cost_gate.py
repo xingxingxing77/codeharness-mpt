@@ -32,6 +32,11 @@ from codeharness.provider.cost import CostManager
 # 也不许把 `E:/tmp` 那种会被清掉的落点当出处。这张表只能靠「读过台账再改代码」长大：
 # 安全闸的每一次加宽都必须出现在 diff 里，这正是它住在源码而不在数据文件里的理由
 # （`storage/` 被 .gitignore:16 整目录忽略，放那儿等于悄悄改数）。
+# ⚠ 2026-10-08：表里的数**来自修前的虚高读数**——那时非流式支路把「本端点每个 chunk 都回的 usage」
+# 按块累加（实测同一发：厂商回执 312 / 我方 19,038），`cost_cny` 因此虚高 1~2 个数量级。该缺陷已修
+# （`provider/gateway.py` 非流式支路改走 `astream` 取末块 usage；判据 `tests/s2_gateway.py::t23`）。
+# **未重测**：留着现值只是**更保守**（闸拒得比实际需要的多），不会误放行；要重标得按修后真读数重跑
+# 同形状，属单独一件（见 `plan/model-gateway.md` §1.12.1 的再基线项）。
 HISTORY: dict[str, list[tuple[float, str]]] = {
     "react": [(0.002652, "plan/frontend.md §1.4 末（09-30，1 发 18s、pt 71/ct 1239）"),
               (0.356093, "plan/model-gateway.md §1.7 第五棒（10-05 事故，pt 45700/ct 154335）")],

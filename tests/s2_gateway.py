@@ -696,6 +696,13 @@ def t15_stream_deadline():
         async def ainvoke(self, msgs, **kw):
             raise APITimeoutError(request=None)
 
+        async def astream(self, msgs, **kw):
+            # 2026-10-08 起**非流式支路也走 astream 收口**（`_collect_quiet`：本端点每块都回 usage，
+            # 直接 `ainvoke` 会把 LangChain 合并时的累加值记进账 ⇒ 虚高 ≈ 块数；见 gateway.py 那段注释
+            # 与 t23）。SDK 层的超时形状不变，只是入口方法换了——这一格要的「有一声账差」照旧。
+            raise APITimeoutError(request=None)
+            yield                                       # 让它是个 async generator（不 yield 就不是）
+
     rec2, saved2 = _Rec(), _gwmod.logger
     _gwmod.logger = rec2
     try:
@@ -1172,7 +1179,9 @@ def t19_structured_goes_through_compression():
     # ③ ainvoke 同一闸
     g3 = _gw(cfg_big)
     asyncio.run(g3.ainvoke(big_msgs(), tag="t19"))
-    got3 = next(c[1] for c in g3._model.calls if c[0] == "ainvoke")
+    # 2026-10-08 起非流式支路走 `astream` 收口（取末块 usage；见 gateway.py 与 t23）⇒ 桩上记的是
+    # `astream` 那条。判据要的是「同一份被裁过的 prompt」，与入口方法无关。
+    got3 = next(c[1] for c in g3._model.calls if c[0] == "astream")
     assert counts(got3) <= keep, f"ainvoke 路反而没裁了（总量 {counts(got3)} > keep {keep}）——两路没同源"
     assert isinstance(got3[0], SystemMessage) and got3[0].content == "你是助手。", got3[0]
 
@@ -1266,6 +1275,114 @@ def t22_c81_serializer_noise_filter_is_scoped():
             del warnings._c81_seam_filter
 
 
+# ---------- 23. usage 不许按块累加（本端点在每个 chunk 都回 usage） ----------
+def t23_usage_not_summed_across_chunks():
+    """端点会在**每一个 chunk** 上都回 usage（OpenAI 规范只该末块回一次），而 LangChain 合并 chunk 时
+    把每块的 `usage_metadata` 相加 ⇒ 只要这次调用**内部走了流**，`resp.usage_metadata` 就 ≈ 真值 × 块数。
+
+    实测（2026-10-08，真端点同一发）：裸 SDK 报 `prompt_tokens=312`，而 `ChatOpenAI(streaming=True)`
+    的 `ainvoke` 报 **19,038**；`streaming=False` 才是 312。产线 `cfg.stream=True` ⇒
+    `gateway.ainvoke` 的**非流式支路**（`_acall(model.ainvoke)`）全线命中，账目虚高 1~2 个数量级。
+
+    两格互为对照，都打在**真 HTTP 往返**上：
+      ① 非流式支路（`ainvoke` 默认）→ 记账必须等于端点真值（**改前红**：读到的是 Σ 块）；
+      ② 流式支路（`ainvoke(stream=True)`）→ 取末块，同样等于真值（改前改后都绿——证明①的红
+         来自非流式支路，不是桩本身有毛病）。
+    """
+    import contextlib
+    import io as _io
+    import json as _j
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    USAGE = {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11}
+    CHUNKS = 3                                     # 每块都带 usage ⇒ 累加值 = 7×3
+
+    class _Stub(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("content-length") or 0)
+            req = _j.loads(self.rfile.read(n) or b"{}")
+            self.send_response(200)
+            self.send_header("Connection", "close")
+            if req.get("stream"):
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+
+                def chunk(delta, usage=None, reason=None):
+                    body = {"id": "chatcmpl-s2-23", "object": "chat.completion.chunk",
+                            "created": 1790000000, "model": "gpt-4o",
+                            "choices": [{"index": 0, "delta": delta, "finish_reason": reason}]}
+                    if usage is not None:              # ← 本端点的形状：**每一块**都挂 usage
+                        body["usage"] = usage
+                    return ("data: " + _j.dumps(body, ensure_ascii=False) + "\n\n").encode()
+
+                self.wfile.write(chunk({"role": "assistant", "content": ""}, USAGE))
+                for i in range(CHUNKS):
+                    self.wfile.write(chunk({"content": f"第{i}片"}, USAGE))
+                self.wfile.write(chunk({}, None, "stop"))
+                self.wfile.write(b"data: [DONE]\n\n")
+            else:
+                out = _j.dumps({"id": "chatcmpl-s2-23", "object": "chat.completion",
+                                "created": 1790000000, "model": "gpt-4o",
+                                "choices": [{"index": 0, "finish_reason": "stop",
+                                             "message": {"role": "assistant", "content": "好的"}}],
+                                "usage": USAGE}, ensure_ascii=False).encode()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Stub)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def _run(stream):
+        from codeharness import logs as _logs
+        orig = _logs._llm_stream_log
+        _logs.set_llm_stream_logfunc(lambda *_: None)
+        buf = _io.StringIO()
+
+        async def go():
+            loop = asyncio.get_running_loop()
+            default = loop.get_exception_handler()
+
+            def _h(_l, ctx):
+                if "athrow" not in str(ctx.get("message", "")):
+                    (default or _l.default_exception_handler)(_l, ctx)
+            loop.set_exception_handler(_h)
+            cm = CostManager()
+            # ⚠ 建网关一律 `stream=True`（**产线默认档**）；变的只是**这一笔调用**要不要流
+            #   ——缺陷的形状正是「流式模型 + 非流式调用」，两者一起传 False 就照不出来。
+            gw = LLMGateway(cfg=LLMConfig(api_type=LLMType.OPENAI,
+                                          base_url=f"http://127.0.0.1:{port}/v1",
+                                          api_key="stub", model="gpt-4o", max_token=64,
+                                          stream=True), cost_manager=cm)
+            try:
+                return cm, await gw.ainvoke([HumanMessage(content="随便说一句")], stream=stream)
+            finally:
+                loop.set_exception_handler(None)
+
+        try:
+            with contextlib.redirect_stderr(buf):
+                return asyncio.run(go())
+        finally:
+            _logs.set_llm_stream_logfunc(orig)
+
+    for stream, tag in ((False, "非流式支路"), (True, "流式支路")):
+        cm, resp = _run(stream)
+        pt, ct = cm.total_prompt_tokens, cm.total_completion_tokens
+        if (pt, ct) != (USAGE["prompt_tokens"], USAGE["completion_tokens"]):
+            _fail(f"23. {tag} 的记账不是端点真值：读到 pt={pt}/ct={ct}，"
+                  f"真值应为 {USAGE['prompt_tokens']}/{USAGE['completion_tokens']}"
+                  f"（pt={USAGE['prompt_tokens'] * (CHUNKS + 1)} 那一档是本端点每块都回 usage 被累加的读数）"
+                  f"—— {cm.get_costs()}")
+        if not resp.content:
+            _fail(f"23. {tag} 这一发连正文都没回来，判据是空转")
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
@@ -1276,7 +1393,8 @@ def main():
               t19_structured_goes_through_compression,
               t20_c79_token_counting_never_leaves_the_process,
               t21_c80_llm_config_terminal_states,
-              t22_c81_serializer_noise_filter_is_scoped]
+              t22_c81_serializer_noise_filter_is_scoped,
+              t23_usage_not_summed_across_chunks]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

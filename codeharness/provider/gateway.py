@@ -302,8 +302,30 @@ class LLMGateway:
                     self._timeout_lost("流式", deadline, tag)   # B6：这一发大概率花了钱，账上却是零
                 raise
         else:
+            # 非流式支路：**仍然走 `astream` 收口，但不发布逐片**（`log_llm_stream` 不调）。
+            # 为什么不直接 `model.ainvoke`（2026-10-08 实测，判据 `s2 t23`）：本端点在**每一个 chunk**
+            # 上都回 usage（OpenAI 规范只该末块回一次），而 `cfg.stream=True` 建出来的模型其 `ainvoke`
+            # 会**内部走流**并让 LangChain 逐块累加 `usage_metadata` ⇒ 记账 ≈ 真值 × 块数（实测同一发：
+            # 裸 SDK 报 `pt=312`，`ainvoke` 报 **19,038**）。走 astream 自己收、取**末块** usage 就是真值。
+            # ⚠ 两条别踩：① 不能改成「显式 `stream=False`」——那会让本支路变成**真非流式请求**，
+            # `on_chat_model_stream` 事件随之归零（实测 36→0），而 C177 那套「非流式调用照旧发 token 事件、
+            # 靠 tag 决定上不上屏」正是建在这上面（`s8_runner_meter t20` ①③ 钉着）；② 不能把模型建成
+            # `streaming=False`，同样归零。
+            async def _collect_quiet():
+                pieces, usage, meta = [], None, {}
+                async for chunk in model.astream(msgs):
+                    if getattr(chunk, "usage_metadata", None):
+                        usage = chunk.usage_metadata    # 同流式支路：取最后一块（本端点每块都带上）
+                    meta = getattr(chunk, "response_metadata", None) or meta
+                    if chunk.content:
+                        pieces.append(chunk.content)
+                resp = AIMessage(content="".join(pieces), response_metadata=meta)
+                if usage is not None:
+                    resp.usage_metadata = usage
+                return resp
+
             try:
-                resp = await _acall(model.ainvoke, msgs, timeout=deadline)
+                resp = await _acall(_collect_quiet, timeout=deadline)
             except Exception as exc:                          # 同一族（重试耗尽后那一发同样没有回执）
                 if _is_timeout(exc):
                     self._timeout_lost("非流式", deadline, tag)
