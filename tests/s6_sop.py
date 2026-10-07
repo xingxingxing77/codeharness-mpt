@@ -211,9 +211,12 @@ def t5_write_design_branches():
         assert (store.root / RepoName.RESOURCES / "seq_flow.mmd").exists(), "方案C 的 .mmd 没落盘"
         asked = str(llm.calls[0])
         assert "classDiagram" in asked and "Designing is complete" in out.content
+        # C185（P4）：schema 多了**自报字段** `facts`（跨阶段事实清单的入口），键集跟着长一个。
+        # 这一格钉的是「产出载荷的键 = schema 的键」⇒ 合法加字段就必须跟改（不是判据放松）；
+        # 反过来，哪天这里少一个键或多一个不在名单里的键，仍然当场红。
         assert set(out.instruct_content) == {"implementation_approach", "file_list",
                                              "data_structures_and_interfaces", "program_call_flow",
-                                             "anything_unclear"}, out.instruct_content.keys()
+                                             "anything_unclear", "facts"}, out.instruct_content.keys()
         llm2 = FakeLLM([DESIGN_JSON])
         A.run(WriteDesign(llm=llm2).run(Message(content="改设计了")))     # 旧 design.json 在 → REFINED
         asked2 = str(llm2.calls[0])

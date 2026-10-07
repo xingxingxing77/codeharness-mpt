@@ -73,6 +73,11 @@ class PRDOutput(BaseModel):
     prose_fields: ClassVar[tuple] = ("product_goals", "user_stories", "competitive_analysis",
                                      "requirement_analysis", "ui_design_draft", "anything_unclear")
 
+    # C185（P4）：跨阶段**自报**事实清单——由 `Action._ask` 追问、`Agent._act` 收割进图 state、
+    # 再经 `FACTS_CONTEXT` 注入后续阶段的 prompt。**不是必填**（空列表不触发补问，见 `_structured`）。
+    facts: list[str] = Field(default_factory=list,
+                             description="本阶段定下的关键事实（≤5 条，只写下游必须遵守的结论）")
+
     language: str = "en_us"
     programming_language: str = ""
     original_requirements: str = ""

@@ -35,6 +35,22 @@ def merge_memories(a: dict, b: dict) -> dict:
     return out
 
 
+def merge_facts(a: list, b: list) -> list:
+    """C185（P4）：跨阶段事实清单的 reducer——**追加去重、保序**。理由与 `merge_memories` 同族：
+    同一超步多个角色各自基于**同一快照**返回「快照 + 各自新增」，末写覆盖会静默丢掉前面的新增。
+    条目是短字符串、量级几十条 ⇒ 线性 `in` 去重（同 merge_memories 的 ponytail 口径）。
+    **只增不减**：清单是全场的累积事实，没有删除语义（要收回一条事实得另立件）。"""
+    if not b:
+        return a
+    if not a:
+        return list(b)
+    out = list(a)
+    for x in b:
+        if x not in out:
+            out.append(x)
+    return out
+
+
 def merge_plans(a: dict, b: dict) -> dict:
     """并行 Send 时按名覆盖**每角色的 Plan 状态机**（T7 前半另半件/C71，用户拍 (a)）。
 
@@ -67,6 +83,7 @@ class TeamState(TypedDict):
     messages: Annotated[list, operator.add]        # 全局黑板 = env.history
     memories: Annotated[dict, merge_memories]      # 每角色私有记忆（checkpointer 持久化）
     plans: Annotated[dict, merge_plans]            # 每角色一份 Plan 状态机（C71 口径 a；值=Plan dump 或 None）
+    facts: Annotated[list, merge_facts]            # C185（P4）：跨阶段事实清单——角色**自报**、全场累积、只增不减
     seen: int                                      # 路由游标：黑板已被消费到的条数（router 写，C13）
     undelivered: list                              # 本超步新增、还没投递的那一截（router 算，route 只读）
     debug_rounds: int                              # QA 修复回路上限（参考速查 §2）

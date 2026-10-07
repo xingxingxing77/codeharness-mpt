@@ -281,6 +281,8 @@ def _seeded_ledger(saved: dict):
     cm.last_prompt_tokens = int(saved.get("last_prompt_tokens", 0) or 0)
     cm.peak_prompt_tokens = int(saved.get("peak_prompt_tokens", 0) or 0)
     cm.last_system_tokens = int(saved.get("last_system_tokens", 0) or 0)
+    # C185（P4）：跨阶段事实清单的单独计数同规播种（漏了＝resume 后卡片那一行静默归 0）。
+    cm.last_facts_tokens = int(saved.get("last_facts_tokens", 0) or 0)
     # P0：校准契约两键 + 静默丢失计数同规播种。k 缺省退 **1.0** 不是 0——0 不在合法域（[0.5,4]）里；
     # `calibration_model` 漏播种会让 resume 后第一笔校准读数把 "" 误判成「换模型」而重置。
     cm.calibration_k = float(saved.get("calibration_k") or 1.0)
@@ -312,6 +314,8 @@ def cost_snapshot(cm) -> dict:
             "last_prompt_tokens": getattr(cm, "last_prompt_tokens", 0),
             "peak_prompt_tokens": getattr(cm, "peak_prompt_tokens", 0),
             "last_system_tokens": getattr(cm, "last_system_tokens", 0),
+            # C185（P4）：跨阶段事实清单的单独计数（0 = 这一场还没注入过，不是「注入了 0 字」）
+            "last_facts_tokens": getattr(cm, "last_facts_tokens", 0),
             # P0：校准契约两键 + 静默丢失计数（k 缺省 1.0 不是 0——0 不在 [0.5,4] 合法域里）
             "calibration_k": getattr(cm, "calibration_k", 1.0),
             "calibration_model": getattr(cm, "calibration_model", ""),

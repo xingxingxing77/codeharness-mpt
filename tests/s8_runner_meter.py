@@ -443,6 +443,8 @@ def t8_two_currency_buckets():
                           "recall_failures", "recall_zero_hits", "recall_returned",
                           "overflow_failed", "overflow_written", "invalid_args_calls",
                           "last_prompt_tokens", "peak_prompt_tokens", "last_system_tokens",
+                          # C185（P4）：跨阶段事实清单的单独计数（0 = 这一场还没注入过）
+                          "last_facts_tokens",
                           "calibration_k", "calibration_model", "silent_lost"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
     assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"],

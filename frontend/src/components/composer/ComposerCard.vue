@@ -69,6 +69,9 @@
                    （P0③：估算不冒充真值、差额不冒充直接计量；修法是标注口径，不是再造一把尺）。 -->
               <template v-if="sysTok">
                 <div class="ctxRow"><span class="dot dotSys" />系统提示词（估算）<span class="ctxVal">{{ sysPct }}%</span></div>
+                <!-- C185（P4）：跨阶段事实清单**单独一行**（口径=末笔注入段的 token，后端 `last_facts_tokens`）。
+                     没有它这一行就渲染成 0%（后端计数为 0＝这一场还没注入过），不假报占用。 -->
+                <div class="ctxRow"><span class="dot dotFacts" />跨阶段事实（估算）<span class="ctxVal">{{ factsPct }}%</span></div>
                 <div class="ctxRow"><span class="dot dotRest" />其余对话与工具结果（差额）<span class="ctxVal">{{ restPct }}%</span></div>
               </template>
             </template>
@@ -253,11 +256,18 @@ const chipLabel = computed(() => {
   if (budget.value > 0) return budgetLabel.value
   return '预算未设'
 })
-/** 分类占比：system 段 / used（两组 token 都到齐才算，别拿半份数据拼 100）。 */
+/** 分类占比：system 段 / 跨阶段事实 / used（各组 token 都到齐才算，别拿半份数据拼 100）。
+ *  C185（P4）：事实清单是**单独计数**的第三行（后端 `last_facts_tokens`），它本来是「其余」的一部分
+ *  ⇒ 「其余」要把它减掉，否则三行加起来超过 100%。计数为 0＝这一场还没注入过（不渲染假占用）。 */
 const sysPct = computed(() =>
   sysTok.value && used.value ? Math.min(100, Math.round((sysTok.value / used.value) * 100)) : 0
 )
-const restPct = computed(() => Math.max(0, 100 - sysPct.value))
+const factsPct = computed(() => {
+  const v = cost.value.last_facts_tokens
+  return typeof v === 'number' && v > 0 && used.value
+    ? Math.min(100, Math.round((v / used.value) * 100)) : 0
+})
+const restPct = computed(() => Math.max(0, 100 - sysPct.value - factsPct.value))
 
 /** 免审档 = 「哪些动作不用问我」。文案与后端判定表同源三档
  *  （codeharness/tools/_approval.py），改档位从下一个节点边界起生效。 */
@@ -526,10 +536,15 @@ textarea:disabled {
   background: var(--dsw-static-deepseek-500);
 }
 
+/* C185（P4）：第三颗点复用**同一个 token**、只差一档透明度 —— C184 的「零新增色值」照旧成立。 */
+.dotFacts {
+  background: var(--dsw-static-deepseek-500);
+  opacity: 0.7;
+}
+
 .dotRest {
   background: var(--dsw-static-deepseek-500);
-  opacity: 0.45;
-}
+  opacity: 0.45;}
 
 .ctxModel {
   display: flex;

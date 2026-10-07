@@ -2157,7 +2157,10 @@ def t28_stream_ux_batch():
                  "file_list", "requirement_pool", "competitive_quadrant_chart",
                  "data_structures_and_interfaces", "program_call_flow", "commands",
                  "filename", "task_id", "dependent_task_ids", "required_packages",
-                 "task_list", "action", "command_name"}
+                 "task_list", "action", "command_name",
+                 # C185（P4）：跨阶段事实清单的自报字段——它进的是**图 state**（再注入后续阶段的
+                 # prompt），不是给人读的正文 ⇒ 不上打字机。登记在此正是这一格要的那句「为什么」。
+                 "facts"}
     for schema in (PRDOutput, DesignOutput, ZeroThought, TaskList, ActionChoice):
         spec = schema.model_json_schema()
         # 名单是按键名认的，而抽取器在任意一层都拿「当前层的键名」去比对 ⇒ 校验也得按整棵树认：
@@ -2244,7 +2247,14 @@ def t31_ctx_card_caliber_labels():
         "t31① system 行没标「估算」——本地 tiktoken 尺不许在卡面上冒充厂商真值"
     assert "其余对话与工具结果（差额）" in cc, \
         "t31② 「其余」行没标「差额」——它 = last − system（两把尺相减的派生量），不标就是两尺混着读"
-    _ok("t31", "P0③ 上下文容量卡分类行两把尺如实标注（system=估算、其余=差额），不造第三把尺")
+    # C185（P4）：跨阶段事实清单**单独一行**（后端 `last_facts_tokens`，口径=我方 tiktoken 现数
+    # ⇒ 与 system 行同族，标签也必须带「估算」，不许在卡面上冒充厂商真值）；且「其余」要把它减掉，
+    # 否则三行相加超过 100%（假占用）。
+    assert "跨阶段事实（估算）" in cc and "last_facts_tokens" in cc, \
+        "t31③ 跨阶段事实那一行没了或没标「估算」：事实清单的 token 又混回「其余」（单独计数等于白数）"
+    assert "100 - sysPct.value - factsPct.value" in cc, \
+        "t31③ 「其余」没减掉事实那一份 ⇒ 三行占比相加 > 100%"
+    _ok("t31", "P0③ 上下文容量卡分类行两把尺如实标注（system=估算、其余=差额）+ C185 第三行=跨阶段事实（单独计数）")
 
 
 def main():

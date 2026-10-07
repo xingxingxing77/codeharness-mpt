@@ -1413,6 +1413,67 @@ def t24_calibration_written_from_ratio():
         _fail("24. ② 没回执却收紧了额度")
 
 
+# ---------- 25. C185（P4）：跨阶段事实清单的注入 / 自报指令 / 单独计数 ----------
+def t25_facts_list_injected_and_counted():
+    """P4（形状 a：角色**产出时自报**）在 `_ask` 这唯一出口上的三件事，三格互为对照：
+
+      ① 装了 `FACTS_CONTEXT` ⇒ prompt 末尾多出 `[跨阶段事实]` 段，且这次注入的 token
+         **单独计数**进账本（`last_facts_tokens`，C184 卡的第三行）；
+      ② 不装（空串）⇒ prompt **逐字不变**、计数不动——「改前形态」的对照格；
+      ③ 目标 schema **没声明** `facts` ⇒ 不追问（strict JSON 下多问一句也填不进去）；
+         对照组是声明了的 schema ⇒ 追问句必须出现。
+    """
+    import json as _j
+
+    from tiktoken import get_encoding
+
+    from codeharness.base.action import BaseAction
+    from codeharness.runtime import FACTS_CONTEXT
+    from codeharness.utils.text import FACTS_HINT, render_facts
+
+    class _WithFacts(BaseModel):
+        answer: str = ""
+        facts: list[str] = []
+
+    class _NoFactsField(BaseModel):
+        answer: str = ""
+
+    class _Probe(BaseAction):
+        async def run(self, msg):                      # 不跑图，只借 `_ask` 那条出口
+            return msg
+
+    def _prompt_of(schema, facts_ctx: str) -> tuple[str, int]:
+        llm = FakeLLM([_j.dumps({"answer": "ok", "facts": []})])
+        act = _Probe(name="probe_act", llm=llm)
+        tok = FACTS_CONTEXT.set(facts_ctx)
+        try:
+            asyncio.run(act._ask(schema, "任务正文"))
+        finally:
+            FACTS_CONTEXT.reset(tok)
+        return str(llm.calls[0]), llm.cost_manager.last_facts_tokens
+
+    facts = render_facts(["接口名是 foo()", "用 CLI 不用 web"])
+    p1, n1 = _prompt_of(_WithFacts, facts)
+    if "[跨阶段事实]" not in p1 or "接口名是 foo()" not in p1:
+        _fail(f"25. ① 装了事实清单却没进 prompt：{p1[-200:]!r}")
+    if n1 <= 0 or n1 != len(get_encoding("cl100k_base").encode(facts)):
+        _fail(f"25. ① 事实清单的 token 没被单独计数（C184 卡第三行要的就是这个数）：{n1}")
+    if FACTS_HINT.strip() not in p1:
+        _fail("25. ① 声明了 facts 的 schema 没拿到自报指令")
+
+    p2, n2 = _prompt_of(_WithFacts, "")
+    if "[跨阶段事实]" in p2 or n2 != 0:
+        _fail(f"25. ② 对照失守：没装清单却动了注入段/计数：{n2} {p2[-120:]!r}")
+
+    p3, n3 = _prompt_of(_NoFactsField, facts)
+    if "[跨阶段事实]" not in p3:
+        _fail("25. ③ 没声明的 schema 也该拿到**注入**段（注入与追问是两件事）")
+    if FACTS_HINT.strip() in p3:
+        _fail("25. ③ 没声明 facts 的 schema 也被追问了（多问一句既无效又改 prompt 形态）")
+    if n3 != n1:
+        _fail(f"25. ③ 注入的计数与 schema 无关，两格该同值：{n3} vs {n1}")
+
+
 def main():
     checks = [t1_payload_snapshot, t2_unsupported_api_type, t3_format_msg, t4_single_accounting,
               t5_fake_llm_accounts, t6_source_symbol_surface, t7_repair_combinations,
@@ -1425,7 +1486,8 @@ def main():
               t21_c80_llm_config_terminal_states,
               t22_c81_serializer_noise_filter_is_scoped,
               t23_usage_not_summed_across_chunks,
-              t24_calibration_written_from_ratio]
+              t24_calibration_written_from_ratio,
+              t25_facts_list_injected_and_counted]
     for c in checks:
         c()
         print(f"  ok  {c.__name__}")

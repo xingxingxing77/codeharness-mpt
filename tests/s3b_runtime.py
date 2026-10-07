@@ -991,6 +991,51 @@ def t21_classic_step_card_covers_the_action():
           "＋ 抛异常/被拒/挂起那三笔都留 ok=false 的卡并收口（回喂链逐字不变、挂起照抛）")
 
 
+def t23_facts_cross_stage():
+    """C185（P4）跨阶段事实清单**端到端**（真 `Agent.as_node` 真子图，零花费）。
+
+    三格（互为对照，② 的「有」不能是恒真）：
+      ① 阶段一由动作**自报** facts（走产出 Message 的 `instruct_content`）⇒ 外层返回的 facts 收到它；
+         同时第一阶段的**注入段**必须是空串（那时还没有任何事实）；
+      ② 阶段二拿同一份清单 ⇒ `_act` 经 `FACTS_CONTEXT` 把它注入本阶段动作的 prompt（`[跨阶段事实]` + 逐字那条）；
+      ③ 清单为空那一跑不许凭空长出事实。
+    """
+    import asyncio
+
+    from codeharness.base.action import Action
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.runtime import FACTS_CONTEXT
+    from codeharness.schema import Message
+
+    seen: list[str] = []
+
+    class _WriteX(Action):
+        name: str = "WriteX"
+
+        async def run(self, msg):
+            seen.append(FACTS_CONTEXT.get())      # 记下这一阶段**真正被注入**的那一段
+            return Message(content="做完了", role="assistant", cause_by="WriteX",
+                           instruct_content={"facts": ["接口名是 foo()"]})
+
+    ag = Agent({"name": "PM", "profile": "PM", "goal": "g"}, [_WriteX()], FakeLLM([""]),
+               react_mode="BY_ORDER")
+    _, run = ag.as_node("PM")
+    inbox = [Message(content="需求", cause_by="UserRequirement", sent_from="user")]
+
+    out1 = asyncio.run(run({"_inbox": list(inbox), "memories": {}, "facts": []}))
+    assert "接口名是 foo()" in (out1.get("facts") or []), f"① 自报的事实没被收割：{out1.get('facts')}"
+    assert seen[-1] == "", f"① 第一阶段的注入段该是空串（那时还没有事实）：{seen[-1]!r}"
+
+    asyncio.run(run({"_inbox": list(inbox), "memories": {}, "facts": ["接口名是 foo()"]}))
+    assert "[跨阶段事实]" in seen[-1] and "接口名是 foo()" in seen[-1], \
+        f"② 上一阶段的事实没被注入本阶段的 prompt：{seen[-1]!r}"
+
+    out3 = asyncio.run(run({"_inbox": list(inbox), "memories": {}, "facts": []}))
+    assert (out3.get("facts") or []) == (out1.get("facts") or []), \
+        f"③ 空清单那一跑凭空长了事实：{out3.get('facts')}"
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -1000,6 +1045,7 @@ def main():
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
               t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
               t15_no_dead_state_channels, t16_run_code_named_delivery,
+              t23_facts_cross_stage,
               t17_react_think_survives_a_broken_structured_reply,
               t18_log_file_sink_is_bounded,
               t19_blocked_think_degrades_not_dies,

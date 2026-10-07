@@ -14,6 +14,8 @@ from typing import Any, ClassVar, Iterable, Optional, Type
 
 from pydantic import BaseModel, Field, create_model
 
+from codeharness.utils.text import FACTS_FIELD, FACTS_HINT   # C185（P4）：跨阶段事实清单的自报字段与指令
+
 # 只补空字段的追问模板。刻意不做多轮闲聊，一次问齐。
 _KB_BLOCK = ("[知识库片段]\n{kb}\n"
              "（以上来自本会话知识库，引用其中内容时请连那行的出处一起说；用不上就忽略）")
@@ -82,7 +84,8 @@ class Action(BaseModel):
 
         obj = await self._ask(schema, prompt, system)
         for _ in range(self.max_field_retries):
-            missing = [f for f in self._empty_fields(schema, obj) if f not in self.patch_exempt]
+            missing = [f for f in self._empty_fields(schema, obj)
+                       if f not in self.patch_exempt and f != FACTS_FIELD]
             if not missing:
                 return obj
             patch = await self._ask(self._partial(schema, missing),
@@ -102,10 +105,18 @@ class Action(BaseModel):
         36 个动作。`KB_CONTEXT` 没装（dynamic 线、离线测试、`enable_rag` 关）时**逐字保持改前形态**，
         所以既有 prompt 判据一格都不受影响；装了才追加一段，出处标记与 C22 那条格式同源。
         """
-        from codeharness.runtime import KB_CONTEXT, LTM_CONTEXT
-        kb, ltm = KB_CONTEXT.get(), LTM_CONTEXT.get()
+        from codeharness.runtime import FACTS_CONTEXT, KB_CONTEXT, LTM_CONTEXT
+        kb, ltm, facts = KB_CONTEXT.get(), LTM_CONTEXT.get(), FACTS_CONTEXT.get()
         extra = "\n\n".join(t for t in (_KB_BLOCK.format(kb=kb) if kb else "",
-                                        _LTM_BLOCK.format(ltm=ltm) if ltm else "") if t)
+                                        _LTM_BLOCK.format(ltm=ltm) if ltm else "",
+                                        facts or "") if t)
+        # C185：跨阶段事实清单的 token **单独计数**（进 C184 用量卡的第三行）。只数、不改 prompt 行为。
+        if facts:
+            self._note_facts_tokens(facts)
+        # C185：目标 schema 声明了 `facts` ⇒ 追加**自报指令**（加法拼接，与 C9 那族同规矩：不碰
+        # `prompts/` 的逐字资产）。没声明就不问——strict JSON 下多问一句也填不进去。
+        if FACTS_FIELD in getattr(schema, "model_fields", {}):
+            prompt = prompt + FACTS_HINT
         if system is not None:
             from langchain_core.messages import HumanMessage, SystemMessage
             msgs = [SystemMessage(content=system), HumanMessage(content=prompt)]
@@ -115,6 +126,19 @@ class Action(BaseModel):
         elif extra:
             prompt = prompt + "\n\n" + extra
         return await self.llm.structured(schema).ainvoke(prompt, tag=self.name)
+
+    def _note_facts_tokens(self, text: str) -> None:
+        """C185：跨阶段事实清单的 token **单独计数**（口径同 `CostManager.note_window_usage`：
+        只写非零、0 不是读数）。计数失败一律当 0——**旁账失败不许打断主流程**。"""
+        cm = getattr(self.llm, "cost_manager", None)
+        if cm is None or not hasattr(cm, "note_facts_usage"):
+            return
+        try:
+            from tiktoken import get_encoding
+            n = len(get_encoding("cl100k_base").encode(text))
+        except Exception:
+            n = 0
+        cm.note_facts_usage(n)
 
     @staticmethod
     def _empty_fields(schema: Type[BaseModel], obj: BaseModel) -> list[str]:

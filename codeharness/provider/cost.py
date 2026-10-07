@@ -87,6 +87,10 @@ class CostManager(BaseModel):
     last_prompt_tokens: int = 0
     peak_prompt_tokens: int = 0
     last_system_tokens: int = 0
+    # C185（P4）：跨阶段事实清单的**单独计数**（末笔注入段的 token 数；`Action._ask` 现算现写）。
+    # 为什么单列：那张分类行要能说清「事实清单占了多少」——混进「其余（差额）」里就等于没数。
+    # 口径同 `last_system_tokens`：只读观测、不参与金额，0 表示「这一场还没注入过」而不是「注入了 0 字」。
+    last_facts_tokens: int = 0
     # P0（10-07）：校准系数 k——「上下文预算契约」的一半（P1 的 ContextBudget 按它换算 clip 额度、
     # P2 按它校正水位），住在**会话级账本**上（per-sid 单例、随快照持久化、resume 播种）。
     # 口径已定不重议：初值 1、夹 [0.5,4]、切模型即重置（唯一写入口 `note_calibration`）；
@@ -130,6 +134,12 @@ class CostManager(BaseModel):
         if pt > 0:
             self.last_prompt_tokens = pt
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, pt)
+
+    def note_facts_usage(self, n: int) -> None:
+        """C185（P4）：跨阶段事实清单注入段的**唯一写入口**（`Action._ask` 那边现算现调）。
+        口径同 `note_window_usage`：n=0 不是读数（没注入 ≠ 注入 0 字），不覆盖上一笔。"""
+        if n > 0:
+            self.last_facts_tokens = n
 
     def note_calibration(self, k: float, model: str = "") -> None:
         """P0：校准系数的唯一写入口（口径已定：初值 1、夹 [0.5,4]、会话级、切模型即重置）。

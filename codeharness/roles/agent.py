@@ -5,7 +5,7 @@ from langgraph.graph import StateGraph, END
 from pydantic import BaseModel
 from codeharness.const import MESSAGE_ROUTE_TO_SELF
 from codeharness.schema import Message
-from codeharness.utils.text import clip
+from codeharness.utils.text import clip, facts_from_instruct, render_facts
 
 
 class ActionChoice(BaseModel):
@@ -29,6 +29,7 @@ class AgentState(TypedDict):
     plan: list             # 本次激活按触发源选定的动作序（源 Engineer._new_code_actions 的按因装配）
     loops: int
     output: list
+    facts: list            # C185（P4）：从外图拷进来的跨阶段事实清单（本角色只读它、产出口只回自报的新条目）
 
 
 class Agent:
@@ -282,10 +283,13 @@ class Agent:
         # 「经典线记忆回喂进 prompt」是 _think 侧 system 上下文的事（对照1 §五-8），不在 _act 做。
         # 知识库那条不一样：动作的 prompt 在 `Action._ask` 那个唯一出口上才成型，所以在这里取一次、
         # 经 ContextVar 交给它（`runtime.KB_CONTEXT`）——**一次动作只检索一次**，补问轮复用同一份。
-        from codeharness.runtime import KB_CONTEXT, LTM_CONTEXT
+        from codeharness.runtime import FACTS_CONTEXT, KB_CONTEXT, LTM_CONTEXT
         from codeharness.report import tool_call_open, tool_call_report
         kb_tok = KB_CONTEXT.set(await self._kb_block(prompt))
         ltm_tok = LTM_CONTEXT.set(await self._ltm_block(prompt))
+        # C185（P4）：跨阶段事实清单从**图 state** 取（全场累积的那份），经 ContextVar 交给 `_ask`
+        # ——与 KB/LTM 同一条缝、同一个理由（不塞 `msg.content`，那是下一动作的工作载荷）。
+        facts_tok = FACTS_CONTEXT.set(render_facts(s.get("facts") or []))
         # C180：经典线也要「每一步一行」。改前这条线上**一个块都不发**（全仓 `tool_call_report` 只有
         # `role_zero.py` 两处调用点），而动作自己那一发 LLM 又被 C177 挡下打字机 ⇒ 长动作（写代码
         # 几十秒）执行期间屏上只有产物块（Docs/Editor）**落地**的那一下。与动态线 C179 同形：执行前
@@ -326,6 +330,7 @@ class Agent:
             # 两支都得把这份上下文摘掉——留着下一轮就会拿上一轮动作的知识库片段干活。
             KB_CONTEXT.reset(kb_tok)
             LTM_CONTEXT.reset(ltm_tok)
+            FACTS_CONTEXT.reset(facts_tok)
         if isinstance(result, Message):
             msg = result
         else:
@@ -333,8 +338,14 @@ class Agent:
         if not msg.cause_by or msg.cause_by == trig.cause_by:
             msg.cause_by = action.name                   # 对齐 :388 cause_by=todo（Action 未显式设 tag 时）
         msg.sent_from = self.profile["name"]             # 对齐 :389 sent_from=self
+        # C185（P4）：把本阶段**自报**的事实并进清单——按全等去重（重放/续跑不重收），只增不减。
+        new_facts = facts_from_instruct(getattr(msg, "instruct_content", None))
+        facts = list(s.get("facts") or [])
+        for x in new_facts:
+            if x not in facts:
+                facts.append(x)
         return {"output": s["output"] + [msg], "memory": s["memory"] + [msg],
-                "inbox": [], "action_cursor": s["action_cursor"]}   # BY_ORDER 的进位已在 think 完成
+                "inbox": [], "action_cursor": s["action_cursor"], "facts": facts}   # BY_ORDER 的进位已在 think 完成
 
     def _format_inbox(self, inbox) -> str:
         return "\n\n".join(m.content for m in inbox)
@@ -348,8 +359,12 @@ class Agent:
             set_role(name)                  # 内核报道事件的 role 字段（前端块头显示角色名）
             inbox = state.get("_inbox") or []
             mem = list(state.get("memories", {}).get(name, []))
+            # C185（P4）：跨阶段事实清单随外图 state 进出（与 memories 同一族的搬运口径）。
+            facts = list(state.get("facts") or [])
             result = await graph.ainvoke({"name": name, "inbox": inbox, "memory": mem,
-                                          "action_cursor": -1, "chosen": "", "loops": 0, "output": []})
-            return {"messages": result["output"], "memories": {name: result["memory"]}}
+                                          "facts": facts, "action_cursor": -1, "chosen": "",
+                                          "loops": 0, "output": []})
+            return {"messages": result["output"], "memories": {name: result["memory"]},
+                    "facts": result.get("facts") or facts}
 
         return name, _run

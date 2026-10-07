@@ -142,6 +142,38 @@ def compact_note(n: int) -> str:
     return f"…[已压缩 {n} 条]"
 
 
+# ---- C185（P4）：classic/react 的**跨阶段事实清单**——自报块的渲染/抽取 ----
+FACTS_HINT = (
+    "\n\n另外：请在 facts 字段里列出本阶段**定下的关键事实**（≤5 条、每条一行、只写下游必须遵守的"
+    "结论——如接口名、文件名、技术选型、硬约束），**不要复述过程**。")
+"""自报指令：只在目标 schema 声明了 `facts` 字段时才拼（见 `base/action.py::_ask`）。
+措辞纪律与 `compact_note` 同族：只数事实、不承诺任何检索能力。"""
+
+_FACTS_MIN_CHARS = 2          # 短于这个长度的条目丢掉（防「-」「。」这类空条目混进清单）
+FACTS_FIELD = "facts"         # 自报字段名（唯一的那个字面量：schema 声明处、`_ask` 问法、`_structured` 排除处共用）
+
+
+def render_facts(items) -> str:
+    """把累积的事实清单渲染成**注入段**（走 `runtime.FACTS_CONTEXT`，与 KB/LTM 两块同形）。
+    空清单 ⇒ 空串——调用点据此**逐字不变**（既有 prompt 判据一格不受影响）。"""
+    rows = [str(x).strip() for x in (items or [])]
+    rows = [r for r in rows if len(r) >= _FACTS_MIN_CHARS]
+    if not rows:
+        return ""
+    return "[跨阶段事实]\n" + "\n".join(f"- {r}" for r in rows)
+
+
+def facts_from_instruct(instruct) -> list[str]:
+    """从动作产出的 `instruct_content` 里取**自报**事实（`facts` 字段）。
+    容错：非 dict / 非 list / 缺字段一律回空——收集这一侧不许因为它抛而把动作打断。"""
+    if not isinstance(instruct, dict):
+        return []
+    v = instruct.get("facts")
+    if not isinstance(v, (list, tuple)):
+        return []
+    return [str(x).strip() for x in v if str(x).strip()]
+
+
 def _raw_len(s: str) -> int:
     """这段文本的**最上游**原长：它自己若带着上一站 `clip` 的标记，就继承那个数，而不是报自己的长度。
 

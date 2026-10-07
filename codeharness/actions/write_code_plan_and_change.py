@@ -133,6 +133,9 @@ class PlanAndChange(BaseModel):
 
     development_plan: list[str] = Field(default_factory=list, description=DEV_PLAN_INSTRUCTION)
     incremental_change: list[str] = Field(default_factory=list, description=INC_CHANGE_INSTRUCTION)
+    # C185（P4）：跨阶段自报事实清单（见 `write_prd.PRDOutput` 同一行注释）；空列表不触发补问。
+    facts: list[str] = Field(default_factory=list,
+                             description="本阶段定下的关键事实（≤5 条，只写下游必须遵守的结论）")
 
 
 class WriteCodePlanAndChange(BaseAction):

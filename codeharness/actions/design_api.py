@@ -53,6 +53,10 @@ class DesignOutput(BaseModel):
     # **键名**会被当散文打上屏。
     prose_fields: ClassVar[tuple] = ("implementation_approach", "anything_unclear")
 
+    # C185（P4）：跨阶段自报事实清单（见 `write_prd.PRDOutput` 同一行注释）；空列表不触发补问。
+    facts: list[str] = Field(default_factory=list,
+                             description="本阶段定下的关键事实（≤5 条，只写下游必须遵守的结论）")
+
     implementation_approach: str = ""
     file_list: list[str] = Field(default_factory=list)
     data_structures_and_interfaces: str = ""      # mermaid classDiagram

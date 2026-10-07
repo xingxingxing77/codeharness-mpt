@@ -65,6 +65,12 @@ LTM_CONTEXT: ContextVar[str] = ContextVar("ltm_context", default="")
 与 `KB_CONTEXT` 分开两个变量而不是拼成一段，是为了两件事各自可判、各自可关——
 知识库那条（C32）与记忆这条（C33）落库路径不同、出处标记也不同（记忆没有 `source`）。"""
 
+FACTS_CONTEXT: ContextVar[str] = ContextVar("facts_context", default="")
+"""C185（P4）经典线/react 的**跨阶段事实清单**注入段（已渲染，见 `utils/text.render_facts`）。
+装在 `Agent._act` 里（拿的是图 state 里累积的那份清单）、读在 `Action._ask` 里——与 KB/LTM 同一条缝、
+同一个理由：**不能塞进 `msg.content`**（那是下一动作的工作载荷）。空串 = 还没有事实 / 非经典线
+⇒ `_ask` 逐字保持改前形态。**只对经典线生效**：dynamic 线走 RoleZero 的 brain 摘要腿（P2），不装它。"""
+
 
 def session_root(project: str | None = None) -> Path:
     """本会话工作目录 = `workspace_root/{project 或 CURRENT_PROJECT}`，与 server 的 `session.workspace`、

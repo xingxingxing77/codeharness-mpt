@@ -82,6 +82,10 @@ class TaskList(BaseModel):
     # 的 live 第一片）；Task 这一路本身没走到过活体（09-29 两场经典线都在 Design 就收了）。
     prose_fields: ClassVar[tuple] = ("instruction", "shared_knowledge")
 
+    # C185（P4）：跨阶段自报事实清单（见 `write_prd.PRDOutput` 同一行注释）；空列表不触发补问。
+    facts: list[str] = Field(default_factory=list,
+                             description="本阶段定下的关键事实（≤5 条，只写下游必须遵守的结论）")
+
     task_list: list[TaskItem] = Field(default_factory=list)
     required_packages: list[str] = Field(default_factory=list)
     shared_knowledge: str = ""
