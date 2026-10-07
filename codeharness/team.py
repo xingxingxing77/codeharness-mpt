@@ -3,7 +3,6 @@ run_project = 脚本场景的 async generator；prepare_project = runner 专用�
 import re
 from pydantic import BaseModel, Field
 from codeharness.const import RequirementTag, TEAMLEADER_NAME
-from codeharness.logs import logger
 from codeharness.schema import Message
 
 
@@ -14,7 +13,6 @@ def default_team(llm, env_desc: str = "a software company"):
     from codeharness.roles.role_zero import RoleZero
     from codeharness.prompts.role_zero import SYSTEM_PROMPT
     from codeharness.configs.settings import settings
-    from codeharness.memory.brain_memory import BrainMemory
     from codeharness.tools import REGISTRY
     ltm = kb = None
     if settings.enable_rag:                                 # 这个开关此前零读者，现在真管记忆召回
@@ -30,13 +28,14 @@ def default_team(llm, env_desc: str = "a software company"):
         "Alice": ("Product Manager", "Create a Product Requirement Document or market research"),
         "Bob":   ("Architect", "design a concise, usable, complete software system"),
     }
-    # 每角色一个 brain：key 按角色名分（RoleZero._brain_key），Redis 挂了也只是不摘要，不影响跑
     agents = {name: RoleZero({"name": name, "profile": prof, "goal": goal},
-                             REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc,
-                             brain=BrainMemory(), longterm_memory=ltm)
+                             REGISTRY, llm, system_prompt=SYSTEM_PROMPT, env_desc=env_desc)
               for name, (prof, goal) in profiles.items()}
     for a in agents.values():
-        a.kb = kb                                 # 后挂而非塞进 ctor：位置参数已经排到第 12 个，别再排第 13 个
+        # P3：挂载一律经 `attach_memory`（唯一出口）——brain 每角色一份（key 按角色名分，
+        # `RoleZero._brain_key`；Redis 挂了也只是不摘要，不影响跑）；ltm/kb 三角色共享同一对
+        # 预建实例（R2 的「失败短路按整场生效」语义就挂在这份共享上）。
+        attach_memory(a, llm, ltm=ltm, kb=kb)
     sync_roster(agents)
     if TEAMLEADER_NAME in agents:
         # 源 TeamLeader._think(:66-67) 每轮重算 instruction=TL_INSTRUCTION；本仓走 instruction_provider
@@ -60,6 +59,37 @@ def sync_roster(agents: dict) -> dict:
         if hasattr(agent, "teammates"):
             agent.teammates = dict(roster)
     return roster
+
+
+def attach_memory(role, llm, *, ltm=None, kb=None, emb=None):
+    """记忆四件套的**唯一装配出口**（P3 不变量 4「挂载单点」）：三个装配点
+    （`default_team` / `classic_team` / `build_hired_role`）都经这里挂，不许再各自写。
+
+    - **brain**：角色引擎带此面（RoleZero 系）且还没挂就补一份 `BrainMemory()`——
+      **与 `enable_rag` 开关无关**（它是工作记忆溢出时的摘要腿；classic 的 Agent 没有这个面，
+      走它自己的 `_flush_memory`）。
+    - **ltm/kb**：`enable_rag` 时挂（只给 doc_type，租户/项目由 LongTermMemory 现取 ContextVar，
+      与灌库侧同源——C31 口径）；`ltm`/`kb` 参数是**预建共享对**（同一场里多角色共享同一对实例——
+      R2 的「失败短路按整场生效」语义就挂在共享上，别在这里悄悄拆开），不传则按 `emb`
+      （现取或共享）各建一份；`meter` 一律取 `llm.cost_manager`（R1：三条装配路同一份账本）。
+
+    为什么要有这个单点：三处各写各的时期，`build_hired_role` 漏了 brain/ltm——动态线现场招进来的
+    成员超窗即静默丢失（第 201 条不进摘要也不进归档、一个字都不说）。现在三处同源，
+    `s23 t9`（与队长同形读数）/`t10`（溢出走归档 + 构造点结构守卫）钉住。"""
+    from codeharness.configs.settings import settings
+    from codeharness.roles.role_zero import RoleZero
+    if isinstance(role, RoleZero) and role.brain is None:
+        from codeharness.memory.brain_memory import BrainMemory
+        role.brain = BrainMemory()
+    if not settings.enable_rag:
+        return role
+    from codeharness.memory.longterm import LongTermMemory
+    from codeharness.provider.gateway import LLMGateway
+    emb = emb or LLMGateway.embeddings()
+    meter = getattr(llm, "cost_manager", None)
+    role.ltm = ltm if ltm is not None else LongTermMemory(embeddings=emb, meter=meter)
+    role.kb = kb if kb is not None else LongTermMemory(embeddings=emb, doc_type="kb", meter=meter)
+    return role
 
 
 async def run_project(idea: str, project_id: str, agents: dict | None = None,
@@ -196,14 +226,13 @@ def classic_team(llm):
     # paradigm**（`CreateSessionReq.paradigm="classic"`）⇒ 用户上传了文档、跑默认线却一条都引用不到，
     # 界面上还不报错。react 线走的就是本函数（`react_assembly` → `classic_team`），一并覆盖。
     # 与 dynamic 线同一份口径：只给 doc_type，租户/项目由 LongTermMemory 现取 ContextVar（C31 同源）。
+    # P3：挂载一律经 `attach_memory`（唯一出口）——本线是 Agent（无 brain 面），挂 ltm/kb；
+    # 每角色独立实例、共享同一份 embeddings 客户端（与改动前逐字同形）。
     if settings.enable_rag:
-        from codeharness.memory.longterm import LongTermMemory
         from codeharness.provider.gateway import LLMGateway
         emb = LLMGateway.embeddings()
-        meter = getattr(llm, "cost_manager", None)      # R1：与 dynamic 线同一份账本口径
         for a in agents.values():
-            a.kb = LongTermMemory(embeddings=emb, doc_type="kb", meter=meter)
-            a.ltm = LongTermMemory(embeddings=emb, meter=meter)      # C33：记忆腿（读同项目历史 + 超窗溢写）
+            attach_memory(a, llm, emb=emb)
     return agents
 
 
@@ -282,7 +311,6 @@ def build_hired_role(defn: dict, llm):
     """档案 → 一个可进图的 RoleZero。工具集走 `TOOL_REGISTRY.select`（名字已校验过）。
 
     空工具集是合法形态：纯思考型成员（评审、总结）不碰任何工具。"""
-    from codeharness.configs.settings import settings
     from codeharness.roles.role_zero import RoleZero
     from codeharness.tools.tool_registry import TOOL_REGISTRY
     role = RoleZero({"name": defn["name"], "profile": defn.get("profile", ""),
@@ -292,18 +320,10 @@ def build_hired_role(defn: dict, llm):
     # C24 行末那条余账：`_default_agents` 给队长与静态成员都挂了知识库读者（`team.py:36`），
     # 现场招进来的没有 ⇒ 同一场会话里「我上传的文档，队长查得到、我招的人查不到」，而界面上看不出来。
     # 租户与项目不传参，走 LongTermMemory 的 ContextVar 现取，与灌库侧、与队长那一份同源（C31 口径）。
-    # **只挂 kb 不挂 ltm**：成员的角色记忆是 C1-③ 的另一笔账（那里连 ltm 都没有），不在这里顺手改。
-    if settings.enable_rag:
-        from codeharness.memory.longterm import LongTermMemory
-        from codeharness.provider.gateway import LLMGateway
-        role.kb = LongTermMemory(embeddings=LLMGateway.embeddings(), doc_type="kb",
-                                 meter=getattr(llm, "cost_manager", None))   # R1：与队长同一份账本
-    # P0：缺口必须在**起跑装配**时喊出来——静态成员经 `_default_agents` 挂了 brain+ltm，招募路
-    # 只挂 kb；消息一旦溢出工作窗口就是静默丢失（运行期那半由 s5 t8 钉，本行由 s23 t9 钉）。
-    # 与 RAG 开关无关：判据只看 brain/ltm 是否缺席。P3 补上记忆腿后，这一行与它的判据一起改判。
-    if role.brain is None and role.ltm is None:
-        logger.warning(f"[hired-role-no-memory] 招募成员 {defn['name']} 未挂 brain/ltm："
-                       f"工作窗口外溢时既无摘要（L1）也无逐字归档（L2）——静默丢失计数将从这里长出来")
+    # C1-③ 的另一笔账（P3）：招募成员原来只挂 kb、brain/ltm 全缺 ⇒ 超窗即静默丢失——
+    # 现在整条挂载走 `attach_memory`（唯一出口），与队长**同形**（s23 t9 同形读数 / t10 归档对照）。
+    # P0 的「招募成员缺记忆腿」缺口告警随补挂退役（缺口已补，复活它只会把修好的事又演成坏的）。
+    attach_memory(role, llm)
     return role
 
 

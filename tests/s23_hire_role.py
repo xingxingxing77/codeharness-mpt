@@ -351,59 +351,111 @@ def t8_hired_role_subscribes_to_the_knowledge_base():
         CURRENT_USER.reset(tok_u)
 
 
-def t9_hired_role_memory_gap_warns_at_assembly():
-    """P0：招募成员没有 brain/ltm 这个缺口，必须在**起跑装配**（`build_hired_role`）时喊出来——
-    静默丢失的根因侧：`_default_agents` 给静态成员挂了 brain+ltm，招募路只挂 kb；成员一旦溢出
-    工作窗口，消息不进摘要、不进逐字归档，一个字都不说（运行期那一半由 `s5 t8` 钉住）。
+def t9_hired_role_memory_legs_same_as_leader():
+    """P3：招募成员的记忆腿与队长**同形**——P0 那格「缺口在装配期喊出来」的使命完成，
+    本格改判成「缺口已补」：P0 的 `[hired-role-no-memory]` 告警随补挂退役（源码里不再出现；
+    复活它等于把已修的缺口又演一遍）。
 
-    两档 RAG 配置都喊：装配事实只由「brain/ltm 是否为 None」决定，与 RAG 开关无关。
-    阳性对照：`default_team` 的静态成员自带 brain，不许被这条告警牵连（告警不许恒亮）。
+    两档：RAG 开 ⇒ brain/ltm/kb 全挂，三元组与 `default_team` 的队长**逐项一致**（同形）；
+    RAG 关 ⇒ brain 仍在（与 RAG 开关无关——它是工作记忆的摘要腿）、ltm/kb 不挂（与 t8③ 同口径）。
     """
-    import io
-
     from codeharness.configs.settings import settings
-    from codeharness.logs import logger
     from codeharness.team import build_hired_role, default_team
 
+    triple = lambda r: (r.brain is not None, getattr(r, "ltm", None) is not None,
+                        getattr(r, "kb", None) is not None)
     keep = settings.enable_rag
     try:
-        for rag in (True, False):
-            settings.enable_rag = rag
-            buf = io.StringIO()
-            hid = logger.add(buf, format="{message}", level="WARNING")
-            try:
-                role = build_hired_role(HIRED, FakeLLM(["x"]))
-            finally:
-                logger.remove(hid)
-            assert role.brain is None and role.ltm is None, \
-                f"t9 前提变了（enable_rag={rag}）：招募成员已经有记忆腿——这一格的判词要跟着改"
-            log = buf.getvalue()
-            assert "[hired-role-no-memory]" in log and "Cleo" in log, \
-                f"t9失效（enable_rag={rag}）：招募成员缺记忆腿没有起跑告警，根因侧一句话都不说：{log!r}"
-        buf2 = io.StringIO()
-        hid2 = logger.add(buf2, format="{message}", level="WARNING")
-        try:
-            default_team(FakeLLM(["x"]))
-        finally:
-            logger.remove(hid2)
-        assert "[hired-role-no-memory]" not in buf2.getvalue(), \
-            "告警恒亮了：带 brain 的静态成员也被喊缺记忆腿"
+        settings.enable_rag = True
+        hired = build_hired_role(HIRED, FakeLLM(["x"]))
+        lead = default_team(FakeLLM(["x"]))[TEAMLEADER_NAME]
+        assert triple(hired) == (True, True, True), f"P3 失守：招募成员还有腿没挂上：{triple(hired)}"
+        assert triple(hired) == triple(lead), \
+            f"P3 失守：招募成员与队长不同形（{triple(hired)} vs {triple(lead)}）"
+        settings.enable_rag = False
+        hired_off = build_hired_role(HIRED, FakeLLM(["x"]))
+        assert hired_off.brain is not None and hired_off.ltm is None and hired_off.kb is None, \
+            f"RAG 关档：该 brain 在、ltm/kb 不挂，实得 {triple(hired_off)}"
     finally:
         settings.enable_rag = keep
-    print("  ok  t9 招募成员缺记忆腿：两档 RAG 配置下起跑装配都告警（带名字）；静态成员不长这条告警")
+    src = (Path(__file__).resolve().parents[1] / "codeharness" / "team.py").read_text(encoding="utf-8")
+    assert "[hired-role-no-memory]" not in src, \
+        "P0 的缺口暴露告警复活了——缺口已补，它只会把修好的事重新演成坏的"
+    print("  ok  t9 招募成员记忆腿与队长同形（RAG 开：三腿全挂；关：brain 在、ltm/kb 不挂；P0 告警已退役）")
+
+
+def t10_hired_role_evicts_into_archive():
+    """P3 的**对照格**（＝「改前第 201 条丢、改后进摘要」的小窗口等价形状）：招募成员溢出
+    工作窗口时走**归档去路**——`silent_lost` 不涨、storage 被裁到窗口内、溢出批进 brain（摘要
+    原料）。改前它 ltm/brain 双 None ⇒ `_compress` 无去路分支直接 return ⇒ 静默丢（改前红取证
+    见 P3 块账）。真装配真挂载（embeddings 指死端口——本仓标准的零花费姿势；overflow 失败只
+    warning、不改「有去路」判定，归档那一半照走）。
+
+    另一半是**单点结构守卫**（不变量 4）：`team.py` 里给角色赋 `ltm`/`kb`/`brain` 的**挂载动作**
+    只许在 `attach_memory` 体内（三个装配点不许再各自写挂载），且 `attach_memory(` 恰被三处
+    装配调用。（守「赋」不守「构造」——`default_team` 的共享对预建是合法的。）
+    """
+    import ast as _ast
+
+    from codeharness.configs.settings import settings
+    from codeharness.provider.context_budget import ContextBudget
+    from codeharness.team import build_hired_role
+
+    keep = (settings.enable_rag, settings.embedding.base_url, settings.embedding.api_key)
+    settings.enable_rag = True
+    settings.embedding.base_url = "http://127.0.0.1:1/v1"      # 死端口：不发任何云端请求
+    settings.embedding.api_key = "dead"
+    try:
+        role = build_hired_role(HIRED, FakeLLM(["x"]))
+        role.budget = ContextBudget.of(None, getattr(role.llm, "cost_manager", None), msg_window=2)
+        for i in range(5):
+            role.memory.add(Message(content=f"c{i}", role="user"))
+        asyncio.run(role._compress())
+    finally:
+        settings.enable_rag, settings.embedding.base_url, settings.embedding.api_key = keep
+    assert role.llm.cost_manager.silent_lost == 0, \
+        f"P3 失守：招募成员溢出被记成静默丢失（{role.llm.cost_manager.silent_lost}）——去路没挂上？"
+    assert len(role.memory.storage) == 2, f"P3 失守：有去路却没裁窗口（{len(role.memory.storage)} 条）"
+    # 摘要在位：溢出批（c0-c2）滚进 brain 的摘要层（summarize 成功后 history 清空——C150 的滚动语义）
+    assert "c0" in (role.brain.historical_summary or ""), \
+        f"P3 失守：溢出批没进 brain 的摘要层（摘要：{role.brain.historical_summary!r}）"
+
+    # 单点结构守卫（不变量 4）：**挂载动作**（给 role 赋 ltm/kb/brain）只许在 `attach_memory`
+    # 体内；`attach_memory(` 恰被三处装配调用。⚠ 守的是「赋」不是「构造」——default_team 的
+    # 共享对（ltm/kb 各一，三角色共用以保住 R2 短路语义）在函数内预建是合法的。
+    src = (Path(__file__).resolve().parents[1] / "codeharness" / "team.py").read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    attach_fn = next(n for n in _ast.walk(tree)
+                     if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                     and n.name == "attach_memory")
+
+    def _mount_lines(node):
+        return [n.lineno for n in _ast.walk(node)
+                if isinstance(n, _ast.Assign)
+                and any(isinstance(t, _ast.Attribute) and t.attr in ("ltm", "kb", "brain")
+                        for t in n.targets)]
+
+    mounts_all, mounts_in = _mount_lines(tree), _mount_lines(attach_fn)
+    assert mounts_all and set(mounts_all) == set(mounts_in), \
+        (f"P3 不变量 4 破了：ltm/kb/brain 在 attach_memory 体外被挂载"
+         f"（行 {sorted(set(mounts_all) - set(mounts_in))}）——挂载只能经这一个出口")
+    calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)
+             and isinstance(n.func, _ast.Name) and n.func.id == "attach_memory"]
+    assert len(calls) == 3, f"P3 不变量 4 破了：attach_memory 调用点 {len(calls)} 处（应恰 3 处装配点）"
+    print("  ok  t10 招募成员溢出走归档（silent_lost 0 / storage 裁 2 / brain 收到 c0）"
+          "+ 单点守卫（挂载动作只许在 attach 体内、恰三处装配调用）")
 
 
 def main():
-    t1_check_role_def()
-    t2_tier_gate_and_rejections()
-    t3_store_roundtrip()
-    t4_assembly_sees_the_hire()
-    t5_real_graph_hire_reachable()
-    t6_no_hot_swap()
-    t7_fire_role()
-    t8_hired_role_subscribes_to_the_knowledge_base()
-    t9_hired_role_memory_gap_warns_at_assembly()
-    print("\ns23_hire_role: 8/8 全绿")
+    # 分母从名单长度推，不写死组数——P3 加 t9/t10 时手抄的「8/8」当场对不上（跑了 10 格印 8/8，
+    # 读数指不回输出），这个坑本仓点过名多次（s13/s8_runner_meter 都已改名单驱动）。
+    steps = [t1_check_role_def, t2_tier_gate_and_rejections, t3_store_roundtrip,
+             t4_assembly_sees_the_hire, t5_real_graph_hire_reachable, t6_no_hot_swap,
+             t7_fire_role, t8_hired_role_subscribes_to_the_knowledge_base,
+             t9_hired_role_memory_legs_same_as_leader, t10_hired_role_evicts_into_archive]
+    for fn in steps:
+        fn()
+    print(f"\ns23_hire_role: {len(steps)}/{len(steps)} 全绿")
     return 0
 
 
