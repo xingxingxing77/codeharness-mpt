@@ -43,7 +43,7 @@
             </button>
           </template>
         </VMenu>
-        <HoverCard v-else-if="showCtxChip">
+        <HoverCard v-else-if="showCtxChip" light>
           <template #default>
             <span class="chip plain" :aria-label="`上下文用量 ${chipLabel}`">{{ chipLabel }}</span>
           </template>
@@ -450,8 +450,8 @@ textarea:disabled {
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* C184 上下文容量卡内容：宿主是 HoverCard 的定值深底（#2c2c2e，两主题同块），
-   文字用 SessionRow hover 卡同款字面量（#ffffff / #cfd3d6），不走会翻转的 alias 令牌。
+/* C184 上下文容量卡内容：卡面 opt-in 白底（HoverCard `light` 档，参考产品同款），
+   文字用静态 token（theme-constant，白底上两主题都读得清），不走会翻转的 alias 令牌。
    进度条只在「超预算」这个事实上换警示色——用量侧不写死 80% 之类的人为告警阈值
    （ADR-20260922-01 的口径）。 */
 .ctxHead {
@@ -464,14 +464,14 @@ textarea:disabled {
 .ctxTitle {
   font-size: 14px;
   line-height: 20px;
-  color: #ffffff;
+  color: var(--dsw-static-neutral-bluish-1000);
   white-space: nowrap;
 }
 
 .ctxNum {
   font-size: 12px;
   line-height: 16px;
-  color: #cfd3d6;
+  color: var(--dsw-static-neutral-bluish-700);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -479,24 +479,24 @@ textarea:disabled {
 .ctxBar {
   height: 6px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--dsw-static-neutral-200);
   overflow: hidden;
 }
 
 .ctxFill {
   height: 100%;
   border-radius: 3px;
-  background: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-static-deepseek-500);
 }
 
 .ctxFill.over {
-  background: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-static-red-600);
 }
 
 .ctxPeak {
   font-size: 12px;
   line-height: 16px;
-  color: #cfd3d6;
+  color: var(--dsw-static-neutral-bluish-700);
 }
 
 .ctxRow {
@@ -505,12 +505,12 @@ textarea:disabled {
   gap: 8px;
   font-size: 12px;
   line-height: 18px;
-  color: #ffffff;
+  color: var(--dsw-static-neutral-bluish-1000);
 }
 
 .ctxVal {
   margin-left: auto;
-  color: #cfd3d6;
+  color: var(--dsw-static-neutral-bluish-700);
   font-variant-numeric: tabular-nums;
 }
 
@@ -522,11 +522,11 @@ textarea:disabled {
 }
 
 .dotSys {
-  background: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-static-deepseek-500);
 }
 
 .dotRest {
-  background: var(--dsw-alias-state-business-primary);
+  background: var(--dsw-static-deepseek-500);
   opacity: 0.45;
 }
 
@@ -537,7 +537,7 @@ textarea:disabled {
   gap: 8px;
   font-size: 12px;
   line-height: 16px;
-  color: #cfd3d6;
+  color: var(--dsw-static-neutral-bluish-700);
 }
 
 .ctxModelName {
@@ -550,7 +550,7 @@ textarea:disabled {
 .ctxWarn {
   font-size: 12px;
   line-height: 16px;
-  color: var(--dsw-alias-state-warn-label);
+  color: var(--dsw-static-amber-600);
 }
 
 /* 模型名：与 .chip/.select 同一质感（透明底、r8、13/20 二级字）。

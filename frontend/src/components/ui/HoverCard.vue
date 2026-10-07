@@ -13,7 +13,7 @@
         v-if="open && pos"
         ref="cardEl"
         class="card"
-        :class="{ copyable, feedback: copied }"
+        :class="{ copyable, feedback: copied, light }"
         :style="cardStyle"
         :role="copyable ? 'button' : undefined"
         :tabindex="copyable ? 0 : undefined"
@@ -47,8 +47,11 @@ const props = withDefaults(
     copyText?: string
     copyLabel?: string
     copiedLabel?: string
+    /** C184：浅色卡面。组件默认定值深底（figma 会话 hover 卡原值），composer 的「上下文容量」
+     *  卡按参考产品是白底——opt-in 换底色，深底消费者（SessionRow）不受影响。 */
+    light?: boolean
   }>(),
-  { openDelay: 500, disabled: false, copyText: undefined, copyLabel: '复制', copiedLabel: '复制成功' }
+  { openDelay: 500, disabled: false, copyText: undefined, copyLabel: '复制', copiedLabel: '复制成功', light: false }
 )
 
 const GRACE_MS = 200
@@ -194,7 +197,8 @@ onBeforeUnmount(() => {
 
 .card {
   /* figma 会话 hover 卡：244 宽、r12、12/16 内距、lv3 投影；
-     底色两主题同一块 #2C2C2E（figma 原值），所以是组件级变量而不是令牌 */
+     底色两主题同一块 #2C2C2E（figma 原值），所以是组件级变量而不是令牌。
+     `light` 档（C184）换白底，同样是组件级定值——静态 token，不随主题翻。 */
   --dsw-hovercard-bg: #2c2c2e;
   position: fixed;
   z-index: 100;
@@ -204,6 +208,10 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   background: var(--dsw-hovercard-bg);
   box-shadow: var(--dsw-shadow-lv3);
+}
+
+.card.light {
+  --dsw-hovercard-bg: var(--dsw-static-neutral-00);
 }
 
 .copyable {
