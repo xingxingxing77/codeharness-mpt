@@ -146,3 +146,11 @@ export interface Health {
   auth_enabled: boolean // N1：PLATFORM__AUTH_ENABLED 开时登录页接管
   workspace_root: string
 }
+
+/** C184 会话级上下文预算档位。枚举由后端出（`/api/models` 的 `context_tiers`，与入口校验
+ *  `sessions._only_model` 同一份名单）——前端只渲染，不硬编码数字。 */
+export interface ContextTier {
+  value: number
+  label: string
+  note: string
+}

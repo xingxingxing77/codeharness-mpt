@@ -245,6 +245,11 @@ class LLMGateway:
         `LLM__CONTEXT_LENGTH` 时才可能触发，届时两条路必须一起生效才算数。"""
         from codeharness.configs.compress_msg_config import CompressType
         _ct = self.cfg.compress_type
+        # C184：system 段计数每笔都记（闸关着也记）——「上下文容量」卡的分类行要的是这个事实，
+        # 不是闸的副产品。system 过滤口径与 `_compress_messages` 同一行；账本必有实例
+        # （`__init__` 里 `or CostManager()`），这里不判空。
+        self.cost_manager.last_system_tokens = self._count_tokens_direct(
+            [m for m in msgs if getattr(m, "type", getattr(m, "role", "")) in ("system", "developer")])
         if self.cfg.context_length and (_ct != CompressType.NO_COMPRESS or self.cfg.compress_threshold < 1.0):
             strategy = _ct if _ct != CompressType.NO_COMPRESS else CompressType.POST_CUT_BY_TOKEN
             keep_token = int(self.cfg.context_length * self.cfg.compress_threshold)
@@ -403,6 +408,8 @@ class LLMGateway:
                     self.outer.cost_manager.update_cost(getattr(usage, "prompt_tokens", 0) or 0,
                                                         getattr(usage, "completion_tokens", 0) or 0,
                                                         self.outer.cfg.model)
+                    # 这一支不经 add_usage，窗口占用也在这里补记（C184；add_usage 那条路自己记）
+                    self.outer.cost_manager.note_window_usage(getattr(usage, "prompt_tokens", 0) or 0)
 
             def _parse(self, text: str):
                 """严格解析：半截 JSON 在这里过不了，好让 repair 档带着 warning 接手。"""

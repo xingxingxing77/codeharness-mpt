@@ -1,4 +1,4 @@
-import type { ApprovalItem, Health, Session, WEvent } from '../types'
+import type { ApprovalItem, ContextTier, Health, Session, WEvent } from '../types'
 import type { VoteEntry } from '../utils/votes'
 
 /* N1：token 存 localStorage；带 Authorization 出请求；401 即清票（App 层据 needLogin 切登录页）。
@@ -86,9 +86,11 @@ function flattenDetail(detail: unknown): string {
 
 export const api = {
   health: () => req<Health>('GET', '/api/health'),
-  /** 端点侧 /models 摊平。ok=false 表示拿不到目录，模型位退化成只读文本 */
+  /** 端点侧 /models 摊平。ok=false 表示拿不到目录，模型位退化成只读文本。
+   *  C184：context_tiers/model_window 由后端常量出（ok=false 照带），前端只渲染不硬编码。 */
   listModels: () =>
-    req<{ models: string[]; current: string; ok: boolean; error: string }>('GET', '/api/models'),
+    req<{ models: string[]; current: string; ok: boolean; error: string;
+          context_tiers: ContextTier[]; model_window: number | null }>('GET', '/api/models'),
   login: (username: string, password: string) =>
     req<{ ok: boolean; token: string }>('POST', '/api/auth/login', { username, password }),
   register: (username: string, password: string) =>

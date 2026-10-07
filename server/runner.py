@@ -276,6 +276,11 @@ def _seeded_ledger(saved: dict):
     # R4：写腿那两笔同规（点数与次数成对，缺前者就分不清「没失败」与「压根没写过」）
     cm.overflow_failed = int(saved.get("overflow_failed", 0) or 0)
     cm.overflow_written = int(saved.get("overflow_written", 0) or 0)
+    # C184：窗口占用三笔同规播种（last/peak/system，口径见 CostManager 字段注释）。
+    # 漏播种的形状：resume 后「本轮峰值」从 0 重算、卡片的末笔/峰值静默缩水——0 是合法读数，看不出是丢的。
+    cm.last_prompt_tokens = int(saved.get("last_prompt_tokens", 0) or 0)
+    cm.peak_prompt_tokens = int(saved.get("peak_prompt_tokens", 0) or 0)
+    cm.last_system_tokens = int(saved.get("last_system_tokens", 0) or 0)
     return cm
 
 
@@ -297,7 +302,11 @@ def cost_snapshot(cm) -> dict:
             "recall_zero_hits": getattr(cm, "recall_zero_hits", 0),
             "recall_returned": getattr(cm, "recall_returned", 0),
             "overflow_failed": getattr(cm, "overflow_failed", 0),
-            "overflow_written": getattr(cm, "overflow_written", 0)}
+            "overflow_written": getattr(cm, "overflow_written", 0),
+            # C184：窗口占用三笔（pt 是单发占用＝窗口口径，不是累计；见 CostManager 字段注释）
+            "last_prompt_tokens": getattr(cm, "last_prompt_tokens", 0),
+            "peak_prompt_tokens": getattr(cm, "peak_prompt_tokens", 0),
+            "last_system_tokens": getattr(cm, "last_system_tokens", 0)}
 
 
 class SessionRunner:

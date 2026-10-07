@@ -132,6 +132,61 @@ def t2_seeded_ledger():
               "缺项/坏项退 0 不炸，且不回读混币种 total_cost")
 
 
+def t22_window_usage_seeded_and_reported():
+    """C184：窗口占用三笔（last/peak/system）的账本语义与两条出口。
+
+    口径钉在 `CostManager` 字段注释上：`last_prompt_tokens` 是**这一发请求的输入总量**＝
+    发那一刻的窗口占用，不是累计消耗（累计住在 total_prompt_tokens 里）。三格各钉一种坏法：
+      ① resume 播种：老会话的快照里三笔非零，`_seeded_ledger` 不给接回 ⇒ 重启后峰值静默归 0
+         （0 是合法读数看不出丢，C78 同形状）；
+      ② add_usage 每笔更新 last/peak；**没有 usage 回执的那笔不更新**——pt=0 是「没回执」不是
+         「窗口空了」，更新了就是把缺账读成 0%；
+      ③ structured 的 ChatCompletion 支路不经 add_usage，窗口占用要在那里补记——漏了它，
+         动态线被截断的那笔思考在卡片上就是上一笔的旧读数。
+    变异验证照惯例做在真代码上（摘 `_seeded_ledger` 里那三行播种 ⇒ ① 当场红）。
+    """
+    snap = cost_snapshot(_seeded_ledger({"last_prompt_tokens": 258_000, "peak_prompt_tokens": 260_000,
+                                         "last_system_tokens": 3_100}))
+    assert (snap["last_prompt_tokens"], snap["peak_prompt_tokens"], snap["last_system_tokens"]) \
+        == (258_000, 260_000, 3_100), f"①C184：三笔没被播种并带出快照：{snap}"
+    legacy = _seeded_ledger({"total_prompt_tokens": 7})
+    assert (legacy.last_prompt_tokens, legacy.peak_prompt_tokens, legacy.last_system_tokens) == (0, 0, 0), \
+        "①C184：老记录没有这三键 ⇒ 退 0，不炸也不编数"
+
+    cm = CostManager()
+    m1 = AIMessage(content="x")
+    m1.usage_metadata = {"input_tokens": 137, "output_tokens": 29}
+    cm.add_usage(m1, model="gpt-4o", tag="a")
+    assert (cm.last_prompt_tokens, cm.peak_prompt_tokens) == (137, 137), "②末笔/峰值没随 add_usage 走"
+    m2 = AIMessage(content="y")
+    m2.usage_metadata = {"input_tokens": 90_000, "output_tokens": 5}
+    cm.add_usage(m2, model="gpt-4o", tag="b")
+    assert (cm.last_prompt_tokens, cm.peak_prompt_tokens) == (90_000, 90_000), "②峰值该取 max，末笔该被覆盖"
+    m3 = AIMessage(content="z")                                   # 无回执：不得把 last 抹成 0
+    cm.add_usage(m3, model="gpt-4o", tag="silent-leak")
+    assert cm.last_prompt_tokens == 90_000, "②没回执的那笔把末笔窗口占用抹掉了（缺账读成 0%）"
+    assert cost_snapshot(cm)["last_prompt_tokens"] == 90_000, "②快照出口没带上窗口占用"
+
+    from types import SimpleNamespace as NS
+    from unittest.mock import MagicMock, patch
+
+    from pydantic import BaseModel as _BM
+
+    from codeharness.configs.llm_config import LLMConfig
+    from codeharness.provider.gateway import LLMGateway
+
+    class _Schema(_BM):
+        ok: bool = True
+
+    with patch.object(LLMGateway, "_build", return_value=MagicMock()):
+        gw = LLMGateway(cfg=LLMConfig(model="fake"), cost_manager=cm)
+    wrapped = gw.structured(_Schema)
+    wrapped._account(NS(usage=NS(prompt_tokens=1234, completion_tokens=9), choices=[]), tag="t22")
+    assert cm.last_prompt_tokens == 1234, "③structured 的 ChatCompletion 支路没补记窗口占用"
+    _ok("t22", "C184 窗口占用三笔：播种接回、add_usage 末笔/峰值（无回执不抹 0）、structured 支路补记，"
+              "快照两出口都带")
+
+
 async def _make_runner():
     tmp = Path(tempfile.mkdtemp())
     store = SessionStore(path=tmp / "sessions.json")
@@ -367,10 +422,13 @@ def t8_two_currency_buckets():
     # **申报口**——守卫不红才说明有人偷偷加了字段没登记。
     # C123（10-02 复审批）：C122 的第四笔 invalid_args_calls 恰好绕过了这个申报口——
     # 加键时没跑本套件，t8 在 HEAD 上红了一拍才补进来。这就是申报口存在的意义。
+    # C184（10-07）：窗口占用三笔 last/peak/system 在此申报入列（口径见 cost.py 字段注释：
+    # pt 是单发占用=窗口口径，不是累计）。申报口存在的意义见下一条 C123 的教训。
     assert set(snap) == {"cost_usd", "cost_cny", "total_prompt_tokens", "total_completion_tokens",
                           "truncated_calls", "unknown_command_calls", "empty_output_calls",
                           "recall_failures", "recall_zero_hits", "recall_returned",
-                          "overflow_failed", "overflow_written", "invalid_args_calls"}, snap
+                          "overflow_failed", "overflow_written", "invalid_args_calls",
+                          "last_prompt_tokens", "peak_prompt_tokens", "last_system_tokens"}, snap
     assert "total_cost" not in snap, f"快照里又长出合计字段（C12 删的就是它）：{snap}"
     assert (snap["truncated_calls"], snap["unknown_command_calls"], snap["empty_output_calls"],
             snap["recall_failures"], snap["recall_zero_hits"], snap["recall_returned"],
@@ -603,6 +661,11 @@ def t10_cost_injection_end_to_end():
                 f"②币种不对（{MODEL} 在 CNY 名单里，两桶不相加）：{cost}"
             missing = {"truncated_calls", "unknown_command_calls", "empty_output_calls"} - set(cost)
             assert not missing, f"④三笔观测项有键没带出出口：缺 {missing}（{sorted(cost)}）"
+            # ⑤ C184：窗口占用三笔同走这条 GET 出口。桩每笔都回 pt=137 ⇒ 末笔与峰值都是 137——
+            # last 不是累计（累计在 total_prompt_tokens，会随调用笔数涨），这正是两个数要分开的口径。
+            assert cost.get("last_prompt_tokens") == PT and cost.get("peak_prompt_tokens") == PT, \
+                f"⑤窗口占用没随注入链上出口：{cost}"
+            assert "last_system_tokens" in cost, f"⑤system 段计数键缺失：{sorted(cost)}"
             _ok("t10", f"整场会话端到端：真装配跑到 {status}、GET 出口 pt={cost['total_prompt_tokens']} "
                        f"ct={cost['total_completion_tokens']} ¥{cost['cost_cny']}（$ 保持 0）、"
                        "三笔无效调用计数键都在 ⇒ 角色手上的 manager 就是 runner 那一份")
@@ -1931,6 +1994,7 @@ def main():
     steps = [
         t1_add_usage_visible,
         t2_seeded_ledger,
+        t22_window_usage_seeded_and_reported,
         t3_midrun_sync,
         t4_ensure_graph_single_ledger,
         t11_park_keeps_the_live_ledger,

@@ -256,25 +256,86 @@ async def t12_long_conversation_reading():
     print(f"  {len(hist)} 条/{before} token → {len(out)} 条/{after} token（预算 720），人设与知识库段都在")
 
 
+def t13_session_tier_lands_in_gateway_cfg():
+    """C184：会话档位（`llm_override.context_length`）真落 `gateway.cfg.context_length`。
+
+    前端选的档要变成压缩闸预算，链路是 `sessions._only_model`（白名单放行）→ `Session.llm_override`
+    → `team._make_llm`（与 model 同批 `model_copy`）→ `_apply_compression` 读它算 keep_token。
+    三格：model+档位同批；**只带档位不换模型**（update 只有一键也必须副本化，否则改的是全局
+    settings.llm——那会泄漏给别的会话）；不带档位沿用 env（None=闸休眠，现状行为）。"""
+    from codeharness.configs.settings import settings
+    from codeharness.team import _make_llm
+
+    print("t13: 会话档位落 gateway.cfg...", end=" ", flush=True)
+    keep_model = settings.llm.model
+    try:
+        settings.llm.model = "default-model"
+        gw = _make_llm(None, {"model": "other-model", "context_length": 200_000})
+        assert gw.cfg.model == "other-model" and gw.cfg.context_length == 200_000, \
+            f"档位没跟 model 一起落 cfg：{gw.cfg.model}/{gw.cfg.context_length}"
+        gw2 = _make_llm(None, {"context_length": 1_000_000})     # 不换模型、只设档位
+        assert gw2.cfg is not settings.llm, "只设档位时没副本化——这一改会把预算写穿到全局 settings"
+        assert gw2.cfg.model == "default-model" and gw2.cfg.context_length == 1_000_000, gw2.cfg.context_length
+        gw3 = _make_llm(None, {"model": "default-model"})        # 无档位：沿用 env，不凭空造预算
+        assert gw3.cfg.context_length == settings.llm.context_length, "无档位却改了 env 的压缩预算"
+    finally:
+        settings.llm.model = keep_model
+    print("✅（200K/1M 都能落，缺省沿用 env）")
+
+
+def t14_llm_override_whitelist():
+    """C184：入口白名单——`model` 任意、`context_length` 只收后端下发的档位枚举值、其余键照旧丢。
+
+    为什么是 422 不是静默丢：丢掉的话用户选的「1M」会变成「未设预算」，记录又说谎了
+    （`_only_model` 原本丢 base_url/api_key 的理由就是「别让记录说谎」）。"""
+    from pydantic import ValidationError
+
+    from server.api.models import CONTEXT_TIERS
+    from server.api.sessions import CreateSessionReq
+
+    print("t14: llm 白名单...", end=" ", flush=True)
+    tiers = {t["value"] for t in CONTEXT_TIERS}
+    ok = CreateSessionReq(idea="x", llm={"model": "m1", "context_length": sorted(tiers)[0],
+                                         "base_url": "http://evil", "api_key": "sk-evil"})
+    assert ok.llm == {"model": "m1", "context_length": sorted(tiers)[0]}, \
+        f"白名单放错了东西：{ok.llm}（base_url/api_key 必须照旧丢掉——SSRF 面）"
+    for bad in (0, -1, 123, 2_000_000, "abc", True):
+        try:
+            CreateSessionReq(idea="x", llm={"context_length": bad})
+            raise AssertionError(f"context_length={bad!r} 竟然收下了（越权值必须 422，别静默丢）")
+        except ValidationError:
+            pass
+    empty = CreateSessionReq(idea="x", llm={"base_url": "http://evil"})
+    assert empty.llm == {}, f"全被丢掉时应为空 dict：{empty.llm}"
+    print(f"✅（档位枚举 {sorted(tiers)} 放行、6 种越权值 422、SSRF 键照旧丢）")
+
+
 async def main():
     print("=" * 60)
     print("批次0/5: 网关 token 压缩门禁（token 口径 + 四策略）")
     print("=" * 60)
+    # 分母从名单长度推，不写死组数（本仓点过名两次的手抄组数：加了一格而末行还写旧数 ⇒ 读数指不回输出）。
+    steps = [
+        t1_compress_disabled,
+        t2_token_budget,
+        t3_minimum,
+        t4_token_count_positive,
+        t5_system_preserved,
+        t6_post_by_msg_and_token,
+        t7_pre_by_msg_and_token,
+        t8_no_compress_passthrough,
+        t9_config_helpers,
+        t10_env_entry_arms_the_gate,
+        t11_config_value_range,
+        t12_long_conversation_reading,
+        t13_session_tier_lands_in_gateway_cfg,
+        t14_llm_override_whitelist,
+    ]
     try:
-        await t1_compress_disabled()
-        await t2_token_budget()
-        await t3_minimum()
-        await t4_token_count_positive()
-        await t5_system_preserved()
-        t6_post_by_msg_and_token()
-        t7_pre_by_msg_and_token()
-        t8_no_compress_passthrough()
-        t9_config_helpers()
-        t10_env_entry_arms_the_gate()
-        await t11_config_value_range()
-        await t12_long_conversation_reading()
+        for fn in steps:
+            await fn() if asyncio.iscoroutinefunction(fn) else fn()
         print("\n" + "=" * 60)
-        print("✅ 全部通过 (12/12)")
+        print(f"✅ 全部通过 ({len(steps)}/{len(steps)})")
         print("=" * 60)
         return 0
     except AssertionError as e:

@@ -74,6 +74,16 @@ class CostManager(BaseModel):
     # 没有前者，后者为零也可能是「压根没写过东西」。
     overflow_failed: int = 0
     overflow_written: int = 0
+    # C184（10-07）：窗口占用三笔。与上面各笔同族——只是计数，不参与金额口径。
+    # ⚠ 口径钉死：`last_prompt_tokens` 是**这一发请求的输入总量**＝发那一刻的窗口占用，
+    # 不是累计消耗（累计那半住在 `total_prompt_tokens` 里，两个数别互相冒充——界面的
+    # 「上下文容量」卡按前者对预算算百分比）。厂商每笔只回一个总 input_tokens，没有分类归因；
+    # `last_system_tokens` 是末笔 system 段的网关侧计数（`gateway._apply_compression` 每笔都数，
+    # 闸关着也数——分类行要的是这个事实，不是闸的副产品），「其余」＝last 减 system，纯派生。
+    # 三笔都随快照持久化并在 resume 时播种（C78 形状：漏播种＝重启后峰值静默归 0，0 是合法读数看不出）。
+    last_prompt_tokens: int = 0
+    peak_prompt_tokens: int = 0
+    last_system_tokens: int = 0
 
     def currency_of(self, model: str) -> str:
         """该模型的记账币种。未登记的模型回 ""（不计价），别让未知模型冒充 USD。"""
@@ -99,6 +109,13 @@ class CostManager(BaseModel):
         # 日志也分符号：这一行原先硬写 `$`（`Total running cost: $…`），而表里本来就有人民币行
         logger.info(f"Total running cost: ${self.cost_usd:.3f} / ¥{self.cost_cny:.3f} | "
                     f"Current: {cost:.6f} {cc}, pt={prompt_tokens}, ct={completion_tokens}")
+
+    def note_window_usage(self, pt: int):
+        """C184：窗口占用观测的唯一定义点（`add_usage` 与 structured 的 ChatCompletion 回执支路都调它）。
+        pt=0 的那一发是「没有回执」不是「窗口空了」——不更新，别让卡片把缺账读成 0%。"""
+        if pt > 0:
+            self.last_prompt_tokens = pt
+            self.peak_prompt_tokens = max(self.peak_prompt_tokens, pt)
 
     def get_costs(self) -> Costs:
         return Costs(self.total_prompt_tokens, self.total_completion_tokens,
@@ -131,6 +148,7 @@ class CostManager(BaseModel):
             # 漏账必须可见：update_cost 对 0 静默 return，真模型实测一场会话里几十次调用
             # 只有零星几笔入账时无从分辨"哪条路没回执"（2026-09-15）。有 warning 才有可 grep 的账差。
             logger.warning(f"add_usage: response 无 usage，本笔不进账 (model={model}, tag={tag})")
+        self.note_window_usage(pt)
         self.update_cost(pt, ct, model)
         # cc 是这一笔的币种（"" = 未计价模型）。逐笔留痕是给 trace 与对账用的：
         # 只有合计的话，混币种这件事在数据里就看不见了——正是 C12 的根因形状。

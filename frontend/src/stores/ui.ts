@@ -21,7 +21,10 @@ export const useUiStore = defineStore('ui', {
       rounds: 5,
       paradigm: 'classic',
       /* 空=用后端配置的默认模型；选了才作为 llm_override.model 发出去 */
-      model: ''
+      model: '',
+      /* C184 上下文预算档位（/api/models 的 context_tiers 值，串存）。空=不设预算：
+         llm 里就不带 context_length 键，压缩闸沿用 env 配置（默认休眠，超窗厂商 400 兜底）。 */
+      tier: ''
     }
   }),
 

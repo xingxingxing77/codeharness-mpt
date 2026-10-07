@@ -80,10 +80,31 @@ class CreateSessionReq(BaseModel):
     @field_validator("llm")
     @classmethod
     def _only_model(cls, v: dict) -> dict:
-        """只留 `model`。其余键（尤其 base_url/api_key）存进会话记录会看着像生效，
-        而 `team._make_llm` 明确不吃它们——在入口就丢掉，别让记录说谎。"""
+        """白名单两个键（C184，原先是只留 `model` 一个键）：
+
+        · `model` 任意字符串——base_url/api_key 若也吃客户端输入，等于让请求方指定任意端点
+          （SSRF 面，`team._make_llm` 同一句理由），其余键照旧在这里丢掉，别让记录说谎；
+        · `context_length` 只收**后端下发的档位枚举值**（`server.api.models.CONTEXT_TIERS`——
+          前端不硬编码数字，校验也只认这份名单；它是个受限整数、不在 SSRF 风险内，落进
+          `Session.llm_override` 作会话级压缩闸预算）。越权值 422 明说，不静默丢弃——
+          丢掉的话用户选的「1M」会变成「未设预算」，记录又说谎了。
+        """
+        from server.api.models import CONTEXT_TIERS
+        out: dict = {}
         m = str(v.get("model") or "").strip()
-        return {"model": m} if m else {}
+        if m:
+            out["model"] = m
+        cl = v.get("context_length")
+        if cl is not None and cl != "":
+            try:
+                cl_int = int(cl)
+            except (TypeError, ValueError):
+                raise ValueError("context_length 只能是后端下发的档位值之一")
+            tiers = {t["value"] for t in CONTEXT_TIERS}
+            if cl_int not in tiers:
+                raise ValueError(f"context_length 只能是后端下发的档位值之一：{sorted(tiers)}")
+            out["context_length"] = cl_int
+        return out
 
 
 class ChatReq(BaseModel):

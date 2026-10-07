@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { api, getToken } from '../api/client'
 import { normalizeVotes } from '../utils/votes'
-import type { ApprovalItem, Block, Health, QueueItem, Session, TraceSpan, WEvent } from '../types'
+import type { ApprovalItem, Block, ContextTier, Health, QueueItem, Session, TraceSpan, WEvent } from '../types'
 
 const MAX_LOGS = 800
 /** 一屏的事件条数（B2）。单位是**事件**不是块——一块会合并整个流式节点的几十上百条
@@ -48,6 +48,10 @@ export const useSessionStore = defineStore('sessions', {
     /** /api/models 的目录。modelsOk=false 表示端点不给列表，模型位退化成只读文本 */
     models: [] as string[],
     modelsOk: false,
+    /** C184：会话级上下文预算档位与模型窗口，都由后端出（与入口校验同一份名单）。
+     *  空数组=后端没给档位 ⇒ composer 不画档位选择（不是画一个点开是空的箭头）。 */
+    contextTiers: [] as ContextTier[],
+    modelWindow: null as number | null,
     sessions: [] as Session[],
     currentId: '',
     blocks: {} as Record<string, Block>,
@@ -127,9 +131,15 @@ export const useSessionStore = defineStore('sessions', {
         const r = await api.listModels()
         this.models = r.models || []
         this.modelsOk = !!r.ok
+        // C184：档位与模型窗口是后端常量，端点探活失败（ok=false）也照收——
+        // 它们跟 modelsOk 无关，收不到就留空/ null，消费端按缺键不渲染。
+        this.contextTiers = r.context_tiers || []
+        this.modelWindow = r.model_window ?? null
       } catch {
         this.models = []
         this.modelsOk = false
+        this.contextTiers = []
+        this.modelWindow = null
       }
     },
 

@@ -203,7 +203,12 @@ async function onDrafted(idea: string) {
       n_round: ui.composer.rounds,
       paradigm: ui.composer.paradigm,
       permission: permissionTier.value,
-      llm: ui.composer.model ? { model: ui.composer.model } : {}
+      // C184：档位是后端 context_tiers 的值（ui.composer.tier），空串=不设预算、不带键。
+      // 白名单在入口 `_only_model`：model 任意、context_length 只收后端档位值。
+      llm: {
+        ...(ui.composer.model ? { model: ui.composer.model } : {}),
+        ...(ui.composer.tier ? { context_length: Number(ui.composer.tier) } : {})
+      }
     })
     await store.start()
     toast.push(`已创建会话 ${s.id} 并开始运行`, 'success')

@@ -113,14 +113,20 @@ def react_assembly(llm):
 
 
 def _make_llm(cost_manager=None, override: dict | None = None):
-    """会话级模型覆盖。**只认 `model` 一个键**：base_url / api_key 若也吃客户端输入，
-    等于让请求方指定任意端点（SSRF 面）；模型名只会送到已配置的那个端点，最坏 4xx。"""
+    """会话级模型/预算覆盖。**只认 `model` 与 `context_length` 两个键**：base_url / api_key 若也吃
+    客户端输入，等于让请求方指定任意端点（SSRF 面）；模型名只会送到已配置的那个端点，最坏 4xx。
+    `context_length` 是受限整数（入口 `sessions._only_model` 只放行后端档位枚举值），作会话级
+    压缩闸预算——与 model 同批 `model_copy` 进 cfg，缺省沿用 env 的 `LLM__CONTEXT_LENGTH`（C184）。"""
     from codeharness.configs.settings import settings
     from codeharness.provider.gateway import LLMGateway
     from codeharness.provider.cost import CostManager
-    model = str((override or {}).get("model") or "").strip()
-    cfg = settings.llm.model_copy(update={"model": model}) \
-        if model and model != settings.llm.model else None
+    override = override or {}
+    model = str(override.get("model") or "").strip()
+    update = {"model": model} if model and model != settings.llm.model else {}
+    cl = override.get("context_length")
+    if cl:
+        update["context_length"] = int(cl)
+    cfg = settings.llm.model_copy(update=update) if update else None
     return LLMGateway(cfg=cfg, cost_manager=cost_manager or CostManager())
 
 
