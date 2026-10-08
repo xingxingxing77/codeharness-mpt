@@ -186,9 +186,13 @@ def t10_env_entry_arms_the_gate():
     try:
         # 对照必须在改 env **之前**取：`Settings(_env_file=None)` 挡不住进程环境，
         # 先设后取会读到自己刚写进去的 3000，那格对照就成了假阳性（本门禁第一次跑就中过）。
+        # 10-08 补另一半：只 pop 进程环境**挡不住 `.env` 文件**——用户把默认档写成
+        # `LLM__CONTEXT_LENGTH=1000000` 之后这一格当场红（现证：`s13 t10 默认档必须是「没设=门不开」`）。
+        # 这一格要钉的是「没设 ⇒ 不开」这个**形状**，不是开发机的 `.env` 现值 ⇒ 两个来源都得中性化。
         for k in keys:
             os.environ.pop(k, None)
-        assert Settings().llm.context_length is None, "默认档必须是「没设=门不开」（配置入口的基线）"
+        assert Settings(_env_file=None).llm.context_length is None, \
+            "默认档必须是「没设=门不开」（配置入口的基线）"
         os.environ["LLM__CONTEXT_LENGTH"] = "3000"
         os.environ["LLM__COMPRESS_TYPE"] = "pre_cut_by_token"
         armed = Settings()

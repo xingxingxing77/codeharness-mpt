@@ -218,7 +218,8 @@ class RoleZero:
         - 三闸：水位 60%（触发）/ 收益 ≥15 个百分点（压完得真降幅，白摘白写不压）/ 每场 ≤8 次；
           连续 2 次摘要失败 ⇒ 本场停 T1（退化为既有的网关 T2 闸）；
         - 游标：摘要成功后 `brain.compacted_upto += 已摘条数`（断点续跑的幂等凭证）；
-        - 事件：`kind=context name=compact value={before, after, freed, evicted_n}`（非块通道）。
+        - 事件：`kind=context name=compact value={before, after, freed, evicted_n, real_peak_pt}`
+          （非块通道；后一个是 C187 并记的**窗口真值**，与前面那把本地尺成对）。
         两路共用同一条「写腿 → 落盘 → 摘要 → 回滚」链（C150 语义未动）。"""
         from codeharness.provider.context_budget import T1_MAX_PER_RUN
         from codeharness.report import emit_event
@@ -277,9 +278,16 @@ class RoleZero:
         if plan_t1 > 0:
             self._t1_count += 1
         after_tokens = self._tokens_of(self.memory.storage)
+        # C187：把**窗口真值**与这条事件并记。为什么要并：水位的分子是「storage 全量的本地 token」，
+        # 而窗口占用是厂商回执的 `prompt_tokens`（现证两套口径差 +54%/+16%/+2.8%，n=3，账在 §1.18）——
+        # 分开看就是两个不可比的数。并记之后，口径差从「一次性花钱抽样」变成「每次真压缩都留一对数」，
+        # 样本在生产里自己长。没有账本（FakeLLM/离线夹具/这一发还没回执）时记 0，**0 不是读数**（同
+        # `note_window_usage` 的口径），界面与判据都不许把 0 当「真值就是 0」。
+        cm = getattr(self.llm, "cost_manager", None)
         emit_event("context", name="compact",
                    value={"before": before_tokens, "after": after_tokens,
-                          "freed": before_tokens - after_tokens, "evicted_n": len(evicted)})
+                          "freed": before_tokens - after_tokens, "evicted_n": len(evicted),
+                          "real_peak_pt": int(getattr(cm, "peak_prompt_tokens", 0) or 0)})
 
     def _note_silent_loss(self, n_out: int) -> None:
         """P0：无归档去路（brain/ltm 均未挂）的截窗＝静默丢失——条数（增量口径）+ 可 grep 告警。"""

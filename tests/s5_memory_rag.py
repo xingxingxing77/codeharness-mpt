@@ -3011,6 +3011,11 @@ def t59_compress_t1_dual_trigger_and_brakes():
     assert tok_all / 1000 >= 0.6, f"夹具前提失守：水位 {tok_all}/1000 < 60%"
     last = role.memory.storage[-1].content
     events = []
+    # C187：先把「窗口真值」那把尺拨到一个可指的数——事件里的 `real_peak_pt` 必须是**现读** cost_manager，
+    # 不是硬编码；对照在 ①b（那颗角色没拨 ⇒ 记 0，而 0 按本仓口径「不是读数」）。
+    _cm187 = getattr(role.llm, "cost_manager", None)
+    assert _cm187 is not None, "①前提自证失败：夹具的 llm 上没有 cost_manager，real_peak_pt 会恒 0"
+    _cm187.peak_prompt_tokens = 4242
     tok_sink = REPORT_SINK.set(lambda e: events.append(e))
     try:
         asyncio.run(role._compress())
@@ -3023,10 +3028,13 @@ def t59_compress_t1_dual_trigger_and_brakes():
     ev = [e for e in events if e.get("kind") == "context" and e.get("name") == "compact"]
     assert ev, f"①失效：没发 kind=context/name=compact 事件：{events}"
     v = ev[0].get("value") or {}
-    assert set(v) == {"before", "after", "freed", "evicted_n"}, f"①事件形状漂了：{v}"
+    assert set(v) == {"before", "after", "freed", "evicted_n", "real_peak_pt"}, f"①事件形状漂了：{v}"
     assert v["before"] == tok_all and v["after"] == after_tok and v["freed"] == tok_all - after_tok, \
         f"①事件读数不实（{v} vs before={tok_all}/after={after_tok}）"
     assert v["evicted_n"] == before_n - len(role.memory.storage), f"①evicted_n 不对：{v}"
+    # C187：本地口径与窗口真值并记——两套尺量的是两个物（现证差 +54%/+16%/+2.8%），并成一条事件之后
+    #        口径差就不是「一次性花钱抽样」而是「每次真压缩都留一对数」。断言它**现读**那个拨上去的值。
+    assert v["real_peak_pt"] == 4242, f"①C187：real_peak_pt 没现读 cost_manager：{v}"
     assert role.brain.compacted_upto == v["evicted_n"], \
         f"①游标没按已摘条数累加：{role.brain.compacted_upto} vs {v['evicted_n']}"
 
@@ -3043,10 +3051,20 @@ def t59_compress_t1_dual_trigger_and_brakes():
     old = _t1_role(k=2, limit=0)
     for i in range(5):
         old.memory.add(Message(content=f"o{i}", role="user"))
-    asyncio.run(old._compress())
+    ev2 = []
+    _t2 = REPORT_SINK.set(lambda e: ev2.append(e))
+    try:
+        asyncio.run(old._compress())
+    finally:
+        REPORT_SINK.reset(_t2)
     assert [m.content for m in old.memory.storage] == ["o3", "o4"], \
         f"②失效：无预算档的条数旧路被改了：{[m.content for m in old.memory.storage]}"
     assert old.brain.compacted_upto == 3, f"②条数路的游标没累加：{old.brain.compacted_upto}"
+    # C187 对照：这一颗角色的账本上一次回执都没有 ⇒ `real_peak_pt` 记 0。
+    # **0 不是读数**（同 `note_window_usage` 的口径）：它只说「这一场还没量到窗口真值」，
+    # 不许被读成「窗口占用是 0」——所以 ① 里我拨的是 4242、这里断言的是 0，两格互为对照。
+    _v2 = [e for e in ev2 if e.get("name") == "compact"][0]["value"]
+    assert _v2["real_peak_pt"] == 0, f"②C187 对照失守（没账却给出非零真值）：{_v2}"
 
     # ③ 收益闸：巨长尾消息使「驱逐老的也降不下 15pp」⇒ 弃压（storage/游标/事件全不动）
     g = _t1_role(k=50, limit=1000, armed=True)
