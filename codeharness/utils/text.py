@@ -143,8 +143,13 @@ def compact_note(n: int) -> str:
 
 
 # ---- C185（P4）：classic/react 的**跨阶段事实清单**——自报块的渲染/抽取 ----
+FACTS_MAX_PER_REPORT = 5      # 一次自报最多收几条（= 自报指令里那个数，两处同源）
+FACTS_MAX_ENTRY_CHARS = 200   # 单条事实的额度（超了走 `clip`，标记照 house 口径挂在句尾）
+FACTS_BLOCK_QUOTA = 2000      # **注入段**总额度（字，含留痕行——口径同 `clip`：标记不走额外额度）
+_FACTS_NOTE_RESERVE = 20      # 给留痕行预扣的量，保证「含标记总长 ≤ FACTS_BLOCK_QUOTA」可证
+
 FACTS_HINT = (
-    "\n\n另外：请在 facts 字段里列出本阶段**定下的关键事实**（≤5 条、每条一行、只写下游必须遵守的"
+    f"\n\n另外：请在 facts 字段里列出本阶段**定下的关键事实**（≤{FACTS_MAX_PER_REPORT} 条、每条一行、只写下游必须遵守的"
     "结论——如接口名、文件名、技术选型、硬约束），**不要复述过程**。")
 """自报指令：只在目标 schema 声明了 `facts` 字段时才拼（见 `base/action.py::_ask`）。
 措辞纪律与 `compact_note` 同族：只数事实、不承诺任何检索能力。"""
@@ -155,23 +160,53 @@ FACTS_FIELD = "facts"         # 自报字段名（唯一的那个字面量：sch
 
 def render_facts(items) -> str:
     """把累积的事实清单渲染成**注入段**（走 `runtime.FACTS_CONTEXT`，与 KB/LTM 两块同形）。
-    空清单 ⇒ 空串——调用点据此**逐字不变**（既有 prompt 判据一格不受影响）。"""
+    空清单 ⇒ 空串——调用点据此**逐字不变**（既有 prompt 判据一格不受影响）。
+
+    C186：这一段**必须有额度**。清单在图 state 里照旧只增不减（那是账本），但渲染视图按
+    `FACTS_BLOCK_QUOTA` 从最新往回装，装不下的挂一行事实性说明——不静默（同 `clip` 那句理由：
+    看不出被切的一方会把半截当全量下结论，而这一方是模型自己）。为什么原来那版不行：现证
+    （零花费，真 `Agent.as_node`+真 `merge_facts`，10-08）13 次自报 × 每次 5 条 ⇒ 末发注入段
+    **3,008 token**；把「每次自报」换成模型真能给出的 40 条 × 每条 200 字 ⇒ 清单 520 条、
+    **单发 187,208 token**，一发就撞穿任何档位（`context_overflow` 那条死因由 C147 钉着）。"""
     rows = [str(x).strip() for x in (items or [])]
     rows = [r for r in rows if len(r) >= _FACTS_MIN_CHARS]
     if not rows:
         return ""
-    return "[跨阶段事实]\n" + "\n".join(f"- {r}" for r in rows)
+    quota = FACTS_BLOCK_QUOTA - _FACTS_NOTE_RESERVE
+    used = len("[跨阶段事实]\n")
+    kept, dropped = [], 0
+    for i in range(len(rows) - 1, -1, -1):        # 从最新往回装（保序输出）
+        line = f"- {rows[i]}"
+        if used + len(line) + 1 > quota:
+            dropped = i + 1                        # 剩下 i+1 条更旧的没进这一段
+            break
+        kept.append(line)
+        used += len(line) + 1
+    body = "[跨阶段事实]\n" + "\n".join(reversed(kept))
+    if dropped:
+        body += f"\n…[更早 {dropped} 条未列出]"
+    return body
 
 
 def facts_from_instruct(instruct) -> list[str]:
     """从动作产出的 `instruct_content` 里取**自报**事实（`facts` 字段）。
-    容错：非 dict / 非 list / 缺字段一律回空——收集这一侧不许因为它抛而把动作打断。"""
+    容错：非 dict / 非 list / 缺字段一律回空——收集这一侧不许因为它抛而把动作打断。
+
+    C186：这里是自报进账本的**唯一收口**，所以两个上界都放在它身上（`FACTS_HINT` 那句「≤N 条」
+    原本只是对模型的请求，schema 里 `list[str]` 没有 `max_length`，不夹等于没有界）：条数超过
+    `FACTS_MAX_PER_REPORT` 的部分不入库并**响一声**（`[facts-capped]`，与 `[silent-lost]` 同族——
+    被丢掉的东西必须有地方查得到），单条超过 `FACTS_MAX_ENTRY_CHARS` 走 `clip` 留截断标记。"""
     if not isinstance(instruct, dict):
         return []
     v = instruct.get("facts")
     if not isinstance(v, (list, tuple)):
         return []
-    return [str(x).strip() for x in v if str(x).strip()]
+    rows = [str(x).strip() for x in v if str(x).strip()]
+    if len(rows) > FACTS_MAX_PER_REPORT:
+        from codeharness.logs import logger
+        logger.warning(f"[facts-capped] 自报 {len(rows)} 条，只收前 {FACTS_MAX_PER_REPORT} 条，"
+                       f"另 {len(rows) - FACTS_MAX_PER_REPORT} 条未入清单")
+    return [clip(x, FACTS_MAX_ENTRY_CHARS) for x in rows[:FACTS_MAX_PER_REPORT]]
 
 
 def _raw_len(s: str) -> int:

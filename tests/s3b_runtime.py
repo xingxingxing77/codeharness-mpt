@@ -1036,6 +1036,93 @@ def t23_facts_cross_stage():
         f"③ 空清单那一跑凭空长了事实：{out3.get('facts')}"
 
 
+def t24_facts_block_is_bounded():
+    """C186：跨阶段事实清单的**注入段必须有上界**（真 `Agent.as_node` 真子图 + 真 `render_facts`，零花费）。
+
+    为什么立这一组：C185 落地时那句「≤5 条」只写在 `FACTS_HINT` 与 schema 的 `description` 里
+    ＝对模型的请求，而 `facts_from_instruct` 不夹条数与单条长度、`render_facts` 全量渲染、
+    `merge_facts` 只增不减 ⇒ 现证（10-08 探针 `E:/tmp/facts-cap-c186/`）13 次自报 × 每次 40 条
+    × 每条 200 字 ⇒ 清单 520 条、**单发注入段 187,208 token**，一发就撞穿任何档位。
+
+    三格（执行顺序就是写的顺序，⑤ 是 ⑥ 的阳性对照——它必须排在额度那格**之前**，理由见 ⑤ 那段）：
+      ④ 收割上界：一次自报 30 条 × 每条 500 字 ⇒ 清单只长 5 条、每条带 `clip` 的截断标记、
+         `[facts-capped]` 可 grep（被丢掉的事实必须响一声，同 `[silent-lost]` 族）；
+      ⑤ 阳性对照：65 条 × 每条 25 字（现实档，探针 A 档现证 1,822 字 < 额度）⇒ **无留痕、逐条全量在场**；
+      ⑥ 注入段额度：65 条 × 每条 199 字 ⇒ 这一段 ≤ `FACTS_BLOCK_QUOTA` 字、留痕「更早 N 条未列出」在、
+         含**最新**那条、不含最旧那条（不是把整段砍了充数）。
+    """
+    import asyncio
+    import io
+
+    from loguru import logger
+
+    from codeharness.base.action import Action
+    from codeharness.provider.fake import FakeLLM
+    from codeharness.roles.agent import Agent
+    from codeharness.runtime import FACTS_CONTEXT
+    from codeharness.schema import Message
+    from codeharness.utils.text import (FACTS_BLOCK_QUOTA, FACTS_MAX_ENTRY_CHARS,
+                                         FACTS_MAX_PER_REPORT, clip)
+
+    seen: list = []
+    payload: dict = {"facts": []}
+
+    class _Report(Action):
+        name: str = "ReportX"
+
+        async def run(self, msg):
+            seen.append(FACTS_CONTEXT.get())          # 这一发**真正被注入**的那一段
+            return Message(content="做完了", role="assistant", cause_by="ReportX",
+                           instruct_content={"facts": list(payload["facts"])})
+
+    def drive(report_facts, state_facts):
+        """跑一发：`report_facts`＝这一发**自报**什么（走收割），`state_facts`＝state 里已有什么（走注入）。"""
+        payload["facts"] = list(report_facts)
+        ag = Agent({"name": "PM", "profile": "PM", "goal": "g"}, [_Report()], FakeLLM([""]),
+                   react_mode="BY_ORDER")
+        _, run = ag.as_node("PM")
+        inbox = [Message(content="需求", cause_by="UserRequirement", sent_from="user")]
+        buf = io.StringIO()
+        hid = logger.add(buf, format="{message}", level="WARNING")     # 与 t17 同款抓法
+        try:
+            out = asyncio.run(run({"_inbox": list(inbox), "memories": {},
+                                   "facts": list(state_facts)}))
+        finally:
+            logger.remove(hid)
+        return out, seen[-1], buf.getvalue()
+
+    # ④ 收割：一次自报 30 条 × 每条 500 字
+    out, _inj, log = drive([f"事实{i}：" + "长" * 500 for i in range(30)], [])
+    got = out.get("facts") or []
+    assert len(got) == FACTS_MAX_PER_REPORT, \
+        f"t24④ 收割没夹条数：自报 30 条却进了清单 {len(got)} 条"
+    assert all(len(x) <= FACTS_MAX_ENTRY_CHARS for x in got), \
+        f"t24④ 单条没走额度：最长那条 {max(len(x) for x in got)} 字 > {FACTS_MAX_ENTRY_CHARS}"
+    assert clip("x" * 500, FACTS_MAX_ENTRY_CHARS).endswith("字]"), "④ 前提自证：clip 的截断标记形状"
+    assert "[facts-capped]" in log, f"t24④ 丢掉的那 25 条没响：{log[:120]!r}"
+
+    # ⑤ 阳性对照（**排在额度那格之前**）：现实档那个形状（65 条 × 每条 25 字 ≈ 1.8k 字 < 额度；
+    #    探针 A 档现证 1,822 字）必须逐字全量。为什么挪上来：第一版它排在额度格之后，拿
+    #    「额度拧到 200」那把刀量时「最新那条不在场」先红 ⇒ 这一格从未执行＝那把刀对它没独立牙
+    #    （C174 的 k5 同族：一格内多条断言互相挡路时，「红在别处」是顺序问题不是形状问题）。
+    _o, inj, _l = drive([], [f"事实{i}：" + "长" * 20 for i in range(65)])
+    assert "条未列出" not in inj, f"t24⑤ 现实档被无端裁了（⑥ 就成了恒真）：{inj[-40:]!r}"
+    assert all(f"事实{i}：" in inj for i in range(65)), "t24⑤ 现实档有条目不在场"
+    assert len(inj) <= FACTS_BLOCK_QUOTA, f"t24⑤ 前提自证失败：现实档 {len(inj)} 字已超额度"
+
+    # ⑥ 注入段额度：65 条 × 每条 199 字（清单照旧全量进 state，**视图**才受额度）
+    _o, inj, _l = drive([], [f"事实{i}：" + "长" * 193 for i in range(65)])
+    assert inj and len(inj) <= FACTS_BLOCK_QUOTA, \
+        f"t24⑥ 注入段没封顶：{len(inj)} 字 > 额度 {FACTS_BLOCK_QUOTA}"
+    assert "更早" in inj and "条未列出" in inj, \
+        f"t24⑥ 被裁掉的那截没留痕（模型会把半截当全量）：末行={inj.splitlines()[-1]!r}"
+    assert "事实64" in inj, f"t24⑥ 最新那条不在场（额度该从最新往回装）：{inj[:80]!r}"
+    assert "事实0：" not in inj, "t24⑥ 最旧那条还在场 ⇒ 这一段根本没裁"
+    print(f"  ok  t24 C186：④ 自报 30 条×500 字 ⇒ 只收 {FACTS_MAX_PER_REPORT} 条且响 [facts-capped]；"
+          f"⑤ 现实档 1.8k 字逐字全量无留痕（阳性对照）；⑥ 65 条×199 字 ⇒ 注入段 {len(inj)} 字 ≤ 额度 "
+          f"{FACTS_BLOCK_QUOTA} 并留痕、含最新不含最旧")
+
+
 def main():
     checks = [t1_by_order_runs_all_actions, t2_precise_activation, t3_explicit_send_to,
               t3b_chat_to_unknown_role_is_dropped,
@@ -1045,7 +1132,7 @@ def main():
               t11_classic_team_watch_covers_sop, t12_action_exception_feeds_back,
               t13_engineer_cr_wired_in_order, t14_dynamic_paradigm_assembly,
               t15_no_dead_state_channels, t16_run_code_named_delivery,
-              t23_facts_cross_stage,
+              t23_facts_cross_stage, t24_facts_block_is_bounded,
               t17_react_think_survives_a_broken_structured_reply,
               t18_log_file_sink_is_bounded,
               t19_blocked_think_degrades_not_dies,
@@ -1071,7 +1158,8 @@ def main():
           f"watch 与 SOP 双向自洽含 WriteCode 软失败 1 组 + Action 异常回喂自愈含 GraphInterrupt 照抛 1 组 + "
           f"写→评审→摘要生产装配 1 组 + C2 假通道不复燃守卫 1 组（TeamState 无 docs 键 + 三处初值源码无写入）+ "
           f"生产级具名投递两分支 1 组 + REACT 档坏回包兜底 1 组（C76）+ C106 日志上界 1 组（t18：`logs.py` 那颗文件 sink 必须带 rotation/retention，三种形状对照各对，临时根里真落一本且中文行按 utf-8 读回）+ "
-          f"**经典线动作卡：动作执行中已有 meta ＋ 同一颗 uuid 一张卡 ＋ 异常那笔也留 ok=false 的卡 1 组（C180）**")
+          f"**经典线动作卡：动作执行中已有 meta ＋ 同一颗 uuid 一张卡 ＋ 异常那笔也留 ok=false 的卡 1 组（C180）** + "
+          f"**C186 事实清单有上界：收割夹条数与单条长度并响 [facts-capped] ＋ 注入段 ≤额度且留痕 ＋ 现实档逐字全量（阳性对照）1 组**")
 
 
 if __name__ == "__main__":
