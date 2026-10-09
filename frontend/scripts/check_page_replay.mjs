@@ -135,5 +135,35 @@ eq('⑤ 有账本时峰值照上', Object.values(s3.blocks).filter((b) => b.type
 eq('⑤ 压缩行进 unhandled 了吗——不许', s3.unhandled, ['memory:flush'])
 
 rmSync(dir, { recursive: true, force: true })
+/* ---- ⑥ C196：冷开那一趟的续推位必须落在日志尾，`connect()` 才真的只收增量 ----
+   这一格量的不是画面（画面由 cursor 去重挡着，怎么都「对」），是**每次刷新实际多发多少**：
+   首屏走 `replayLog`，而 `foldAll` 不像当年的 `applyEvent` 那样顺带推 `lastCursor`/`lastSeq`
+   ⇒ `after` 退回 `0` ⇒ 服务端把保留窗口整段重播（10-10 数过：467 条的会话冷开收 467 帧）。
+   所以这里用假 `EventSource` 把 URL 读出来——**量发出去的那个 `after`，不是注释里说的那一个**。 */
+{
+  const s6 = useSessionStore()
+  s6.currentId = 's6'
+  s6.sessions = [{ id: 's6', status: 'running', goal: '', goal_done_at: '', cost: {} }]
+  // 冷开的真形状：`select()` 里 `resetStream` 把续推位清成初值（同一个 pinia 实例被上面几段用过，
+  // 这里照抄那道清理，否则测的就不是「冷开」）。
+  s6.lastCursor = ''
+  s6.lastSeq = 0
+  const page = [
+    ev('report', 20, { uuid: 'p1', block: 'Thought', name: 'content', value: '首屏那一条正文' }),
+    ev('report', 21, { uuid: 'p1', block: 'Thought', name: 'end_marker', value: null }),
+    ev('ask_human', 22, { value: '停在待答的那一问' })
+  ]
+  s6.ingestEarlier(page)                     // 冷开时首屏走的就是这一条（日志里没有活流那些）
+  eq('⑥ 首屏折完，续推位落在日志尾（不是停在 0）', s6.lastCursor, cur(22))
+  let url = ''
+  globalThis.localStorage = { getItem: () => '', setItem() {}, removeItem() {} }
+  globalThis.EventSource = class { constructor(u) { url = u } close() {} }
+  s6.connect()
+  eq('⑥ connect() 带的是那个尾游标（不是 after=0）', url.includes(`after=${encodeURIComponent(cur(22))}`), true)
+  eq('⑥ 同一条路上块与问答卡照样折得出（游标修法不许弄坏画面）',
+     [s6.blocks['p1']?.closed, s6.humanQuestion?.value], [true, '停在待答的那一问'])
+  delete globalThis.EventSource
+}
+
 console.log(failed ? `\n${failed} 条失败` : '\n全过')
 process.exit(failed ? 1 : 0)

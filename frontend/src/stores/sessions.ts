@@ -280,8 +280,22 @@ export const useSessionStore = defineStore('sessions', {
      *  只要那条 requested 在日志里，对应的 resolved 必在它后面，按序重折就把它撤掉了。
      *  `check_page_replay.mjs` 量的就是这句话，而不是「有没有名单」。 */
     replayLog(sid: string) {
+      const log = evlog.get(sid) || []
       resetFold(this)
-      foldAll(this, evlog.get(sid) || [])
+      foldAll(this, log)
+      // C196：折完必须把**续推位**推到日志尾——`ingest` 里那两行去重顺带做的事，`foldAll` 不做。
+      // 症状不在画面上（重复的由 cursor 去重挡住，块是对的），在**每一次冷开多传多少**：
+      // `connect()` 的 `after` 取 `lastCursor || String(lastSeq)`，两者停在 ''/0 ⇒ 服务端把
+      // 保留窗口整段重播（10-10 现证：一场 467 条的会话冷开收 467 帧，其中 450 帧是刚折过的
+      // 历史；换成尾游标则 0 帧），前端再逐条丢掉。长会话还会溢出有界订阅队列（4096，C90）
+      // 打出 `[sse-drop]`。这条是 C188 换掉 `applyEvent` 逐条回放时漏的——当年那句注释
+      // 「成功后 lastCursor 落在页尾」就是靠 `applyEvent` 顺带推进才成立的。
+      // 「加载更早」共用这一条路而日志尾不变 ⇒ 幂等；单调性照旧守住（只往更大走，不往回拽）。
+      const tail = log[log.length - 1]
+      if (tail) {
+        if (tail.cursor && tail.cursor > this.lastCursor) this.lastCursor = tail.cursor
+        if (tail.seq > this.lastSeq) this.lastSeq = tail.seq
+      }
       this.runEffects()
       this.syncSessionPatch()
     },

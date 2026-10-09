@@ -176,8 +176,15 @@ def t32_event_disposition_and_fold():
     assert not no_landing, f"处置表说 report:{sorted(no_landing)} 走时间线，reducer 的 switch 里没这一支"
 
     # ---- ④ 三条路同一个 reducer ----
-    for anchor in ("foldOne(this, ev)", "foldAll(this, evlog.get(sid) || [])", "resetFold(this)"):
+    # ---- ④ 三条路同一个 reducer ----
+    # 2026-10-10（C196）改准一次：这里原来钉的是字面串 `foldAll(this, evlog.get(sid) || [])`，
+    # 而 C196 把那份日志提成局部变量（折完还要拿同一本日志的尾部去推续推位），字面就断了——
+    # **守卫要认结构，不认排版**（同 t32⑦ 那回「抽取器按一行一个键抽一张写在一行的表」同一个族，
+    # 只是这次排版是我自己改的）。断言强度不变：仍然要求「整本重折」这一句拿的就是那本日志。
+    for anchor in ("foldOne(this, ev)", "resetFold(this)"):
         assert anchor in st, f"store 里少了 `{anchor}`——活流/首屏/加载更早又分叉成两条路了"
+    assert re.search(r"foldAll\(this,\s*(?:log\b|evlog\.get\(sid\)\s*\|\|\s*\[\])\)", st), \
+        "store 里找不到「整本重折 = foldAll(this, 那本日志)」这一句：首屏或「加载更早」又各自折各自的了"
     for shape in ("mergeEarlierPage(", "const PAGE_REPLAY_OPAQUE", "replayingPage = ", "applyEvent("):
         assert shape not in st, f"`{shape}` 复活了：整本重折之外又开了一条手写合并/名单（路线三删的就是它）"
 
