@@ -12,7 +12,7 @@
      `stop()` 就地落 stopped（不是钉死在 stopping）、`start` 回 409 且文案说清去路；
      正常收口（无 interrupt）→ 照旧 finished。对照组用修复前那三行原样跑，读数必须是
      finished——证明这条判据抓得住复发。
-  t5/t6 真图真 gate（A4 之后新增，零花费）：审批卡驻留四格 + 批准真写盘/拒绝零副作用。
+  t5/t6 真图真 gate（A4 之后新增，零花费）：审批卡驻留五格 + 批准真写盘/拒绝零副作用。
   t7 C15：审批面只 police `self.tools` 里的真工具——`end`/`RoleZero.*` 这类零副作用特殊命令
      不许挂起（真跑台账里那张 `tool:'end'` 的卡），同时**正向对照** `write_file` 照旧挂起。
   t8 C18①：启动自愈只抹 `running`；停在待批处的会话跨**进程**重启仍是可信驻留态且真能恢复
@@ -378,7 +378,23 @@ def t5_real_gate_interrupt():
         assert cards == ["requested"] or cards.count("requested") >= 1, \
             f"t5③失效：活流里没有审批卡（前端只在切会话时 GET，用户看不到新卡）：{cards}"
         assert not written, f"t5④失效：没批就把文件写了 {written}——副作用必须在批准之后"
-        print(f"  ok  t5 真图真 gate：状态驻留 awaiting_human、graph 留着、卡进了活流、零副作用")
+        # ⑤（C193，10-10 真模型活体照出来的那条）：**真审批停车**在角色状态行上必须留 `paused`，
+        # 不是 `aborted`——旧症状是「停在待批」也被算成散会，于是跑到 `finished` 的会话里半数行
+        # 写着「没跑完」（现证 12 颗收口 6 颗 aborted）。这一格吃的是真图真 interrupt，
+        # 不是 s22 t9⑤ 那样手工调 `_forget(park=…)` 模拟的那条。
+        lanes = [e for e in runner.bus.history(s.id) if e.kind == "role"]
+        paused = [e for e in lanes if e.name == "paused"]
+        assert paused, \
+            f"t5⑤失效：真审批停车没留下 paused 收尾（那就是 C193 的旧症状，界面上会说「没跑完」）：" \
+            f"{[(e.name, e.value) for e in lanes]}"
+        assert all((e.value or {}).get("park") == "approval" for e in paused), \
+            f"t5⑤失效：paused 没带上「在等批」这个事实（前端就只能说笼统一句）：{[e.value for e in paused]}"
+        assert not [e for e in lanes if e.name == "completed" and (e.value or {}).get("aborted")], \
+            f"t5⑤失效：同一次停车又发了 aborted 收口（两种收尾再次混账）：{[(e.name, e.value) for e in lanes]}"
+        assert not [e for e in paused if "ms" in (e.value or {})], \
+            f"t5⑤失效：paused 带了 ms——那是「开行到散场」的墙钟差，上屏就是「他只跑了 46 毫秒」那种假读数"
+        print(f"  ok  t5 真图真 gate：状态驻留 awaiting_human、graph 留着、卡进了活流、零副作用、"
+              f"车道留下 {len(paused)} 条 paused（无 aborted、无 ms）")
     finally:
         for t in list(runner.tasks.values()):
             t.cancel()
@@ -1934,7 +1950,7 @@ def main():
         f()
     print(f"\nS17 门禁通过：{len(checks)} 组 —— interrupt 后 tasks 清出核对 1 组 + "
           f"不抢槽/连点幂等 1 组 + human-input 409 端点半边 1 组 + 断点落态/停止/start 1 组 + "
-          f"真图真审批卡驻留四格 1 组 + 批准真执行/拒绝不执行 1 组 + "
+          f"真图真审批卡驻留五格 1 组 + 批准真执行/拒绝不执行 1 组 + "
           f"特殊命令不进审批面 1 组 + 跨进程重启仍驻留且真恢复 1 组 + 会话失败留可 grep 告警 1 组 + "
           f"未知命令可数 1 组 + ask_human 不重放副作用 1 组（C59）+ "
           f"**审批×ask 交替与重启停在 ask 1 组（C59 未验边界闭合）** + "
