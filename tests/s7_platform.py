@@ -1494,8 +1494,10 @@ async def t25_terminal_ring_offloads_to_cold_storage():
         r.bus = _StubBus()
         # `_forget` 扫的登记表（逐个列出来是有意的：判据要跟着这条出口一起改，
         # 用 `vars(run)` 那种自动播种会被「新增一张表但没在这里登记」的形态糊过去）
+        # ——C190 就是这么撞出来的：`_close_lanes` 是新加的清扫面，少登记两张表这条出口就当场炸。
         for attr in ("chats", "costs", "_last_span", "_trunc_reported", "_call_t0", "_prose",
                      "_prompts", "_used_kernel_block", "_silent_runs", "_blk_of", "_live_blk", "_stream_rows",
+                     "_node_names", "_lane_open", "_lane_t0", "_lane_seq",
                      "graphs",
                      "projects"):
             setattr(r, attr, {})

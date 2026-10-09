@@ -178,8 +178,27 @@ const TIMELINE_PROBE: [string, Ev[], (s: FoldState) => boolean][] = [
   ['error', [ev('error', { value: 'boom\nValueError: x', code: 'crash' })], (s) => Object.values(s.blocks).some((b) => b.type === 'Error' && b.code === 'crash')],
   ['turn:max-tokens', [ev('turn', { value: { reason: { kind: 'max-tokens' } } })], (s) => Object.values(s.blocks).some((b) => b.type === 'MaxTokens')],
   ['turn:plan-unfinished', [ev('turn', { value: { reason: { kind: 'plan-unfinished', open: 2, total: 5 } } })], (s) => Object.values(s.blocks).some((b) => b.type === 'PlanOpen' && b.meta.open === 2)],
-  // P2 那条「有发无看」之二：整条 kind 此前在 else-if 链里根本没有分支
-  ['context:compact', [ev('context', { name: 'compact', value: { before: 90000, after: 20000, freed: 70000, evicted_n: 12, real_peak_pt: 0 } })], (s) => Object.values(s.blocks).some((b) => b.type === 'Compact')]
+  // P4 路线三接上的那一格：整条 kind 此前在 else-if 链里根本没有分支
+  ['context:compact', [ev('context', { name: 'compact', value: { before: 90000, after: 20000, freed: 70000, evicted_n: 12, real_peak_pt: 0 } })], (s) => Object.values(s.blocks).some((b) => b.type === 'Compact')],
+  // C190 的角色车道：一颗块走完「开跑 → 相位 → 收工」全生命周期（uuid 是 runner 攒的 `lane-<n>`）
+  ['role:started→phase→completed', [
+    ev('role', { name: 'started', uuid: 'lane-1', block: 'RoleLane', role: 'PM', value: { role: 'PM', phase: 'observe' } }),
+    ev('role', { name: 'phase', uuid: 'lane-1', block: 'RoleLane', role: 'PM', value: { role: 'PM', phase: 'think' } }),
+    ev('role', { name: 'completed', uuid: 'lane-1', block: 'RoleLane', role: 'PM', value: { role: 'PM', ms: 4200 } })
+  ], (s) => {
+    const b = s.blocks['lane-1']
+    return !!b && b.type === 'RoleLane' && b.role === 'PM' && b.closed === true &&
+      b.meta.ms === 4200 && b.meta.phase === '' && s.blockOrder.length === 1
+  }],
+  // 取消/异常那条路：runner 散会清扫补的那一颗带 aborted，界面据此不许画成正常收工
+  ['role:completed(aborted)', [
+    ev('role', { name: 'started', uuid: 'lane-7', block: 'RoleLane', role: 'QA', value: { role: 'QA', phase: 'act' } }),
+    ev('role', { name: 'completed', uuid: 'lane-7', block: 'RoleLane', role: 'QA', value: { role: 'QA', ms: 800, aborted: true } })
+  ], (s) => s.blocks['lane-7'].meta.aborted === true && s.blocks['lane-7'].closed === true],
+  // 车道本体没开过（started 落在已裁掉的那段窗口里）也不许炸、不许留一条永远在跑的行
+  ['role:completed(孤立)', [
+    ev('role', { name: 'completed', uuid: 'lane-9', block: 'RoleLane', role: 'Engineer', value: { role: 'Engineer', ms: 120 } })
+  ], (s) => s.blocks['lane-9'].closed === true && s.blocks['lane-9'].role === 'Engineer']
 ]
 for (const [label, evs, landed] of TIMELINE_PROBE) {
   const s = newState()

@@ -376,6 +376,25 @@ class SessionRunner:
         # `b.closed`（Think 行停在 running 扫光、Docs 的 mermaid 不水合、轮尾行不发＝分叉入口也没了），
         # 且冷档回放同形。这张表就是「散会时还有谁没关」的账，值用来决定要不要补分隔（C173）。
         self._stream_rows: dict[str, dict[str, bool]] = {}
+        # C190（10-10）：角色生命周期（车道）的三张表。形状是现取的，不是照参照系 `run_started` 想象的
+        # ——`tests/manual_role_node_shape_probe.py`（真图 + 本机 FakeLLM，零花费）三条：
+        #   · 角色节点本体 = `name == metadata.langgraph_node == 角色名` 且 `checkpoint_ns` 为空；
+        #     内层 think/gate/act/observe 的 `checkpoint_ns` 首段才是角色名（`_owner` 一直靠它）；
+        #   · ⚠ **整场所有节点级事件的 `run_id` 是同一个**（现证 48 条 `on_chain_*` 全是同一颗
+        #     `01a1215d…`）⇒ 它当不了「这一趟执行」的标识。注意这与 `on_chat_model_*` 那侧不同：
+        #     那边每笔调用一个 run_id，`_call_t0` 就是那么用的——照它推就会把两次激活并成一条；
+        #   · `graph:step:N` 也配不上对（本体 start 在 step:2、end 在 step:6，中间夹着别的激活）。
+        # 所以配对只能自己攒：开一条车道压一颗 uuid、收口弹一颗（`_lane_open` 是**按角色的栈**）。
+        # `_lane_t0` 给「这一趟几秒」，`_lane_seq` 只管 uuid 唯一，`_node_names` 是装配出口那份名单
+        # （与 `/chat` 的目标校验同源，不另造一份角色名单）。
+        # ponytail: 同角色并发重入（dynamic 线把两条 Send 投给同一个成员）时，LIFO 会把后一趟的 ms
+        # 记到前一条车道上——车道文本不受影响，只有「用时」那个数会串。升级路径=用 `checkpoint_ns`
+        # 里那颗每次激活都换的 uuid 当配对键（现证两次激活是 `172ef58a…` 与 `8cbd625c…` 不同值），
+        # 代价是车道的 uuid 要改到本体 start 之后才发得出来。今天没有消费者报这个痛。
+        self._node_names: dict[str, set] = {}
+        self._lane_open: dict[str, dict] = {}
+        self._lane_t0: dict[tuple[str, str], float] = {}
+        self._lane_seq: dict[str, int] = {}
 
     # ---- 生命周期（契约：start/stop） --------------------------------------
     def _spawn(self, sid: str, coro):
@@ -623,6 +642,10 @@ class SessionRunner:
             if names != list(session.roles) or entry != session.entry_role:
                 self.store.update(session.id, roles=names, entry_role=entry)
             session.roles, session.entry_role = names, entry
+        # C190：装配那份名单顺手缓存成集合——`_role_signal` 每条 `on_chain_*` 都要问「这是不是一个
+        # 角色节点本体」，而 `store.get(sid)` 在 Redis 档是一次读库。`_prepare` 的两条调用路
+        # （`_run` 起跑、`_resume` 续跑）都经过这里；只读回放（B7）也会经过，缓存无害。
+        self._node_names[session.id] = set(names)
         chat = self.chats.get(session.id)
         if chat is not None and entry:
             chat.default_target = entry                 # 空目标也要落在真节点上
@@ -942,10 +965,20 @@ class SessionRunner:
         # C172：散会前把还挂着的兜底行收掉。**顺序要紧**：`_retire_ring` 就在下面这个 `if terminal:`
         # 里把这场的 ring 落冷档，补在它之后等于冷档里那条一直开着——回放同形，刷新也不会好。
         self._end_stream_rows(sid)
+        # C190：与上面同族的一半——**取消 / 异常走不到 `on_chain_end`**，还开着的角色车道在这儿收。
+        # 不收就是那个角色在界面上永远「在跑」（前端只认 `b.closed`，冷档回放同形，刷新也不会好）。
+        # 顺序同 `_end_stream_rows` 的理由：`_retire_ring` 就在下面 `if terminal:` 里落冷档，
+        # 补在它之后等于冷档里那条车道一直开着。
+        self._close_lanes(sid)
+        for k in [k for k in self._lane_t0 if k[0] == sid]:
+            self._lane_t0.pop(k, None)
+        self._lane_open.pop(sid, None)
         if terminal:
             self.costs.pop(sid, None)
             self._last_span.pop(sid, None)
             self._trunc_reported.pop(sid, None)
+            self._node_names.pop(sid, None)      # C190：装配名单与车道序号也是 per-session 的，
+            self._lane_seq.pop(sid, None)        # 不跟着 terminal 收就是「只增不减」那张老账
             self._retire_ring(sid)
         # 中断的调用不会走到 on_chat_model_end，在途表必须在这里扫干净，否则永久留着
         for k in [k for k in self._call_t0 if k[0] == sid]:
@@ -1238,6 +1271,70 @@ class SessionRunner:
                                 "t0": t0, "ft": ft})
 
     # ---- astream_events 翻译（LLM 用量合流与打字机、interrupt，其余块走报道槽） ----
+    def _role_signal(self, sid: str, ev: dict, start: bool):
+        """C190（10-10）：把「某个角色开始干活 / 正在干什么 / 收工了」说上事件流——
+        参照系 `run_started` / `run_phase` / `run_completed` 在本仓的对应物。
+
+        为什么必须由**服务端**发而不是前端自己从块流倒推：块上带的 `role` 只有一个字符串，
+        「这一趟开始了、这一趟结束了、他此刻在思考还是在执行动作」在协议里**没有对象**，
+        于是前端只能拿一颗头部胶囊倒着扫块猜（`ConversationRoot.vue:195-200`），五角色并发就分不出人。
+        车道是一颗**块**（`block="RoleLane"`），所以前端不需要第二套渲染管线：开块/改 meta/收口
+        沿用 C188 那一个 reducer，刷新与「加载更早」整本重折时车道自己复原。
+
+        形状现取三条（`tests/manual_role_node_shape_probe.py`，别照参照系想象）：本体是
+        `name == langgraph_node == 角色名` 且 `checkpoint_ns` 为空；相位看内层节点名；
+        `run_id` 整场共用 ⇒ 配对靠 `_lane_open` 那颗栈。
+        """
+        md = ev.get("metadata") or {}
+        node = str(md.get("langgraph_node") or "")
+        name = str(ev.get("name") or "")
+        ns = str(md.get("checkpoint_ns") or "")
+        names = self._node_names.get(sid) or set()
+        if not names:
+            return                                     # 还没装配过（单测直接喂事件）：不猜名单
+        if node and node == name and not ns and node in names:
+            stack = self._lane_open.setdefault(sid, {}).setdefault(node, [])
+            if start:
+                n = self._lane_seq.get(sid, 0) + 1
+                self._lane_seq[sid] = n
+                lane = f"lane-{n}"                     # 名字里不放角色：同一角色两次激活要两条车道
+                stack.append(lane)
+                self._lane_t0[(sid, lane)] = time.time()
+                self.bus.publish(sid, kind="role", name="started", block="RoleLane", uuid=lane,
+                                 role=node, value={"role": node, "phase": "observe"})
+            elif stack:
+                lane = stack.pop()
+                ms = max(0, round((time.time() - self._lane_t0.pop((sid, lane), time.time())) * 1000))
+                self.bus.publish(sid, kind="role", name="completed", block="RoleLane", uuid=lane,
+                                 role=node, value={"role": node, "ms": ms})
+            return
+        if not start or ":" not in ns:
+            return                                     # 相位只在开那一刻发；收口不重复发（重复＝噪声）
+        role = ns.split(":", 1)[0]
+        if role not in names or name not in ("observe", "think", "gate", "act"):
+            return                                     # 别的内部节点（_route / LangGraph 包装…）不是相位
+        stack = self._lane_open.get(sid, {}).get(role) or []
+        if not stack:
+            return                                     # 本体没开过车道：不发孤立相位，前端会画出一条没主的行
+        self.bus.publish(sid, kind="role", name="phase", block="RoleLane", uuid=stack[-1],
+                         role=role, value={"role": role, "phase": name})
+
+    def _close_lanes(self, sid: str):
+        """C190 的另一半，与 C172 同族：**取消 / 异常那两条路走不到 `on_chain_end`**。
+        不收口就是界面上那个角色永远「在跑」——前端三处只认 `b.closed`（车道行的扫光、
+        相位文本、状态色），而冷档回放同形（刷新也不会好）。`aborted` 带上，界面才敢说
+        「这条没跑完」而不是假装收工。"""
+        open_lanes = self._lane_open.get(sid) or {}
+        for role, stack in list(open_lanes.items()):
+            for lane in stack[:]:
+                stack.remove(lane)
+                t0 = self._lane_t0.pop((sid, lane), None)
+                ms = max(0, round((time.time() - t0) * 1000)) if t0 else 0
+                self.bus.publish(sid, kind="role", name="completed", block="RoleLane", uuid=lane,
+                                 role=role, value={"role": role, "ms": ms, "aborted": True})
+            if not stack:
+                open_lanes.pop(role, None)
+
     def _translate(self, sid: str, ev: dict):
         kind = ev.get("event", "")
         rid = str(ev.get("run_id") or "")
@@ -1334,6 +1431,10 @@ class SessionRunner:
                                  uuid=row, name="live", value=piece,
                                  role=self._owner(ev.get("metadata")) or node)
                 self._stream_rows.setdefault(sid, {})[row] = True   # C173：有字才补分隔
+        elif kind == "on_chain_start":
+            self._role_signal(sid, ev, True)          # C190：角色开跑 / 相位
+        elif kind == "on_chain_end":
+            self._role_signal(sid, ev, False)         # C190：角色收工（配对靠 `_lane_open` 那颗栈）
         # 注意：这里**没有** `on_interrupt` 分支。旧实现有一条，靠它置 `awaiting_human` 并把审批卡
         # 推进活流——实测 langgraph 1.2.11 的 `astream_events(v2)` 只发 `on_chain_start/stream/end`，
         # 根本没有 interrupt 事件（A4 真模型那批取到的读数，PLAN §2 A4 行），那条分支永不触发，

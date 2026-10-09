@@ -36,7 +36,7 @@ export interface Disposal {
 /** SSE 信封的 `kind`。来源：`server/`+`codeharness/` 里所有 `bus.publish(kind=…)` 与 `emit_event(…)`。 */
 export const WIRE_KINDS = [
   'report', 'log', 'status', 'ask_human', 'approval', 'error', 'turn',
-  'feedback', 'queue', 'goal', 'context'
+  'feedback', 'queue', 'goal', 'context', 'role'
 ] as const
 export type WireKind = (typeof WIRE_KINDS)[number]
 
@@ -78,6 +78,11 @@ export type FeedbackName = (typeof FEEDBACK_NAMES)[number]
 export const CONTEXT_NAMES = ['compact'] as const
 export type ContextName = (typeof CONTEXT_NAMES)[number]
 
+/** `kind=role` 的 `name`（C190 角色生命周期）。来源：`server/runner.py::_role_signal`
+ *  （本体 `on_chain_start/end` 与内层节点的相位）。 */
+export const ROLE_NAMES = ['started', 'phase', 'completed'] as const
+export type RoleName = (typeof ROLE_NAMES)[number]
+
 /** 子名的复合键。写成模板串联合，是为了让下面那一张表**一次全查**：加一个取值不登记就 red。 */
 export type SubKey =
   | `report:${ReportName}`
@@ -88,6 +93,7 @@ export type SubKey =
   | `goal:${GoalName}`
   | `feedback:${FeedbackName}`
   | `context:${ContextName}`
+  | `role:${RoleName}`
 
 export const KIND_DISPOSAL: Record<WireKind, Disposal> = {
   report: { lane: 'timeline', src: 'journal', why: '块流是时间线的唯一构成；首屏、活流、「加载更早」三条路都走同一个 reducer' },
@@ -100,7 +106,8 @@ export const KIND_DISPOSAL: Record<WireKind, Disposal> = {
   feedback: { lane: 'runtime', src: 'rest', why: '真值在 `Session.feedback`（B4）；事件只是让这一屏立刻亮起来' },
   queue: { lane: 'runtime', src: 'rest', why: '真值是服务端队列（GET /queue）；事件只按 id 增删，绝不整份覆盖（参照系对 `turn_queued` 的口径同）' },
   goal: { lane: 'runtime', src: 'rest', why: '真值在 Session 记录里，GET 就拿得到；这条只让活流跟上' },
-  context: { lane: 'timeline', src: 'journal', why: 'P4 路线三接上的那一格：压缩是发生过的事实，要在时间线留一行（`Compact` 合成块）' }
+  context: { lane: 'timeline', src: 'journal', why: 'P4 路线三接上的那一格：压缩是发生过的事实，要在时间线留一行（`Compact` 合成块）' },
+  role: { lane: 'timeline', src: 'journal', why: 'C190：角色这一趟的「开始 / 正在干什么 / 收工」折成一颗 `RoleLane` 块——整本重折能复原“谁在跑、跑到哪一步被打断”，所以它是日志能重放的那一类，不是只活在连接上的通知' }
 }
 
 export const SUB_DISPOSAL: Record<SubKey, Disposal> = {
@@ -138,6 +145,11 @@ export const SUB_DISPOSAL: Record<SubKey, Disposal> = {
   'feedback:set': { lane: 'runtime', src: 'rest', why: '按尾行键写这一份投影' },
   'feedback:clear': { lane: 'runtime', src: 'rest', why: '票值为空串 ⇒ 删键' },
 
+  // ---- role：C190 的角色生命周期（车道）----
+  'role:started': { lane: 'timeline', src: 'journal', why: '开一条车道：uuid=`lane-<n>`（现证 `run_id` 整场共用，当不了配对键，所以 uuid 由 runner 自己攒），meta 带角色与初始相位' },
+  'role:phase': { lane: 'timeline', src: 'derived', why: '只改同一颗车道的相位文本；权威是收口那一颗（相位是「此刻在干什么」的另一种形态，收工后无意义，只有被打断时它才是留下的痕迹）' },
+  'role:completed': { lane: 'timeline', src: 'journal', why: '收口 + 用时；`aborted=True` 是「没跑完」（取消/异常走不到 `on_chain_end`，由 `runner._close_lanes` 在散会时补发），界面据此不许画成正常收工' },
+
   // ---- context ----
   'context:compact': { lane: 'timeline', src: 'journal', why: '{before,after,freed,evicted_n,real_peak_pt}；0 在 real_peak_pt 上不是读数（没账本时记 0），渲染要分清' }
 }
@@ -168,5 +180,6 @@ export function declaredKeys(): string[] {
   for (const n of GOAL_NAMES) out.push(`goal:${n}`)
   for (const n of FEEDBACK_NAMES) out.push(`feedback:${n}`)
   for (const n of CONTEXT_NAMES) out.push(`context:${n}`)
+  for (const n of ROLE_NAMES) out.push(`role:${n}`)
   return out
 }

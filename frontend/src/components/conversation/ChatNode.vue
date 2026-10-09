@@ -73,6 +73,17 @@
     <span v-if="b.meta?.hasPeak" class="compactPeak">窗口峰值 {{ formatTokens(b.meta?.real_peak_pt ?? 0) }}</span>
   </div>
 
+  <!-- RoleLane：一个角色这一趟的标题行（C190）。后端只发事实（phase 就是 langgraph 内层节点名），
+       人话由 `utils/agents.ts::lanePhase` 派生——与 `toolRow` 同一口径，不去求模型自报意图。
+       收工后相位文本让位给「已收工 / 没跑完」：`aborted` 是 runner 在散会清扫时补的那一颗
+       （取消与异常走不到 `on_chain_end`，不收就会在界面上永远「在跑」，与 C172 那条兜底行同族）。 -->
+  <div v-else-if="b.type === 'RoleLane'" class="laneRow" :data-running="open ? '1' : undefined"
+       role="status" :data-chat-anchor-key="b.key">
+    <span class="laneRole">{{ b.role || b.meta?.role || '角色' }}</span>
+    <span class="lanePhase">{{ open ? lanePhase(b.meta?.phase) : (b.meta?.aborted ? '没跑完' : '已收工') }}</span>
+    <span v-if="b.meta?.ms" class="laneMs">{{ laneMs(b.meta.ms) }}</span>
+  </div>
+
   <!-- 其余：24px 折叠行 + 展开卡 -->
   <VDisclosureRow
     v-else
@@ -99,6 +110,7 @@
  *  是合成块、不是 BlockType，t1 查不到，各由 s8 自己的那一格钉住分支在不在。 */
 import { computed } from 'vue'
 import { formatTokens } from '../../utils/stats'
+import { lanePhase } from '../../utils/agents'
 import MarkdownText from './MarkdownText.vue'
 import MessageIconActions from './MessageIconActions.vue'
 import ReasoningRow from './ReasoningRow.vue'
@@ -132,6 +144,12 @@ const fileName = computed(
   () => b.value.meta?.filename || b.value.doc?.filename || b.value.path?.split(/[\\/]/).pop() || ''
 )
 const artifactUrl = computed(() => (isProse.value && b.value.path ? store.workspaceUrl(b.value.path) : ''))
+
+/** 车道的用时：不足 1 秒必须原样说毫秒。真图第一次跑就量到 5ms——`(5/1000).toFixed(1)` 会印成
+ *  「0.0s」，那是一个看着像读数的假数（同一角色第二次激活就是这么短）。 */
+function laneMs(ms: number): string {
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
 
 const KIND: Record<string, { title: string; icon: string }> = {
   Terminal: { title: 'Bash', icon: 'code' },
@@ -270,6 +288,41 @@ const row = computed(() => {
 
 .errMsg {
   color: var(--dsw-alias-label-secondary);
+}
+
+/* RoleLane（C190 的角色车道行）：它是「这一段是谁的」的分隔，不是又一条状态提示，
+   所以刻意比 Compact 重一点（角色名用主文本色 + 600 字重），但不用 error/warn 那一族的颜色。 */
+.laneRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 10px 0 2px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.laneRole {
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* 用时是读数：等宽数字，跑起来不会左右跳 */
+.laneMs {
+  font-variant-numeric: tabular-nums;
+}
+
+.laneRow[data-running='1'] .lanePhase {
+  animation: lanePulse 1.6s ease-in-out infinite;
+}
+
+@keyframes lanePulse {
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .laneRow[data-running='1'] .lanePhase { animation: none; }
 }
 
 /* Compact：刻意不是 .errRow 那一族——压缩不是失败也不是警告，是「这里发生过一件系统动作」。

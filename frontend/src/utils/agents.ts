@@ -30,3 +30,14 @@ export function agentChipLabel(role: string | null, roles: string[] | undefined 
   if (!role) return roster.length ? `${roster.length} 个角色` : ''
   return roster.length > 1 ? `${role} · ${roster.length} 个角色` : role
 }
+
+/** 车道行的相位文本（C190）。后端只发**事实**——`value.phase` 就是 langgraph 的内层节点名
+ *  （`observe`/`think`/`gate`/`act`，见 `server/runner.py::_role_signal`），动词由这里说人话。
+ *  与 `toolRow.ts` 同一口径：不新造一个「意图」字段去求模型填。认不出来的名字一律回
+ *  「干活中」——宁可笼统，也不把内部节点名原样打在界面上（那正是本文件开头那条病）。 */
+const LANE_PHASE: Record<string, string> = {
+  observe: '看进展', think: '思考中', gate: '自检中', act: '执行动作'
+}
+export function lanePhase(phase: string | undefined | null): string {
+  return LANE_PHASE[(phase || '').trim()] || '干活中'
+}

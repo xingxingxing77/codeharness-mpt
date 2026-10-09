@@ -370,6 +370,112 @@ async def t7_pingpong_brake():
           f"（{cycles} 个委派-回报来回）后正常散会，会话没被打成 failed")
 
 
+def t9_role_lanes():
+    """C190（10-10）：角色生命周期事件（车道）必须由**真图**数出来，不能照参照系的形状写。
+
+    为什么这一格非用真图不可：三条反直觉的事实全是现取的
+    （`tests/manual_role_node_shape_probe.py`，真 `build_team` + 每角色独立 FakeLLM 剧本）——
+      · 整场所有 `on_chain_*` 的 `run_id` 是**同一颗** ⇒ 拿它配对会把两次激活并成一条车道；
+      · 角色本体的 `checkpoint_ns` 为空，内层 think/gate/act 的那颗 uuid 首段才是角色名；
+      · `graph:step:N` 在 start 与 end 上不是同一个数 ⇒ 也配不上。
+    本仓在这族「判据打在构造/合成事件上、生产里那条分支从不触发」上应验过两次
+    （A4 那轮的 `on_interrupt`；`manual_stream_landing` 文件头那两次形状猜错）。所以形状先现取，
+    再拿真图的事件源喂真 `_translate`，数总线上的东西。
+
+    四格：① 每次激活恰好一条 `started` + 一条 `completed`，uuid 配对且不重复、ms 是算出来的；
+         ② `phase` 只挂在**已开着的**车道上（不发孤立相位——前端会画出一条没主的行）；
+         ③ 内层节点名不冒充角色（`think`/`act` 不该有自己的车道）；
+         ④ 阳性对照·取消那条路：走不到 `on_chain_end`，散会清扫必须补一颗 `aborted` 收口
+            （与 C172 的兜底行同族：不收口就是那个角色在界面上永远「在跑」）。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from server.events import SessionEventBus
+    from server.runner import SessionRunner
+    from server.sessions import SessionStore
+
+    agents, sop, _ = _team([_think("派活给 Alice", [PUBLISH]), _think("等回报", [END])],
+                           [_think("PRD 写完了", [REPLY, END])])
+    graph = build_team(agents, sop=sop, checkpointer=InMemorySaver())
+    tmp = Path(tempfile.mkdtemp())
+    store = SessionStore(path=tmp / "sessions.json")
+    bus = SessionEventBus()
+    runner = SessionRunner(store, bus)
+    init = {"messages": [Message(content="做个命令行待办工具", role="user",
+                                  cause_by=RequirementTag.USER_REQUIREMENT)],
+            "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}
+
+    def _run(sid_tag, stop_after_started=False):
+        s = store.create("车道判据", project_name=f"s22t9_{sid_tag}", paradigm="dynamic")
+        cfg = {"configurable": {"thread_id": f"s22t9-{sid_tag}"}}
+        # 真路径里这份名单是 `_prepare` 顺手缓存的（装配出口那一份，与 /chat 目标校验同源）。
+        # 这里只借真图的事件源，不重跑装配：装配要建网关与 checkpointer，与「车道形状」无关。
+        runner._node_names[s.id] = set(agents)
+
+        async def _go():
+            seen_started = 0
+            async for ev in graph.astream_events(init, cfg, version="v2"):
+                runner._translate(s.id, ev)
+                if stop_after_started and ev.get("event") == "on_chain_start" \
+                        and str((ev.get("metadata") or {}).get("langgraph_node") or "") in agents:
+                    seen_started += 1
+                    if seen_started:
+                        return s.id          # 模拟「角色还在跑就被取消」：停在第一条车道开着的时候
+            return s.id
+
+        asyncio.run(_go())
+        if stop_after_started:
+            runner._forget(s.id, terminal=False)     # 取消/异常那条路的清扫点（C172 同处）
+        return s.id, [e for e in bus.history(s.id) if e.kind == "role"]
+
+    sid, lanes = _run("full")
+    started = [e for e in lanes if e.name == "started"]
+    done = [e for e in lanes if e.name == "completed"]
+    phases = [e for e in lanes if e.name == "phase"]
+    assert started, "真图跑完一条车道都没有 ⇒ 发射点根本没通电（下面几条都是空转）"
+    assert len({e.uuid for e in started}) == len(started), \
+        f"车道 uuid 重复了（配对靠的就是它）：{[e.uuid for e in started]}"
+    assert {e.uuid for e in started} == {e.uuid for e in done}, \
+        f"开了没关 / 关了没开：started={[e.uuid for e in started]} completed={[e.uuid for e in done]}"
+    assert all(e.role in agents for e in lanes), \
+        f"车道角色不在册（内层节点名冒充了角色？）：{sorted({e.role for e in lanes})}"
+    assert {e.value.get("phase") for e in started} | {e.value.get("phase") for e in phases} \
+        <= {"observe", "think", "gate", "act"}, "相位取值漂了（前端词表对账在 s8 t32⑦）"
+    opened = set()
+    for e in lanes:
+        if e.name == "started":
+            opened.add(e.uuid)
+        elif e.name == "phase":
+            assert e.uuid in opened, f"孤立相位：车道 {e.uuid} 还没开就来了 phase（会画出没主的行）"
+    assert sum(int(e.value.get("ms") or 0) for e in done) > 0, \
+        f"ms 全是 0 = 根本没在算（写死的 0 比不报更坏）：{[e.value for e in done]}"
+    # 栈要弹空（键可以留着、值是空栈）；`_lane_t0` 按 (sid, uuid) 存，必须一条不剩。
+    # 上一版这里写成 `assert not runner._lane_open.get(sid)`——那查的是「键没了」，而实现只 pop
+    # 弹栈不删键，于是判据红在一处不是缺陷的地方（假红也是红，记一笔免得下次再撞）。
+    _stacks = runner._lane_open.get(sid) or {}
+    assert all(not v for v in _stacks.values()), \
+        f"跑完还留着在途车道 ⇒ 配对没弹干净，取消时会补错收口：{ {k: list(v) for k, v in _stacks.items()} }"
+    assert not [k for k in runner._lane_t0 if k[0] == sid], "跑完还留着在途 t0 ⇒ 计时表漏扫"
+    # 同一个角色被激活两次必须留下**两条**车道（LIFO 配对的正证；剧本里队长派活一次、收回报一次）
+    per_role: dict = {}
+    for e in started:
+        per_role[e.role] = per_role.get(e.role, 0) + 1
+    assert max(per_role.values()) >= 2, \
+        f"这场真图里没有一个角色跑过两趟（{per_role}）⇒ 配对这条判据成了空转，别留假绿"
+
+    _sid2, lanes2 = _run("cancel", stop_after_started=True)
+    aborted = [e for e in lanes2 if e.name == "completed" and e.value.get("aborted")]
+    assert lanes2 and aborted, \
+        f"取消那条路必须留下 aborted 收口（否则界面上那个角色永远在跑）：{[(e.name, e.value) for e in lanes2]}"
+    assert {e.uuid for e in aborted} <= {e.uuid for e in lanes2 if e.name == "started"}, \
+        "aborted 收口对到了没开过的车道上"
+    print(f"  ok  t9 车道真图档：{len(started)} 条 started/completed 逐条配对、"
+          f"{len(phases)} 条相位全挂在已开车道上、ms 合计 "
+          f"{sum(int(e.value.get('ms') or 0) for e in done)}ms；取消档补了 {len(aborted)} 条 aborted")
+
+
 def main():
     t1_split_and_target()
     t2_real_graph()
@@ -379,7 +485,8 @@ def main():
     asyncio.run(t6_report_path())
     asyncio.run(t7_pingpong_brake())
     asyncio.run(t8_plan_open_reads_real_dump())
-    print("\ns22_delegate_route: 8/8 全绿")
+    t9_role_lanes()
+    print("\ns22_delegate_route: 9/9 全绿")
     return 0
 
 

@@ -186,6 +186,27 @@ def t32_event_disposition_and_fold():
     assert "evicted_n" in node and "freed" in node, "Compact 行没读事件里的数（写死一个数就是假话）"
     assert "hasPeak" in fold and "real_peak_pt" in fold, \
         "real_peak_pt 的 0「不是读数」这一件没在折的时候定下来（渲染层就得自己猜 0 的含义）"
+
+    # ---- ⑦ C190 角色车道：类型名与相位词表必须**两侧同源** ----
+    # 车道块不叫 BlockType，t1 那格查不到它——而它拼错一个字的症状恰好是 t1 当初立起来要防的那件事
+    # （行静默降级成灰色折叠行）。所以这里自己钉：后端发什么块名、前端就分派什么块名。
+    assert 'kind="role"' in run, "C190 回归：runner 不再发角色生命周期事件（「谁在跑」又只剩倒扫块猜）"
+    assert 'block="RoleLane"' in run, "C190 回归：后端车道块名漂了（前端那份分派就成了没人喂的分支）"
+    assert "b.type === 'RoleLane'" in node, "C190 回归：ChatNode 少了 RoleLane 分支——车道行静默降级成灰色折叠行"
+    assert "lanePhase" in node and "aborted" in node, \
+        "C190 回归：车道行不再把相位说人话，或不再区分「已收工 / 没跑完」（取消那条路靠 aborted）"
+    m_be = re.search(r'name not in \(((?:"\w+"(?:, )?)+)\)', run)
+    assert m_be, "C190：后端相位白名单的形状变了（这条对账的抽取器得跟着改，不许静默空转）"
+    be_phases = set(re.findall(r'"(\w+)"', m_be.group(1)))
+    agents_ts = (FE / "utils" / "agents.ts").read_text(encoding="utf-8")
+    # 抽整个对象字面量的体，再在里面找键名：上一版按「一行一个键」抽，而这份表是四个键写在一行的
+    # ⇒ 抽出空集、判据红成「前端没登记相位词」——那是抽取器的问题，不是代码的问题（假红也要记账）。
+    m_fe = re.search(r"const LANE_PHASE[^=]*=\s*\{(.*?)\}", agents_ts, re.S)
+    assert m_fe, "C190：前端相位派生表 `LANE_PHASE` 形状变了，这条对账的抽取器得跟着改（不许静默空转）"
+    fe_phases = set(re.findall(r"(\w+):\s*'", m_fe.group(1)))
+    assert be_phases == fe_phases and be_phases, \
+        f"C190 回归：相位词表两侧不一致（后端 {sorted(be_phases)} / 前端 {sorted(fe_phases)}）——" \
+        "少一边就是「后端发得出、前端只认『干活中』」那种静默退化"
     _ok("t32", f"处置表 {len(rows)} 行 ↔ 生产端 kind {len(prod_kinds)} / report name {len(prod_names)} / "
                f"turn reason {len(prod_reasons)} 全对上；三条路同一个 reducer；行为级探针三支跑绿"
                f"（{', '.join(probed)}）")

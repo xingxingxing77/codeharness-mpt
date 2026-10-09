@@ -242,6 +242,26 @@ function foldTimeline(st: FoldState, ev: WEvent, key: string) {
     if (b) b.role = ev.role || b.role
     return
   }
+  if (ev.kind === 'role') {
+    // C190：一个角色这一趟的车道 = 一颗 `RoleLane` 块（`started` 开、`phase` 改相位文本、
+    // `completed` 收口带 ms/aborted）。uuid 是 runner 攒的 `lane-<n>`——现证整场 `on_chain_*`
+    // 共用一个 `run_id`，当不了配对键（`server/runner.py::_role_signal` 那段记了现证）。
+    // 用它自己的 `target()`：车道行与块流同一条管线，「加载更早」整本重折自然把车道复原。
+    const v = (ev.value || {}) as Record<string, any>
+    const b = target(st, ev)
+    const role = String(v.role || ev.role || b.role || '')
+    b.role = role
+    if (ev.name === 'started') {
+      b.closed = false
+      b.meta = { role, phase: String(v.phase || ''), ms: 0, aborted: false }
+    } else if (ev.name === 'phase') {
+      b.meta = { ...(b.meta || { role }), phase: String(v.phase || '') }
+    } else {
+      b.meta = { ...(b.meta || { role }), phase: '', ms: Number(v.ms) || 0, aborted: !!v.aborted }
+      b.closed = true                  // 不收口就永远「在跑」：取消/异常那条路由 runner._close_lanes 补
+    }
+    return
+  }
   // 处置表把这条判到了 timeline，但这里没有分支＝新加了一个「有处置、无落点」的 kind。
   loud(st, key)
 }
