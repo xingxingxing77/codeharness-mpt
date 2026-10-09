@@ -10,6 +10,13 @@
       <!-- 子 agent 胶囊：多角色线（经典 SOP 的 PM/Architect/Engineer/QA、动态线的 Mike/Alice…）
            跑起来后头部要看得出「此刻是谁在干活」，否则流里全是 Think 行、根本分不出人。 -->
       <AgentChip v-if="agentLabel" :label="agentLabel" :running="store.isRunning" />
+      <!-- C189：筛选态要说得出「现在只看谁」并给一个明确的退出。不写这颗，中栏少了一半行
+           却没有任何地方解释为什么少——那是「界面自己变了」那一类最难查的困惑。 -->
+      <button v-if="ui.roleFilter" type="button" class="filterChip" title="清除筛选，回到全部"
+              @click="ui.roleFilter = ''">
+        只看 {{ ui.roleFilter }}
+        <span class="filterX" aria-hidden="true">×</span>
+      </button>
       <span class="grow" />
       <!-- C25②：这颗金额是**厂商回执原样累加**的，只补一句口径、不改数也不折算（真账去厂商控制台核）。
            ⚠ 2026-10-08 更正：C25 当初写的「同一条 prompt 它报 59 万而 7B 报 1.2k ⇒ 账面能显出几百元这种
@@ -206,8 +213,16 @@ const TAKEOVERS: { kind: 'question' | 'approval'; when: (s: typeof store) => boo
 ]
 const takeover = computed(() => TAKEOVERS.find((t) => t.when(store))?.kind ?? null)
 
-/** 只在「结构」变化时跟滚，普通重渲染不抢滚动条。尾行也算结构变化。 */
-const rows = computed(() => buildRows(store.blockList, store.spans))
+/** 只在「结构」变化时跟滚，普通重渲染不抢滚动条。尾行也算结构变化。
+ *  C189 筛选态：先按角色滤块再算轮，且**筛掉轮尾行**——尾行的用时/TTFT/tok·s⁻¹ 是按整轮的块与
+ *  span 时间窗聚合出来的，只留一个人的行还画尾行，那就是「把整轮的账冒充成一个人的账」。 */
+const rows = computed(() => {
+  const f = ui.roleFilter
+  const list = f ? store.blockList.filter((b) => b.type === 'User' || (b.role || b.meta?.role) === f)
+                 : store.blockList
+  const built = buildRows(list, store.spans)
+  return f ? built.filter((r) => r.kind === 'node') : built
+})
 const followSig = computed(() => {
   const last = rows.value.at(-1)
   const tail = last && last.kind === 'node' ? last.b.key : last ? 'tail' : ''
@@ -215,6 +230,9 @@ const followSig = computed(() => {
 })
 
 const follow = useFollowScroll(scrollEl, flowEl, seatEl, () => followSig.value)
+
+/* 切会话就退出「只看某人」：换场之后还留着上一场的角色名，屏幕会显示一片空白并假装那是结果。 */
+watch(() => store.currentId, () => { ui.roleFilter = '' })
 
 /** 「加载更早」（B2）：整页往前拼会改变内容高度，读者那一屏必须原地不动——
  *  先抓视觉锚点，DOM 更新后按锚点补回差值。captureAnchor/restoreAnchor 就是为这一步留的。 */
@@ -305,6 +323,27 @@ onBeforeUnmount(() => clearInterval(tick))
   gap: 8px;
   min-height: 32px;
   padding: 12px 28px 0 20px;
+}
+
+/* 筛选胶囊：它是「退出」而不是「又一个开关」，所以刻意贴着 iconBtn 的尺寸与圆角 */
+.filterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.filterX {
+  font-size: 14px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-secondary);
 }
 
 .crumbs {

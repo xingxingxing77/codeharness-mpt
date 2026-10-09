@@ -12,6 +12,12 @@ export const useUiStore = defineStore('ui', {
     jumpKey: '',
     /** 中栏视图：对话流 / Trajectory 台账。参考项目把它放在会话 store 的 view 字段。 */
     centerView: 'chat' as 'chat' | 'trajectory',
+    /** C191（缺口登记在 C189 ②）：只看某个角色的整趟。空=不筛。
+     *  为什么住在 `ui` 而不是会话 store：它是**视图态**，不是事件折出来的事实——放进
+     *  `sessions` 就会有人想去 `resetFold` 里清它或在 reducer 里算它，而 C188 那条分工
+     *  （日志折事实、GET 补快照、视图偏好谁都不折）正是靠这种边界才成立的。
+     *  切会话时由 `ConversationRoot` 清（那里有 currentId 的 watch），不靠 store 记。 */
+    roleFilter: '',
     /* 设置弹窗开关 */
     settingsFull: false,
     settingsPage: 'general' as string,

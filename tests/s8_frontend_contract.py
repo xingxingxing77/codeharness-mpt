@@ -212,6 +212,44 @@ def t32_event_disposition_and_fold():
                f"（{', '.join(probed)}）")
 
 
+def t33_role_filter_and_user_producer():
+    """C189（10-10）：「点开某个角色看整趟」与「用户发言有生产者」两侧同源对账。
+
+    两件事都是**少一边就静默错**的形状，所以各钉一对：
+    ① 用户发言：后端两处入口（`/chat`、`/human-input`）必须发真 `User` 块，而前端**必须不再**
+       自己造那颗本地假块——两边同时留着就是「两个气泡同屏」（C188 那族「两份同屏」的界面版）；
+       只删前端不接后端更糟：用户说的话在界面上彻底消失。
+    ② 角色筛选：车道行要是**可点的**（`<button>` 而不是挂了 @click 的 div——键盘与读屏要免费拿到），
+       筛选态必须**滤掉轮尾行**（尾行的 tok/s 与用时是按整轮窗口聚合的，留它就是「把整轮的账
+       冒充成一个人的账」），要有看得见的退出胶囊，且切会话必须清（下一场还带着上一场的角色名
+       = 一片空白还假装那是结果）。
+    """
+    api_py = (ROOT / "server" / "api" / "sessions.py").read_text(encoding="utf-8")
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    ui = (FE / "stores" / "ui.ts").read_text(encoding="utf-8")
+    root_vue = (FE / "components" / "conversation" / "ConversationRoot.vue").read_text(encoding="utf-8")
+    node = (FE / "components" / "conversation" / "ChatNode.vue").read_text(encoding="utf-8")
+
+    # ① 用户发言：生产端两颗（content + end_marker），两个入口都接，前端那条本地路已删
+    assert 'block="User"' in api_py, "C189 回归：后端不再发 User 块——刷新后用户说过的话会整段消失"
+    assert api_py.count("_publish_user_block(") >= 3,         "C189 回归：`/chat` 或 `/human-input` 少了一个接生产者（漏一个就是那条入口说的话不进事件流）"
+    assert 'name="end_marker"' in api_py.split("_publish_user_block", 1)[-1][:1200],         "C189 回归：User 块只发 content 不收口——末块不收口就不发轮尾行（分叉与点赞入口一起没）"
+    for gone in ("sendChatLocal", "ingestLocal"):
+        assert gone not in st, f"C189 回归：`{gone}` 回来了——服务端已发 User 块，前端再造一颗就是两份气泡同屏"
+    assert "b.type === 'User'" in node, "C189 回归：ChatNode 不再画 User 气泡"
+
+    # ② 角色筛选：可点、滤尾行、有退出、切会话清
+    assert 'roleFilter' in ui and "''" in ui.split("roleFilter")[1][:40],         "C189 回归：`ui.roleFilter` 没了基线空串（空=不筛是这份态的唯一真相源）"
+    assert "<button v-else-if=\"b.type === 'RoleLane'\"" in node,         "C189 回归：车道行不是 `<button>`——用 div 挂 @click 的话键盘与读屏拿不到这个操作"
+    assert "ui.roleFilter = ui.roleFilter === laneRole" in node,         "C189 回归：车道行不再切换筛选（或不会二次点击取消）"
+    assert "aria-pressed" in node and "aria-pressed=\"true\"" in node,         "C189 回归：车道行没有筛选态的可视/可读标记（点亮着看不出来）"
+    assert "built.filter((r) => r.kind === 'node')" in root_vue,         "C189 回归：筛选态还画轮尾行——那是把整轮的 tok/s 与用时冒充成单个角色的账"
+    assert "只看 {{ ui.roleFilter }}" in root_vue, "C189 回归：筛选态没有说「现在只看谁」的退出胶囊"
+    assert "watch(() => store.currentId, () => { ui.roleFilter = '' })" in root_vue,         "C189 回归：切会话不清筛选——换场后屏幕一片空白还假装那是结果"
+    _ok("t33", "C189 两侧同判：User 块有生产者且前端不再自造（两份气泡不许回来）；"
+               "车道行可点 + 筛选态滤尾行 + 退出胶囊 + 切会话清，四件都在")
+
+
 def t1_blocktype_vocabulary():
     from codeharness.report import BlockType
     # 分发从 Timeline.vue 搬到了 conversation/：ChatNode 管 prose 与 User，
@@ -2439,7 +2477,7 @@ def main():
               t25_frontend_one_liners_c92_c96,
               t26_ui_bugfix_batch, t27_recall_visibility,
               t28_stream_ux_batch, t29_task_rows_c107, t30_foreground_resync_c110,
-              t31_ctx_card_caliber_labels, t32_event_disposition_and_fold)
+              t31_ctx_card_caliber_labels, t32_event_disposition_and_fold, t33_role_filter_and_user_producer)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

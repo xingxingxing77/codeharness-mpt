@@ -349,6 +349,26 @@ async def stop_session(sid: str, request: Request, user: str = Depends(current_u
     return {"ok": True, "stopped": stopped}
 
 
+def _publish_user_block(request: Request, sid: str, content: str) -> str:
+    """C191（缺口登记在 C189 ③甲）：用户自己说的话上事件流（此前**根本没有生产者**）。
+
+    症状是现证的：`/chat` 与 `/human-input` 只把内容投进队列就返回，总线上一条事件都不发
+    ⇒ 刷新之后用户气泡整段消失（`SessionEventBus` 的回放与冷档里压根没有这一行），
+    而此前它靠前端 `sendChatLocal` 在内存里造一颗假块顶着——顶得住这一屏，顶不住刷新，
+    且「加载更早」整本重折时会被抹掉。参照系那一侧同形状：用户句是 `message_start` +
+    delta，**走同一条事件流**，所以回放、多端、分叉都看得见同一本账。
+
+    两颗事件（`content` + `end_marker`）与内核块同形：`end_marker` 是必需的，末块没收口
+    就不发轮尾行（分叉入口与点赞都会少）。返回 uuid 只为判据能点名这一颗。
+    """
+    import uuid as _u
+    bus = _get(request, "bus")
+    uid = _u.uuid4().hex
+    bus.publish(sid, kind="report", block="User", uuid=uid, name="content", value=content, role="user")
+    bus.publish(sid, kind="report", block="User", uuid=uid, name="end_marker", value=None, role="user")
+    return uid
+
+
 @router.post("/{sid}/chat")
 async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(current_user)):
     s = _owned(request, sid, user)
@@ -362,6 +382,8 @@ async def chat(sid: str, req: ChatReq, request: Request, user: str = Depends(cur
         raise HTTPException(409, "session is not running")
     if not runner.enqueue_chat(sid, req.content, target):
         raise HTTPException(409, "session chat queue unavailable")
+    # 只有**真投进队列**才算这一句说过：投递失败不发（否则界面上多一条模型从没收到过的用户气泡）
+    _publish_user_block(request, sid, req.content)
     return {"ok": True}
 
 
@@ -606,6 +628,7 @@ async def human_input(sid: str, req: HumanInputReq, request: Request, user: str 
         # B2：拒收必须是 409。原先 200 + {"ok": false} 到了前端是恒真的信封
         # （store 把整个响应体当布尔用），用户以为回答已送达、卡片就地消失。
         raise HTTPException(409, "会话正在运行或已在恢复中，人工回答未接收")
+    _publish_user_block(request, sid, req.content)      # C189：这条回答同样是用户说过的话
     return {"ok": True}
 
 

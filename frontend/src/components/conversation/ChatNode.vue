@@ -76,13 +76,19 @@
   <!-- RoleLane：一个角色这一趟的标题行（C190）。后端只发事实（phase 就是 langgraph 内层节点名），
        人话由 `utils/agents.ts::lanePhase` 派生——与 `toolRow` 同一口径，不去求模型自报意图。
        收工后相位文本让位给「已收工 / 没跑完」：`aborted` 是 runner 在散会清扫时补的那一颗
-       （取消与异常走不到 `on_chain_end`，不收就会在界面上永远「在跑」，与 C172 那条兜底行同族）。 -->
-  <div v-else-if="b.type === 'RoleLane'" class="laneRow" :data-running="open ? '1' : undefined"
-       role="status" :data-chat-anchor-key="b.key">
-    <span class="laneRole">{{ b.role || b.meta?.role || '角色' }}</span>
+       （取消与异常走不到 `on_chain_end`，不收就会在界面上永远「在跑」，与 C172 那条兜底行同族）。
+       C189：这行**可点**，点下去中栏只看这个角色这一路（`ui.roleFilter`）。用 `<button>` 而不是
+       给 div 挂 @click——车道行是真正的操作对象，键盘与读屏要免费拿到，别造一个"看起来能点"的死控件。 -->
+  <button v-else-if="b.type === 'RoleLane'" type="button" class="laneRow"
+          :data-running="open ? '1' : undefined" :data-role="laneRole"
+          :aria-pressed="ui.roleFilter === laneRole ? 'true' : 'false'"
+          :title="`只看 ${laneRole} 这一路`"
+          :data-chat-anchor-key="b.key"
+          @click="ui.roleFilter = ui.roleFilter === laneRole ? '' : laneRole">
+    <span class="laneRole">{{ laneRole }}</span>
     <span class="lanePhase">{{ open ? lanePhase(b.meta?.phase) : (b.meta?.aborted ? '没跑完' : '已收工') }}</span>
     <span v-if="b.meta?.ms" class="laneMs">{{ laneMs(b.meta.ms) }}</span>
-  </div>
+  </button>
 
   <!-- 其余：24px 折叠行 + 展开卡 -->
   <VDisclosureRow
@@ -133,6 +139,8 @@ const b = computed(() => props.b)
 const text = computed(() => b.value.tokens.join('') + b.value.live.join(''))
 const open = computed(() => !b.value.closed)
 const isProse = computed(() => b.value.type === 'Docs')
+/** 车道行归属的角色：优先块上的 `role`（报道槽与打字机流都写它），meta 那份是兜底。 */
+const laneRole = computed(() => b.value.role || b.value.meta?.role || '角色')
 /** 轮内 error 行（B1）：store 把 traceback 按行存进 lines，行里只报最后一行非空——
  *  `format_exc` 的末行才是「异常类型: 消息」，前面全是栈。全段挂 title，右栏台账也留了一份。 */
 const traceback = computed(() => b.value.lines.join('\n'))
@@ -296,10 +304,32 @@ const row = computed(() => {
   display: flex;
   align-items: baseline;
   gap: 6px;
+  width: 100%;
   padding: 10px 0 2px;
+  border: 0;
+  background: none;
+  font-family: inherit;
   font-size: 12px;
   line-height: 18px;
+  text-align: left;
   color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.laneRow:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* 筛选态：角色名后面挂一道短下划线，说「这一路正在被看」——比整行变色安静，
+   也比"只有 hover 才像能点"诚实（读屏靠 aria-pressed，视觉靠这条）。 */
+.laneRow[aria-pressed="true"] .laneRole {
+  border-bottom: 1px solid var(--dsw-alias-label-secondary);
+}
+
+/* 焦点环照 `VDisclosureRow.vue:71-73` 那一套（同一个 token、同样 1px 外扩），不自造样式 */
+.laneRow:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 1px;
 }
 
 .laneRole {

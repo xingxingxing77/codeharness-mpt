@@ -436,12 +436,6 @@ export const useSessionStore = defineStore('sessions', {
         return
       }
       if (ev.seq > this.lastSeq) this.lastSeq = ev.seq
-      this.ingestLocal(ev)
-    },
-
-    /** 把一帧投进同一本日志再折（本地合成的那两帧也走这儿：去重在 `ingest` 那一层，
-     *  不在日志那一层——本地帧没有游标，硬走 `ingest` 会被「seq 0 比当前游标老」判成重复丢掉）。 */
-    ingestLocal(ev: WEvent) {
       let log = evlog.get(this.currentId)
       if (!log) evlog.set(this.currentId, (log = []))
       log.push(ev)
@@ -488,24 +482,14 @@ export const useSessionStore = defineStore('sessions', {
       if (this.currentId === sid) this.goHome()
     },
 
-    /** 用户自己的发言。**没有后端生产者**（`/chat` 只进 ChatQueue，不发事件），所以这里造一帧
-     *  同形状的事件投进日志——投日志而不是直接塞块，是为了让「加载更早」的整本重折不会把它抹掉
-     *  （改前那份直接写 `this.blocks` 的写法，翻一页历史就少一条用户气泡）。
-     *  ⚠ 刷新就没了是同一件事的另一半：真缺口在**生产端**，登记在 plan/frontend.md，
-     *  不在本件里顺手改语义（那要动 `/chat` 的落流与游标口径）。 */
-    sendChatLocal(content: string) {
-      const now = Date.now() / 1000
-      const mk = (name: string, value: any): WEvent => ({
-        session_id: this.currentId, seq: 0, cursor: '', ts: now, kind: 'report',
-        block: 'User', uuid: `u${now}`, name, value, role: 'user', code: null, extra: null
-      })
-      this.ingestLocal(mk('content', content))
-      this.ingestLocal(mk('end_marker', null))   // 不收口就不发轮次尾行（与 error/turn 同一判据）
-    },
-
+    /** 用户发言**不再在前端造块**（C189）：`/chat` 与 `/human-input` 现在各发一颗真 `User` 块
+     *  上事件流（`server/api/sessions.py::_publish_user_block`），这一屏的气泡与刷新后的回放、
+     *  「加载更早」的整本重折、分叉切点吃的都是同一本账。
+     *  改前这里是「本地乐观插一颗假块」：顶得住这一屏，顶不住刷新（C188 之前连翻页都会抹掉它），
+     *  而且一旦生产端补上就会变成两份同屏——所以生产端接上的同一批，这里必须删干净，
+     *  不是留着「更跟手」。 */
     async sendChat(content: string, sendTo = '') {
       await api.sendChat(this.currentId, content, sendTo)
-      this.sendChatLocal(content)
     },
 
     async answerHuman(content: string) {

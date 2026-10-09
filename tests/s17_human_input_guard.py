@@ -1837,6 +1837,83 @@ def t19_tool_card_is_open_during_the_call():
           "＋抛异常那一笔也留 ok=false 的卡并收口（回喂串逐字不变）")
 
 
+def t20_user_turns_reach_the_event_stream():
+    """C189（10-10）：用户说的话必须是**事件流里的一行**，不是前端自己画的一颗假块。
+
+    改前的症状：`/chat` 与 `/human-input` 只投队列、不发事件 ⇒ 刷新后用户气泡整段消失
+    （回放与冷档里根本没有这一行），前端只能本地乐观插一颗顶着，而那份顶不住刷新、也顶不住
+    「加载更早」的整本重折。
+    三格：① `/chat` 投成功 ⇒ 恰好一对 `User` 事件（`content` + `end_marker`，`role=user`，
+            正文逐字等值，同一颗 uuid）；
+         ② `/human-input` 答成功 ⇒ 同样一对；
+         ③ 两条拒收路径（队列拿不到 / 会话正在跑）⇒ **一颗都不发**——
+            发了就是界面上多一条模型从没收到过的用户气泡，那比丢了更难查。
+    """
+    import server.sessions as ss
+    from codeharness.configs.settings import settings
+
+    keep_sess, keep_redis = ss.SESSIONS_FILE, settings.platform.use_redis
+    ss.SESSIONS_FILE = Path(tempfile.mkdtemp()) / "sessions.json"
+    settings.platform.use_redis = False
+    try:
+        from fastapi.testclient import TestClient
+        from server.app import create_app
+        from codeharness.runtime import ChatQueue
+
+        def users(runner, sid):
+            return [(e.name, e.uuid, e.role, e.value) for e in runner.bus.history(sid)
+                    if getattr(e, "block", None) == "User"]
+
+        with TestClient(create_app()) as c:
+            runner = c.app.state.runner
+            sid = c.post("/api/sessions", json={"idea": "C189", "project_name": "c189_http"}).json()["id"]
+            # 「正在跑」这一位在整格里**一直留着**：`/chat` 的两道闸是 `is_running` 与「队列拿得到」，
+            # 提前 del 掉 tasks 会让 ① 变成 409（第一版就红在这儿——判据自己的桩拆早了，
+            # 不是产品没接）。② 之前才撤，因为 `answer_human` 要的是「停在待人工、没有活任务」那个形态。
+            busy = _Busy()
+            runner.tasks[sid] = busy
+
+            # ③a 队列拿不到（`chats` 里没有这场）⇒ 409 且一颗都不发
+            r_bad = c.post(f"/api/sessions/{sid}/chat", json={"content": "这句不该上屏"})
+            assert r_bad.status_code == 409, f"t20③a 期望 409，实际 {r_bad.status_code}（先怀疑桩：running 位在不在？）"
+            assert users(runner, sid) == [], f"t20③a 拒收却发了 User 事件（会多出模型没收到的气泡）：{users(runner, sid)}"
+
+            # ① 投成功：恰好一对，同 uuid、role=user、正文逐字
+            runner.chats[sid] = ChatQueue()
+            assert c.post(f"/api/sessions/{sid}/chat", json={"content": "把标题改成中文"}).status_code == 200
+            pair = users(runner, sid)
+            assert [x[0] for x in pair] == ["content", "end_marker"], f"t20① 不是一对 content+end_marker：{pair}"
+            assert pair[0][1] == pair[1][1], f"t20① 两颗 uuid 不同（前端会折成两块）：{pair}"
+            assert pair[0][2] == "user" and pair[0][3] == "把标题改成中文", f"t20① 载荷不对：{pair[0]}"
+
+            # ③b 会话正在跑 ⇒ human-input 409，且不许多加一对（busy 从开头就挂着）
+            r2 = c.post(f"/api/sessions/{sid}/human-input", json={"content": "这句也不该上屏"})
+            n_before = len(users(runner, sid))
+            assert r2.status_code == 409, f"t20③b 期望 409，实际 {r2.status_code}"
+            del runner.tasks[sid]
+            assert len(users(runner, sid)) == n_before, "t20③b 被拒的回答也发了 User 事件"
+
+            # ② 答成功：再一对（回答同样是用户说过的话，刷新后要看得见）
+            started = threading.Event()
+            saved = runner._resume
+            async def fake_resume(_sid, _content):
+                started.set()
+            runner._resume = fake_resume
+            try:
+                assert c.post(f"/api/sessions/{sid}/human-input", json={"content": "方案 A"}).status_code == 200
+                started.wait(3)
+            finally:
+                runner._resume = saved
+            got = users(runner, sid)
+            assert len(got) == 4 and got[2][3] == "方案 A" and got[3][0] == "end_marker",                 f"t20② 回答没发成一对 User 事件：{got}"
+            runner.chats.pop(sid, None)
+            print(f"  ok  t20 用户发言两处入流：成功各一对（同 uuid、role=user、逐字等值）、"
+                  f"两条拒收各零颗（{len(got)} 颗总计）")
+    finally:
+        settings.platform.use_redis = keep_redis
+        ss.SESSIONS_FILE = keep_sess
+
+
 def main():
     checks = [t1_interrupt_clears_task_slot, t2_no_slot_steal, t3_endpoint_returns_409,
               t4_breakpoint_settles_and_stops, t5_real_gate_interrupt, t6_real_approve_and_reject,
@@ -1850,7 +1927,7 @@ def main():
               t15_approval_receipt_records_actor,
               t16_invalid_args_is_countable,
               t17_throat_tells_crash_from_dropped,
-              t18_plan_open_at_settle,
+              t18_plan_open_at_settle, t20_user_turns_reach_the_event_stream,
               t19_tool_card_is_open_during_the_call,
               t22_error_event_carries_fail_kind]
     for f in checks:
