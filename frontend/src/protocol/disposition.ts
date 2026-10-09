@@ -80,7 +80,7 @@ export type ContextName = (typeof CONTEXT_NAMES)[number]
 
 /** `kind=role` 的 `name`（C190 角色生命周期）。来源：`server/runner.py::_role_signal`
  *  （本体 `on_chain_start/end` 与内层节点的相位）。 */
-export const ROLE_NAMES = ['started', 'phase', 'completed'] as const
+export const ROLE_NAMES = ['started', 'phase', 'completed', 'paused'] as const
 export type RoleName = (typeof ROLE_NAMES)[number]
 
 /** 子名的复合键。写成模板串联合，是为了让下面那一张表**一次全查**：加一个取值不登记就 red。 */
@@ -107,7 +107,7 @@ export const KIND_DISPOSAL: Record<WireKind, Disposal> = {
   queue: { lane: 'runtime', src: 'rest', why: '真值是服务端队列（GET /queue）；事件只按 id 增删，绝不整份覆盖（参照系对 `turn_queued` 的口径同）' },
   goal: { lane: 'runtime', src: 'rest', why: '真值在 Session 记录里，GET 就拿得到；这条只让活流跟上' },
   context: { lane: 'timeline', src: 'journal', why: 'P4 路线三接上的那一格：压缩是发生过的事实，要在时间线留一行（`Compact` 合成块）' },
-  role: { lane: 'timeline', src: 'journal', why: 'C190：角色这一趟的「开始 / 正在干什么 / 收工」折成一颗 `RoleLane` 块——整本重折能复原“谁在跑、跑到哪一步被打断”，所以它是日志能重放的那一类，不是只活在连接上的通知' }
+  role: { lane: 'timeline', src: 'journal', why: 'C190：一个角色这一趟的「开始 / 正在干什么 / 收工 / 停下等人」折成一颗 `RoleLane` 块——整本重折能复原“谁在跑、跑到哪一步被打断或被谁挂起”，所以它是日志能重放的那一类，不是只活在连接上的通知' }
 }
 
 export const SUB_DISPOSAL: Record<SubKey, Disposal> = {
@@ -149,6 +149,7 @@ export const SUB_DISPOSAL: Record<SubKey, Disposal> = {
   'role:started': { lane: 'timeline', src: 'journal', why: '开一条车道：uuid=`lane-<n>`（现证 `run_id` 整场共用，当不了配对键，所以 uuid 由 runner 自己攒），meta 带角色与初始相位' },
   'role:phase': { lane: 'timeline', src: 'derived', why: '只改同一颗车道的相位文本；权威是收口那一颗（相位是「此刻在干什么」的另一种形态，收工后无意义，只有被打断时它才是留下的痕迹）' },
   'role:completed': { lane: 'timeline', src: 'journal', why: '收口 + 用时；`aborted=True` 是「没跑完」（取消/异常走不到 `on_chain_end`，由 `runner._close_lanes` 在散会时补发），界面据此不许画成正常收工' },
+  'role:paused': { lane: 'timeline', src: 'journal', why: 'C193（真模型活体现证）：这一段是**停下来等人**（`park`=approval|question），不是没跑完也不是收工。图停在待批处时跑图那个循环同样退出，走的是同一个散场清扫——原来只有 `aborted` 一支，于是跑到 `finished` 的会话 12 颗收口有 6 颗写「没跑完」。**这一支不带 `ms`**：那值是「开行到散场」的墙钟差，停车时常见几十毫秒，跟在角色名后面会读成「他只跑了 46 毫秒」' },
 
   // ---- context ----
   'context:compact': { lane: 'timeline', src: 'journal', why: '{before,after,freed,evicted_n,real_peak_pt}；0 在 real_peak_pt 上不是读数（没账本时记 0），渲染要分清' }

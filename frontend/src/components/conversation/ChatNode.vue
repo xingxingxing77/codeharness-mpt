@@ -75,8 +75,11 @@
 
   <!-- RoleLane：一个角色这一趟的标题行（C190）。后端只发事实（phase 就是 langgraph 内层节点名），
        人话由 `utils/agents.ts::lanePhase` 派生——与 `toolRow` 同一口径，不去求模型自报意图。
-       收工后相位文本让位给「已收工 / 没跑完」：`aborted` 是 runner 在散会清扫时补的那一颗
-       （取消与异常走不到 `on_chain_end`，不收就会在界面上永远「在跑」，与 C172 那条兜底行同族）。
+       收工后相位文本让位给三档：「已收工」／「没跑完」（取消与异常走不到 `on_chain_end`，不收就会
+       在界面上永远「在跑」，与 C172 那条兜底行同族）／「等你批准・等你回答」（C193：图停在待批或
+       待答处时跑图那个循环同样退出，原来只有 `aborted` 一支——真模型那场跑到 `finished` 的会话
+       12 颗收口里 6 颗被印成「没跑完」，而那一半角色其实干完了活）。停车那一档不带用时：
+       从开行到散场的墙钟差在停车时常见几十毫秒，上屏就是「他只跑了 46 毫秒」那种冒充读数的数。
        C189：这行**可点**，点下去中栏只看这个角色这一路（`ui.roleFilter`）。用 `<button>` 而不是
        给 div 挂 @click——车道行是真正的操作对象，键盘与读屏要免费拿到，别造一个"看起来能点"的死控件。 -->
   <button v-else-if="b.type === 'RoleLane'" type="button" class="laneRow"
@@ -86,7 +89,9 @@
           :data-chat-anchor-key="b.key"
           @click="ui.roleFilter = ui.roleFilter === laneRole ? '' : laneRole">
     <span class="laneRole">{{ laneRole }}</span>
-    <span class="lanePhase">{{ open ? lanePhase(b.meta?.phase) : (b.meta?.aborted ? '没跑完' : '已收工') }}</span>
+    <span class="lanePhase">{{ open ? lanePhase(b.meta?.phase)
+      : b.meta?.park ? lanePark(b.meta.park)
+      : (b.meta?.aborted ? '没跑完' : '已收工') }}</span>
     <span v-if="b.meta?.ms" class="laneMs">{{ laneMs(b.meta.ms) }}</span>
   </button>
 
@@ -116,7 +121,7 @@
  *  是合成块、不是 BlockType，t1 查不到，各由 s8 自己的那一格钉住分支在不在。 */
 import { computed } from 'vue'
 import { formatTokens } from '../../utils/stats'
-import { lanePhase } from '../../utils/agents'
+import { lanePark, lanePhase } from '../../utils/agents'
 import MarkdownText from './MarkdownText.vue'
 import MessageIconActions from './MessageIconActions.vue'
 import ReasoningRow from './ReasoningRow.vue'

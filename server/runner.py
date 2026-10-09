@@ -956,7 +956,7 @@ class SessionRunner:
         if not rows:
             self._stream_rows.pop(sid, None)
 
-    def _forget(self, sid: str, terminal: bool):
+    def _forget(self, sid: str, terminal: bool, park: str = ""):
         """散会（`terminal=True`）才清图与整场的进程态；**停在待人工处（`terminal=False`）只扫在途表**。
 
         B1：`costs` 从前无条件清，而 `_park` 的约定恰恰是「图还活着、断点已落 checkpointer、等 resume」
@@ -970,7 +970,11 @@ class SessionRunner:
         增量从 0 起算（虚高一笔）、截断提示重报一次。
 
         注意这不是「永不回收」：`_settle` 的正常收口、`_fail`、取消、以及 stop 的那两条路都走
-        `terminal=True`，断点态只是**留到这一场真正结束**为止。"""
+        `terminal=True`，断点态只是**留到这一场真正结束**为止。
+
+        `park`（C193，10-10 真模型活体现证）只由 `_park` 传：图停在审批/待答处时这个循环也退出了，
+        于是「停下来等人点」和「散会」在车道上撞成同一种收尾——那场跑到 `finished` 的会话里
+        12 颗收口有 6 颗写着「没跑完」。这里把它传给 `_close_lanes` 分岔，界面上才说得出真话。"""
         self.chats.pop(sid, None)
         # C172：散会前把还挂着的兜底行收掉。**顺序要紧**：`_retire_ring` 就在下面这个 `if terminal:`
         # 里把这场的 ring 落冷档，补在它之后等于冷档里那条一直开着——回放同形，刷新也不会好。
@@ -979,7 +983,7 @@ class SessionRunner:
         # 不收就是那个角色在界面上永远「在跑」（前端只认 `b.closed`，冷档回放同形，刷新也不会好）。
         # 顺序同 `_end_stream_rows` 的理由：`_retire_ring` 就在下面 `if terminal:` 里落冷档，
         # 补在它之后等于冷档里那条车道一直开着。
-        self._close_lanes(sid)
+        self._close_lanes(sid, park)
         for k in [k for k in self._lane_t0 if k[0] == sid]:
             self._lane_t0.pop(k, None)
         self._lane_open.pop(sid, None)
@@ -1052,7 +1056,9 @@ class SessionRunner:
             question = payload.get("question", "") if isinstance(payload, dict) else str(payload)
             self.bus.publish(sid, kind="ask_human", value=question)
         self._publish_status(self.store.get(sid), "awaiting human input")
-        self._forget(sid, terminal=False)
+        # C193：把「为什么散」带到车道上——审批停的写「等你批准」、提问停的写「等你回答」，
+        # 都不是「没跑完」（那一支留给真取消/崩溃，走 `_fail`/stop/`CancelledError` 那三条 `terminal=True`）。
+        self._forget(sid, terminal=False, park="approval" if item else "question")
 
     async def _settle(self, sid: str):
         """事件流收口时的落态——**停在待人工处就不许写 finished**。
@@ -1329,19 +1335,30 @@ class SessionRunner:
         self.bus.publish(sid, kind="role", name="phase", block="RoleLane", uuid=stack[-1],
                          role=role, value={"role": role, "phase": name})
 
-    def _close_lanes(self, sid: str):
+    def _close_lanes(self, sid: str, park: str = ""):
         """C190 的另一半，与 C172 同族：**取消 / 异常那两条路走不到 `on_chain_end`**。
         不收口就是界面上那个角色永远「在跑」——前端三处只认 `b.closed`（车道行的扫光、
         相位文本、状态色），而冷档回放同形（刷新也不会好）。`aborted` 带上，界面才敢说
-        「这条没跑完」而不是假装收工。"""
+        「这条没跑完」而不是假装收工。
+
+        C193（10-10 真模型活体照出来）：`park` 非空＝这一趟不是没跑完，是**停下来等人**
+        （审批或回答）。原来这里只有一支 `aborted=True`，于是那场跑到 `finished` 的会话
+        12 颗收口里 6 颗写着「没跑完」——`_park` 也走 `_forget`，而图和散会在车道上长得一样。
+        停车这两段**不给 `ms`**：那值是「开行到散场」的墙钟差，停在待批时它常是几十毫秒
+        （现证 22/27/34/46ms），跟在角色名后面会被读成「这活儿只跑了 46 毫秒」。"""
         open_lanes = self._lane_open.get(sid) or {}
         for role, stack in list(open_lanes.items()):
             for lane in stack[:]:
                 stack.remove(lane)
                 t0 = self._lane_t0.pop((sid, lane), None)
-                ms = max(0, round((time.time() - t0) * 1000)) if t0 else 0
-                self.bus.publish(sid, kind="role", name="completed", block="RoleLane", uuid=lane,
-                                 role=role, value={"role": role, "ms": ms, "aborted": True})
+                if park:
+                    self.bus.publish(sid, kind="role", name="paused", block="RoleLane", uuid=lane,
+                                     role=role, value={"role": role, "park": park})
+                else:
+                    ms = max(0, round((time.time() - t0) * 1000)) if t0 else 0
+                    self.bus.publish(sid, kind="role", name="completed", block="RoleLane",
+                                     uuid=lane, role=role,
+                                     value={"role": role, "ms": ms, "aborted": True})
             if not stack:
                 open_lanes.pop(role, None)
 

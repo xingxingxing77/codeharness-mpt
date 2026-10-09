@@ -207,6 +207,29 @@ def t32_event_disposition_and_fold():
     assert be_phases == fe_phases and be_phases, \
         f"C190 回归：相位词表两侧不一致（后端 {sorted(be_phases)} / 前端 {sorted(fe_phases)}）——" \
         "少一边就是「后端发得出、前端只认『干活中』」那种静默退化"
+    # ---- ⑦b C193（10-10 真模型活体现证）：「停在等人」与「散会」必须有两种收尾 ----
+    # 症状不是难看，是**说谎**：图停在审批/待答处时跑图那个循环同样退出、同样走 `_forget`，
+    # 而 `_close_lanes` 只有一支 `aborted=True` ⇒ 那场跑到 `finished` 的会话 12 颗收口有 6 颗
+    # 写着「没跑完」。三处同源一起钉：后端发得出第四种、处置表登记了、文案查得到表。
+    assert 'name="paused"' in run, \
+        "C193 回归：runner 不再为「停在待人工处」发单独的收尾（那种车道会退回写「没跑完」）"
+    assert 'park="approval" if item else "question"' in run, \
+        "C193 回归：`_park` 没把「在等谁」带到车道上（前端就只能说笼统一句，且分不清批准与回答）"
+    m_role = re.search(r"export const ROLE_NAMES = \[([^\]]+)\]", disp)
+    assert m_role, "C193：前端角色消息名那张表的形状变了，抽取器要跟着改（不许静默空转）"
+    fe_roles = set(re.findall(r"'(\w+)'", m_role.group(1)))
+    be_roles = set(re.findall(r'kind="role", name="(\w+)"', run))
+    assert be_roles and fe_roles >= be_roles, \
+        f"C193 回归：后端发得出的收尾前端没登记（后端 {sorted(be_roles)} / 前端 {sorted(fe_roles)}）" \
+        "——「有发无看」在车道上重演一次"
+    m_park = re.search(r"const LANE_PARK[^=]*=\s*\{(.*?)\}", agents_ts, re.S)
+    assert m_park, "C193：前端停车词表 `LANE_PARK` 不在了（`lanePark` 没表可查就只剩兜底那句）"
+    fe_park = set(re.findall(r"(\w+):\s*'", m_park.group(1)))
+    assert fe_park == {"approval", "question"}, \
+        f"C193 回归：停车原因词表两侧不一致（后端只发 approval|question，前端登记了 {sorted(fe_park)}）"
+    assert "lanePark(" in node, "C193 回归：车道行不再读 `lanePark`——paused 会掉回「已收工」或「没跑完」"
+    assert "park: String(v.park || '')" in fold, \
+        "C193 回归：reducer 没把 `park` 折进车道 meta（后端发了也没人接）"
     _ok("t32", f"处置表 {len(rows)} 行 ↔ 生产端 kind {len(prod_kinds)} / report name {len(prod_names)} / "
                f"turn reason {len(prod_reasons)} 全对上；三条路同一个 reducer；行为级探针三支跑绿"
                f"（{', '.join(probed)}）")

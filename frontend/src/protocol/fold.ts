@@ -244,7 +244,8 @@ function foldTimeline(st: FoldState, ev: WEvent, key: string) {
   }
   if (ev.kind === 'role') {
     // C190：一个角色这一趟的车道 = 一颗 `RoleLane` 块（`started` 开、`phase` 改相位文本、
-    // `completed` 收口带 ms/aborted）。uuid 是 runner 攒的 `lane-<n>`——现证整场 `on_chain_*`
+    // `completed` 收口带 ms/aborted、`paused` 收口但只说「停下等人」不带用时——C193）。
+    // uuid 是 runner 攒的 `lane-<n>`——现证整场 `on_chain_*`
     // 共用一个 `run_id`，当不了配对键（`server/runner.py::_role_signal` 那段记了现证）。
     // 用它自己的 `target()`：车道行与块流同一条管线，「加载更早」整本重折自然把车道复原。
     const v = (ev.value || {}) as Record<string, any>
@@ -256,6 +257,12 @@ function foldTimeline(st: FoldState, ev: WEvent, key: string) {
       b.meta = { role, phase: String(v.phase || ''), ms: 0, aborted: false }
     } else if (ev.name === 'phase') {
       b.meta = { ...(b.meta || { role }), phase: String(v.phase || '') }
+    } else if (ev.name === 'paused') {
+      // C193：停下来等人批/等人答的那一段——**收口但不给用时**（`ms` 归 0：runner 这支根本不带
+      // 那个字段，而「开行到散场」的墙钟差在停车时常见几十毫秒，上屏就是「他只跑了 46 毫秒」那种
+      // 冒充读数的数）。文字由 `lanePark` 按 `park` 取值说人话。
+      b.meta = { ...(b.meta || { role }), phase: '', ms: 0, park: String(v.park || '') }
+      b.closed = true
     } else {
       b.meta = { ...(b.meta || { role }), phase: '', ms: Number(v.ms) || 0, aborted: !!v.aborted }
       b.closed = true                  // 不收口就永远「在跑」：取消/异常那条路由 runner._close_lanes 补

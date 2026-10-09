@@ -391,6 +391,7 @@ def t9_role_lanes():
          ③ 内层节点名不冒充角色（`think`/`act` 不该有自己的车道）；
          ④ 阳性对照·取消那条路：走不到 `on_chain_end`，散会清扫必须补一颗 `aborted` 收口
             （与 C172 的兜底行同族：不收口就是那个角色在界面上永远「在跑」）。
+    ⑤（C193 加的一格）停在待人工处那一条**不是** aborted：补的是 `paused` + `park`，且不带 `ms`。
     """
     import tempfile
     from pathlib import Path
@@ -411,7 +412,7 @@ def t9_role_lanes():
                                   cause_by=RequirementTag.USER_REQUIREMENT)],
             "memories": {}, "debug_rounds": 0, "team_rounds": 0, "finished": False}
 
-    def _run(sid_tag, stop_after_started=False):
+    def _run(sid_tag, stop_after_started=False, park=""):
         s = store.create("车道判据", project_name=f"s22t9_{sid_tag}", paradigm="dynamic")
         cfg = {"configurable": {"thread_id": f"s22t9-{sid_tag}"}}
         # 真路径里这份名单是 `_prepare` 顺手缓存的（装配出口那一份，与 /chat 目标校验同源）。
@@ -431,7 +432,8 @@ def t9_role_lanes():
 
         asyncio.run(_go())
         if stop_after_started:
-            runner._forget(s.id, terminal=False)     # 取消/异常那条路的清扫点（C172 同处）
+            # 取消/异常那条路的清扫点（C172 同处）；`park` 非空＝停在待人工处那一条（C193）
+            runner._forget(s.id, terminal=False, park=park)
         return s.id, [e for e in bus.history(s.id) if e.kind == "role"]
 
     sid, lanes = _run("full")
@@ -475,9 +477,21 @@ def t9_role_lanes():
         f"取消那条路必须留下 aborted 收口（否则界面上那个角色永远在跑）：{[(e.name, e.value) for e in lanes2]}"
     assert {e.uuid for e in aborted} <= {e.uuid for e in lanes2 if e.name == "started"}, \
         "aborted 收口对到了没开过的车道上"
+
+    # ⑤ C193（10-10 真模型活体现证）：**停在待批/待答处**那一条收口必须是 `paused` 带 `park`，
+    # 不是 aborted，也不许带 ms。那场跑到 `finished` 的会话 12 颗收口有 6 颗写着「没跑完」，
+    # 就是因为 `_park` 也走 `_forget`，而这里只有一支 `aborted=True`。
+    _sid3, lanes3 = _run("park", stop_after_started=True, park="approval")
+    paused = [e for e in lanes3 if e.name == "paused"]
+    assert paused, f"⑤失效：停在待人工处仍按散会收口 ⇒ 界面上就是那句假「没跑完」：{[(e.name, e.value) for e in lanes3]}"
+    assert not [e for e in lanes3 if e.name == "completed" and e.value.get("aborted")], \
+        "⑤失效：停车那一趟同时被写成 aborted——两种收尾必须分家，前端才选得对文案"
+    assert all(e.value.get("park") == "approval" and "ms" not in e.value for e in paused), \
+        f"⑤失效：paused 那颗形状漂了（`park` 才说得出「等你批准」；带 `ms` 就是把散场墙钟差当用时）：{[e.value for e in paused]}"
     print(f"  ok  t9 车道真图档：{len(started)} 条 started/completed 逐条配对、"
           f"{len(phases)} 条相位全挂在已开车道上、ms 合计 "
-          f"{sum(int(e.value.get('ms') or 0) for e in done)}ms；取消档补了 {len(aborted)} 条 aborted")
+          f"{sum(int(e.value.get('ms') or 0) for e in done)}ms；取消档补了 {len(aborted)} 条 aborted、"
+          f"停车档补了 {len(paused)} 条 paused（不带 ms）")
 
 
 def t10_resume_has_a_queue_to_address():

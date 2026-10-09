@@ -195,6 +195,14 @@ const TIMELINE_PROBE: [string, Ev[], (s: FoldState) => boolean][] = [
     ev('role', { name: 'started', uuid: 'lane-7', block: 'RoleLane', role: 'QA', value: { role: 'QA', phase: 'act' } }),
     ev('role', { name: 'completed', uuid: 'lane-7', block: 'RoleLane', role: 'QA', value: { role: 'QA', ms: 800, aborted: true } })
   ], (s) => s.blocks['lane-7'].meta.aborted === true && s.blocks['lane-7'].closed === true],
+  // C193：停在待批/待答那一档——收口、认得出是「等人」，且**不许带用时**（那几十毫秒不是工作时长）
+  ['role:paused', [
+    ev('role', { name: 'started', uuid: 'lane-8', block: 'RoleLane', role: 'PM', value: { role: 'PM', phase: 'gate' } }),
+    ev('role', { name: 'paused', uuid: 'lane-8', block: 'RoleLane', role: 'PM', value: { role: 'PM', park: 'approval' } })
+  ], (s) => {
+    const b = s.blocks['lane-8']
+    return b.closed === true && b.meta.park === 'approval' && !b.meta.aborted && !b.meta.ms
+  }],
   // 车道本体没开过（started 落在已裁掉的那段窗口里）也不许炸、不许留一条永远在跑的行
   ['role:completed(孤立)', [
     ev('role', { name: 'completed', uuid: 'lane-9', block: 'RoleLane', role: 'Engineer', value: { role: 'Engineer', ms: 120 } })

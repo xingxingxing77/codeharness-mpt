@@ -149,16 +149,23 @@ def main() -> int:
     quiet, g_from, g_to = (gaps[0] if gaps else (0.0, t_start, t_end))
 
     def open_at(ts):
-        """那段时间**开着**的车道，以及各自最后一条相位——那一格就是用户当时看到的那行字。"""
+        """那段时间**用户看得见的那一行**：还开着的车道（带最后相位与已停多久），
+        以及停在等人那一档的车道（C193 之后那种收尾是 `paused`，行不亮但字写着「等你批准」）。"""
         rows = []
         for role, evs in by_role.items():
             seen = [e for e in evs if e["_at"] <= ts]
-            started = [e for e in seen if e["name"] == "started"]
-            done = [e for e in seen if e["name"] == "completed"]
-            if started and len(started) > len(done):
-                last = [e for e in seen if e["name"] in ("started", "phase")][-1]
-                rows.append(f"{role}={(last.get('value') or {}).get('phase')}"
-                            f"（已停 {round(ts - last['_at'], 1)}s）")
+            if not seen:
+                continue
+            last = seen[-1]
+            opened = sum(1 for e in seen if e["name"] == "started")
+            closed = sum(1 for e in seen if e["name"] in ("completed", "paused"))
+            if opened > closed:
+                ph = [e for e in seen if e["name"] in ("started", "phase")][-1]
+                rows.append(f"{role}={(ph.get('value') or {}).get('phase')}"
+                            f"（已停 {round(ts - ph['_at'], 1)}s）")
+            elif last["name"] == "paused":
+                rows.append(f"{role} 停下等人（park={ (last.get('value') or {}).get('park') }，"
+                            f"已等 {round(ts - last['_at'], 1)}s）")
         return rows
 
     kinds = Counter(f"{e.get('kind')}:{e.get('name')}" for e in live)
@@ -187,8 +194,9 @@ def main() -> int:
         trail = " → ".join(f"{round(e['_at'] - t_start)}s:{(e.get('value') or {}).get('phase')}"
                            for e in evs if e["name"] in ("started", "phase"))[:220]
         ab = sum(1 for e in evs if e["name"] == "completed" and (e.get("value") or {}).get("aborted"))
+        pa = sum(1 for e in evs if e["name"] == "paused")     # C193：停在等人的那一档
         print(f"[② 车道] {role}: 开 {sum(1 for e in evs if e['name'] == 'started')} / "
-              f"收 {len(ms)}（aborted {ab}）· ms={ms} · 轨迹 {trail}")
+              f"收 {len(ms)}（aborted {ab} / paused {pa}）· ms={ms} · 轨迹 {trail}")
     print(f"[③ User 块] 活流 {len(users_live)} 条 · 跑完重拉首屏 {len(users_hist)} 条 "
           f"⇒ 刷新后看得见 = {bool(users_hist) and len(users_hist) == len(users_live)}")
     print(f"[花费] cost={json.dumps(cost, ensure_ascii=False)}")

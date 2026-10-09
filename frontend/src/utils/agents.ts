@@ -41,3 +41,12 @@ const LANE_PHASE: Record<string, string> = {
 export function lanePhase(phase: string | undefined | null): string {
   return LANE_PHASE[(phase || '').trim()] || '干活中'
 }
+
+/** 收尾文字里「停下等人」那一档（C193）。后端只发事实 `park`=`approval`|`question`，
+ *  词在这里翻成人话——与 `lanePhase` 同一条分工，两侧词表由 s8 t32⑦ 对账。
+ *  认不出来的取值不猜「没跑完」也不猜「已收工」：落到「停下等你」这一句中立的话，
+ *  将来多一种停车原因（比如等外部任务）不至于又印成假读数。 */
+const LANE_PARK: Record<string, string> = { approval: '等你批准', question: '等你回答' }
+export function lanePark(park: string | undefined | null): string {
+  return LANE_PARK[(park || '').trim()] || '停下等你'
+}
