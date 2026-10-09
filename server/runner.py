@@ -646,7 +646,17 @@ class SessionRunner:
         # 角色节点本体」，而 `store.get(sid)` 在 Redis 档是一次读库。`_prepare` 的两条调用路
         # （`_run` 起跑、`_resume` 续跑）都经过这里；只读回放（B7）也会经过，缓存无害。
         self._node_names[session.id] = set(names)
+        # C192（10-10 真模型活体现证）：**队必须在这里就存在**，否则这句拿 None、默认目标留在
+        # 构造函数的 `TEAMLEADER_NAME="Mike"`。起跑那趟不会缺（`_run` 先建队再 `_prepare`），
+        # `_resume` 却是先 `_ensure_graph`（走到这里）后才 `self.chats.get(sid) or self._make_chat(sid)`
+        # 建队 ⇒ **停过一次待批、
+        # 再续跑**的每一场，空目标插话都被 route 当成不存在的角色丢掉（真模型那场日志逐字：
+        # `插话指名投给不存在的角色 'Mike'，该条已丢弃（在册：['Architect', 'Engineer', 'PM',
+        # 'PMManager', 'QA']）`——而 `entry_role` 明明是 PM）。只读回放（B7）不建队：那两条 GET
+        # 不该留下任何写侧痕迹，同上面 `persist_roles` 那一列的判法。
         chat = self.chats.get(session.id)
+        if chat is None and persist_roles:
+            chat = self.chats[session.id] = self._make_chat(session.id)
         if chat is not None and entry:
             chat.default_target = entry                 # 空目标也要落在真节点上
         # N9：全链路 trace 的唯一注入点（_run 与 _resume 都从这里拿 config）。

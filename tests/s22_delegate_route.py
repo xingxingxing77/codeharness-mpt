@@ -1,6 +1,6 @@
 """S22 门禁（C1-②/②b 委派与回报）：队长的任务真的落到成员节点上，成员的回报真的回到队长身上。
 
-钉七件事：
+钉十件事：
   t1 拆包 + 定向：`_wire_delegation` 把聚合件拆成「一人一条」，route 按**载荷自己的** send_to 收窄。
      不收窄就是 cartesian：两名成员会互相收到对方的任务（本文件最容易写错的一格）。
   t2 真图端到端：`dynamic_assembly` 三角色 + 真 `build_team`，队长脚本调
@@ -21,6 +21,10 @@
   t8 C148 真图档：`_publish_plan_open` 读**真 build_team 落下的 `plans` dump** 数得对（2 条任务勾掉 1 条
      ⇒ `open=1/total=2`）。s17 t18 吃的是替身图的 values，而本仓因这颗函数的形状假设真炸过一次
      （遍历 dict 拿到键 ⇒ `AttributeError` 冒到 `_fail`、红在无关的 t7），所以形状必须由真图复核。
+  t9 C190 车道真图档：角色生命周期三事件由**真图**数出来（run_id 整场共用、graph:step 在 start/end
+     不同数 ⇒ 都不能当配对键），四格见函数文档。
+  t10 C192 续跑档：`_resume` 那趟的插话队列必须在装配出口就存在并把空目标默认落进**在册**角色，
+     只读回放那趟不建队（真模型活体照出来的静默丢消息，见函数文档）。
 
 跑法：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \\
@@ -476,6 +480,76 @@ def t9_role_lanes():
           f"{sum(int(e.value.get('ms') or 0) for e in done)}ms；取消档补了 {len(aborted)} 条 aborted")
 
 
+def t10_resume_has_a_queue_to_address():
+    """C192（10-10 真模型活体照出来的一条静默丢消息）。
+
+    现场：8795 隔离实例那场 classic（¥0.041、641 条事件）里那句**没写目标**的插话，日志逐字
+    `插话指名投给不存在的角色 'Mike'，该条已丢弃（在册：['Architect', 'Engineer', 'PM',
+    'PMManager', 'QA']）`——而同一场 `entry_role` 明明是 `PM`。根因是**顺序**：`_run` 先建队再
+    `_prepare`（默认目标落得上），`_resume` 却先 `_ensure_graph`（走到装配出口）再在第 751 行建队，
+    于是**停过一次待批再续跑**的每一场，队上留的是构造函数那个 `TEAMLEADER_NAME="Mike"`，
+    而 classic/react 的队长叫 PM、不在 Mike 名下 ⇒ route 按「指名了不存在的角色」把这条丢掉。
+    判法打在 route 自己那句条件上：`default_target` 必须在册（它查的就是 `recv not in agents`）。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from codeharness.provider.cost import CostManager
+    from codeharness.environment.team_graph import SOP
+    import codeharness.team as team_mod
+    from server.events import SessionEventBus
+    from server.runner import SessionRunner
+    from server.sessions import SessionStore
+
+    real_llm = team_mod._make_llm
+    team_mod._make_llm = lambda cm=None, override=None: FakeLLM([])
+    tmp = Path(tempfile.mkdtemp())
+    store = SessionStore(path=tmp / "sessions.json")
+    runner = SessionRunner(store, SessionEventBus())
+
+    async def none():
+        return None
+    runner._saver = none
+    try:
+        s = store.create("插话默认目标判据", project_name="s22_t10", paradigm="classic")
+        assert s.id not in runner.chats, "前置失配：还没装配就已有队，这格测不到『队还没建』"
+
+        async def go(session, persist):
+            return await runner._prepare(session, session.project_name, CostManager(),
+                                         persist_roles=persist)
+        asyncio.run(go(s, True))
+
+        chat = runner.chats.get(s.id)
+        assert chat is not None, \
+            "失效：`_resume` 那条顺序（先 _prepare 后建队）没被兜住——装配出口拿不到队，默认目标就留在 Mike"
+        assert chat.default_target == s.entry_role, \
+            f"默认目标与回填的 entry_role 不一致：{chat.default_target!r} vs {s.entry_role!r}"
+        assert chat.default_target in s.roles, \
+            f"①失效：空目标插话会被 route 丢掉（`recv not in agents`）——default_target={chat.default_target!r}" \
+            f"、在册={s.roles}"
+        assert chat.default_target != TEAMLEADER_NAME, \
+            "①失效：默认目标还是构造函数那颗 Mike（classic 的队长是 PM）"
+        # 装配自己算出来的那份也要对得上（这格不是自证：它读的是 route 用的同一张 SOP 表）
+        assert s.entry_role in SOP[RequirementTag.USER_REQUIREMENT], \
+            f"entry_role 不在 SOP 的 USER_REQUIREMENT 目标里：{s.entry_role!r}"
+
+        # 阳性对照·只读回放不许建队（B7 那一列同判：两条 GET 不该留下写侧痕迹）
+        s2 = store.create("只读回放不建队", project_name="s22_t10_ro", paradigm="classic")
+        asyncio.run(go(s2, False))
+        assert s2.id not in runner.chats, \
+            "②失效：只读回放（persist_roles=False）也建了队——那两条 GET 从此有写侧痕迹"
+        assert not store.get(s2.id).roles and not store.get(s2.id).entry_role, \
+            "②失效：只读回放把 roles/entry_role 回写进库了"
+        print(f"  ok  t10 续跑档：装配出口建队并把空目标默认落进在册角色（{chat.default_target}），"
+              f"只读回放那趟依旧零痕迹")
+    finally:
+        team_mod._make_llm = real_llm
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(Path("workspace") / "s22_t10", ignore_errors=True)
+        shutil.rmtree(Path("workspace") / "s22_t10_ro", ignore_errors=True)
+
+
 def main():
     t1_split_and_target()
     t2_real_graph()
@@ -486,7 +560,8 @@ def main():
     asyncio.run(t7_pingpong_brake())
     asyncio.run(t8_plan_open_reads_real_dump())
     t9_role_lanes()
-    print("\ns22_delegate_route: 9/9 全绿")
+    t10_resume_has_a_queue_to_address()
+    print("\ns22_delegate_route: 10/10 全绿")
     return 0
 
 
