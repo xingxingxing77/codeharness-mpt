@@ -1,16 +1,22 @@
-/** C91 自测：「加载更早」的整页回放**不许**改实时状态。
+/** 「加载更早」的行为自测（P4 路线三改过口径的那一条）。
  *  跑法：node frontend/scripts/check_page_replay.mjs
  *
- *  背景：`mergeEarlierPage` 借道 `applyEvent` 合成块，而那个 switch 里混着两类事件——
- *  「产生块/日志」（可回放：调用方对这两份做了快照还原）与「写实时状态」（status/cost/
- *  humanQuestion/approvals/queue/feedback/goal，**不可回放**）。三层判据：
- *    ① 回放期那六类一律不落地（实时状态整份不变）；
- *    ② 同一批事件在**非回放**路径下照旧落地（证明跳过只作用于回放，不是把功能改没了）；
- *    ③ 块仍被合成并前拼（证明回放没被整段跳过）——① 的阳性对照。
+ *  这一格在 10-09 之前钉的是另一件事：`mergeEarlierPage` 借道 `applyEvent` 合成块，那个 switch
+ *  里混着「产生块/日志」与「写实时状态」两类事件，于是回放老页会把当前状态盖回历史值（C91），
+ *  修法是一份名单（`PAGE_REPLAY_OPAQUE`）+ 一个回放期标志。
+ *  路线三把那两条一起删了，因为病根是**同一本账被折了两遍、第二条路还是手写的**：
+ *  现在「加载更早」= 前插进同一本 append-only 事件日志 + 整本按序重折（`ingestEarlier`→`replayLog`），
+ *  「最新的赢」是折的顺序给的，不是名单挡的。所以这一格改钉新的不变量，四条：
+ *    ① 前插老页再整本重折 ⇒ 实时槽仍等于**最新那条事件的主张**（七项逐个量）；
+ *    ② 块按日志序合成：老页的块排前面，同一块被页边界切开的两半截**顺序不颠倒**；
+ *    ③ 阳性对照：把同一批事件按「老页更晚」的顺序喂 ⇒ 主张跟着翻面
+ *       （证明 ① 不是写死的，也不是名单挡出来的）；
+ *    ④ 未登记的 kind 不进块、不进实时槽，但**必须留在 `unhandled` 里**（有发无看这一族的哨子）。
+ *  再加 ⑤：`context/compact` 在真 store 上折得出 `Compact` 块——s8 t1 只查 BlockType，查不到它。
  *
- *  为什么先打包再跑：node 的 ESM 解析不了 `sessions.ts` 里那些**无扩展名**的相对导入
- *  （vite/esbuild 解析得了，node 不行）。这里用 vite 自带的 esbuild 现打一个自包含产物到
- *  tmp 再 import——**零新依赖**，也不改源码的导入风格。
+ * 为什么先打包再跑：node 的 ESM 解析不了 `sessions.ts` 里那些**无扩展名**的相对导入
+ *  （vite/esbuild 解析得了，node 不行）。用 vite 自带的 esbuild 现打一个自包含产物到 tmp 再 import
+ *  ——零新依赖，也不改源码的导入风格。跑的是**真 pinia store + 真 reducer**，不是仿真状态对象。
  */
 import { buildSync } from 'esbuild'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
@@ -36,88 +42,97 @@ function eq(name, got, want) {
   console.log(`${ok ? '✅' : '❌'} ${name}${ok ? '' : ` 得到 ${JSON.stringify(got)} 期望 ${JSON.stringify(want)}`}`)
 }
 
-const ev = (kind, o = {}) => ({ kind, cursor: o.cursor || '0000000000000-000000', seq: o.seq || 1, ts: 1, ...o })
+const cur = (n) => `${String(n).padStart(13, '0')}-000000`
+const ev = (kind, n, o = {}) => ({ kind, cursor: cur(n), seq: n, ts: 100 + n, ...o })
 
 setActivePinia(createPinia())
 const s = useSessionStore()
-
-/* ---- 实时状态：一场正停在「等你回答」的会话（还有一张待批卡、一条队列、一票、一个目标） ---- */
 s.currentId = 's1'
-s.sessions = [{ id: 's1', status: 'awaiting_human', goal: 'G-now', goal_done_at: '' }]
-s.status = 'awaiting_human'
-s.cost = { cny: 1.23 }
-s.humanQuestion = ev('ask_human', { value: { question: '现在这个' } })
-s.approvals = [{ id: 'live-card' }]
-s.queue = [{ id: 'live-q' }]
-s.feedback = { 'later:key': 'like' }
-s.blocks = { 'live-block': { key: 'live-block', type: 'Assistant', tokens: ['B'], live: [], lines: [], raw: [], closed: false } }
-s.blockOrder = ['live-block']
-s.logs = ['live-log']
-s.lastCursor = '0000000000009-000000'
-s.lastSeq = 9
+s.sessions = [{ id: 's1', status: 'running', goal: '', goal_done_at: '', cost: {} }]
 
-/* ---- 一页历史：六类「写实时状态」的事件（**status 排最后**——否则页里靠后的
- *  ask_human/approval 会把它写回 awaiting_human，那条断言就变成没有判别力的） ---- */
-const page = [
-  ev('ask_human', { cursor: '0000000000001-000000', seq: 1, value: { question: '早就答过的' } }),
-  ev('approval', { cursor: '0000000000002-000000', seq: 2, name: 'requested', value: { id: 'old-card' } }),
-  ev('queue', { cursor: '0000000000003-000000', seq: 3, name: 'add', value: { items: [{ id: 'old-q' }] } }),
-  ev('feedback', { cursor: '0000000000004-000000', seq: 4, value: { key: 'later:key', vote: 'dislike' } }),
-  ev('goal', { cursor: '0000000000005-000000', seq: 5, value: { objective: 'G-old' } }),
-  ev('status', { cursor: '0000000000006-000000', seq: 6, value: { status: 'running', cost: { cny: 0.01 } } }),
-  ev('report', { cursor: '0000000000007-000000', seq: 7, uuid: 'live-block', block: 'Assistant', name: 'content', value: 'A' }),
-  ev('report', { cursor: '0000000000008-000000', seq: 8, uuid: 'old-block', block: 'Assistant', name: 'content', value: 'Z' }),
+/* ---- 一场正在跑的会话：先按活流把「当前」折出来（这些事件都在日志的**尾部**） ---- */
+const live = [
+  ev('report', 10, { uuid: 'b-old', block: 'Thought', role: 'PM', name: 'content', value: '后半截' }),
+  ev('status', 11, { value: { status: 'awaiting_human', cost: { cny: 1.23 }, message: '' } }),
+  ev('goal', 12, { name: 'edit', value: { objective: 'G-now', done_at: '' } }),
+  ev('feedback', 13, { name: 'set', value: { key: 'k1', vote: 'like' } }),
+  ev('queue', 14, { name: 'add', value: { items: [{ id: 'live-q', content: '插话', send_to: '' }] } }),
+  ev('approval', 15, { name: 'requested', value: { id: 'live-card', tool: 'shell' } }),
+  ev('ask_human', 16, { value: '现在这个问题' }),
+  // 老页里那张 `old-card` 早就决议过了：决议事件比请求事件**更新**，所以它一定在同一本日志里
+  // 排在那条 requested 后面 ⇒ 按序重折会把它撤掉。这一条就是「不许复活」的全部内容，
+  // 不需要名单（窗口是裁头的，`resolved` 不可能被裁掉而留下它的 `requested`）。
+  ev('approval', 17, { name: 'resolved', value: { id: 'old-card', outcome: 'allowed-once' } })
 ]
-const pageLogs = [ev('log', { cursor: '0000000000009-000000', seq: 9, value: 'old-log' })]
+for (const e of live) s.ingest(e)
+eq('活流先折出当前态', [s.status, s.cost.cny, s.approvals.length, s.queue.length], ['awaiting_human', 1.23, 1, 1])
 
-s.mergeEarlierPage([...page, ...pageLogs])
+/* ---- 一页更早的历史（游标都比上面小），里面写满了「过去」的实时状态主张 ---- */
+const older = [
+  ev('report', 1, { uuid: 'b-old', block: 'Thought', role: 'PM', name: 'meta', value: { streaming: 'think' } }),
+  ev('report', 2, { uuid: 'b-old', block: 'Thought', role: 'PM', name: 'content', value: '前半截' }),
+  ev('report', 3, { uuid: 'b-first', block: 'Docs', role: 'Architect', name: 'content', value: '更早的一块' }),
+  ev('log', 4, { value: 'old-log' }),
+  ev('status', 5, { value: { status: 'running', cost: { cny: 0.01 }, message: '' } }),
+  ev('goal', 6, { name: 'create', value: { objective: 'G-old', done_at: '' } }),
+  ev('feedback', 7, { name: 'set', value: { key: 'k1', vote: 'dislike' } }),
+  ev('queue', 8, { name: 'add', value: { items: [{ id: 'old-q', content: '旧插话', send_to: '' }] } }),
+  ev('approval', 9, { name: 'requested', value: { id: 'old-card', tool: 'write_file' } })
+]
+s.ingestEarlier(older)
 
-/* ① 六类实时状态：整份不许动 */
-eq('状态没被旧 status 盖掉', s.status, 'awaiting_human')
-eq('顶栏金额没被旧 cost 盖掉', s.cost, { cny: 1.23 })
-eq('问答卡还是当前那张（旧问答没顶上来）', s.humanQuestion?.value?.question, '现在这个')
-eq('审批卡没冒出第二张', s.approvals.map((a) => a.id), ['live-card'])
-eq('插话队列没被旧 add 加料', s.queue.map((q) => q.id), ['live-q'])
-eq('票没被旧 feedback 改掉', s.feedback, { 'later:key': 'like' })
-eq('会话目标没被旧 goal 盖掉', s.sessions[0].goal, 'G-now')
-eq('会话状态没被旧 status 写进列表', s.sessions[0].status, 'awaiting_human')
+/* ---- ① 最新的赢：七项逐个量，全靠折的顺序，不是名单 ---- */
+eq('① 状态来自最后一条 status，不是老页那条', s.status, 'awaiting_human')
+eq('① 顶栏金额来自最后一条 cost', s.cost, { cny: 1.23 })
+eq('① 目标来自最后一条 goal', s.sessions[0].goal, 'G-now')
+eq('① 票来自最后一条 feedback', s.feedback, { k1: 'like' })
+/* 队列是「基线（GET 那份）在前、老页的 add 补在后面」——显示次序不是游标序，这是刻意的取舍：
+   清空重折的话，一枚还排着的插话如果它的 `add` 已被窗口裁掉（窗口裁头），就会从界面上消失，
+   而用户既撤不掉也看不见。少一条比次序乱更贵（`protocol/fold.ts::resetFold` 那段记了这条）。 */
+eq('① 插话队列只做覆盖：当前那条不丢，老页那条补在后面', s.queue.map((q) => q.id), ['live-q', 'old-q'])
+eq('① 已决议的卡没被老页那条 requested 复活', s.approvals.map((a) => a.id), ['live-card'])
+eq('① 问答卡是最后那条', s.humanQuestion?.value, '现在这个问题')
 
-/* ② 回放期该干的照干：块/日志合成、游标不回退 */
-eq('新块已前拼', s.blockOrder, ['old-block', 'live-block'])
-eq('同 key 的旧半截排在新半截前面（顺序没颠倒）', s.blocks['live-block'].tokens, ['A', 'B'])
-eq('日志前拼', s.logs, ['old-log', 'live-log'])
-eq('游标不回退（SSE 续推位不许往回走）', [s.lastCursor, s.lastSeq], ['0000000000009-000000', 9])
+/* ---- ② 块的次序与跨页那一块 ---- */
+// b-old 这颗在老页就开了（游标 1），所以它排在 b-first（游标 3）之前——次序来自日志，不是来自「哪一页」。
+eq('② 老页的块按日志序排在前面', s.blockOrder, ['b-old', 'b-first'])
+eq('② 被页边界切开的那一块，正文顺序没颠倒', s.blocks['b-old'].tokens, ['前半截', '后半截'])
+eq('② 日志也在前头', s.logs, ['old-log'])
+eq('② 游标不因前插而回退（SSE 续推位必须单调）', s.lastCursor, cur(17))
 
-/* ③ 阳性对照：同一批事件在**非回放**路径下必须照旧落地（否则这条修法把功能改没了）。
- *  ⚠ 游标必须比**实时**游标大——回放把 lastCursor/lastSeq 还原成实时那份之后，再喂旧游标的
- *  事件会被去重挡在门口，那测的是去重不是本项（第一版判据就栽在这，形如「拿旧游标测新事件」）。 */
-let liveN = 10
-const live = (kind, o = {}) =>
-  ev(kind, { cursor: `${++liveN}`.padStart(13, '0') + '-000000', seq: liveN, ...o })
-s.applyEvent(live('status', { value: { status: 'running', cost: { cny: 0.5 } } }))
-eq('非回放的 status 照旧生效', s.status, 'running')
-eq('非回放的 cost 照旧生效', s.cost, { cny: 0.5 })
-s.applyEvent(live('ask_human', { value: { question: '早就答过的' } }))
-eq('非回放的 ask_human 照旧占住座位', s.humanQuestion?.value?.question, '早就答过的')
-s.applyEvent(live('feedback', { value: { key: 'later:key', vote: 'dislike' } }))
-eq('非回放的 feedback 照旧改票', s.feedback, { 'later:key': 'dislike' })
-s.applyEvent(live('goal', { value: { objective: 'G-old' } }))
-eq('非回放的 goal 照旧落库', s.sessions[0].goal, 'G-old')
+/* ---- ③ 阳性对照：同一批「写实时槽」的事件，这次走**活流**那条路（更晚到）⇒ 必须照旧生效 ----
+ *   ① 保住的是「冷折不许把历史值盖回当前」，这一条保住的是「没把功能删没」——
+ *   两半合起来才是有牙的：只做 ①，把 runtime 车道整支删掉也照样绿（C91 当年就是这么要求的）。 */
+setActivePinia(createPinia())
+const s2 = useSessionStore()
+s2.currentId = 's2'
+s2.sessions = [{ id: 's2', status: 'running', goal: '', goal_done_at: '', cost: {} }]
+for (const e of live) s2.ingest(e)
+for (const [i, e] of [older[4], older[5], older[6]].entries()) s2.ingest({ ...e, cursor: cur(300 + i), seq: 300 + i })
+s2.syncSessionPatch()
+eq('③ 活流路径里 status 照旧被最新那条改写', s2.status, 'running')
+eq('③ 金额照旧翻面', s2.cost, { cny: 0.01 })
+eq('③ 目标照旧翻面（走 sessionPatch）', s2.sessions[0].goal, 'G-old')
+eq('③ 票照旧翻面', s2.feedback, { k1: 'dislike' })
 
-/* ④ C148：`turn` 那支的两类 reason 都得在 store 里建成块——s8 t16 钉的是「源码里有这个分支」，
- *   这一格钉的是**真 store 真建出块、数从事件里带出来**（最后一米断在 store 的话界面照样空白）。
- *   max-tokens 同批对照：加了新分支不许把兄弟分支顶掉。 */
-s.applyEvent(live('turn', { uuid: 'po-1', name: 'end',
-  value: { reason: { kind: 'plan-unfinished', open: 2, total: 5 } } }))
-eq('plan-unfinished 建成 PlanOpen 块', s.blocks['po-1']?.type, 'PlanOpen')
-eq('两个数是从事件里来的（不是模板写死）', s.blocks['po-1']?.meta, { open: 2, total: 5 })
-const orderBefore = s.blockOrder.length
-s.applyEvent(live('turn', { uuid: 'po-1', name: 'end',
-  value: { reason: { kind: 'plan-unfinished', open: 2, total: 5 } } }))
-eq('同 key 再喂不建第二块', s.blockOrder.length, orderBefore)
-s.applyEvent(live('turn', { uuid: 'mt-1', name: 'end', value: { reason: { kind: 'max-tokens' } } }))
-eq('max-tokens 照旧建 MaxTokens 块（新分支没顶掉兄弟）', s.blocks['mt-1']?.type, 'MaxTokens')
-eq('截断行不带 meta（它没有数要念）', s.blocks['mt-1']?.meta, null)
+/* ---- ④ 未登记的 kind：不进块、不进槽，但要留在 unhandled ---- */
+setActivePinia(createPinia())
+const s3 = useSessionStore()
+s3.currentId = 's3'
+s3.ingest(ev('memory', 1, { name: 'flush', value: { n: 3 } }))
+s3.ingest(ev('report', 2, { uuid: 'ok', block: 'Thought', name: 'content', value: '还在流' }))
+eq('④ 未登记的 kind 进了 unhandled', s3.unhandled, ['memory:flush'])
+eq('④ 未登记不许断流：后面那条照样成块', s3.blocks['ok']?.tokens.join(''), '还在流')
+
+/* ---- ⑤ 压缩那一条在真 store 上折得出行（s8 t1 只查 BlockType，查不到这个类型） ---- */
+s3.ingest(ev('context', 3, { name: 'compact', role: 'Mike',
+  value: { before: 912000, after: 210000, freed: 702000, evicted_n: 37, real_peak_pt: 0 } }))
+const compact = Object.values(s3.blocks).find((b) => b.type === 'Compact')
+eq('⑤ 折出 Compact 块', compact && compact.meta.evicted_n, 37)
+eq('⑤ 峰值那个 0 是「没账本」，不许当读数渲染', compact && compact.meta.hasPeak, false)
+s3.ingest(ev('context', 4, { name: 'compact', value: { before: 1, after: 1, freed: 0, evicted_n: 0, real_peak_pt: 158000 } }))
+eq('⑤ 有账本时峰值照上', Object.values(s3.blocks).filter((b) => b.type === 'Compact').at(-1).meta.hasPeak, true)
+eq('⑤ 压缩行进 unhandled 了吗——不许', s3.unhandled, ['memory:flush'])
 
 rmSync(dir, { recursive: true, force: true })
 console.log(failed ? `\n${failed} 条失败` : '\n全过')

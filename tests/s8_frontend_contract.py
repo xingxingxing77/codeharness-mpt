@@ -21,6 +21,9 @@
   t11 B2：/events/history 的 before/limit 反向分页——两台 bus 同签名 + 窗口语义同判 + 路由传参与值域。
   t12 B1：断线横幅只有一个状态源（store.stream 三态，不从非响应式的 evtSource.readyState 派生）
      + 轮内 error 行走块管线且 ChatNode 有显式 'Error' 分支（'Error' 不是 BlockType，t1 查不到）。
+  t32 P4 路线三（10-09 用户拍「全套」）：事件处置表 ↔ 生产端词表 ↔ reducer 落点三处对账，
+     并跑 `frontend/scripts/fold_check.ts`（活流/首屏/加载更早三条路必须是同一个 reducer）。
+     这一格是「有发无看」那族缺陷的机器版守卫——t2 只比 kind，看不见 name 那一层的漏。
 
 跑法（PYTHONPATH 必须带 logs 那截，少了会撞本机 WMI 永久卡死，看着像代码挂死）：
   cd /e/Codeharness && PYTHONPATH=/e/Codeharness:/e/Codeharness/logs PYTHONIOENCODING=utf-8 \
@@ -52,8 +55,140 @@ FE = ROOT / "frontend" / "src"
 
 # 后端事件 kind 的发出点：events.py 默认值 + 各 publish(kind=...)
 _KIND_RE = re.compile(r'kind="(\w+)"|kind: str = "(\w+)"')
-# 前端消费的 kind：applyEvent 的 if/else-if 链
+# 前端消费的 kind：reducer 与 store 里的 `ev.kind === '...'`
 _FE_KIND_RE = re.compile(r"ev\.kind === '(\w+)'")
+
+
+def _ts_array(src: str, const_name: str):
+    """取 `export const X = [...] as const` 里的字符串成员（处置表那份词表就是这么声明的）。"""
+    m = re.search(r"export const %s = \[(.*?)\] as const" % const_name, src, re.S)
+    assert m, f"disposition.ts 里找不到 `export const {const_name}`——词表被改名或整块搬走了"
+    return set(re.findall(r"'([\w_-]+)'", m.group(1)))
+
+
+def _fe_consumers():
+    """事件消费端的两处，拼成一份给「这一格前端接住了没有」那一类断言用：
+    `protocol/fold.ts` 是车道 reducer（P4 路线三之后 kind/name 分支全在这儿，写的是 `st.*`），
+    `stores/sessions.ts` 只管传输（游标去重、合帧、GET 补快照，写的是 `this.*`）。
+    只读 store 的那些旧断言会在「把 reducer 搬走」这一步集体假红——搬是对的，判据得跟着换层。
+    「三条路同一个 reducer」那件形状由 t32④ 单独钉，不靠这里。"""
+    return "".join((FE / p).read_text(encoding="utf-8")
+                   for p in ("protocol/fold.ts", "stores/sessions.ts"))
+
+
+def t32_event_disposition_and_fold():
+    """P4 路线三（10-09 用户拍「全套」）：处置表 ↔ 生产端词表 ↔ reducer 落点，三处对账。
+
+    为什么不扩 t2 就完事：t2 比的是 **kind**，而本仓现证的两条静默丢都发生在下一层——
+      · `kind=context name=compact`（`codeharness/roles/role_zero.py:287`）：else-if 链里没有
+        context 支，整条事件无声消失，kind 级检查看得见「链里有没有」看不见「有没有落点」；
+      · `name=local_url`（`codeharness/report.py:256`，ServerReporter 的默认名）：kind=report
+        接了，但它掉进 `raw`，界面上一个字都不留。
+    所以这一格查六件事：
+    ① 生产端全集（kind + report 的 name + turn 的 reason + 能静态取到的子名）都在处置表里；
+    ② 表里每条都有合法 lane/src 与非空 why（why 空着＝没想过「刷新之后谁是权威」，
+       而那正是 `SSE事件与录制回放` 那族缺陷的成因——参照系为此专门写了 disposition.py）；
+    ③ 表说走时间线的 report name，reducer 的 switch 里必须有对应 case（**登记 ≠ 落点**）；
+    ④ 三条路仍是一个 reducer：store 里 `foldOne`/`foldAll`/`resetFold` 三个名字都在，
+       且那份逐字段手写合并与「回放挡名单」不许复活（它们回来＝又分叉成两条路）；
+    ⑤ 行为级三份探针全跑（`fold_check.ts` / `check_page_replay.mjs` / `check_stream_reopen.mjs`），
+       少跑一支就红——前一支查 reducer 的不变量，后两支跑**真 pinia store + 真 reducer**；
+    ⑥ 渲染侧接上那两格：ChatNode 有 `'Compact'` 显式分支且读事件里的数（不硬编码）。
+    """
+    disp = (FE / "protocol" / "disposition.ts").read_text(encoding="utf-8")
+    fold = (FE / "protocol" / "fold.ts").read_text(encoding="utf-8")
+    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    rep = (ROOT / "codeharness" / "report.py").read_text(encoding="utf-8")
+    run = (ROOT / "server" / "runner.py").read_text(encoding="utf-8")
+
+    wire = _ts_array(disp, "WIRE_KINDS")
+    report_names = _ts_array(disp, "REPORT_NAMES")
+    turn_reasons = _ts_array(disp, "TURN_REASONS")
+    declared = set(wire) | {f"{k}:{v}" for k, v in re.findall(r"'(\w+[\w-]*):([\w_-]+)':", disp)}
+
+    # ---- ① 生产端全集 ----
+    prod_kinds = set()
+    for f in [ROOT / "server" / "events.py", ROOT / "server" / "runner.py",
+              ROOT / "server" / "api" / "sessions.py", ROOT / "server" / "api" / "approvals.py",
+              ROOT / "platforms" / "event_store.py"]:
+        prod_kinds |= {m.group(1) or m.group(2) for m in _KIND_RE.finditer(f.read_text(encoding="utf-8"))}
+    prod_kinds |= set(re.findall(r'emit_event\("(\w+)"',
+                                (ROOT / "codeharness" / "roles" / "role_zero.py").read_text(encoding="utf-8")))
+    assert prod_kinds <= wire, f"生产端 kind {sorted(prod_kinds - wire)} 没进处置表"
+
+    # 块通道（report）的 name：Reporter 的默认名 + 显式第二实参 + 收口哨兵 + runner 直发的那几支
+    prod_names = set(re.findall(r'name: str = "(\w+)"', rep))
+    prod_names |= set(re.findall(r'\.report\([^,]+,\s*"(\w+)"', rep))
+    prod_names |= set(re.findall(r'async_report\([^,]+,\s*"(\w+)"', rep))
+    prod_names |= set(re.findall(r'name="(live|meta|content|end_marker)"', run))
+    assert len(prod_names) >= 8, f"只扫出 {sorted(prod_names)}——发射点改了形状，本格的扫描器该跟着改（空转不算绿）"
+    assert prod_names <= report_names, f"report 通道 name {sorted(prod_names - report_names)} 没进处置表"
+
+    prod_reasons = set(re.findall(r'\{"kind": "([\w-]+)"', run))
+    assert prod_reasons <= turn_reasons, f"turn 的 reason {sorted(prod_reasons - turn_reasons)} 没进处置表"
+
+    # 能静态取到的 `kind + name` 成对发数点（goal 的 operation 走三元/变量，由 fold_check 喂全集）
+    pairs = set()
+    for src in (run, (ROOT / "server" / "api" / "sessions.py").read_text(encoding="utf-8"),
+                (ROOT / "server" / "api" / "approvals.py").read_text(encoding="utf-8")):
+        pairs |= {f"{k}:{n}" for k, n in re.findall(r'kind="(\w+)",\s*name="(\w+)"', src)}
+    for src in ((ROOT / "codeharness" / "runtime.py").read_text(encoding="utf-8"),
+                (ROOT / "platforms" / "chat_queue.py").read_text(encoding="utf-8")):
+        pairs |= {f"queue:{n}" for n in re.findall(r'_fire\("(\w+)"', src)}
+    pairs |= {f"context:{n}" for n in
+              re.findall(r'emit_event\("\w+", name="(\w+)"',
+                         (ROOT / "codeharness" / "roles" / "role_zero.py").read_text(encoding="utf-8"))}
+    assert pairs, "生产端一个 `kind+name` 对都没扫到——正则失效，本格的这一半在空转"
+    unregistered = sorted(p for p in pairs if p not in declared)
+    assert not unregistered, f"生产端在发 {unregistered}，处置表里没登记（加了发数点忘了登记＝界面上静默丢）"
+
+    # ---- ② 每条登记都得想过「刷新后谁是权威」 ----
+    rows = re.findall(r"lane: '(\w+)', src: '(\w+)', why: '([^']*)'", disp)
+    assert len(rows) >= len(wire) + len(report_names) + len(turn_reasons), \
+        f"处置表只有 {len(rows)} 行，比词表（{len(wire) + len(report_names) + len(turn_reasons)} 个取值）还少——有取值没登记"
+    bad_lane = [r for r in rows if r[0] not in ("timeline", "runtime", "none")]
+    bad_src = [r for r in rows if r[1] not in ("journal", "rest", "derived", "none")]
+    empty_why = [r for r in rows if len(r[2].strip()) < 2]
+    assert not bad_lane and not bad_src and not empty_why, \
+        f"处置表有非法或空白的行：lane={bad_lane} src={bad_src} why空={empty_why}"
+
+    # ---- ③ 登记过的 report name 都得有落点 ----
+    cases = set(re.findall(r"case '(\w+)':", fold))
+    no_landing = {n for n in report_names if n not in cases}
+    assert not no_landing, f"处置表说 report:{sorted(no_landing)} 走时间线，reducer 的 switch 里没这一支"
+
+    # ---- ④ 三条路同一个 reducer ----
+    for anchor in ("foldOne(this, ev)", "foldAll(this, evlog.get(sid) || [])", "resetFold(this)"):
+        assert anchor in st, f"store 里少了 `{anchor}`——活流/首屏/加载更早又分叉成两条路了"
+    for shape in ("mergeEarlierPage(", "const PAGE_REPLAY_OPAQUE", "replayingPage = ", "applyEvent("):
+        assert shape not in st, f"`{shape}` 复活了：整本重折之外又开了一条手写合并/名单（路线三删的就是它）"
+
+    # ---- ⑤ 行为级：三份探针全跑，缺一份就红 ----
+    # 为什么要一次跑齐而不是「各归各的组」：`check_page_replay.mjs` 与 `check_stream_reopen.mjs`
+    # 此前只被别的组的**文档字符串**提过、没有任何一组真的 `node` 跑它们——路线三把 store 的
+    # 那条链换掉之后，它们调的 `applyEvent` / `mergeEarlierPage` 当场不存在，而 s8 一路全绿。
+    # 「判据写在注释里而没人执行」就是本仓点名的空转形状，所以这三根针统一由本格执行。
+    probed = []
+    import subprocess
+    for probe in ("scripts/fold_check.ts", "scripts/check_page_replay.mjs", "scripts/check_stream_reopen.mjs"):
+        f = ROOT / "frontend" / probe
+        assert f.exists(), f"{probe} 被删了：路线三只留下源码守卫，量不到三条路同不分叉"
+        r = subprocess.run(["node", probe], cwd=ROOT / "frontend", capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=180)
+        tail = (r.stdout or "").strip().splitlines()[-3:]
+        assert r.returncode == 0, f"{probe} 红了（exit={r.returncode}）：\n" + "\n".join(tail) + \
+            f"\n{r.stderr.strip()[:600]}"
+        probed.append(f"{probe.split('/')[-1]}")
+
+    # ---- ⑥ 渲染侧那两格 ----
+    node = (FE / "components" / "conversation" / "ChatNode.vue").read_text(encoding="utf-8")
+    assert "b.type === 'Compact'" in node, "ChatNode 少了 Compact 分支：压缩行会静默降级成灰色折叠行"
+    assert "evicted_n" in node and "freed" in node, "Compact 行没读事件里的数（写死一个数就是假话）"
+    assert "hasPeak" in fold and "real_peak_pt" in fold, \
+        "real_peak_pt 的 0「不是读数」这一件没在折的时候定下来（渲染层就得自己猜 0 的含义）"
+    _ok("t32", f"处置表 {len(rows)} 行 ↔ 生产端 kind {len(prod_kinds)} / report name {len(prod_names)} / "
+               f"turn reason {len(prod_reasons)} 全对上；三条路同一个 reducer；行为级探针三支跑绿"
+               f"（{', '.join(probed)}）")
 
 
 def t1_blocktype_vocabulary():
@@ -84,8 +219,15 @@ def t2_envelope_and_kinds():
     for f in server_srcs:
         for m in _KIND_RE.finditer(f.read_text(encoding="utf-8")):
             kinds.add(m.group(1) or m.group(2))
-    fe_src = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
-    handled = set(_FE_KIND_RE.findall(fe_src))
+    # P4 路线三：内核侧那条**非块**通道（`report.emit_event`）也是生产端，改前它发的
+    # `kind=context` 在处置表与 reducer 里都不存在——整条事件被 else-if 链无声吞掉。
+    # 只扫 `emit_event("…")` 那一种写法，别把 role_zero.py 注释里的 `kind=context` 当发数点。
+    for f in (ROOT / "codeharness" / "roles" / "role_zero.py",):
+        kinds |= set(re.findall(r'emit_event\("(\w+)"', f.read_text(encoding="utf-8")))
+    fe_src = "".join((FE / p).read_text(encoding="utf-8")
+                     for p in ("stores/sessions.ts", "protocol/fold.ts"))
+    handled = set(_FE_KIND_RE.findall(fe_src)) | _ts_array(
+        (FE / "protocol" / "disposition.ts").read_text(encoding="utf-8"), "WIRE_KINDS")
     assert kinds <= handled, f"后端发出 {sorted(kinds - handled)} 前端不处理"
     assert set(re.findall(r"kind == \"(\w+)\"", (ROOT / "codeharness" / "report.py").read_text(encoding="utf-8"))) == set()  # 报道走 sink 不标 kind，防误加第二通道
     _ok("t2", f"信封字段 server==frontend（{len(be_fields)} 项）；kind 词汇表 {sorted(kinds)} 全被前端接住")
@@ -727,13 +869,17 @@ def t12_offline_banner_and_turn_error_row():
     assert "reconnecting" not in st and "readyState !=" not in st and "readyState ===" not in st, \
         "B1：横幅别改回从 evtSource.readyState 派生——EventSource 实例非响应式，实测横幅常驻不消"
 
-    err = re.search(r"=== 'error'\) \{(.*?)\n      \} else if", st, re.S)
-    assert err, "B1：applyEvent 的 error 分支不见了"
+    consumers = _fe_consumers()
+    err = re.search(r"=== 'error'\) \{(.*?)\n  \}", consumers, re.S)
+    assert err, "B1：error 那一格的分支不见了（reducer 里找不到）"
     body = err.group(1)
-    assert "b.type = 'Error'" in body and "b.closed = true" in body \
-        and "this.blockOrder.push(key)" in body, \
-        f"B1 回归：error 不再走块管线（另开数组=第二个游标；closed 缺=末轮不出尾行）\n{body}"
-    assert "this.logs.push(`[error]" in body, "B1：右栏台账那份 error 行被删了（横幅/红点不替台账）"
+    # 收口与入序两件事现在住在 `synthBlock` 里（error / MaxTokens / PlanOpen / Compact 四格共用），
+    # 所以断言的是「这一格走的是那颗共用合成块」+「那里面把 closed 与入序都办了」。
+    assert "synthBlock(st, ev, 'Error')" in body, \
+        f"B1 回归：error 不再走块管线（另开数组=第二个游标）\n{body}"
+    assert "b.closed = true" in consumers and "st.blockOrder.push(key)" in consumers, \
+        "B1 回归：合成块不再收口/入序（closed 缺=末轮不出尾行，入序缺=这一行根本不出现）"
+    assert "pushLog(st, `[error]" in body, "B1：右栏台账那份 error 行被删了（横幅/红点不替台账）"
     assert "type === 'Error'" in node, \
         "B1 回归：ChatNode 少了 'Error' 分支——它会静默降级成灰色折叠行，而 t1 查不到"
     css = node.split(".errRow", 1)[-1]
@@ -743,7 +889,7 @@ def t12_offline_banner_and_turn_error_row():
     # 收了不上屏（槽白留）、或上屏但无条件开三列（共用 .errRow 的 MaxTokens/PlanOpen 行白让 8px gap）。
     ty = (FE / "types.ts").read_text(encoding="utf-8")
     assert "code: string | null" in ty, "C182：WEvent 没有 code 字段（SSE 上的死因码没人接）"
-    assert "b.code = ev.code ?? null" in st, "C182：applyEvent 的 error 分支没把码写进块"
+    assert "b.code = ev.code ?? null" in _fe_consumers(), "C182：error 那格的分支没把码写进块"
     assert re.search(r'class="\{ hasCode: !!b\.code \}"', node), \
         "C182：ChatNode 的 Error 行没按码开第三列（hasCode 绑定丢了）"
     assert '<span v-if="b.code" class="errCode">{{ b.code }}</span>' in node, \
@@ -1106,9 +1252,9 @@ def t16_max_tokens_notice():
     finally:
         srv.shutdown()
 
-    ss = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
-    assert "ev.kind === 'turn'" in ss, "B8 回归：applyEvent 不接 kind=turn（后端说出去了但没人听）"
-    assert "b.type = 'MaxTokens'" in ss and 'reason?.kind === \'max-tokens\'' in ss, \
+    ss = _fe_consumers()
+    assert "ev.kind === 'turn'" in ss, "B8 回归：kind=turn 没人接（后端说出去了但没人听）"
+    assert "synthBlock(st, ev, 'MaxTokens')" in ss and "reason === 'max-tokens'" in ss, \
         "B8 回归：turn 分支不再按 reason.kind 建 MaxTokens 块（提示行会消失或不分原因乱发）"
 
     cn = (FE / "components" / "conversation" / "ChatNode.vue").read_text(encoding="utf-8")
@@ -1123,9 +1269,9 @@ def t16_max_tokens_notice():
         "B8 回归：截断行用的是 error 档的红（截断不是失败，参照系给的是 warn 档）"
     # C148 同族第二格：`plan-unfinished` 也得走完「后端发出去 → 建块 → 轮尾一行」，
     # 且那两个数是从事件里带出来的（写死在模板里就成了「永远说还剩 0 条」那种假绿）。
-    assert "reason?.kind === 'plan-unfinished'" in ss and "b.type = 'PlanOpen'" in ss, \
+    assert "reason === 'plan-unfinished'" in ss and "synthBlock(st, ev, 'PlanOpen'" in ss, \
         "C148 回归：turn 分支不接 plan-unfinished（后端说出去了但没人听）"
-    assert "b.meta = { open:" in ss and "total:" in ss, \
+    assert "{ open: Number(r?.open) || 0, total:" in ss, \
         "C148 回归：open/total 没落进 b.meta（界面念不出还剩几条）"
     assert 'v-else-if="b.type === \'PlanOpen\'" class="errRow"' in cn, \
         "C148 回归：PlanOpen 行不复用 .errRow 那一族几何（B1 已钉过源值，别另造一档）"
@@ -1148,7 +1294,7 @@ def t17_goal_surface():
     ③ 前端：三条路由都在消费集里、`kind='goal'` 有分支、`GoalBar.vue` 的文案与几何取参照系源值。
     """
     fe_api = (FE / "api" / "client.ts").read_text(encoding="utf-8")
-    fe_store = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    fe_store = _fe_consumers()
     bar = (FE / "components" / "composer" / "GoalBar.vue").read_text(encoding="utf-8")
 
     for route in ("/goal", "/goal/complete", "/goal/clear"):
@@ -1283,11 +1429,11 @@ def t18_steer_queue():
     fe_api = (FE / "api" / "client.ts").read_text(encoding="utf-8")
     assert "/api/sessions/${sid}/queue" in fe_api and "dropQueued" in fe_api, \
         "B6 回归：前端不再消费队列两条路由"
-    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
-    assert "ev.kind === 'queue'" in st, "B6 回归：applyEvent 不接 kind=queue"
+    st = _fe_consumers()
+    assert "ev.kind === 'queue'" in st, "B6 回归：kind=queue 没人接（后端说出去了但没人听）"
     assert "queue: [] as QueueItem[]" in st, "B6 回归：队列投影不再是唯一那一份 store 状态"
     assert "this.queue = []" in st, "B6 回归：切会话不清队列胶囊（上一场排着的会挂在下一场名下）"
-    assert "!this.queue.some((q) => q.id === it.id)" in st and "filter((q) => !items.some" in st, \
+    assert "!st.queue.some((q) => q.id === it.id)" in _fe_consumers() and "filter((q) => !items.some" in _fe_consumers(), \
         "B6 回归：queue 分支改成整份覆盖了——add 与 GET 竞态会把刚投的那条吞掉"
     dock = (FE / "components" / "composer" / "QueueDock.vue").read_text(encoding="utf-8")
     assert "store.queue" in dock and "api.dropQueued" in dock, "B6 回归：QueueDock 不再读队列/不再会撤回"
@@ -1779,7 +1925,7 @@ def t22_feedback_surface():
     api_ts = (FE / "api" / "client.ts").read_text(encoding="utf-8")
     assert "feedback: (sid: string)" in api_ts and "putFeedback" in api_ts and "deleteFeedback" in api_ts \
         and "`/api/sessions/${sid}/feedback`" in api_ts, "B4 回归：client.ts 不再消费那三条反馈路由"
-    st = (FE / "stores" / "sessions.ts").read_text(encoding="utf-8")
+    st = _fe_consumers()
     assert "ev.kind === 'feedback'" in st and "feedback: {} as Record<string, string>" in st, \
         "B4 回归：反馈投影或 kind=feedback 分支没了"
     icon = (FE / "components" / "conversation" / "MessageIconActions.vue").read_text(encoding="utf-8")
@@ -2107,7 +2253,9 @@ def t28_stream_ux_batch():
     assert 'name="content"' not in seg, "t28② start 改发 content ⇒ fts 被静默期点着，TTFT 成假读数"
 
     # ③ 前端两条：收口后的第二笔要开回来；空白 Think 行不渲染
-    ss = rd("stores/sessions.ts")
+    #    （P4 路线三之后块管线住在 `protocol/fold.ts`，store 只剩传输与 GET——两份一起读，
+    #     不然「把 reducer 搬走」这一步会让这一串假红，而它判的从来不是文件位置。）
+    ss = rd("stores/sessions.ts") + rd("protocol/fold.ts")
     assert "if (b.closed) b.closed = false" in ss, "t28③ 已闭合块不再被重开（第二笔静默上屏）"
     assert ss.count("if (b.closed) b.closed = false") == 2, \
         f"t28③ content 与 live 各要一条重开，现命中 {ss.count('if (b.closed) b.closed = false')} 条"
@@ -2270,7 +2418,7 @@ def main():
               t25_frontend_one_liners_c92_c96,
               t26_ui_bugfix_batch, t27_recall_visibility,
               t28_stream_ux_batch, t29_task_rows_c107, t30_foreground_resync_c110,
-              t31_ctx_card_caliber_labels)
+              t31_ctx_card_caliber_labels, t32_event_disposition_and_fold)
     for fn in checks:
         fn()
     print(f"\ns8_frontend_contract: {len(checks)}/{len(checks)} 全绿")

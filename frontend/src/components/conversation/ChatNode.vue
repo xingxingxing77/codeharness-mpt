@@ -62,6 +62,17 @@
     </div>
   </div>
 
+  <!-- Compact：上下文压缩过这一行（P4 路线三接上的那一格）。改前 `kind=context name=compact`
+       （`codeharness/roles/role_zero.py:287`）在 `applyEvent` 的 else-if 链里**没有分支**，
+       整条事件被无声吞掉——压缩发生了，界面上什么都没有。
+       文案只用事件自带的事实（条数与 token 差），`real_peak_pt` 那个 0 是「这一发还没账本」
+       而不是读数（同 role_zero.py:280 的口径），所以带不带峰值在折的时候就定好了，渲染层不猜。 -->
+  <div v-else-if="b.type === 'Compact'" class="compactRow" role="status"
+       :data-chat-anchor-key="b.key">
+    <span class="compactCopy">已压缩 {{ b.meta?.evicted_n ?? 0 }} 条早先消息（{{ formatTokens(b.meta?.before ?? 0) }} → {{ formatTokens(b.meta?.after ?? 0) }} token，释放 {{ formatTokens(b.meta?.freed ?? 0) }}）</span>
+    <span v-if="b.meta?.hasPeak" class="compactPeak">窗口峰值 {{ formatTokens(b.meta?.real_peak_pt ?? 0) }}</span>
+  </div>
+
   <!-- 其余：24px 折叠行 + 展开卡 -->
   <VDisclosureRow
     v-else
@@ -83,8 +94,11 @@
 
 <script setup lang="ts">
 /** 一个节点 = 后端一个 block。分派：User→气泡、Thought→Think 披露行、
- *  Docs→全宽正文、Error→轮内红点行、其余→折叠行。每个 BlockType 必须有显式分支（s8 t1 守这条）。 */
+ *  Docs→全宽正文、Error→轮内红点行、Compact→压缩事实行、其余→折叠行。
+ *  每个 BlockType 必须有显式分支（s8 t1 守这条）；`Error`/`MaxTokens`/`PlanOpen`/`Compact`
+ *  是合成块、不是 BlockType，t1 查不到，各由 s8 自己的那一格钉住分支在不在。 */
 import { computed } from 'vue'
+import { formatTokens } from '../../utils/stats'
 import MarkdownText from './MarkdownText.vue'
 import MessageIconActions from './MessageIconActions.vue'
 import ReasoningRow from './ReasoningRow.vue'
@@ -255,6 +269,27 @@ const row = computed(() => {
 }
 
 .errMsg {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Compact：刻意不是 .errRow 那一族——压缩不是失败也不是警告，是「这里发生过一件系统动作」。
+   参照系同判（`CompactionDivider.tsx` 是一条居中的浅色分隔线，不走红/黄卡）。 */
+.compactRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.compactPeak {
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
   color: var(--dsw-alias-label-secondary);
 }
 

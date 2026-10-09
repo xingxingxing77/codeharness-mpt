@@ -1,46 +1,25 @@
 import { defineStore } from 'pinia'
 import { api, getToken } from '../api/client'
 import { normalizeVotes } from '../utils/votes'
+import { foldAll, foldOne, resetFold } from '../protocol/fold'
 import type { ApprovalItem, Block, ContextTier, Health, QueueItem, Session, TraceSpan, WEvent } from '../types'
 
-const MAX_LOGS = 800
 /** 一屏的事件条数（B2）。单位是**事件**不是块——一块会合并整个流式节点的几十上百条
  *  token 事件，按块定页数就会把首屏撑回「一次吞完整条流」。 */
 const HISTORY_PAGE = 400
 
-/** C91：`mergeEarlierPage` 整页回放期间为真。历史事件是**过去**的读数，只许走会产生
- *  `blocks`/`logs` 的那几支（调用方对这两份做了快照还原）；下面这六支写的是**实时**状态，
- *  回放旧值会把当前状态盖成历史：
- *  · `status`  —— 顶栏金额/`store.status` 回退（`isRunning` 假真/假假、`humanQuestion` 被清）
- *  · `ask_human`/`approval` —— 已答过的问答卡、已决议的审批卡重新占住 composer
- *  · `queue`/`feedback`/`goal` —— 插话队列/票/目标被旧值覆盖
- *  ⚠ 加**新的**事件 kind 时想清楚两件事：它落的是块还是实时状态？后者要进这个名单，
- *  否则「加载更早」会把它重新执行一遍（C91 就是这两者被混在同一个 switch 里的代价）。 */
-const PAGE_REPLAY_OPAQUE = new Set(['status', 'ask_human', 'approval', 'queue', 'feedback', 'goal'])
-let replayingPage = false
+/** 本场已加载的**事件日志**（append-only，按游标升序）。它是时间线的唯一真相：
+ *  活流往里推、首屏装它、「加载更早」往**头里**插它然后整本重折——三条路喂的是同一个 reducer。
+ *  放 pinia 外面是刻意的：Vue 会给每条事件建深层 proxy，而这份数据从来没有渲染消费者，
+ *  只有 reducer 读它。
+ *  ponytail: 天花板＝内存 O(已加载事件)，一条事件实测均长 1475B（§1.10 那本账），
+ *  翻 30 页 ≈ 1.2 万条 ≈ 18MB，是块里那份文本的第二本拷贝。升级路径＝按页冻结成
+ *  不可变前缀段（折完就把段里的事件丢掉，只留折出来的块），那要再处理跨页开口的块——
+ *  今天没有消费者报这个痛，先不做。 */
+const evlog = new Map<string, WEvent[]>()
 
 /** C110：`connect()` 里那条 `visibilitychange` 监听只挂一次（挂多次 ⇒ 回一次前台重开 N 条流）。 */
 let foregroundHooked = false
-
-function newBlock(ev: WEvent): Block {
-  return {
-    key: ev.uuid || `e${ev.cursor || ev.seq}`,
-    type: ev.block || 'System',
-    role: ev.role || '',
-    closed: false,
-    meta: null,
-    tokens: [],
-    live: [],
-    doc: null,
-    obj: null,
-    lines: [],
-    cmd: '',
-    path: '',
-    url: '',
-    page: null,
-    raw: []
-  }
-}
 
 export const useSessionStore = defineStore('sessions', {
   state: () => ({
@@ -54,23 +33,29 @@ export const useSessionStore = defineStore('sessions', {
     modelWindow: null as number | null,
     sessions: [] as Session[],
     currentId: '',
+    // ---- 下面这一段就是 `protocol/fold.ts::FoldState`：reducer 写的字段与渲染读的字段必须同一份。
+    //      对账在 `frontend/scripts/fold_check.ts`（它按 FoldState 构造状态跑不变量）＋ s8 那一格
+    //      （它 grep 这段字段名，少一个就红）。----
     blocks: {} as Record<string, Block>,
     blockOrder: [] as string[],
     logs: [] as string[],
+    status: '',
+    cost: {} as Record<string, number>,
     humanQuestion: null as WEvent | null,
-    /** 当前会话的待批项（批次36）。SSE `approval` 事件驱动，切会话时 GET 补一次——
-     *  刷新页面不该把已经挂着的审批弄没。 */
+    /** 当前会话的待批项（批次36）。SSE `approval` 事件与 GET /approvals 两路，后者带 who/when。 */
     approvals: [] as ApprovalItem[],
-    /** C144：已决议的审批（谁批的、何时批的，C119 回执带 decided_by/decided_at）。
-     *  同一个 GET /approvals 的 `decided` 口，与 pending 一起载入；resolved 事件到达时重拉一次。 */
+    /** C144：已决议的审批（谁批的、何时批的）。**只**由 GET 喂——事件载荷里没有这两笔。 */
     decidedApprovals: [] as ApprovalItem[],
-    /** B6：排着还没被 route 取走的插话。唯一真值仍是服务端队列，这里只是投影
-     *  （开/切会话从 GET /queue 取一次，之后靠 kind=queue 事件跟着走）。 */
+    /** B6：排着还没被 route 取走的插话。服务端队列是唯一真值，这里只是投影。 */
     queue: [] as QueueItem[],
     /** B4：尾行键 → 票。同样只是投影，真值在 `Session.feedback`。 */
     feedback: {} as Record<string, string>,
-    status: '',
-    cost: {} as Record<string, number>,
+    /** reducer 折出来的会话记录主张（状态/目标/用量），每批折完一次性套回 `sessions` 里那条。 */
+    sessionPatch: {} as Record<string, any>,
+    /** 处置表查不到、或查到了但 reducer 没这一支的事件键。界面上不画，探针与门禁读它。 */
+    unhandled: [] as string[],
+    effects: [] as string[],
+    // ---- FoldState 到此为止 ----
     /** 活流三态（B1 断线横幅的唯一状态源）。刻意只有三值：参考项目 ConnectionBanner 的原子
      *  契约是「null / 首握手中的 connecting 保持安静，只有真在退避重连才现身」，所以
      *  idle 覆盖「没这条流」与「刚 new 出来还没 onopen」两种，open 过之后报错才进 down。
@@ -121,9 +106,9 @@ export const useSessionStore = defineStore('sessions', {
     async init() {
       this.health = await api.health()
       await this.loadSessions()
+      // 不再自动选中会话：落地页显示"我们应该构建什么"首页（参考 OpenHarness 布局）
       // 模型目录是旁路信息：端点不给也不能把首屏拖挂，loadModels 自己吞错
       void this.loadModels()
-      // 不再自动选中会话：落地页显示"我们应该构建什么"首页（参考 OpenHarness 布局）
     },
 
     async loadModels() {
@@ -144,8 +129,9 @@ export const useSessionStore = defineStore('sessions', {
     },
 
     goHome() {
+      const prev = this.currentId
       this.currentId = ''
-      this.resetStream()
+      this.resetStream(prev)
       this.status = ''
     },
 
@@ -196,8 +182,9 @@ export const useSessionStore = defineStore('sessions', {
 
     select(sid: string) {
       if (this.currentId === sid) return
+      const prev = this.currentId
       this.currentId = sid
-      this.resetStream()
+      this.resetStream(prev)
       const s = this.sessions.find((x) => x.id === sid)
       this.status = s?.status || ''
       this.cost = s?.cost || {}
@@ -231,13 +218,14 @@ export const useSessionStore = defineStore('sessions', {
       }
     },
 
-    /** 拉最新一屏历史。成功后 lastCursor 落在页尾，connect() 从那儿只收增量。 */
+    /** 拉最新一屏历史：装进日志、整本重折。成功后 lastCursor 落在页尾，connect() 从那儿只收增量。 */
     async loadFirstPage(sid: string) {
       this.loadingFirst = true
       try {
         const r = await api.eventHistory(sid, { limit: HISTORY_PAGE })
         if (sid !== this.currentId) return          // 连点两个会话：慢的那次不许把别人的块画进来
-        for (const ev of r.events) this.applyEvent(ev)
+        evlog.set(sid, r.events.slice())
+        this.replayLog(sid)
         this.earliestCursor = r.events.length ? r.events[0].cursor : ''
         this.hasMoreEarlier = !!r.has_more
       } catch {
@@ -250,9 +238,11 @@ export const useSessionStore = defineStore('sessions', {
       if (sid === this.currentId) this.connect()
     },
 
-    /** 「加载更早」：取 earliestCursor 之前的一屏拼到最前，返回**新出现**的块数
-     *  （0 = 没动静，视图据此决定要不要补滚动锚点）。失败静默：has_more 保持原样，
-     *  胶囊留在原地，用户能再点一次。 */
+    /** 「加载更早」：**前插**进同一本日志再整本重折——这就是路线三要的那件事：
+     *  改前这里有一份手写合并（`mergeEarlierPage`：逐字段 concat、单值字段「留正片那份」、
+     *  还得靠 `PAGE_REPLAY_OPAQUE` 名单挡住六支实时槽），因为它把「老页」和「新页」当成两条
+     *  路来折。按序重折之后「最新的赢」是构造出来的，那份合并和那个名单一起删掉。
+     *  返回**新出现**的块数（0 = 没动静，视图据此决定要不要补滚动锚点）。失败静默。 */
     async loadEarlier(): Promise<number> {
       if (!this.hasMoreEarlier || this.loadingEarlier || !this.earliestCursor) return 0
       this.loadingEarlier = true
@@ -262,10 +252,10 @@ export const useSessionStore = defineStore('sessions', {
         if (sid !== this.currentId) return 0
         this.hasMoreEarlier = !!r.has_more
         if (!r.events.length) return 0
-        const beforeCount = this.blockOrder.length
-        this.mergeEarlierPage(r.events)
+        const before = this.blockOrder.length
+        this.ingestEarlier(r.events)
         this.earliestCursor = r.events[0].cursor
-        return this.blockOrder.length - beforeCount
+        return this.blockOrder.length - before
       } catch {
         return 0
       } finally {
@@ -273,62 +263,30 @@ export const useSessionStore = defineStore('sessions', {
       }
     },
 
-    /** 整页往前拼（B2）。借道 applyEvent：先把这一页在**临时状态**里合成块（页内升序合并
-     *  走的就是原来那份 switch），再拼到正片最前。两个坑：
-     *  ① 被页边界切开的那一块，早半截必须排在已有的晚半截**前面**——直接 applyEvent 到正片
-     *     会变成 `tokens.push`，把这块的文字顺序颠倒；
-     *  ② lastCursor / lastSeq 不许往回走：SSE 续推位与 seq 去重都靠单调，回退会让活流重播整页。 */
-    mergeEarlierPage(evs: WEvent[]) {
-      const liveBlocks = this.blocks
-      const liveOrder = this.blockOrder
-      const liveCursor = this.lastCursor
-      const liveSeq = this.lastSeq
-      const liveLogs = this.logs
-      this.blocks = {}
-      this.blockOrder = []
-      this.logs = []
-      this.lastCursor = ''
-      this.lastSeq = 0
-      // C91：这一遍是**合成块**用的，不是「把这一页当成刚发生」——所以期间只读不写实时状态。
-      // try/finally：applyEvent 里有 throw 的路径，标志卡在 true 会让**之后的活流**整段哑掉。
-      replayingPage = true
-      try {
-        for (const ev of evs) this.applyEvent(ev)
-      } finally {
-        replayingPage = false
-      }
-      const pageBlocks = this.blocks
-      const pageOrder = this.blockOrder
-      const pageLogs = this.logs
-      this.blocks = liveBlocks
-      this.blockOrder = liveOrder
-      this.logs = liveLogs
-      this.lastCursor = liveCursor
-      this.lastSeq = liveSeq
-
-      const fresh: string[] = []
-      for (const k of pageOrder) {
-        const head = pageBlocks[k]
-        const tail = liveBlocks[k]
-        if (!tail) {
-          liveBlocks[k] = head
-          fresh.push(k)
-          continue
-        }
-        tail.tokens = head.tokens.concat(tail.tokens)
-        tail.live = head.live.concat(tail.live)
-        tail.lines = head.lines.concat(tail.lines)
-        tail.raw = head.raw.concat(tail.raw)
-        if (head.ts !== undefined) tail.ts = head.ts
-        if (head.fts !== undefined) tail.fts = head.fts
-        tail.closed = tail.closed || head.closed
-        // 单值字段（meta/doc/obj/cmd/path/url/page）留正片那份：晚半截更接近最终态
-      }
-      this.blockOrder = [...fresh, ...liveOrder]
-      if (pageLogs.length) this.logs = [...pageLogs, ...liveLogs].slice(-MAX_LOGS)
+    /** 「加载更早」的下半截：**前插进同一本日志再整本重折**。单独成一条动作是为了让
+     *  `check_page_replay.mjs` 能在真 store（pinia + 真 reducer）上直接量这一转——
+     *  上半截是网络，判据不该为了走到下半截而造假端点。 */
+    ingestEarlier(evs: WEvent[]) {
+      const sid = this.currentId
+      const older = evlog.get(sid) || []
+      evlog.set(sid, evs.concat(older))
+      this.replayLog(sid)
     },
 
-    /** 待批列表拉一次（切会话 / 刷新页面）。失败静默：审批是旁路信息，不该把首屏拖挂。 */
+    /** 整本日志重折（首屏与「加载更早」共用这一条路）。`resetFold` 刻意不清 status/cost/approvals：
+     *  它们的基线来自 GET，重折只做覆盖。
+     *  「已决议的卡会不会被老页那条 `requested` 复活」这一族在这里不成立，而且**不靠额外规则**：
+     *  窗口是裁头的（`MAX_EVENTS_PER_SESSION` 丢最旧），`resolved` 永远比它的 `requested` 新 ⇒
+     *  只要那条 requested 在日志里，对应的 resolved 必在它后面，按序重折就把它撤掉了。
+     *  `check_page_replay.mjs` 量的就是这句话，而不是「有没有名单」。 */
+    replayLog(sid: string) {
+      resetFold(this)
+      foldAll(this, evlog.get(sid) || [])
+      this.runEffects()
+      this.syncSessionPatch()
+    },
+
+    /** 待批列表拉一次（切会话 / 刷新页面 / 有卡决议完）。失败静默：审批是旁路信息，不该把首屏拖挂。 */
     async loadApprovals(sid: string) {
       try {
         const r = await api.approvals(sid)
@@ -351,16 +309,18 @@ export const useSessionStore = defineStore('sessions', {
       }
     },
 
-    resetStream() {
+    /** `dropSid`＝离开那一场，要连带丢掉它的事件日志（日志是 per-session 的，不丢就是内存里
+     *  第二本没人翻的账）。调用方传**切换前**的 id——`select` 会先把 currentId 换成新的。 */
+    resetStream(dropSid?: string) {
       this.evtSource?.close()
       this.evtSource = null
-      this.blocks = {}
-      this.blockOrder = []
-      this.logs = []
+      if (dropSid) evlog.delete(dropSid)
+      resetFold(this)
       this.spans = []
-      this.humanQuestion = null
       this.approvals = []
       this.decidedApprovals = []
+      this.status = ''
+      this.cost = {}
       this.lastSeq = 0
       this.lastCursor = ''
       this.earliestCursor = ''
@@ -377,7 +337,7 @@ export const useSessionStore = defineStore('sessions', {
       // 而这条 EventSource **连接没断** ⇒ 浏览器不会自动重连 ⇒ 回到前台后对话中间留一个洞，
       // 直到用户手动刷新。补法不新造机制：`/events` 路由本来就是「先按 `after` 回放历史、
       // 再跟活流」（`server/api/sessions.py:591-596`），而 `after` 取的就是已应用的游标 ⇒
-      // **回到前台这一刻重开一次流**，被丢掉的那段自己从历史补回来（重复的由 `applyEvent` 按 cursor 去重）。
+      // **回到前台这一刻重开一次流**，被丢掉的那段自己从历史补回来（重复的由 `ingest` 按 cursor 去重）。
       if (!foregroundHooked && typeof document !== 'undefined') {
         foregroundHooked = true
         document.addEventListener('visibilitychange', () => {
@@ -441,14 +401,34 @@ export const useSessionStore = defineStore('sessions', {
       const batch = this.pending
       if (!batch.length) return
       this.pending = []
-      for (const ev of batch) this.applyEvent(ev)
+      for (const ev of batch) this.ingest(ev)
+      this.runEffects()
+      this.syncSessionPatch()
     },
 
-    applyEvent(ev: WEvent) {
-      // C91：整页前拼（`mergeEarlierPage`）期间的**只读回放**——那一遍只为合成块，写实时状态的
-      // 六支（status/ask_human/approval/queue/feedback/goal）必须整支跳过，否则历史值会把当前
-      // 状态盖回去（过期问答卡甚至会占住 composer 座位、把答案投给当前那个待中断）。
-      if (replayingPage && PAGE_REPLAY_OPAQUE.has(ev.kind)) return
+    /** 活流的一批折完了：把 reducer 记下的口令执行掉。同名口令一批只跑一次——
+     *  整本重折时「某张卡决议过」这种历史事实会再来一遍，重复发请求就是白打尖峰。 */
+    runEffects() {
+      const names = [...new Set(this.effects)]
+      this.effects = []
+      for (const n of names) {
+        if (n === 'loadApprovals') void this.loadApprovals(this.currentId)
+        else if (n === 'loadTrace') void this.loadTrace(this.currentId)
+      }
+    },
+
+    /** 会话记录是投影的另一头：reducer 只主张「这些事件说过什么」，套回记录在这儿一次性做，
+     *  不再逐事件 `mergeSessionLocal`（那同一件事就有两本账）。 */
+    syncSessionPatch() {
+      const p = this.sessionPatch
+      this.sessionPatch = {}
+      if (this.current && Object.keys(p).length) this.mergeSessionLocal(this.current.id, p)
+    },
+
+    /**  transport→reducer 的唯一接缝：先去重、再进日志、再折。
+     *  去重留在 store 是因为它是**传输**的事（游标单调），不是渲染的事——
+     *  折一份已经去过重的日志，重放与活流才会得到同一个终态。 */
+    ingest(ev: WEvent) {
       if (ev.cursor) {
         if (this.lastCursor && ev.cursor <= this.lastCursor) return
         this.lastCursor = ev.cursor
@@ -456,191 +436,16 @@ export const useSessionStore = defineStore('sessions', {
         return
       }
       if (ev.seq > this.lastSeq) this.lastSeq = ev.seq
+      this.ingestLocal(ev)
+    },
 
-      if (ev.kind === 'report') {
-        // 孤立收口标记（uuid 从未开过块）直接丢：否则下面会凭空创建一个空块
-        if (ev.name === 'end_marker' && ev.uuid && !(ev.uuid in this.blocks)) return
-        const key = ev.uuid || `e${ev.cursor || ev.seq}`
-        let b = this.blocks[key]
-        if (!b) {
-          b = newBlock(ev)
-          this.blocks[key] = b
-          this.blockOrder.push(key)
-        }
-        if (typeof ev.ts === 'number') {
-          if (b.ts === undefined) b.ts = ev.ts
-          b.lastTs = ev.ts
-          if (ev.cursor) b.endCursor = ev.cursor   // B3：分叉点要按块拿游标
-          if ((ev.name === 'content' || ev.name === 'live') && b.fts === undefined) b.fts = ev.ts
-        }
-        switch (ev.name) {
-          case 'meta':
-            b.meta = ev.value
-            break
-          case 'content':
-            // 内核的定稿到了：在飞的逐片整段撤掉（两份内容同屏是本仓要治的重复，不是过渡态）。
-            if (b.closed) b.closed = false
-            b.live = []
-            b.tokens.push(String(ev.value ?? ''))
-            break
-          case 'live':
-            // 打字机逐片：后端 `server/runner.py` 从 LLM 流里抽出的散文，投进这一笔所在的那一块
-            // （开着的内核块，没有就落 `stream-{node}`）。它只进 `live`，绝不进 `tokens`——
-            // 所以定稿来了直接清空就行，不需要任何「比对是不是同一句话」的猜。
-            if (b.closed) b.closed = false
-            b.live.push(String(ev.value ?? ''))
-            break
-          case 'document':
-            b.doc = ev.value
-            break
-          case 'object':
-            b.obj = ev.value
-            break
-          case 'cmd':
-            b.cmd = String(ev.value ?? '')
-            break
-          case 'output':
-            b.lines.push(String(ev.value ?? ''))
-            break
-          case 'path':
-            b.path = String(ev.value ?? '')
-            break
-          case 'url':
-            b.url = String(ev.value ?? '')
-            break
-          case 'page':
-            b.page = ev.value
-            break
-          case 'end_marker':
-            b.closed = true
-            break
-          default:
-            b.raw.push({ name: ev.name, value: ev.value })
-        }
-      } else if (ev.kind === 'log') {
-        this.logs.push(String(ev.value ?? ''))
-        if (this.logs.length > MAX_LOGS) this.logs.splice(0, this.logs.length - MAX_LOGS)
-      } else if (ev.kind === 'ask_human') {
-        this.humanQuestion = ev
-        if (this.current) this.mergeSessionLocal(this.current.id, { status: 'awaiting_human' })
-        this.status = 'awaiting_human'
-      } else if (ev.kind === 'approval') {
-        // requested 按 id 去重入队（重放/双开标签页不该冒出两张一样的卡）；
-        // resolved 只出队——之后会话回到什么状态由紧随其后的 status 事件说，这里不猜。
-        const item = (ev.value || {}) as ApprovalItem
-        if (ev.name === 'resolved') {
-          this.approvals = this.approvals.filter((a) => a.id !== item.id)
-          // C144：resolved 的载荷只有 {id,outcome}，不带 who/when——重拉一次拿权威回执，
-          // 让「谁批的」对所有看着这场的人（含决策者自己）都落进审批记录。
-          // 回放期不会到这儿：approval 在 PAGE_REPLAY_OPAQUE 里，上面已经 return。
-          void this.loadApprovals(this.currentId)
-        } else if (item.id && !this.approvals.some((a) => a.id === item.id)) {
-          this.approvals.push(item)
-          if (this.current) this.mergeSessionLocal(this.current.id, { status: 'awaiting_human' })
-          this.status = 'awaiting_human'
-        }
-      } else if (ev.kind === 'error') {
-        this.logs.push(`[error] ${ev.value}`)
-        // 轮内红点行（B1）：走块管线，不另开一份 errors 数组——顺序、按游标去重、
-        // 历史回放与「加载更早」的整页合并已经在 applyEvent/mergeEarlierPage/buildRows
-        // 里了，另起一份就是第二个游标（SSE seq 精度丢事件那条洞正是第二个游标的产物）。
-        const key = ev.uuid || `e${ev.cursor || ev.seq}`
-        if (!(key in this.blocks)) {
-          const b = newBlock(ev)
-          b.type = 'Error'
-          // closed 必须真：末块没收口就不发轮次尾行，而 error 事件本身就是收口信号
-          b.closed = true
-          b.lines = String(ev.value ?? '').split('\n')
-          b.code = ev.code ?? null   // C182：死因码进块，ChatNode 按它开第三列；旧事件没有就是 null
-          if (typeof ev.ts === 'number') {
-            b.ts = ev.ts
-            b.lastTs = ev.ts
-          }
-          this.blocks[key] = b
-          this.blockOrder.push(key)
-        }
-      } else if (ev.kind === 'turn') {
-        // B8：这一跑里有步被输出 token 上限截断（后端在收口时按记账出口的次数发这一条）。
-        // 口径与参照系一致：它是轮级聚合、锚在轮尾，不是贴在截断那一步后面——参照系自己也
-        // 把提示放在 closing Assistant 与 turn-tail 之间（turn-max-tokens.ts:29-40）。
-        if ((ev.value as any)?.reason?.kind === 'max-tokens') {
-          const key = ev.uuid || `e${ev.cursor || ev.seq}`
-          if (!(key in this.blocks)) {
-            const b = newBlock(ev)
-            b.type = 'MaxTokens'      // 不是 BlockType：t1 查不到，靠 s8 t16 钉住
-            b.closed = true            // 同 error 行：不给 closed 就不发尾行，见上面那条注释
-            if (typeof ev.ts === 'number') {
-              b.ts = ev.ts
-              b.lastTs = ev.ts
-            }
-            this.blocks[key] = b
-            this.blockOrder.push(key)
-          }
-        }
-        // C148 同族第二格：`plan-unfinished`＝收口时那本 Plan 状态机还有没做完的条目（后端
-        // `_publish_plan_open` 读 `TeamState.plans` 的发数，对勾=`Task.is_finished`）。两个数走事件
-        // value、落进 `b.meta`——不扩 Block 字段，界面那一行才有东西可念。
-        if ((ev.value as any)?.reason?.kind === 'plan-unfinished') {
-          const key = ev.uuid || `e${ev.cursor || ev.seq}`
-          if (!(key in this.blocks)) {
-            const b = newBlock(ev)
-            b.type = 'PlanOpen'
-            b.closed = true
-            const r = (ev.value as any).reason
-            b.meta = { open: Number(r?.open) || 0, total: Number(r?.total) || 0 }
-            if (typeof ev.ts === 'number') {
-              b.ts = ev.ts
-              b.lastTs = ev.ts
-            }
-            this.blocks[key] = b
-            this.blockOrder.push(key)
-          }
-        }
-      } else if (ev.kind === 'feedback') {
-        // B4：反馈变更。按 key 增删这一份投影（`clear` 的 vote 是空串 ⇒ 删键）
-        const v = (ev.value || {}) as { key?: string; vote?: string }
-        if (!v.key) return
-        const next = { ...this.feedback }
-        if (v.vote) next[v.key] = v.vote
-        else delete next[v.key]
-        this.feedback = next
-      } else if (ev.kind === 'queue') {
-        // B6：队列变更。三个动作都只**按 id 增删**这一份投影，绝不整份覆盖——
-        // 覆盖会把「add 到一半、GET 还没回来」的中间态抹掉，那就是第二个游标的老病。
-        const items = ((ev.value as any)?.items || []) as QueueItem[]
-        if (ev.name === 'add')
-          for (const it of items) if (!this.queue.some((q) => q.id === it.id)) this.queue.push(it)
-        else if (ev.name === 'drain' || ev.name === 'remove')
-          this.queue = this.queue.filter((q) => !items.some((i) => i.id === q.id))
-      } else if (ev.kind === 'goal') {
-        // B5：目标变更。真值在 Session 记录里（GET 就拿得到），这条事件只让**活流**立刻跟上；
-        // 回放走同一处落点，所以不另开第二份状态（`clear` 的 objective 是空串，必须照收）。
-        const v = (ev.value || {}) as { objective?: string; done_at?: string }
-        if (this.current)
-          this.mergeSessionLocal(this.current.id,
-                                 { goal: v.objective || '', goal_done_at: v.done_at || '' })
-      } else if (ev.kind === 'status') {
-        const v = ev.value || {}
-        // B1：`{}` 在 JS 里是**真值**。后端读不到账本时会发一个空 cost（`"cost": {}`），
-        // 旧写法 `if (v.cost)` 于是把顶栏金额覆盖成 0，而刷新（GET 拿落盘记录）又跳回
-        // 批准前那个数——一个只出现在这一屏的假读数。空对象是「这一发没带账本」，
-        // 不是「账本是 0」，不许当读数用。
-        const hasCost = !!v.cost && Object.keys(v.cost).length > 0
-        if (hasCost) this.cost = v.cost
-        if (v.message) this.logs.push(`[status] ${v.message}`)
-        if (v.status) {
-          this.status = v.status
-          if (this.current) {
-            const patch: Partial<Session> = { status: v.status }
-            if (hasCost) patch.cost = v.cost
-            this.mergeSessionLocal(this.current.id, patch)
-          }
-          // 终态才重拉 trace：tok/s 与 StatsLine 的用量要等这一跑收口才完整，
-          // 而中间态每步都在同步成本，每次拉就是打一串尖峰请求。
-          if (['finished', 'stopped', 'failed'].includes(v.status)) void this.loadTrace(this.currentId)
-        }
-        if (v.status !== 'awaiting_human') this.humanQuestion = null
-      }
+    /** 把一帧投进同一本日志再折（本地合成的那两帧也走这儿：去重在 `ingest` 那一层，
+     *  不在日志那一层——本地帧没有游标，硬走 `ingest` 会被「seq 0 比当前游标老」判成重复丢掉）。 */
+    ingestLocal(ev: WEvent) {
+      let log = evlog.get(this.currentId)
+      if (!log) evlog.set(this.currentId, (log = []))
+      log.push(ev)
+      foldOne(this, ev)
     },
 
     mergeSessionLocal(sid: string, patch: Partial<Session>) {
@@ -683,30 +488,24 @@ export const useSessionStore = defineStore('sessions', {
       if (this.currentId === sid) this.goHome()
     },
 
+    /** 用户自己的发言。**没有后端生产者**（`/chat` 只进 ChatQueue，不发事件），所以这里造一帧
+     *  同形状的事件投进日志——投日志而不是直接塞块，是为了让「加载更早」的整本重折不会把它抹掉
+     *  （改前那份直接写 `this.blocks` 的写法，翻一页历史就少一条用户气泡）。
+     *  ⚠ 刷新就没了是同一件事的另一半：真缺口在**生产端**，登记在 plan/frontend.md，
+     *  不在本件里顺手改语义（那要动 `/chat` 的落流与游标口径）。 */
+    sendChatLocal(content: string) {
+      const now = Date.now() / 1000
+      const mk = (name: string, value: any): WEvent => ({
+        session_id: this.currentId, seq: 0, cursor: '', ts: now, kind: 'report',
+        block: 'User', uuid: `u${now}`, name, value, role: 'user', code: null, extra: null
+      })
+      this.ingestLocal(mk('content', content))
+      this.ingestLocal(mk('end_marker', null))   // 不收口就不发轮次尾行（与 error/turn 同一判据）
+    },
+
     async sendChat(content: string, sendTo = '') {
       await api.sendChat(this.currentId, content, sendTo)
-      // 把用户发言插成伪块，Timeline 里按时间顺序渲染成右侧气泡（参考图布局）
-      const key = `u${Date.now()}`
-      this.blocks[key] = {
-        key,
-        type: 'User',
-        role: 'user',
-        closed: true,
-        ts: Date.now() / 1000,
-        lastTs: Date.now() / 1000,
-        meta: null,
-        tokens: [content],
-        live: [],
-        doc: null,
-        obj: null,
-        lines: [],
-        cmd: '',
-        path: '',
-        url: '',
-        page: null,
-        raw: []
-      }
-      this.blockOrder.push(key)
+      this.sendChatLocal(content)
     },
 
     async answerHuman(content: string) {
