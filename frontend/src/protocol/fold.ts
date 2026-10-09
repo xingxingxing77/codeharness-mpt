@@ -55,7 +55,10 @@ export function resetFold(st: FoldState) {
   // **裁头**的（`MAX_EVENTS_PER_SESSION` 丢最旧）——某一枚还排着的插话，它的 `add` 可能早就被裁掉，
   // 清空重折就会让这枚胶囊从界面上消失（用户撤不掉它、也看不见它）。覆盖的最坏结果只是
   // 队列的**显示次序**不按游标（基线在前、老页的 add 补在后面），不是少一条。
-  // `humanQuestion` 同理：它连 GET 口都没有（处置表里 `src='none'` 记着那条缺口）。
+  // `humanQuestion` 同理但来源不同：它的权威**就是日志**（C195 现场把处置表那行从 `src='none'`
+  // 改判成 `src='journal'`——冷开浏览器实测卡还在，喂它的是 `connect()` 的整段重播，不是 GET 口，
+  // 这道口今天不存在）。不清空的理由仍然成立：整本重折只折「已加载的那本日志」，翻页过程中
+  // 某一页的窗口里可能暂时没有这一问，清空就会让正亮着的卡闪掉。
 }
 
 function newBlock(ev: WEvent): Block {

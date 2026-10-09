@@ -99,7 +99,7 @@ export const KIND_DISPOSAL: Record<WireKind, Disposal> = {
   report: { lane: 'timeline', src: 'journal', why: '块流是时间线的唯一构成；首屏、活流、「加载更早」三条路都走同一个 reducer' },
   log: { lane: 'timeline', src: 'journal', why: '右栏日志页读 `store.logs`（DetailsPanel.vue:23），重放能整段重建' },
   status: { lane: 'runtime', src: 'rest', why: '状态与用量的权威是 Session 记录（GET）；事件只让活流立刻跟上。回放旧状态会把当前盖回去——C91 那六支就是这个洞的形状' },
-  ask_human: { lane: 'runtime', src: 'none', why: '⚠ 已知缺口：只有 POST /human-input，没有 GET 口，也没有块落点 ⇒ 停在待答时刷新，那张卡就没了（登记在 plan/frontend.md，不在本件里顺手改语义）' },
+  ask_human: { lane: 'runtime', src: 'journal', why: 'C195（10-10 现场改判）：**这条不是缺口，是被 C188 顺手治好的**。原记 `src=\'none\'` 说的是「只有 POST /human-input、没有 GET 口 ⇒ 停在待答时刷新丢卡」，那是 else-if 链年代的读数。现证：一场真停在 `awaiting_human` 的会话冷开浏览器，卡照样在——而喂它的**不是**首屏那一屏（`/events/history?limit=400` 那扇窗里 `ask_human` 实测 0 条），是 `connect()` 拿 `after=0` 把保留窗口**整段重播**（同场实测 467 条 data 帧、含那条 ask_human）。所以刷新后的权威就是日志本身 ⇒ `journal`。**残余只有一条**：那一问被 `MAX_EVENTS_PER_SESSION=15000` 裁出保留窗口之后才会丢，而这不是开 GET 口能顺手解决的（真撞到了再说，账 `plan/frontend.md` §1.7 末）。' },
   approval: { lane: 'runtime', src: 'rest', why: 'GET /approvals 给 pending+decided 两份，是权威；事件只做按 id 增删的通知' },
   error: { lane: 'timeline', src: 'journal', why: '轮内红点行走块管线（B1）：顺序、按游标去重、回放都白拿，另开一份 errors 就是第二个游标' },
   turn: { lane: 'timeline', src: 'journal', why: '轮尾提示（截断/计划未完）锚在轮尾建合成块，与参照系同形状' },

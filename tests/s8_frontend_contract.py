@@ -152,6 +152,24 @@ def t32_event_disposition_and_fold():
     assert not bad_lane and not bad_src and not empty_why, \
         f"处置表有非法或空白的行：lane={bad_lane} src={bad_src} why空={empty_why}"
 
+    # ---- ②b C195：表里「刷新后谁是权威」这句必须和**产品现实**一致（能被证伪，不是注释） ----
+    # 起因：`ask_human` 那行长期写着 `src='none'`（「只有 POST 没有 GET ⇒ 刷新丢卡」）。10-10 现场
+    # 冷开浏览器实测：卡在。喂它的既不是 GET（这道口根本不存在）也不是首屏那一屏（那扇窗里没有
+    # 这条事件），而是 `connect()` 拿 `after=0` 的整段重播 ⇒ 权威其实就是日志，账该写 `journal`。
+    # 所以这里钉的是**改判之后别漂回去**：表说 journal，就不许有任何一端偷偷造一道 GET 当权威；
+    # 真哪天开到 `/ask_human`（比如撞上了 15000 裁头那一档），这两条断言会一起红，逼着两边同批改准。
+    m_ask = re.search(r"ask_human:\s*\{\s*lane:\s*'(\w+)',\s*src:\s*'(\w+)'", disp)
+    assert m_ask and m_ask.group(2) == "journal", \
+        f"C195 回归：处置表把 ask_human 的刷新权威又写回 {m_ask.group(2) if m_ask else '缺行'!r}——" \
+        "实测冷开浏览器能拿到卡（来源是日志重播），写 `none` 就是把已存在的能力记成缺口"
+    cli = (FE / "api" / "client.ts").read_text(encoding="utf-8")
+    api_py = (ROOT / "server" / "api" / "sessions.py").read_text(encoding="utf-8")
+    assert "/ask_human" not in cli, \
+        "C195 回归：前端开始调一道 GET /ask_human 了，而表里那句权威还写着 journal（两边必须同批改）"
+    assert 'get("/{sid}/ask_human"' not in api_py, \
+        "C195 回归：后端新开了 ask_human 的 GET 口却没动处置表——那就变成「有权威没登记」，" \
+        "正是 t32 立起来要防的那一类（登记表与产品现实脱钩）"
+
     # ---- ③ 登记过的 report name 都得有落点 ----
     cases = set(re.findall(r"case '(\w+)':", fold))
     no_landing = {n for n in report_names if n not in cases}
