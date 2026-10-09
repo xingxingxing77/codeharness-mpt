@@ -166,7 +166,7 @@ def publish_thread(sid, n, delay=0.02):
 
 
 def drain(conn, st, wait):
-    """按产品同款规则消费（`frontend/src/stores/sessions.ts:434-436`：`cursor <= lastCursor` 即丢）。
+    """按产品同款规则消费（`frontend/src/stores/sessions.ts::ingest`（C188 之后去重从 `applyEvent` 挪进 `ingest`，规则一字未改）：`cursor <= lastCursor` 即丢）。
 
     就地更新 `st`（seqs / last_cursor / wire / dup），返回本次读数。"""
     wire = dup = 0
